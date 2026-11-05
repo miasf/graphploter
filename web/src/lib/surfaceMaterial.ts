@@ -1,9 +1,10 @@
 // 曲面用の材質。Three.js の標準の材質に「格子線」を描く処理を足したもの。
 //
 // 格子線はメッシュの三角形とは関係なく、画素ごとに
-// 「x（または y, z）が間隔のちょうど整数倍に近いか」を調べて線の色を混ぜている。
-// そのため、どんな形の曲面（陽関数・陰関数）にも同じように線が引ける。
-// z 方向の線は、z = f(x, y) では等高線になる。
+// 「格子用の座標 gridCoord の各成分が、間隔のちょうど整数倍に近いか」を調べて線の色を混ぜている。
+// そのため、どんな形の曲面にも同じように線が引ける。
+// - 陽関数・陰関数: gridCoord = (x, y, z)。z 方向の線は z = f(x, y) では等高線になる
+// - 媒介変数表示の曲面: gridCoord = (u − u0, v − v0, z)。曲面に沿った u, v の格子になる
 
 import * as THREE from 'three'
 
@@ -77,10 +78,10 @@ export function createSurfaceMaterial(
   m.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, grid)
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vGridPos;')
+      .replace('#include <common>', '#include <common>\nattribute vec3 gridCoord;\nvarying vec3 vGridPos;')
       .replace(
         '#include <begin_vertex>',
-        '#include <begin_vertex>\nvGridPos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+        '#include <begin_vertex>\nvGridPos = gridCoord;',
       )
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)

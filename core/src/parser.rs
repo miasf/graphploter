@@ -18,6 +18,8 @@ pub enum Expr {
     Neg(Box<Expr>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
     Call(Func, Vec<Expr>),
+    /// 組 (a, b, c)。媒介変数表示の点を表す
+    Tuple(Vec<Expr>),
 }
 
 impl Expr {
@@ -28,7 +30,7 @@ impl Expr {
             Expr::Num(_) | Expr::Const(_) => false,
             Expr::Neg(a) => a.uses_var(name),
             Expr::Bin(_, a, b) => a.uses_var(name) || b.uses_var(name),
-            Expr::Call(_, args) => args.iter().any(|a| a.uses_var(name)),
+            Expr::Call(_, args) | Expr::Tuple(args) => args.iter().any(|a| a.uses_var(name)),
         }
     }
 }
@@ -283,6 +285,16 @@ impl Parser {
             Tok::Const(c) => Ok(Expr::Const(c)),
             Tok::LParen => {
                 let e = self.expr()?;
+                // カンマが続けば組 (a, b, c)
+                if *self.peek() == Tok::Comma {
+                    let mut items = vec![e];
+                    while *self.peek() == Tok::Comma {
+                        self.next();
+                        items.push(self.expr()?);
+                    }
+                    self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+                    return Ok(Expr::Tuple(items));
+                }
                 self.expect(Tok::RParen, "閉じ括弧 ')'")?;
                 Ok(e)
             }

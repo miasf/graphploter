@@ -104,6 +104,7 @@ impl Program {
                 let a = self.emit(&args[0])?;
                 self.push(Op::Call1(*f, a))
             }
+            Expr::Tuple(_) => return Err("組 (a, b, c) は式の中では使えません".into()),
         })
     }
 

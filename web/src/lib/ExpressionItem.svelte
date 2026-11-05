@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import type { Domain, GridStyle, PlotItem } from './types'
+  import type { Domain, GridStyle, ParamRanges, PlotItem } from './types'
 
   interface Props {
     item: PlotItem
@@ -12,12 +12,36 @@
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
+    onLineWidth: (width: number) => void
+    onRange: (name: keyof ParamRanges, side: 0 | 1, value: string) => void
     onToggle: () => void
     onToggleSettings: () => void
     onRemove: () => void
   }
-  let { item, index, domain, onInput, onColor, onGrid, onOpacity, onToggle, onToggleSettings, onRemove }: Props =
-    $props()
+  let {
+    item,
+    index,
+    domain,
+    onInput,
+    onColor,
+    onGrid,
+    onOpacity,
+    onLineWidth,
+    onRange,
+    onToggle,
+    onToggleSettings,
+    onRemove,
+  }: Props = $props()
+
+  /** 媒介変数表示の曲面で選べる分割数（0 は線なし） */
+  const DIVISIONS = [0, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48, 60, 72, 96, 120]
+  const divIndex = (n: number) =>
+    DIVISIONS.reduce((best, d, k) => (Math.abs(d - n) < Math.abs(DIVISIONS[best] - n) ? k : best), 0)
+
+  /** 範囲の入力欄を出す媒介変数 */
+  const paramNames = $derived<(keyof ParamRanges)[]>(
+    item.params === 't' ? ['t'] : item.params === 'uv' ? ['u', 'v'] : [],
+  )
 
   const gridAxes = [
     { axis: 'x', label: 'x 方向' },
@@ -50,11 +74,28 @@
       class="source"
       type="text"
       value={item.source}
-      placeholder="例: z = sin(x) cos(y)、x^2 + y^2 + z^2 = 9"
+      placeholder="例: z = sin(x) cos(y)、(cos t, sin t, t)"
       spellcheck="false"
       autocomplete="off"
       oninput={(e) => onInput(e.currentTarget.value)}
     />
+    {#each paramNames as name (name)}
+      <div class="param-range">
+        <input
+          type="text"
+          value={item.ranges[name][0]}
+          aria-label="{name} の最小値"
+          oninput={(e) => onRange(name, 0, e.currentTarget.value)}
+        />
+        <span>≤ {name} ≤</span>
+        <input
+          type="text"
+          value={item.ranges[name][1]}
+          aria-label="{name} の最大値"
+          oninput={(e) => onRange(name, 1, e.currentTarget.value)}
+        />
+      </div>
+    {/each}
     {#if item.error}
       <p class="error">{item.error}</p>
     {:else if item.info}
@@ -72,57 +113,89 @@
             oninput={(e) => onColor(e.currentTarget.value)}
           />
         </label>
-        <div class="sliders">
-          <span class="label">面の濃さ</span>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.05"
-            value={item.opacity}
-            oninput={(e) => onOpacity(e.currentTarget.valueAsNumber)}
-          />
-          <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
-        </div>
-
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={item.grid.enabled}
-            onchange={(e) => onGrid({ ...item.grid, enabled: e.currentTarget.checked })}
-          />
-          格子線
-        </label>
-        <div class="sliders" class:disabled={!item.grid.enabled}>
-          {#each gridAxes as { axis, label } (axis)}
-            {@const options = spacingOptions(ranges[axis])}
-            {@const index = spacingToIndex(item.grid[axis], options)}
-            <span class="label">{label}</span>
+        {#if item.params === 't'}
+          <div class="sliders">
+            <span class="label">線の太さ</span>
+            <input
+              type="range"
+              min="1"
+              max="10"
+              step="0.5"
+              value={item.lineWidth}
+              oninput={(e) => onLineWidth(e.currentTarget.valueAsNumber)}
+            />
+            <span class="value">{item.lineWidth} px</span>
+          </div>
+        {:else}
+          <div class="sliders">
+            <span class="label">面の濃さ</span>
             <input
               type="range"
               min="0"
-              max={options.length}
-              step="1"
-              value={index}
-              disabled={!item.grid.enabled}
-              oninput={(e) =>
-                onGrid({ ...item.grid, [axis]: indexToSpacing(e.currentTarget.valueAsNumber, options) })}
+              max="1"
+              step="0.05"
+              value={item.opacity}
+              oninput={(e) => onOpacity(e.currentTarget.valueAsNumber)}
             />
-            <span class="value">{index === 0 ? 'なし' : `間隔 ${indexToSpacing(index, options)}`}</span>
-          {/each}
-          <span class="label">線の太さ</span>
-          <input
-            type="range"
-            min="0.5"
-            max="4"
-            step="0.25"
-            value={item.grid.width}
-            disabled={!item.grid.enabled}
-            oninput={(e) => onGrid({ ...item.grid, width: e.currentTarget.valueAsNumber })}
-          />
-          <span class="value">{item.grid.width} px</span>
-        </div>
-        <p class="hint">スライダーを右にするほど線が細かくなります。左端で線なし。</p>
+            <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
+          </div>
+
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={item.grid.enabled}
+              onchange={(e) => onGrid({ ...item.grid, enabled: e.currentTarget.checked })}
+            />
+            格子線
+          </label>
+          <div class="sliders" class:disabled={!item.grid.enabled}>
+            {#if item.params === 'uv'}
+              <!-- 媒介変数表示の曲面: u, v の範囲を何等分するか -->
+              {#each ['u', 'v'] as const as axis (axis)}
+                {@const k = divIndex(item.grid[axis])}
+                <span class="label">{axis} 方向</span>
+                <input
+                  type="range"
+                  min="0"
+                  max={DIVISIONS.length - 1}
+                  step="1"
+                  value={k}
+                  disabled={!item.grid.enabled}
+                  oninput={(e) => onGrid({ ...item.grid, [axis]: DIVISIONS[e.currentTarget.valueAsNumber] })}
+                />
+                <span class="value">{k === 0 ? 'なし' : `${DIVISIONS[k]} 等分`}</span>
+              {/each}
+            {/if}
+            {#each item.params === 'uv' ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
+              {@const options = spacingOptions(ranges[axis])}
+              {@const index = spacingToIndex(item.grid[axis], options)}
+              <span class="label">{label}</span>
+              <input
+                type="range"
+                min="0"
+                max={options.length}
+                step="1"
+                value={index}
+                disabled={!item.grid.enabled}
+                oninput={(e) =>
+                  onGrid({ ...item.grid, [axis]: indexToSpacing(e.currentTarget.valueAsNumber, options) })}
+              />
+              <span class="value">{index === 0 ? 'なし' : `間隔 ${indexToSpacing(index, options)}`}</span>
+            {/each}
+            <span class="label">線の太さ</span>
+            <input
+              type="range"
+              min="0.5"
+              max="4"
+              step="0.25"
+              value={item.grid.width}
+              disabled={!item.grid.enabled}
+              oninput={(e) => onGrid({ ...item.grid, width: e.currentTarget.valueAsNumber })}
+            />
+            <span class="value">{item.grid.width} px</span>
+          </div>
+          <p class="hint">スライダーを右にするほど線が細かくなります。左端で線なし。</p>
+        {/if}
       </div>
     {/if}
   </div>
@@ -229,6 +302,25 @@
     border: none;
     background: none;
     cursor: pointer;
+  }
+  .param-range {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font: 13px var(--mono);
+    color: var(--muted);
+  }
+  .param-range input {
+    width: 100%;
+    min-width: 0;
+    padding: 3px 6px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px var(--mono);
   }
   .sliders {
     display: grid;

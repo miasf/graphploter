@@ -27,6 +27,9 @@ pub struct Mesh {
     pub normals: Vec<f32>,
     /// 三角形の頂点番号 [a0, b0, c0, a1, b1, c1, ...]
     pub indices: Vec<u32>,
+    /// 格子線を引くための座標（頂点ごとに3つ）。空なら頂点座標 (x, y, z) を使う。
+    /// 媒介変数表示の曲面では (u − u0, v − v0, z) を入れて、u, v に沿った格子線にする。
+    pub grid_coords: Vec<f32>,
 }
 
 impl Mesh {
@@ -266,6 +269,155 @@ pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
 }
 
 // ---------------------------------------------------------------------------
+// 媒介変数表示
+// ---------------------------------------------------------------------------
+
+/// 3つの成分をまとめて計算し、点の列にする。どれかの成分が実数にならない点は NaN。
+fn eval_points(progs: &[Program; 3], inputs: &[&[f64]], n: usize) -> Vec<[f64; 3]> {
+    let mut pts = vec![[0.0; 3]; n];
+    let mut out = vec![C::new(0.0, 0.0); n];
+    for (ax, prog) in progs.iter().enumerate() {
+        prog.eval_batch(inputs, &mut out);
+        for (p, v) in pts.iter_mut().zip(&out) {
+            p[ax] = as_real(*v);
+        }
+    }
+    pts
+}
+
+fn finite(p: &[f64; 3]) -> bool {
+    p.iter().all(|v| v.is_finite())
+}
+
+fn dist(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// 媒介変数表示の曲面 (x(u,v), y(u,v), z(u,v)) を `n × n` マスの格子で作る。
+pub fn parametric_surface(progs: &[Program; 3], dom: Domain, u: (f64, f64), v: (f64, f64), n: usize) -> Mesh {
+    let n = n.max(2);
+    let m = n + 1;
+    let mut us = Vec::with_capacity(m * m);
+    let mut vs = Vec::with_capacity(m * m);
+    for j in 0..m {
+        for i in 0..m {
+            us.push(u.0 + (u.1 - u.0) * i as f64 / n as f64);
+            vs.push(v.0 + (v.1 - v.0) * j as f64 / n as f64);
+        }
+    }
+    let pts = eval_points(progs, &[&us, &vs], m * m);
+
+    // 表示範囲から大きく外れた点（無限大の近くなど）は省く。はみ出た部分は描画側で切り落とす。
+    let ok = |p: &[f64; 3]| {
+        finite(p)
+            && (0..3).all(|a| {
+                let h = dom.hi[a] - dom.lo[a];
+                p[a] >= dom.lo[a] - h && p[a] <= dom.hi[a] + h
+            })
+    };
+
+    let mut index_of = vec![NONE; m * m];
+    let mut mesh = Mesh::default();
+    for k in 0..m * m {
+        if ok(&pts[k]) {
+            index_of[k] = mesh.push_vertex(pts[k]);
+            mesh.grid_coords
+                .extend_from_slice(&[(us[k] - u.0) as f32, (vs[k] - v.0) as f32, pts[k][2] as f32]);
+        }
+    }
+    for j in 0..n {
+        for i in 0..n {
+            let a = index_of[j * m + i];
+            let b = index_of[j * m + i + 1];
+            let c = index_of[(j + 1) * m + i];
+            let d = index_of[(j + 1) * m + i + 1];
+            for tri in [[a, b, d], [a, d, c]] {
+                if !tri.contains(&NONE) {
+                    mesh.indices.extend_from_slice(&tri);
+                }
+            }
+        }
+    }
+    compute_normals(&mut mesh);
+    mesh
+}
+
+/// 媒介変数表示の曲線 (x(t), y(t), z(t))。
+///
+/// 最初に `n` 等分して計算し、曲がっている所・途切れる所だけを細かく分け直す（適応サンプリング）。
+/// 戻り値は点の座標を並べたもの。曲線が途切れる所には NaN の点が入る。
+/// `tol` は「直線で結んだときのずれ」の許容量。
+pub fn parametric_curve(progs: &[Program; 3], t: (f64, f64), n: usize, tol: f64) -> Vec<f32> {
+    const MAX_POINTS: usize = 200_000;
+    const PASSES: usize = 14;
+
+    let n = n.max(2);
+    let mut ts: Vec<f64> = (0..=n).map(|k| t.0 + (t.1 - t.0) * k as f64 / n as f64).collect();
+    let mut ps = eval_points(progs, &[&ts], ts.len());
+    // 区間 [ts[k], ts[k+1]] をまだ分け直す必要があるか
+    let mut todo = vec![true; ts.len() - 1];
+
+    for _ in 0..PASSES {
+        // 分け直す候補の区間の中点をまとめて計算する
+        let cand: Vec<usize> = (0..todo.len())
+            .filter(|&k| todo[k] && (finite(&ps[k]) || finite(&ps[k + 1])))
+            .collect();
+        if cand.is_empty() || ts.len() + cand.len() > MAX_POINTS {
+            break;
+        }
+        let mids: Vec<f64> = cand.iter().map(|&k| 0.5 * (ts[k] + ts[k + 1])).collect();
+        let mps = eval_points(progs, &[&mids], mids.len());
+
+        // 中点を入れるべきか判定しながら、新しい列を作る
+        let mut nts = Vec::with_capacity(ts.len() + cand.len());
+        let mut nps = Vec::with_capacity(ts.len() + cand.len());
+        let mut ntodo = Vec::with_capacity(ts.len() + cand.len());
+        let mut c = 0;
+        for k in 0..ts.len() {
+            nts.push(ts[k]);
+            nps.push(ps[k]);
+            if k + 1 == ts.len() {
+                break;
+            }
+            if c < cand.len() && cand[c] == k {
+                let (a, b, m) = (&ps[k], &ps[k + 1], &mps[c]);
+                let insert = if finite(a) && finite(b) && finite(m) {
+                    // 中点が、両端を結ぶ線分の中点からどれだけずれているか
+                    let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0];
+                    dist(m, &mid) > tol
+                } else {
+                    true // 定義されない点との境目を探す
+                };
+                if insert {
+                    nts.push(mids[c]);
+                    nps.push(*m);
+                    ntodo.extend_from_slice(&[true, true]);
+                } else {
+                    ntodo.push(false);
+                }
+                c += 1;
+            } else {
+                ntodo.push(todo[k]);
+            }
+        }
+        ts = nts;
+        ps = nps;
+        todo = ntodo;
+    }
+
+    // 分け直しきれなかった長い区間は、値が飛んでいる（例: tan t の極）とみなして線を切る
+    let jump = tol * 200.0;
+    let mut out = Vec::with_capacity(ps.len() * 3);
+    for k in 0..ps.len() {
+        if k > 0 && todo[k - 1] && finite(&ps[k - 1]) && finite(&ps[k]) && dist(&ps[k - 1], &ps[k]) > jump {
+            out.extend_from_slice(&[f32::NAN; 3]);
+        }
+        out.extend(ps[k].iter().map(|&v| v as f32));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 
 /// 周りの三角形の向き（面積で重み付け）を平均して、頂点の法線を求める。
 fn compute_normals(mesh: &mut Mesh) {
@@ -363,6 +515,36 @@ mod tests {
             }
         }
         assert!(edges.values().all(|&c| c == 2));
+    }
+
+    fn progs3(src: [&str; 3], vars: &[&str]) -> [Program; 3] {
+        src.map(|s| prog(s, vars))
+    }
+
+    #[test]
+    fn param_surface_cylinder() {
+        let d = Domain { lo: [-2.0; 3], hi: [2.0; 3] };
+        let p = progs3(["cos(u)", "sin(u)", "v"], &["u", "v"]);
+        let m = parametric_surface(&p, d, (0.0, std::f64::consts::TAU), (-1.0, 1.0), 20);
+        assert_eq!(m.positions.len(), 21 * 21 * 3);
+        assert_eq!(m.grid_coords.len(), m.positions.len());
+        // 円柱の法線は横向き（z 成分がほぼ 0）
+        assert!(m.normals.chunks_exact(3).all(|n| n[2].abs() < 1e-3));
+    }
+
+    #[test]
+    fn curve_adaptive_and_breaks() {
+        // 円: 点はすべて半径 1 の上
+        let p = progs3(["cos(t)", "sin(t)", "0"], &["t"]);
+        let pts = parametric_curve(&p, (0.0, std::f64::consts::TAU), 8, 1e-3);
+        assert!(pts.len() / 3 > 9, "曲がっている所は細かく分け直される");
+        for q in pts.chunks_exact(3) {
+            assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 1.0).abs() < 1e-5);
+        }
+        // tan t は極で線が切れる（NaN が入る）
+        let p = progs3(["t", "tan(t)", "0"], &["t"]);
+        let pts = parametric_curve(&p, (-3.0, 3.0), 50, 1e-3);
+        assert!(pts.iter().any(|v| v.is_nan()));
     }
 
     /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`

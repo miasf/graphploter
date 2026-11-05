@@ -3,7 +3,7 @@
   import { onMount } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { requestPlot } from './lib/plotClient'
-  import type { Domain, GridStyle, PlotItem } from './lib/types'
+  import type { Domain, GridStyle, ParamRanges, PlotItem } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -17,8 +17,12 @@
       color: PALETTE[(id - 1) % PALETTE.length],
       visible: true,
       opacity: 1,
-      grid: { enabled: true, x: 1, y: 1, z: 0, width: 1 },
+      grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 24, width: 1 },
+      lineWidth: 3,
       showSettings: false,
+      ranges: { t: ['0', '2pi'], u: ['0', '2pi'], v: ['0', '2pi'] },
+      params: '',
+      paramSpan: { u: 2 * Math.PI, v: 2 * Math.PI },
       ...options,
     }
   }
@@ -29,8 +33,15 @@
     newItem('z = 2exp(-(x^2 + y^2)/4) - 1', {
       color: '#3fb6c8',
       opacity: 0,
-      grid: { enabled: true, x: 0.25, y: 0.25, z: 0, width: 1 },
+      grid: { enabled: true, x: 0.25, y: 0.25, z: 0, u: 24, v: 24, width: 1 },
     }),
+    // 媒介変数表示の曲線（らせん）
+    newItem('(4cos t, 4sin t, t/5)', {
+      color: '#c74440',
+      ranges: { t: ['-4pi', '4pi'], u: ['0', '2pi'], v: ['0', '2pi'] },
+    }),
+    // 媒介変数表示の曲面（トーラス）
+    newItem('((3 + cos v) cos u, (3 + cos v) sin u, sin v)', { visible: false, color: '#6042a6' }),
     newItem('x^2 + y^2 + z^2 = 4', { visible: false }),
     newItem('z = abs(gamma(x + iy))', { visible: false }),
   ])
@@ -152,14 +163,18 @@
       return
     }
 
-    const res = await requestPlot(item.source, domain, resolution, implicitResolution)
+    const res = await requestPlot(item.source, domain, resolution, implicitResolution, item.ranges)
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
     if (res.ok) {
+      item.params = res.mesh.params
+      item.paramSpan = res.mesh.paramSpan
       viewer.setPlot(item.id, res.mesh, item)
       item.error = undefined
-      const tris = res.mesh.indices.length / 3
-      item.info = `${res.kind} · ${tris.toLocaleString()} 個の三角形 · ${res.ms.toFixed(0)} ms`
+      const size = res.mesh.curve
+        ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
+        : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
+      item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
     } else {
       viewer.removePlot(item.id)
       item.error = res.error
@@ -196,6 +211,16 @@
   function setOpacity(item: PlotItem, opacity: number) {
     item.opacity = opacity
     viewer?.setStyle(item.id, item)
+  }
+
+  function setLineWidth(item: PlotItem, width: number) {
+    item.lineWidth = width
+    viewer?.setStyle(item.id, item)
+  }
+
+  function setRange(item: PlotItem, name: keyof ParamRanges, side: 0 | 1, value: string) {
+    item.ranges[name][side] = value
+    schedule(item, 300)
   }
 
   function setGrid(item: PlotItem, grid: GridStyle) {
@@ -258,6 +283,8 @@
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
+          onLineWidth={(w) => setLineWidth(item, w)}
+          onRange={(name, side, v) => setRange(item, name, side, v)}
             onToggle={() => toggle(item)}
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
             onRemove={() => removeItem(item)}
@@ -335,6 +362,8 @@
         <ul>
           <li>陽関数: <code>z = x^2 - y^2</code>（<code>z =</code> は省略可）、<code>y = sin(x) z</code> なども可</li>
           <li>陰関数: <code>x^2 + y^2 + z^2 = 4</code>、<code>sin x + sin y + sin z = 0</code></li>
+          <li>曲線: <code>(cos t, sin t, t/4)</code>（t を使う。範囲は式の下で指定）</li>
+          <li>曲面: <code>(u cos v, u sin v, u)</code>（u と v を使う）</li>
           <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
           <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>
           <li>

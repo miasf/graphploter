@@ -4,6 +4,9 @@
 
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import type { Domain, MeshData, PlotStyle } from './types'
@@ -38,6 +41,17 @@ interface Theme {
 const LIGHT: Theme = { background: 0xf7f7f4, box: 0x9a9aa2, grid: 0xd6d6d2 }
 const DARK: Theme = { background: 0x1b1c20, box: 0x6a6b72, grid: 0x34353b }
 
+/** 1つの式の描画物 */
+type PlotObject =
+  | {
+      kind: 'surface'
+      group: THREE.Group // 表面用と裏面用の2つのメッシュ
+      grid: GridUniforms
+      /** 媒介変数表示なら u, v の範囲の長さ（格子線を u, v に沿って引く） */
+      uvSpan: { u: number; v: number } | null
+    }
+  | { kind: 'curve'; line: LineSegments2 }
+
 export class Viewer {
   private renderer: THREE.WebGLRenderer
   private labelRenderer: CSS2DRenderer
@@ -45,7 +59,7 @@ export class Viewer {
   private camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000)
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
-  private plots = new Map<number, { group: THREE.Group; grid: GridUniforms }>() // 式ごとの曲面
+  private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
   private clipPlanes: THREE.Plane[] = []
   private domain: Domain | null = null
   private theme: Theme
@@ -105,6 +119,9 @@ export class Viewer {
     this.camera.aspect = w / h
     this.renderer.setSize(w, h)
     this.labelRenderer.setSize(w, h)
+    for (const p of this.plots.values()) {
+      if (p.kind === 'curve') (p.line.material as LineMaterial).resolution.set(w, h)
+    }
     this.applyViewOffset()
   }
 
@@ -194,8 +211,9 @@ export class Viewer {
       new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin),
       new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax),
     ]
-    for (const { group } of this.plots.values()) {
-      group.traverse((o) => {
+    for (const p of this.plots.values()) {
+      const obj = p.kind === 'surface' ? p.group : p.line
+      obj.traverse((o) => {
         if (o instanceof THREE.Mesh) (o.material as THREE.Material).clippingPlanes = this.clipPlanes
       })
     }
@@ -282,13 +300,23 @@ export class Viewer {
     }
   }
 
-  /** 式 id の曲面を設定（作り直し） */
+  /** 式 id の曲面・曲線を設定（作り直し） */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
     this.removePlot(id)
+    if (mesh.curve) {
+      this.setCurve(id, mesh.positions)
+    } else {
+      this.setSurface(id, mesh)
+    }
+    this.setStyle(id, style)
+  }
 
+  private setSurface(id: number, mesh: MeshData) {
     const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3))
+    const pos = new THREE.BufferAttribute(mesh.positions, 3)
+    geo.setAttribute('position', pos)
     geo.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3))
+    geo.setAttribute('gridCoord', mesh.gridCoords.length > 0 ? new THREE.BufferAttribute(mesh.gridCoords, 3) : pos)
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
 
     // 表面と裏面で色の明るさを変えて、どちら側を見ているか分かるようにする
@@ -297,18 +325,45 @@ export class Viewer {
     const back = createSurfaceMaterial(THREE.BackSide, grid, this.clipPlanes)
     const group = new THREE.Group()
     group.add(new THREE.Mesh(geo, front), new THREE.Mesh(geo, back))
-    this.plots.set(id, { group, grid })
+    const uvSpan = mesh.params === 'uv' ? mesh.paramSpan : null
+    this.plots.set(id, { kind: 'surface', group, grid, uvSpan })
     this.scene.add(group)
-    this.setStyle(id, style)
   }
 
-  /** 色・表示/非表示・格子線だけを変える（計算し直さない） */
+  /** 曲線。点の列を、隣り合う2点ずつの線分にする（NaN の所は線を切る） */
+  private setCurve(id: number, pts: Float32Array) {
+    const seg: number[] = []
+    const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
+    for (let k = 0; k + 5 < pts.length; k += 3) {
+      if (ok(k) && ok(k + 3)) {
+        seg.push(pts[k], pts[k + 1], pts[k + 2], pts[k + 3], pts[k + 4], pts[k + 5])
+      }
+    }
+    const geo = new LineSegmentsGeometry()
+    if (seg.length > 0) geo.setPositions(seg)
+    const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
+    mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
+    const line = new LineSegments2(geo, mat)
+    this.plots.set(id, { kind: 'curve', line })
+    this.scene.add(line)
+  }
+
+  /** 色・表示/非表示・格子線などの見た目だけを変える（計算し直さない） */
   setStyle(id: number, style: PlotStyle) {
     const p = this.plots.get(id)
     if (!p) return
+    const c = new THREE.Color(style.color)
+
+    if (p.kind === 'curve') {
+      p.line.visible = style.visible
+      const m = p.line.material as LineMaterial
+      m.color.copy(c)
+      m.linewidth = style.lineWidth
+      return
+    }
+
     p.group.visible = style.visible
     const [front, back] = p.group.children as THREE.Mesh[]
-    const c = new THREE.Color(style.color)
     ;(front.material as THREE.MeshStandardMaterial).color.copy(c)
     ;(back.material as THREE.MeshStandardMaterial).color.copy(c).multiplyScalar(0.55)
 
@@ -331,7 +386,13 @@ export class Viewer {
     // 間隔が 0 以下・数値でないものは描かない
     const g = style.grid
     const sp = (v: number) => (g.enabled && Number.isFinite(v) && v > 0 ? v : 0)
-    p.grid.uGridSpacing.value.set(sp(g.x), sp(g.y), sp(g.z))
+    if (p.uvSpan) {
+      // 媒介変数表示: u, v の範囲をそれぞれ g.u, g.v 等分する線
+      const div = (span: number, n: number) => (n > 0 ? span / n : 0)
+      p.grid.uGridSpacing.value.set(sp(div(p.uvSpan.u, g.u)), sp(div(p.uvSpan.v, g.v)), sp(g.z))
+    } else {
+      p.grid.uGridSpacing.value.set(sp(g.x), sp(g.y), sp(g.z))
+    }
     p.grid.uGridColor.value.copy(c).multiplyScalar(0.3 + 0.7 * (1 - opacity))
     p.grid.uGridStrength.value = 0.75 + 0.25 * (1 - opacity)
     p.grid.uGridWidth.value = g.width
@@ -340,11 +401,17 @@ export class Viewer {
   removePlot(id: number) {
     const p = this.plots.get(id)
     if (!p) return
-    const [front, back] = p.group.children as THREE.Mesh[]
-    front.geometry.dispose()
-    ;(front.material as THREE.Material).dispose()
-    ;(back.material as THREE.Material).dispose()
-    this.scene.remove(p.group)
+    if (p.kind === 'curve') {
+      p.line.geometry.dispose()
+      ;(p.line.material as THREE.Material).dispose()
+      this.scene.remove(p.line)
+    } else {
+      const [front, back] = p.group.children as THREE.Mesh[]
+      front.geometry.dispose()
+      ;(front.material as THREE.Material).dispose()
+      ;(back.material as THREE.Material).dispose()
+      this.scene.remove(p.group)
+    }
     this.plots.delete(id)
   }
 }
