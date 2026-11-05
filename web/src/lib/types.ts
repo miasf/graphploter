@@ -22,6 +22,8 @@ export interface GridStyle {
 export interface PlotStyle {
   color: string
   visible: boolean
+  /** 面の不透明度（0〜1）。0 にすると格子線だけの曲面になる */
+  opacity: number
   grid: GridStyle
 }
 

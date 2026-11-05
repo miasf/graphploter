@@ -1,5 +1,7 @@
 # graphploter
 
+公開ページ: https://miasf.github.io/graphploter/
+
 ブラウザで動く 3D グラフソフト。目標は「Desmos くらい使いやすく、多次元の媒介変数表示・陰関数・特殊関数・複素数を 3 次元空間に自由に描ける」こと。
 
 現在できること:
@@ -7,6 +9,8 @@
 - 陽関数の曲面 `z = f(x, y)`（`y = f(x, z)`、`x = f(y, z)` も可）
 - 陰関数の曲面 `F(x, y, z) = G(x, y, z)`（例: `x^2 + y^2 + z^2 = 4`）
 - 曲面の格子線: x, y, z 方向ごとに間隔を変えられる（z 方向は等高線になる）
+- 面の濃さ: 0 にすると格子線だけの曲面（ワイヤーフレーム）になる
+- 遠近感: 平行投影から強い透視投影までスライダーで調整、背景の明暗の切り替え
 - 計算はすべて複素数で行う（例: `z = abs(gamma(x + iy))`）
 - 特殊関数: ガンマ関数 `gamma`
 - 式の追加・削除・色変更・表示切り替え、表示範囲と細かさの変更
@@ -42,7 +46,13 @@ graphploter/
 式を入力 → (Web Worker) Rust/WASM が解析・計算・メッシュ生成 → Three.js が描画
 ```
 
-## 動かし方
+## 公開（GitHub Pages）
+
+`.github/workflows/deploy.yml` により、`main` か `claude/graph-software-lightweight-lang-jtkw91` ブランチにプッシュすると、
+自動でビルドして https://miasf.github.io/graphploter/ に公開される。
+進み具合はリポジトリの「Actions」タブで見られる。
+
+## 自分のパソコンで動かす
 
 ### 1. 必要なものを入れる（最初の1回だけ）
 

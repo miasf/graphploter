@@ -9,34 +9,53 @@
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
 
   let nextId = 1
-  function newItem(source: string, visible = true): PlotItem {
+  function newItem(source: string, options: Partial<PlotItem> = {}): PlotItem {
     const id = nextId++
     return {
       id,
       source,
       color: PALETTE[(id - 1) % PALETTE.length],
-      visible,
+      visible: true,
+      opacity: 1,
       grid: { enabled: true, x: 1, y: 1, z: 0 },
       showSettings: false,
+      ...options,
     }
   }
 
   // ---- 画面の状態 ----
   let items = $state<PlotItem[]>([
-    newItem('z = sin(x) cos(y)'),
-    newItem('x^2 + y^2 + z^2 = 4', false),
-    newItem('z = abs(gamma(x + iy))', false),
+    // 格子線だけの曲面（面の不透明度 0）
+    newItem('z = 2exp(-(x^2 + y^2)/4) - 1', {
+      color: '#3fb6c8',
+      opacity: 0,
+      grid: { enabled: true, x: 0.25, y: 0.25, z: 0 },
+    }),
+    newItem('x^2 + y^2 + z^2 = 4', { visible: false }),
+    newItem('z = abs(gamma(x + iy))', { visible: false }),
   ])
   let domain = $state<Domain>({ xmin: -5, xmax: 5, ymin: -5, ymax: 5, zmin: -3, zmax: 3 })
   let resolution = $state(150)
   let implicitResolution = $state(80)
   let domainError = $state('')
+  /** 遠近感（0: 平行投影 〜 100: 強い透視投影） */
+  let perspective = $state(41)
+  /** 暗い配色にするか（最初は OS の設定に合わせる） */
+  let dark = $state(window.matchMedia('(prefers-color-scheme: dark)').matches)
+
+  // 配色を画面全体（CSS）と 3D 表示の両方に反映
+  $effect(() => {
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    viewer?.setDark(dark)
+  })
 
   let viewerEl: HTMLElement
   let viewer: Viewer | null = null
 
   onMount(() => {
     viewer = new Viewer(viewerEl)
+    viewer.setDark(dark)
+    viewer.setPerspective(perspective / 100)
     viewer.setDomain(domain)
     items.forEach(replot)
     return () => viewer?.dispose()
@@ -107,6 +126,11 @@
     viewer?.setStyle(item.id, item)
   }
 
+  function setOpacity(item: PlotItem, opacity: number) {
+    item.opacity = opacity
+    viewer?.setStyle(item.id, item)
+  }
+
   function setGrid(item: PlotItem, grid: GridStyle) {
     item.grid = grid
     viewer?.setStyle(item.id, item)
@@ -149,6 +173,7 @@
           onInput={(s) => setSource(item, s)}
           onColor={(c) => setColor(item, c)}
           onGrid={(g) => setGrid(item, g)}
+          onOpacity={(o) => setOpacity(item, o)}
           onToggle={() => toggle(item)}
           onToggleSettings={() => (item.showSettings = !item.showSettings)}
           onRemove={() => removeItem(item)}
@@ -203,7 +228,22 @@
         />
       </label>
 
-      <button class="secondary" onclick={() => viewer?.resetCamera()}>視点をリセット</button>
+      <h2>見え方</h2>
+      <label class="slider">
+        <span>遠近感: {perspective === 0 ? '平行投影' : `${perspective}%`}</span>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          bind:value={perspective}
+          oninput={() => viewer?.setPerspective(perspective / 100)}
+        />
+      </label>
+      <div class="buttons">
+        <button class="secondary" onclick={() => viewer?.resetCamera()}>視点をリセット</button>
+        <button class="secondary" onclick={() => (dark = !dark)}>{dark ? '明るい背景' : '暗い背景'}</button>
+      </div>
     </section>
 
     <details class="help">
@@ -314,6 +354,10 @@
     margin: 14px 0;
     font-size: 13px;
     color: var(--muted);
+  }
+  .buttons {
+    display: flex;
+    gap: 8px;
   }
   .secondary {
     padding: 6px 12px;

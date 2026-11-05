@@ -1,0 +1,67 @@
+# GitHub Pages への自動公開。
+# 下の branches にプッシュすると、Rust → WASM のビルドと画面のビルドを行い、サイトとして公開する。
+name: GitHub Pages に公開
+
+on:
+  push:
+    branches:
+      - main
+      - claude/graph-software-lightweight-lang-jtkw91
+  workflow_dispatch: # Actions の画面から手動でも実行できる
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 公開が同時に2つ走らないようにする
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust を用意
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: wasm-pack を用意
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Rust のテスト
+        run: cargo test
+        working-directory: core
+
+      - name: Node.js を用意
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: ビルド
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -49,6 +49,8 @@ export class Viewer {
   private clipPlanes: THREE.Plane[] = []
   private domain: Domain | null = null
   private theme: Theme
+  /** 遠近感の強さ = tan(視野角 / 2)。小さいほど平行投影に近い */
+  private perspective = Math.tan(THREE.MathUtils.degToRad(22.5))
   private resizeObserver: ResizeObserver
   private stopped = false
 
@@ -64,8 +66,7 @@ export class Viewer {
     this.labelRenderer.domElement.className = 'label-layer'
     container.appendChild(this.labelRenderer.domElement)
 
-    const dark = window.matchMedia('(prefers-color-scheme: dark)')
-    this.theme = dark.matches ? DARK : LIGHT
+    this.theme = LIGHT
     this.scene.background = new THREE.Color(this.theme.background)
 
     // カメラとマウス操作（左ドラッグ: 回転 / 右ドラッグ: 移動 / ホイール: 拡大縮小）
@@ -109,8 +110,51 @@ export class Viewer {
     if (this.stopped) return
     requestAnimationFrame(this.loop)
     this.controls.update()
+    this.updateClipRange()
     this.renderer.render(this.scene, this.camera)
     this.labelRenderer.render(this.scene, this.camera)
+  }
+
+  /** 表示範囲の対角線の長さ */
+  private sceneSize(): number {
+    const d = this.domain
+    return d ? Math.hypot(d.xmax - d.xmin, d.ymax - d.ymin, d.zmax - d.zmin) : 10
+  }
+
+  /** カメラが描く奥行きの範囲を、今の距離に合わせる（平行投影に近いとカメラがとても遠くなるため） */
+  private updateClipRange() {
+    const dist = this.camera.position.distanceTo(this.controls.target)
+    const size = this.sceneSize()
+    const near = Math.max(dist - 2 * size, dist * 1e-3)
+    const far = dist + 4 * size
+    if (near !== this.camera.near || far !== this.camera.far) {
+      this.camera.near = near
+      this.camera.far = far
+      this.camera.updateProjectionMatrix()
+    }
+  }
+
+  /**
+   * 遠近感の強さを変える（0: 平行投影 〜 1: 視野角 90° の強い透視投影）。
+   * 見た目の大きさが変わらないよう、視野角を変えると同時にカメラを前後に動かす。
+   */
+  setPerspective(strength: number) {
+    const tanNew = Math.max(strength, 0.004) // ちょうど 0 は計算できないので、ほぼ平行投影で代用
+    const target = this.controls.target
+    const offset = this.camera.position.clone().sub(target)
+    const halfHeight = offset.length() * this.perspective // 注視点の位置で見えている高さの半分
+    offset.setLength(halfHeight / tanNew)
+    this.camera.position.copy(target).add(offset)
+    this.perspective = tanNew
+    this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(tanNew))
+    this.camera.updateProjectionMatrix()
+  }
+
+  /** 背景の明暗を切り替える */
+  setDark(dark: boolean) {
+    this.theme = dark ? DARK : LIGHT
+    ;(this.scene.background as THREE.Color).set(this.theme.background)
+    if (this.domain) this.buildFrame(this.domain)
   }
 
   /** 表示範囲を設定し、軸・目盛り・枠を作り直す */
@@ -142,12 +186,11 @@ export class Viewer {
     const d = this.domain
     if (!d) return
     const center = new THREE.Vector3((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
-    const size = Math.hypot(d.xmax - d.xmin, d.ymax - d.ymin, d.zmax - d.zmin)
+    const size = this.sceneSize()
+    const dist = (size * 0.56) / this.perspective
     this.controls.target.copy(center)
-    this.camera.position.copy(center).add(new THREE.Vector3(1.1, -1.5, 0.9).normalize().multiplyScalar(size * 1.35))
-    this.camera.near = size / 1000
-    this.camera.far = size * 100
-    this.camera.updateProjectionMatrix()
+    this.camera.position.copy(center).add(new THREE.Vector3(1.1, -1.5, 0.9).normalize().multiplyScalar(dist))
+    this.updateClipRange()
   }
 
   private buildFrame(d: Domain) {
@@ -245,11 +288,28 @@ export class Viewer {
     ;(front.material as THREE.MeshStandardMaterial).color.copy(c)
     ;(back.material as THREE.MeshStandardMaterial).color.copy(c).multiplyScalar(0.55)
 
-    // 格子線: 曲面の色を暗くした色で描く。間隔が 0 以下・数値でないものは描かない
+    // 面の不透明度。1 未満なら半透明として描き、奥の面や線も透けて見えるようにする
+    const opacity = Math.min(1, Math.max(0, style.opacity))
+    for (const mesh of [front, back]) {
+      const m = mesh.material as THREE.MeshStandardMaterial
+      const transparent = opacity < 1
+      if (m.transparent !== transparent) {
+        m.transparent = transparent
+        m.depthWrite = !transparent
+        m.needsUpdate = true // シェーダーの作り直しが必要
+      }
+      // 面が薄いときは、線が暗く沈まないよう少し自分で光らせる
+      m.emissive.copy(c).multiplyScalar(0.45 * (1 - opacity))
+    }
+    p.grid.uFillOpacity.value = opacity
+
+    // 格子線: 面が濃いときは曲面の色を暗くした色、面が薄いときは曲面の色そのもので描く。
+    // 間隔が 0 以下・数値でないものは描かない
     const g = style.grid
     const sp = (v: number) => (g.enabled && Number.isFinite(v) && v > 0 ? v : 0)
     p.grid.uGridSpacing.value.set(sp(g.x), sp(g.y), sp(g.z))
-    p.grid.uGridColor.value.copy(c).multiplyScalar(0.3)
+    p.grid.uGridColor.value.copy(c).multiplyScalar(0.3 + 0.7 * (1 - opacity))
+    p.grid.uGridStrength.value = 0.75 + 0.25 * (1 - opacity)
   }
 
   removePlot(id: number) {

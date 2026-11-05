@@ -8,11 +8,13 @@
     onInput: (source: string) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
+    onOpacity: (opacity: number) => void
     onToggle: () => void
     onToggleSettings: () => void
     onRemove: () => void
   }
-  let { item, index, onInput, onColor, onGrid, onToggle, onToggleSettings, onRemove }: Props = $props()
+  let { item, index, onInput, onColor, onGrid, onOpacity, onToggle, onToggleSettings, onRemove }: Props =
+    $props()
 
   const gridAxes = ['x', 'y', 'z'] as const
 </script>
@@ -56,6 +58,19 @@
             value={item.color}
             oninput={(e) => onColor(e.currentTarget.value)}
           />
+        </label>
+        <label class="row">
+          <span class="label">面の濃さ</span>
+          <input
+            class="opacity"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={item.opacity}
+            oninput={(e) => onOpacity(e.currentTarget.valueAsNumber)}
+          />
+          <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
         </label>
         <div class="row">
           <label class="label check">
@@ -189,6 +204,15 @@
     border: none;
     background: none;
     cursor: pointer;
+  }
+  .opacity {
+    flex: 1;
+    min-width: 0;
+  }
+  .value {
+    width: 4.5em;
+    font-size: 12px;
+    color: var(--muted);
   }
   .grid-spacing {
     display: grid;

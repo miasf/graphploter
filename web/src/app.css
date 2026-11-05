@@ -11,21 +11,21 @@
   --error: #c7362f;
   --mono: ui-monospace, 'SF Mono', Consolas, 'Cascadia Mono', monospace;
   --sans: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17181b;
-    --panel: #1e1f23;
-    --gutter: #26272c;
-    --text: #e8e8ea;
-    --muted: #9a9aa3;
-    --border: #2f3036;
-    --border-strong: #44454c;
-    --hover: #2a2b30;
-    --error: #ff6b63;
-  }
+/* 暗い配色。App.svelte が <html data-theme="dark"> を付け外しして切り替える */
+:root[data-theme='dark'] {
+  --bg: #17181b;
+  --panel: #1e1f23;
+  --gutter: #26272c;
+  --text: #e8e8ea;
+  --muted: #9a9aa3;
+  --border: #2f3036;
+  --border-strong: #44454c;
+  --hover: #2a2b30;
+  --error: #ff6b63;
+  color-scheme: dark;
 }
 
 * {

@@ -14,6 +14,8 @@ export interface GridUniforms {
   uGridColor: { value: THREE.Color }
   /** 線の濃さ（0〜1） */
   uGridStrength: { value: number }
+  /** 面の不透明度（0 なら格子線だけが見える） */
+  uFillOpacity: { value: number }
 }
 
 export function createGridUniforms(): GridUniforms {
@@ -21,6 +23,7 @@ export function createGridUniforms(): GridUniforms {
     uGridSpacing: { value: new THREE.Vector3() },
     uGridColor: { value: new THREE.Color() },
     uGridStrength: { value: 0.75 },
+    uFillOpacity: { value: 1 },
   }
 }
 
@@ -29,6 +32,7 @@ varying vec3 vGridPos;
 uniform vec3 uGridSpacing;
 uniform vec3 uGridColor;
 uniform float uGridStrength;
+uniform float uFillOpacity;
 
 // 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（約1画素の太さ）
 float gridLine(float coord, float spacing) {
@@ -47,6 +51,9 @@ const FRAGMENT_APPLY = /* glsl */ `
                     gridLine(vGridPos.y, uGridSpacing.y)),
                 gridLine(vGridPos.z, uGridSpacing.z));
   diffuseColor.rgb = mix(diffuseColor.rgb, uGridColor, g * uGridStrength);
+  // 面は uFillOpacity の濃さ、線の上は不透明にする。ほぼ透明な所は描かない
+  diffuseColor.a = max(uFillOpacity, g);
+  if (diffuseColor.a < 0.01) discard;
 }
 `
 
