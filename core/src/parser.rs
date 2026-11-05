@@ -20,6 +20,19 @@ pub enum Expr {
     Call(Func, Vec<Expr>),
 }
 
+impl Expr {
+    /// 式の中で使われている変数名か調べる
+    pub fn uses_var(&self, name: &str) -> bool {
+        match self {
+            Expr::Var(v) => v == name,
+            Expr::Num(_) | Expr::Const(_) => false,
+            Expr::Neg(a) => a.uses_var(name),
+            Expr::Bin(_, a, b) => a.uses_var(name) || b.uses_var(name),
+            Expr::Call(_, args) => args.iter().any(|a| a.uses_var(name)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Constant {
     Pi,

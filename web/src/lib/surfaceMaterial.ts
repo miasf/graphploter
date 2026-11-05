@@ -1,0 +1,79 @@
+// 曲面用の材質。Three.js の標準の材質に「格子線」を描く処理を足したもの。
+//
+// 格子線はメッシュの三角形とは関係なく、画素ごとに
+// 「x（または y, z）が間隔のちょうど整数倍に近いか」を調べて線の色を混ぜている。
+// そのため、どんな形の曲面（陽関数・陰関数）にも同じように線が引ける。
+// z 方向の線は、z = f(x, y) では等高線になる。
+
+import * as THREE from 'three'
+
+/** シェーダーに渡す値。表面用・裏面用の2つの材質で共有する。 */
+export interface GridUniforms {
+  /** x, y, z 方向の線の間隔（0 なら描かない） */
+  uGridSpacing: { value: THREE.Vector3 }
+  uGridColor: { value: THREE.Color }
+  /** 線の濃さ（0〜1） */
+  uGridStrength: { value: number }
+}
+
+export function createGridUniforms(): GridUniforms {
+  return {
+    uGridSpacing: { value: new THREE.Vector3() },
+    uGridColor: { value: new THREE.Color() },
+    uGridStrength: { value: 0.75 },
+  }
+}
+
+const FRAGMENT_HEADER = /* glsl */ `
+varying vec3 vGridPos;
+uniform vec3 uGridSpacing;
+uniform vec3 uGridColor;
+uniform float uGridStrength;
+
+// 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（約1画素の太さ）
+float gridLine(float coord, float spacing) {
+  if (spacing <= 0.0) return 0.0;
+  float c = coord / spacing;
+  float w = fwidth(c);                      // 1画素で c がどれだけ変わるか
+  float d = abs(fract(c - 0.5) - 0.5);      // 一番近い線までの距離
+  float line = 1.0 - smoothstep(0.5 * w, 1.5 * w, d);
+  return line * (1.0 - smoothstep(0.2, 0.5, w)); // 線が細かすぎて潰れるときは薄くする
+}
+`
+
+const FRAGMENT_APPLY = /* glsl */ `
+{
+  float g = max(max(gridLine(vGridPos.x, uGridSpacing.x),
+                    gridLine(vGridPos.y, uGridSpacing.y)),
+                gridLine(vGridPos.z, uGridSpacing.z));
+  diffuseColor.rgb = mix(diffuseColor.rgb, uGridColor, g * uGridStrength);
+}
+`
+
+export function createSurfaceMaterial(
+  side: THREE.Side,
+  grid: GridUniforms,
+  clippingPlanes: THREE.Plane[],
+): THREE.MeshStandardMaterial {
+  const m = new THREE.MeshStandardMaterial({
+    side,
+    roughness: side === THREE.BackSide ? 0.7 : 0.55,
+    metalness: side === THREE.BackSide ? 0.0 : 0.05,
+    clippingPlanes,
+  })
+  // Three.js が作るシェーダーのコードに、格子線の処理を差し込む
+  m.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, grid)
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vGridPos;')
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\nvGridPos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+      )
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)
+      .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_APPLY)
+  }
+  m.customProgramCacheKey = () => 'surface-with-grid'
+  return m
+}

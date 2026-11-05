@@ -4,10 +4,12 @@
 //! - `eval`      : 構文木 → 命令列、多数の点でまとめて計算（複素数）
 //! - `functions` : 組み込み関数の一覧
 //! - `special`   : 特殊関数の実装
+//! - `equation`  : 式の種類（陽関数・陰関数）の判定
 //! - `mesh`      : 曲面のメッシュ生成
 //!
 //! このファイルは、JavaScript から呼び出す関数（WASM の入口）だけを置く。
 
+pub mod equation;
 pub mod eval;
 pub mod functions;
 pub mod mesh;
@@ -20,6 +22,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct MeshResult {
     inner: mesh::Mesh,
+    kind: String,
 }
 
 #[wasm_bindgen]
@@ -34,6 +37,11 @@ impl MeshResult {
     pub fn normals(&self) -> Vec<f32> {
         self.inner.normals.clone()
     }
+    /// グラフの種類の説明（例: "z = f(x, y)", "陰関数"）
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.kind.clone()
+    }
     /// 三角形の頂点番号（Uint32Array）
     #[wasm_bindgen(getter)]
     pub fn indices(&self) -> Vec<u32> {
@@ -41,37 +49,19 @@ impl MeshResult {
     }
 }
 
-/// 入力の左辺 `z =` を取り除き、右辺だけを返す。
-/// 現時点では z = f(x, y) の形（または右辺だけ）に対応。
-fn explicit_rhs(source: &str) -> Result<&str, String> {
-    match source.split_once('=') {
-        None => Ok(source),
-        Some((lhs, rhs)) => {
-            if lhs.trim() == "z" && !rhs.contains('=') {
-                Ok(rhs)
-            } else {
-                Err("今のところ「z = (x と y の式)」の形だけに対応しています".into())
-            }
-        }
-    }
-}
-
-fn compile_explicit(source: &str) -> Result<eval::Program, String> {
-    let rhs = explicit_rhs(source)?;
-    let expr = parser::parse(rhs).map_err(|e| e.to_string())?;
-    eval::Program::compile(&expr, &["x", "y"])
-}
-
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
 #[wasm_bindgen]
 pub fn check_expression(source: &str) -> Result<(), JsError> {
-    compile_explicit(source).map(|_| ()).map_err(|e| JsError::new(&e))
+    equation::compile(source).map(|_| ()).map_err(|e| JsError::new(&e))
 }
 
-/// 陽関数 z = f(x, y) の曲面を作る。
+/// 式を解析して、曲面のメッシュを作る。
+///
+/// - `resolution`: 陽関数の格子の細かさ（1辺のマス数）
+/// - `implicit_resolution`: 陰関数の格子の細かさ（立方体の1辺のマス数。計算量はこの3乗）
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn plot_explicit(
+pub fn plot(
     source: &str,
     xmin: f64,
     xmax: f64,
@@ -80,10 +70,17 @@ pub fn plot_explicit(
     zmin: f64,
     zmax: f64,
     resolution: u32,
+    implicit_resolution: u32,
 ) -> Result<MeshResult, JsError> {
-    let prog = compile_explicit(source).map_err(|e| JsError::new(&e))?;
-    let dom = mesh::Domain { x: (xmin, xmax), y: (ymin, ymax), z: (zmin, zmax) };
-    Ok(MeshResult {
-        inner: mesh::explicit_surface(&prog, dom, resolution.clamp(2, 1000) as usize),
-    })
+    let plot = equation::compile(source).map_err(|e| JsError::new(&e))?;
+    let dom = mesh::Domain { lo: [xmin, ymin, zmin], hi: [xmax, ymax, zmax] };
+    let inner = match &plot {
+        equation::Plot::Explicit { axis, prog } => {
+            mesh::explicit_surface(prog, dom, resolution.clamp(2, 1000) as usize, *axis)
+        }
+        equation::Plot::Implicit { prog } => {
+            mesh::implicit_surface(prog, dom, implicit_resolution.clamp(2, 300) as usize)
+        }
+    };
+    Ok(MeshResult { inner, kind: plot.kind_label() })
 }

@@ -14,9 +14,14 @@ worker.onmessage = (ev: MessageEvent<PlotResponse>) => {
 }
 
 /** 曲面の計算を頼む。結果は Promise で返る。 */
-export function requestPlot(source: string, domain: Domain, resolution: number): Promise<PlotResponse> {
+export function requestPlot(
+  source: string,
+  domain: Domain,
+  resolution: number,
+  implicitResolution: number,
+): Promise<PlotResponse> {
   const requestId = nextId++
-  const req: PlotRequest = { requestId, source, domain: { ...domain }, resolution }
+  const req: PlotRequest = { requestId, source, domain: { ...domain }, resolution, implicitResolution }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)
     worker.postMessage(req)

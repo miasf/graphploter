@@ -234,8 +234,8 @@ mod tests {
         let p = Program::compile(&parse("x + y").unwrap(), &["x", "y"]).unwrap();
         let mut out = vec![C::new(0.0, 0.0); n];
         p.eval_batch(&[&xs, &ys], &mut out);
-        for k in 0..n {
-            assert_eq!(out[k].re, k as f64 + 1.0);
+        for (k, v) in out.iter().enumerate() {
+            assert_eq!(v.re, k as f64 + 1.0);
         }
     }
 

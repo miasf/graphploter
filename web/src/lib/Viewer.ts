@@ -5,7 +5,8 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
-import type { Domain, MeshData } from './types'
+import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
+import type { Domain, MeshData, PlotStyle } from './types'
 
 /** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
 function niceStep(range: number, target = 8): number {
@@ -44,7 +45,7 @@ export class Viewer {
   private camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000)
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
-  private plots = new Map<number, THREE.Group>() // 式ごとの曲面
+  private plots = new Map<number, { group: THREE.Group; grid: GridUniforms }>() // 式ごとの曲面
   private clipPlanes: THREE.Plane[] = []
   private domain: Domain | null = null
   private theme: Theme
@@ -126,8 +127,8 @@ export class Viewer {
       new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin),
       new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax),
     ]
-    for (const g of this.plots.values()) {
-      g.traverse((o) => {
+    for (const { group } of this.plots.values()) {
+      group.traverse((o) => {
         if (o instanceof THREE.Mesh) (o.material as THREE.Material).clippingPlanes = this.clipPlanes
       })
     }
@@ -215,7 +216,7 @@ export class Viewer {
   }
 
   /** 式 id の曲面を設定（作り直し） */
-  setPlot(id: number, mesh: MeshData, color: string, visible: boolean) {
+  setPlot(id: number, mesh: MeshData, style: PlotStyle) {
     this.removePlot(id)
 
     const geo = new THREE.BufferGeometry()
@@ -224,44 +225,41 @@ export class Viewer {
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
 
     // 表面と裏面で色の明るさを変えて、どちら側を見ているか分かるようにする
-    const front = new THREE.MeshStandardMaterial({
-      roughness: 0.55,
-      metalness: 0.05,
-      side: THREE.FrontSide,
-      clippingPlanes: this.clipPlanes,
-    })
-    const back = new THREE.MeshStandardMaterial({
-      roughness: 0.7,
-      metalness: 0.0,
-      side: THREE.BackSide,
-      clippingPlanes: this.clipPlanes,
-    })
+    const grid = createGridUniforms()
+    const front = createSurfaceMaterial(THREE.FrontSide, grid, this.clipPlanes)
+    const back = createSurfaceMaterial(THREE.BackSide, grid, this.clipPlanes)
     const group = new THREE.Group()
     group.add(new THREE.Mesh(geo, front), new THREE.Mesh(geo, back))
-    this.plots.set(id, group)
+    this.plots.set(id, { group, grid })
     this.scene.add(group)
-    this.setStyle(id, color, visible)
+    this.setStyle(id, style)
   }
 
-  /** 色と表示/非表示だけを変える（計算し直さない） */
-  setStyle(id: number, color: string, visible: boolean) {
-    const g = this.plots.get(id)
-    if (!g) return
-    g.visible = visible
-    const [front, back] = g.children as THREE.Mesh[]
-    const c = new THREE.Color(color)
+  /** 色・表示/非表示・格子線だけを変える（計算し直さない） */
+  setStyle(id: number, style: PlotStyle) {
+    const p = this.plots.get(id)
+    if (!p) return
+    p.group.visible = style.visible
+    const [front, back] = p.group.children as THREE.Mesh[]
+    const c = new THREE.Color(style.color)
     ;(front.material as THREE.MeshStandardMaterial).color.copy(c)
     ;(back.material as THREE.MeshStandardMaterial).color.copy(c).multiplyScalar(0.55)
+
+    // 格子線: 曲面の色を暗くした色で描く。間隔が 0 以下・数値でないものは描かない
+    const g = style.grid
+    const sp = (v: number) => (g.enabled && Number.isFinite(v) && v > 0 ? v : 0)
+    p.grid.uGridSpacing.value.set(sp(g.x), sp(g.y), sp(g.z))
+    p.grid.uGridColor.value.copy(c).multiplyScalar(0.3)
   }
 
   removePlot(id: number) {
-    const g = this.plots.get(id)
-    if (!g) return
-    const [front, back] = g.children as THREE.Mesh[]
+    const p = this.plots.get(id)
+    if (!p) return
+    const [front, back] = p.group.children as THREE.Mesh[]
     front.geometry.dispose()
     ;(front.material as THREE.Material).dispose()
     ;(back.material as THREE.Material).dispose()
-    this.scene.remove(g)
+    this.scene.remove(p.group)
     this.plots.delete(id)
   }
 }

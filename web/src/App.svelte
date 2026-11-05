@@ -3,7 +3,7 @@
   import { onMount } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { requestPlot } from './lib/plotClient'
-  import type { Domain, PlotItem } from './lib/types'
+  import type { Domain, GridStyle, PlotItem } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -11,16 +11,25 @@
   let nextId = 1
   function newItem(source: string, visible = true): PlotItem {
     const id = nextId++
-    return { id, source, color: PALETTE[(id - 1) % PALETTE.length], visible }
+    return {
+      id,
+      source,
+      color: PALETTE[(id - 1) % PALETTE.length],
+      visible,
+      grid: { enabled: true, x: 1, y: 1, z: 0 },
+      showSettings: false,
+    }
   }
 
   // ---- 画面の状態 ----
   let items = $state<PlotItem[]>([
     newItem('z = sin(x) cos(y)'),
+    newItem('x^2 + y^2 + z^2 = 4', false),
     newItem('z = abs(gamma(x + iy))', false),
   ])
   let domain = $state<Domain>({ xmin: -5, xmax: 5, ymin: -5, ymax: 5, zmin: -3, zmax: 3 })
   let resolution = $state(150)
+  let implicitResolution = $state(80)
   let domainError = $state('')
 
   let viewerEl: HTMLElement
@@ -57,14 +66,14 @@
       return
     }
 
-    const res = await requestPlot(item.source, domain, resolution)
+    const res = await requestPlot(item.source, domain, resolution, implicitResolution)
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
     if (res.ok) {
-      viewer.setPlot(item.id, res.mesh, item.color, item.visible)
+      viewer.setPlot(item.id, res.mesh, item)
       item.error = undefined
       const tris = res.mesh.indices.length / 3
-      item.info = `${tris.toLocaleString()} 個の三角形 · ${res.ms.toFixed(0)} ms`
+      item.info = `${res.kind} · ${tris.toLocaleString()} 個の三角形 · ${res.ms.toFixed(0)} ms`
     } else {
       viewer.removePlot(item.id)
       item.error = res.error
@@ -95,12 +104,17 @@
 
   function setColor(item: PlotItem, color: string) {
     item.color = color
-    viewer?.setStyle(item.id, item.color, item.visible)
+    viewer?.setStyle(item.id, item)
+  }
+
+  function setGrid(item: PlotItem, grid: GridStyle) {
+    item.grid = grid
+    viewer?.setStyle(item.id, item)
   }
 
   function toggle(item: PlotItem) {
     item.visible = !item.visible
-    viewer?.setStyle(item.id, item.color, item.visible)
+    viewer?.setStyle(item.id, item)
   }
 
   // ---- 表示範囲 ----
@@ -134,7 +148,9 @@
           index={i}
           onInput={(s) => setSource(item, s)}
           onColor={(c) => setColor(item, c)}
+          onGrid={(g) => setGrid(item, g)}
           onToggle={() => toggle(item)}
+          onToggleSettings={() => (item.showSettings = !item.showSettings)}
           onRemove={() => removeItem(item)}
         />
       {/each}
@@ -165,13 +181,24 @@
       {#if domainError}<p class="error">{domainError}</p>{/if}
 
       <label class="slider">
-        <span>細かさ: {resolution} × {resolution}</span>
+        <span>曲面の細かさ: {resolution} × {resolution}</span>
         <input
           type="range"
           min="20"
           max="400"
           step="10"
           bind:value={resolution}
+          onchange={() => replotAll(0)}
+        />
+      </label>
+      <label class="slider">
+        <span>陰関数の細かさ: {implicitResolution}³（重いので注意）</span>
+        <input
+          type="range"
+          min="20"
+          max="200"
+          step="10"
+          bind:value={implicitResolution}
           onchange={() => replotAll(0)}
         />
       </label>
@@ -182,7 +209,8 @@
     <details class="help">
       <summary>書き方のヒント</summary>
       <ul>
-        <li><code>z = x^2 - y^2</code>（<code>z =</code> は省略可）</li>
+        <li>陽関数: <code>z = x^2 - y^2</code>（<code>z =</code> は省略可）、<code>y = sin(x) z</code> なども可</li>
+        <li>陰関数: <code>x^2 + y^2 + z^2 = 4</code>、<code>sin x + sin y + sin z = 0</code></li>
         <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
         <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>
         <li>
@@ -190,6 +218,7 @@
           gamma
         </li>
         <li>複素数の結果が実数でない点は描かれません</li>
+        <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
         <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
       </ul>
     </details>
