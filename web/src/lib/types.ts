@@ -38,7 +38,7 @@ export interface PlotStyle {
 /** 媒介変数の名前: 't'（曲線）, 'uv'（曲面）, ''（媒介変数表示でない） */
 export type ParamKind = 't' | 'uv' | ''
 
-/** 媒介変数の範囲（入力された文字列のまま。"2pi" などの式も書ける） */
+/** 媒介変数の範囲（入力欄の LaTeX のまま。2π などの式も書ける） */
 export interface ParamRanges {
   t: [string, string]
   u: [string, string]
@@ -48,7 +48,8 @@ export interface ParamRanges {
 /** 式の一覧の1行 */
 export interface PlotItem extends PlotStyle {
   id: number
-  source: string
+  /** 入力された式（LaTeX）。計算エンジンに渡す前に latexToText で変換する */
+  latex: string
   /** 設定欄を開いているか */
   showSettings: boolean
   /** 媒介変数表示 (a, b, c) を、成分ごとに縦に並べた入力欄で編集するか */

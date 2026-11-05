@@ -1,7 +1,8 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { joinTuple, splitTuple } from './tuple'
+  import { joinTuple, splitTuple } from './latex'
+  import MathInput from './MathInput.svelte'
   import type { Domain, GridStyle, ParamRanges, PlotItem } from './types'
 
   interface Props {
@@ -9,7 +10,8 @@
     index: number
     /** 表示範囲（格子線の間隔の選択肢を決めるのに使う） */
     domain: Domain
-    onInput: (source: string) => void
+    /** 式（LaTeX）が書き換えられたとき */
+    onInput: (latex: string) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -39,7 +41,7 @@
   // 1行の入力欄を編集している間は、縦の表示に切り替えない（入力中に欄が入れ替わらないように）
   let editingLine = $state(false)
   /** 式が組 (a, b, c) なら成分の配列 */
-  const parts = $derived(splitTuple(item.source))
+  const parts = $derived(splitTuple(item.latex))
   const showVertical = $derived(item.vertical && parts !== null && !editingLine)
   const COMPONENT_NAMES = ['x', 'y', 'z']
 
@@ -91,31 +93,25 @@
       <!-- 媒介変数表示: 成分ごとに縦に並べる -->
       <div class="components">
         {#each parts as part, k (k)}
-          <label class="component">
+          <div class="component">
             <span class="name">{COMPONENT_NAMES[k] ?? '?'} =</span>
-            <input
-              class="source"
-              type="text"
+            <MathInput
               value={part}
-              spellcheck="false"
-              autocomplete="off"
-              oninput={(e) => setPart(k, e.currentTarget.value)}
+              label="{COMPONENT_NAMES[k] ?? '?'} 成分"
+              keyboardToggle={k === 0}
+              onInput={(v) => setPart(k, v)}
             />
-          </label>
+          </div>
         {/each}
       </div>
       <button class="link" onclick={onToggleVertical}>1行で編集</button>
     {:else}
-      <input
-        class="source"
-        type="text"
-        value={item.source}
-        placeholder="例: z = sin(x) cos(y)、(cos t, sin t, t)"
-        spellcheck="false"
-        autocomplete="off"
-        onfocus={() => (editingLine = true)}
-        onblur={() => (editingLine = false)}
-        oninput={(e) => onInput(e.currentTarget.value)}
+      <MathInput
+        value={item.latex}
+        label="式 {index + 1}"
+        placeholder="z=\sin x\cos y"
+        onInput={(v) => onInput(v)}
+        onFocusChange={(f) => (editingLine = f)}
       />
       {#if parts && !item.vertical}
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
@@ -123,18 +119,18 @@
     {/if}
     {#each paramNames as name (name)}
       <div class="param-range">
-        <input
-          type="text"
+        <MathInput
+          small
           value={item.ranges[name][0]}
-          aria-label="{name} の最小値"
-          oninput={(e) => onRange(name, 0, e.currentTarget.value)}
+          label="{name} の最小値"
+          onInput={(v) => onRange(name, 0, v)}
         />
         <span>≤ {name} ≤</span>
-        <input
-          type="text"
+        <MathInput
+          small
           value={item.ranges[name][1]}
-          aria-label="{name} の最大値"
-          oninput={(e) => onRange(name, 1, e.currentTarget.value)}
+          label="{name} の最大値"
+          onInput={(v) => onRange(name, 1, v)}
         />
       </div>
     {/each}
@@ -294,14 +290,6 @@
     padding: 10px 8px;
     min-width: 0;
   }
-  .source {
-    width: 100%;
-    border: none;
-    outline: none;
-    background: transparent;
-    color: var(--text);
-    font: 17px/1.4 var(--mono);
-  }
   .error,
   .info {
     margin: 4px 0 0;
@@ -378,16 +366,6 @@
     margin-top: 6px;
     font: 13px var(--mono);
     color: var(--muted);
-  }
-  .param-range input {
-    width: 100%;
-    min-width: 0;
-    padding: 3px 6px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font: 13px var(--mono);
   }
   .sliders {
     display: grid;

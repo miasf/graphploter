@@ -2,6 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
+  import { latexToText } from './lib/latex'
   import { requestPlot } from './lib/plotClient'
   import type { Domain, GridStyle, ParamRanges, PlotItem } from './lib/types'
   import { Viewer } from './lib/Viewer'
@@ -9,11 +10,12 @@
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
 
   let nextId = 1
-  function newItem(source: string, options: Partial<PlotItem> = {}): PlotItem {
+  /** 新しい式。latex は数式入力欄の書き方（LaTeX） */
+  function newItem(latex: string, options: Partial<PlotItem> = {}): PlotItem {
     const id = nextId++
     return {
       id,
-      source,
+      latex,
       color: PALETTE[(id - 1) % PALETTE.length],
       visible: true,
       opacity: 1,
@@ -21,7 +23,7 @@
       lineWidth: 3,
       showSettings: false,
       vertical: true,
-      ranges: { t: ['0', '2pi'], u: ['0', '2pi'], v: ['0', '2pi'] },
+      ranges: { t: ['0', '2\\pi'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
       params: '',
       paramSpan: { u: 2 * Math.PI, v: 2 * Math.PI },
       ...options,
@@ -31,20 +33,23 @@
   // ---- 画面の状態 ----
   let items = $state<PlotItem[]>([
     // 格子線だけの曲面（面の不透明度 0）
-    newItem('z = 2exp(-(x^2 + y^2)/4) - 1', {
+    newItem('z=2e^{-\\frac{x^2+y^2}{4}}-1', {
       color: '#3fb6c8',
       opacity: 0,
       grid: { enabled: true, x: 0.25, y: 0.25, z: 0, u: 24, v: 24, width: 1 },
     }),
     // 媒介変数表示の曲線（らせん）
-    newItem('(4cos t, 4sin t, t/5)', {
+    newItem('\\left(4\\cos t,4\\sin t,\\frac{t}{5}\\right)', {
       color: '#c74440',
-      ranges: { t: ['-4pi', '4pi'], u: ['0', '2pi'], v: ['0', '2pi'] },
+      ranges: { t: ['-4\\pi', '4\\pi'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
     }),
     // 媒介変数表示の曲面（トーラス）
-    newItem('((3 + cos v) cos u, (3 + cos v) sin u, sin v)', { visible: false, color: '#6042a6' }),
-    newItem('x^2 + y^2 + z^2 = 4', { visible: false }),
-    newItem('z = abs(gamma(x + iy))', { visible: false }),
+    newItem('\\left(\\left(3+\\cos v\\right)\\cos u,\\left(3+\\cos v\\right)\\sin u,\\sin v\\right)', {
+      visible: false,
+      color: '#6042a6',
+    }),
+    newItem('x^2+y^2+z^2=4', { visible: false }),
+    newItem('z=\\left|\\Gamma\\left(x+iy\\right)\\right|', { visible: false }),
   ])
   let domain = $state<Domain>({ xmin: -5, xmax: 5, ymin: -5, ymax: 5, zmin: -3, zmax: 3 })
   let resolution = $state(150)
@@ -83,10 +88,16 @@
   let sheetState = $state<SheetState>('half')
   let dragHeight = $state<number | null>(null) // ドラッグ中の高さ
   let windowHeight = $state(window.innerHeight)
+  // 画面上の数式キーボードの高さ（出ていなければ 0）。シートはキーボードの上に乗せる
+  let keyboardHeight = $state(0)
+  const kb = window.mathVirtualKeyboard
+  kb.addEventListener('geometrychange', () => {
+    keyboardHeight = kb.visible ? kb.boundingRect.height : 0
+  })
   const snapHeights = $derived({
     peek: 64,
-    half: Math.round(windowHeight * 0.45),
-    full: windowHeight - 48,
+    half: Math.round((windowHeight - keyboardHeight) * 0.45),
+    full: Math.max(64, windowHeight - keyboardHeight - 48),
   })
   const sheetHeight = $derived(dragHeight ?? snapHeights[sheetState])
 
@@ -95,7 +106,7 @@
   let isNarrow = $state(narrow.matches)
   narrow.addEventListener('change', () => (isNarrow = narrow.matches))
   $effect(() => {
-    viewer?.setBottomInset(isNarrow ? Math.min(sheetHeight, snapHeights.half) : 0)
+    viewer?.setBottomInset(isNarrow ? Math.min(sheetHeight, snapHeights.half) + keyboardHeight : 0)
   })
 
   let drag: { startY: number; startH: number; lastY: number; lastT: number; v: number; moved: boolean } | null =
@@ -157,14 +168,28 @@
     const token = (latest.get(item.id) ?? 0) + 1
     latest.set(item.id, token)
 
-    if (item.source.trim() === '') {
+    // 数式入力欄の LaTeX を、計算エンジン用の式に変換する
+    let source: string
+    let ranges: ParamRanges
+    try {
+      source = latexToText(item.latex)
+      const conv = ([a, b]: [string, string]): [string, string] => [latexToText(a), latexToText(b)]
+      ranges = { t: conv(item.ranges.t), u: conv(item.ranges.u), v: conv(item.ranges.v) }
+    } catch (e) {
+      viewer.removePlot(item.id)
+      item.error = e instanceof Error ? e.message : String(e)
+      item.info = undefined
+      return
+    }
+
+    if (source === '') {
       viewer.removePlot(item.id)
       item.error = undefined
       item.info = undefined
       return
     }
 
-    const res = await requestPlot(item.source, domain, resolution, implicitResolution, item.ranges)
+    const res = await requestPlot(source, domain, resolution, implicitResolution, ranges)
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
     if (res.ok) {
@@ -178,7 +203,8 @@
       item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
     } else {
       viewer.removePlot(item.id)
-      item.error = res.error
+      // 「（8文字目）」のような位置は、変換後の式での位置なので入力欄とは合わない。表示しない
+      item.error = res.error.replace(/（\d+文字目）/g, '')
       item.info = undefined
     }
   }
@@ -199,8 +225,8 @@
     items.splice(items.indexOf(item), 1)
   }
 
-  function setSource(item: PlotItem, source: string) {
-    item.source = source
+  function setLatex(item: PlotItem, latex: string) {
+    item.latex = latex
     schedule(item)
   }
 
@@ -254,7 +280,12 @@
 <svelte:window bind:innerHeight={windowHeight} />
 
 <div class="app">
-  <aside class="panel" class:dragging={dragHeight !== null} style:--sheet-h="{sheetHeight}px">
+  <aside
+    class="panel"
+    class:dragging={dragHeight !== null}
+    style:--sheet-h="{sheetHeight}px"
+    style:--keyboard-h="{keyboardHeight}px"
+  >
     <!-- スマホではここがシートのつまみになる -->
     <header
       class="title"
@@ -280,7 +311,7 @@
             {item}
             index={i}
             {domain}
-            onInput={(s) => setSource(item, s)}
+            onInput={(s) => setLatex(item, s)}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
@@ -373,7 +404,12 @@
           Re Im conj arg gamma、2つの引数: mod(a, b) min max nCr(n, r) nPr(n, r)、階乗: <code>n!</code>
         </li>
           <li>複素数の結果が実数でない点は描かれません</li>
-          <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
+          <li>
+          入力欄は数式の見た目のまま編集できます。<code>/</code> で分数、<code>^</code> でべき乗、<code>pi</code> →
+          π、<code>sqrt</code> → √ に自動で変わります
+        </li>
+        <li>スマホでは数式用のキーボードが出ます（123 / f(x) / abc のタブで切り替え）</li>
+        <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
           <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
         </ul>
       </details>
@@ -538,13 +574,15 @@
       position: fixed;
       left: 0;
       right: 0;
-      bottom: 0;
+      bottom: var(--keyboard-h);
       z-index: 10;
       height: var(--sheet-h);
       border-right: none;
       border-radius: 14px 14px 0 0;
       box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
-      transition: height 0.25s ease;
+      transition:
+        height 0.25s ease,
+        bottom 0.25s ease;
       overflow: hidden;
     }
     .panel.dragging {

@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "wasm": "wasm-pack build ../core --target web --out-dir ../web/src/wasm-core --no-pack",
-    "dev": "npm run wasm && vite",
-    "build": "npm run wasm && vite build",
+    "dev": "npm run wasm && npm run fonts && vite",
+    "build": "npm run wasm && npm run fonts && vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "fonts": "node -e \"require('fs').cpSync('node_modules/mathlive/fonts', 'public/mathlive-fonts', { recursive: true })\"",
+    "test": "node --experimental-strip-types --no-warnings src/lib/latex.test.ts"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
@@ -21,6 +23,7 @@
     "vite": "^8.3.6"
   },
   "dependencies": {
+    "mathlive": "^0.111.4",
     "three": "^0.187.0"
   }
 }

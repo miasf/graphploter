@@ -7,6 +7,8 @@
     "types": ["svelte", "vite/client"],
     "allowArbitraryExtensions": true,
     "noEmit": true,
+    // テスト（node で直接実行する）から ./latex.ts のように拡張子付きで読み込むため
+    "allowImportingTsExtensions": true,
     /**
      * Typecheck JS in `.svelte` and `.js` files by default.
      * Disable checkJs if you'd like to use dynamic types in JS.

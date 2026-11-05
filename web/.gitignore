@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# MathLive のフォント（npm run fonts でコピーされる）
+public/mathlive-fonts

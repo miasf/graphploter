@@ -46,11 +46,13 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: ビルド
+      - name: ビルドとテスト
         working-directory: web
         run: |
           npm ci
           npm run build
+          npm test
+          npm run check
 
       - uses: actions/upload-pages-artifact@v3
         with:
