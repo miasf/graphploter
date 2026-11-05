@@ -24,6 +24,7 @@ enum Op {
     Neg(usize),
     Bin(BinOp, usize, usize),
     Call1(Func, usize),
+    Call2(Func, usize, usize),
 }
 
 /// コンパイル済みの式
@@ -58,6 +59,10 @@ impl Program {
                 _ => None,
             },
             Op::Call1(f, a) => self.const_of(*a).map(|a| f.eval1(a)),
+            Op::Call2(f, a, b) => match (self.const_of(*a), self.const_of(*b)) {
+                (Some(a), Some(b)) => Some(f.eval2(a, b)),
+                _ => None,
+            },
             _ => None,
         };
         self.ops.push(match folded {
@@ -102,7 +107,12 @@ impl Program {
             }
             Expr::Call(f, args) => {
                 let a = self.emit(&args[0])?;
-                self.push(Op::Call1(*f, a))
+                if f.arity() == 2 {
+                    let b = self.emit(&args[1])?;
+                    self.push(Op::Call2(*f, a, b))
+                } else {
+                    self.push(Op::Call1(*f, a))
+                }
             }
             Expr::Tuple(_) => return Err("組 (a, b, c) は式の中では使えません".into()),
         })
@@ -150,6 +160,12 @@ impl Program {
                     Op::Call1(f, a) => {
                         for (d, a) in dst.iter_mut().zip(&done[*a][..len]) {
                             *d = f.eval1(*a);
+                        }
+                    }
+                    Op::Call2(f, a, b) => {
+                        let (a, b) = (&done[*a][..len], &done[*b][..len]);
+                        for j in 0..len {
+                            dst[j] = f.eval2(a[j], b[j]);
                         }
                     }
                 }
@@ -238,6 +254,18 @@ mod tests {
         for (k, v) in out.iter().enumerate() {
             assert_eq!(v.re, k as f64 + 1.0);
         }
+    }
+
+    #[test]
+    fn new_functions() {
+        assert_eq!(eval_xy("mod(x, 3)", 7.0, 0.0), C::new(1.0, 0.0));
+        assert_eq!(eval_xy("nCr(x, y)", 5.0, 2.0), C::new(10.0, 0.0));
+        assert_eq!(eval_xy("nPr(5, 2) + floor(x)", 1.7, 0.0), C::new(21.0, 0.0));
+        assert_eq!(eval_xy("max(x, y) - min(x, y)", 1.0, 4.0), C::new(3.0, 0.0));
+        // 階乗
+        assert!((eval_xy("x!", 5.0, 0.0).re - 120.0).abs() < 1e-9);
+        assert!((eval_xy("3!^2", 0.0, 0.0).re - 36.0).abs() < 1e-9);
+        assert!((eval_xy("-x!", 3.0, 0.0).re + 6.0).abs() < 1e-9);
     }
 
     #[test]

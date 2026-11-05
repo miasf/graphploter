@@ -47,7 +47,10 @@ float gridLine(float coord, float spacing) {
   float d = abs(fract(c - 0.5) - 0.5) / w;  // 一番近い線までの距離（画素）
   float hw = 0.5 * uGridWidth;               // 太さの半分
   float line = (1.0 - smoothstep(hw - 0.5, hw + 0.5, d)) * min(uGridWidth, 1.0);
-  return line * (1.0 - smoothstep(0.2, 0.5, w)); // 線が細かすぎて潰れるときは薄くする
+  // 線が細かすぎて1画素に何本も入るときは、1本ずつ描くとちらつく（モアレ）ので、
+  // 「線が画素を覆う割合」（= 太さ × 1画素あたりの本数）の濃さで一様に塗る
+  float coverage = min(uGridWidth * w, 1.0);
+  return mix(line, coverage, smoothstep(0.2, 0.5, w));
 }
 `
 

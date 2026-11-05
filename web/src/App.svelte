@@ -367,9 +367,9 @@
           <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
           <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>
           <li>
-            関数: sin cos tan arcsin arccos arctan sinh cosh tanh exp ln log sqrt abs Re Im conj arg
-            gamma
-          </li>
+            関数: sin cos tan arcsin arccos arctan sinh cosh tanh exp ln log sqrt abs floor ceil round sign
+          Re Im conj arg gamma、2つの引数: mod(a, b) min max nCr(n, r) nPr(n, r)、階乗: <code>n!</code>
+        </li>
           <li>複素数の結果が実数でない点は描かれません</li>
           <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
           <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>

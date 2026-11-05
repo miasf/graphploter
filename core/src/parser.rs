@@ -86,6 +86,7 @@ enum Tok {
     Star,
     Slash,
     Caret,
+    Bang,
     LParen,
     RParen,
     Comma,
@@ -167,6 +168,7 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             '*' | '·' | '×' => Tok::Star,
             '/' | '÷' => Tok::Slash,
             '^' => Tok::Caret,
+            '!' => Tok::Bang,
             '(' => Tok::LParen,
             ')' => Tok::RParen,
             ',' => Tok::Comma,
@@ -186,7 +188,7 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 //   expr  := term (('+' | '-') term)*
 //   term  := unary (('*' | '/' | 暗黙の掛け算) unary)*
 //   unary := ('-' | '+') unary | power
-//   power := primary ('^' unary)?          ← 右結合: 2^3^2 = 2^(3^2)
+//   power := primary '!'* ('^' unary)?     ← 右結合: 2^3^2 = 2^(3^2)、x! は階乗
 //   primary := 数値 | 変数 | 定数 | 関数呼び出し | '(' expr ')'
 // ---------------------------------------------------------------------------
 
@@ -268,7 +270,13 @@ impl Parser {
     }
 
     fn power(&mut self) -> Result<Expr, ParseError> {
-        let base = self.primary()?;
+        let mut base = self.primary()?;
+        // 階乗 x! = Γ(x + 1)。累乗より先に計算する（3!^2 = (3!)^2）
+        while *self.peek() == Tok::Bang {
+            self.next();
+            let arg = Expr::Bin(BinOp::Add, Box::new(base), Box::new(Expr::Num(1.0)));
+            base = Expr::Call(Func::Gamma, vec![arg]);
+        }
         if *self.peek() == Tok::Caret {
             self.next();
             let exp = self.unary()?;

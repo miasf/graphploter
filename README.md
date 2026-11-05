@@ -102,7 +102,9 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
 - 掛け算の `*` は省略可: `2xy`, `x sin(y)`, `(x+1)(x-1)`
 - 括弧なしの関数: `sin x`, `sin^2 x`（= `(sin x)^2`）
 - 定数: `pi`（`π`）, `e`, `i`（虚数単位）
-- 関数: `sin cos tan arcsin arccos arctan sinh cosh tanh exp ln log sqrt abs Re Im conj arg gamma`
+- 関数: `sin cos tan arcsin arccos arctan sinh cosh tanh exp ln log sqrt abs floor ceil round sign Re Im conj arg gamma`
+- 2 つの引数の関数: `mod(a, b)`（余り）, `min(a, b)`, `max(a, b)`, `nCr(n, r)`（二項係数）, `nPr(n, r)`（順列）
+- 階乗: `n!`（= Γ(n + 1) なので整数でなくてもよい）
 - 結果が実数にならない点（例: `x < 0` での `sqrt(x)`）は描かれない
 
 ## 今後の予定
