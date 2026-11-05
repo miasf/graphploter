@@ -1,10 +1,13 @@
 <script lang="ts">
   // 式の一覧の1行
-  import type { GridStyle, PlotItem } from './types'
+  import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
+  import type { Domain, GridStyle, PlotItem } from './types'
 
   interface Props {
     item: PlotItem
     index: number
+    /** 表示範囲（格子線の間隔の選択肢を決めるのに使う） */
+    domain: Domain
     onInput: (source: string) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
@@ -13,10 +16,20 @@
     onToggleSettings: () => void
     onRemove: () => void
   }
-  let { item, index, onInput, onColor, onGrid, onOpacity, onToggle, onToggleSettings, onRemove }: Props =
+  let { item, index, domain, onInput, onColor, onGrid, onOpacity, onToggle, onToggleSettings, onRemove }: Props =
     $props()
 
-  const gridAxes = ['x', 'y', 'z'] as const
+  const gridAxes = [
+    { axis: 'x', label: 'x 方向' },
+    { axis: 'y', label: 'y 方向' },
+    { axis: 'z', label: 'z（等高線）' },
+  ] as const
+
+  const ranges = $derived({
+    x: domain.xmax - domain.xmin,
+    y: domain.ymax - domain.ymin,
+    z: domain.zmax - domain.zmin,
+  })
 </script>
 
 <li class="item" class:has-error={!!item.error}>
@@ -59,10 +72,9 @@
             oninput={(e) => onColor(e.currentTarget.value)}
           />
         </label>
-        <label class="row">
+        <div class="sliders">
           <span class="label">面の濃さ</span>
           <input
-            class="opacity"
             type="range"
             min="0"
             max="1"
@@ -71,33 +83,46 @@
             oninput={(e) => onOpacity(e.currentTarget.valueAsNumber)}
           />
           <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
+        </div>
+
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={item.grid.enabled}
+            onchange={(e) => onGrid({ ...item.grid, enabled: e.currentTarget.checked })}
+          />
+          格子線
         </label>
-        <div class="row">
-          <label class="label check">
+        <div class="sliders" class:disabled={!item.grid.enabled}>
+          {#each gridAxes as { axis, label } (axis)}
+            {@const options = spacingOptions(ranges[axis])}
+            {@const index = spacingToIndex(item.grid[axis], options)}
+            <span class="label">{label}</span>
             <input
-              type="checkbox"
-              checked={item.grid.enabled}
-              onchange={(e) => onGrid({ ...item.grid, enabled: e.currentTarget.checked })}
+              type="range"
+              min="0"
+              max={options.length}
+              step="1"
+              value={index}
+              disabled={!item.grid.enabled}
+              oninput={(e) =>
+                onGrid({ ...item.grid, [axis]: indexToSpacing(e.currentTarget.valueAsNumber, options) })}
             />
-            格子線
-          </label>
-        </div>
-        <div class="grid-spacing" class:disabled={!item.grid.enabled}>
-          {#each gridAxes as a (a)}
-            <label>
-              <span class="axis">{a} の間隔</span>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={item.grid[a]}
-                disabled={!item.grid.enabled}
-                oninput={(e) => onGrid({ ...item.grid, [a]: e.currentTarget.valueAsNumber || 0 })}
-              />
-            </label>
+            <span class="value">{index === 0 ? 'なし' : `間隔 ${indexToSpacing(index, options)}`}</span>
           {/each}
+          <span class="label">線の太さ</span>
+          <input
+            type="range"
+            min="0.5"
+            max="4"
+            step="0.25"
+            value={item.grid.width}
+            disabled={!item.grid.enabled}
+            oninput={(e) => onGrid({ ...item.grid, width: e.currentTarget.valueAsNumber })}
+          />
+          <span class="value">{item.grid.width} px</span>
         </div>
-        <p class="hint">0 にするとその方向の線は消えます。z の線は等高線になります。</p>
+        <p class="hint">スライダーを右にするほど線が細かくなります。左端で線なし。</p>
       </div>
     {/if}
   </div>
@@ -205,40 +230,23 @@
     background: none;
     cursor: pointer;
   }
-  .opacity {
-    flex: 1;
+  .sliders {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 6px 10px;
+  }
+  .sliders.disabled {
+    opacity: 0.5;
+  }
+  .sliders input {
+    width: 100%;
     min-width: 0;
   }
   .value {
-    width: 4.5em;
-    font-size: 12px;
+    min-width: 5.5em;
+    font: 12px var(--mono);
     color: var(--muted);
-  }
-  .grid-spacing {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
-  }
-  .grid-spacing.disabled {
-    opacity: 0.5;
-  }
-  .grid-spacing label {
-    display: grid;
-    gap: 2px;
-  }
-  .axis {
-    font-size: 11px;
-    color: var(--muted);
-  }
-  .grid-spacing input {
-    width: 100%;
-    min-width: 0;
-    padding: 4px 6px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font: 13px var(--mono);
   }
   .hint {
     margin: 0;

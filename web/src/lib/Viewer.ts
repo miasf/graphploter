@@ -51,6 +51,8 @@ export class Viewer {
   private theme: Theme
   /** 遠近感の強さ = tan(視野角 / 2)。小さいほど平行投影に近い */
   private perspective = Math.tan(THREE.MathUtils.degToRad(22.5))
+  /** 画面の下側が何 px 隠れているか（スマホで式の一覧のシートが重なる分） */
+  private bottomInset = 0
   private resizeObserver: ResizeObserver
   private stopped = false
 
@@ -101,9 +103,30 @@ export class Viewer {
     const h = this.container.clientHeight
     if (w === 0 || h === 0) return
     this.camera.aspect = w / h
-    this.camera.updateProjectionMatrix()
     this.renderer.setSize(w, h)
     this.labelRenderer.setSize(w, h)
+    this.applyViewOffset()
+  }
+
+  /**
+   * 画面の下側 px 分が隠れていることを伝える。グラフが見えている部分の中央に来るよう、
+   * 描画の中心を上にずらす。
+   */
+  setBottomInset(px: number) {
+    this.bottomInset = Math.max(0, px)
+    this.applyViewOffset()
+  }
+
+  private applyViewOffset() {
+    const w = this.container.clientWidth
+    const h = this.container.clientHeight
+    if (w === 0 || h === 0) return
+    if (this.bottomInset > 0) {
+      this.camera.setViewOffset(w, h, 0, this.bottomInset / 2, w, h)
+    } else {
+      this.camera.clearViewOffset()
+    }
+    this.camera.updateProjectionMatrix()
   }
 
   private loop = () => {
@@ -187,7 +210,8 @@ export class Viewer {
     if (!d) return
     const center = new THREE.Vector3((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
     const size = this.sceneSize()
-    const dist = (size * 0.56) / this.perspective
+    // 縦長の画面（スマホ）では横幅に収まるよう、その分だけ遠くから見る
+    const dist = (size * 0.56) / this.perspective / Math.min(1, this.camera.aspect)
     this.controls.target.copy(center)
     this.camera.position.copy(center).add(new THREE.Vector3(1.1, -1.5, 0.9).normalize().multiplyScalar(dist))
     this.updateClipRange()
@@ -310,6 +334,7 @@ export class Viewer {
     p.grid.uGridSpacing.value.set(sp(g.x), sp(g.y), sp(g.z))
     p.grid.uGridColor.value.copy(c).multiplyScalar(0.3 + 0.7 * (1 - opacity))
     p.grid.uGridStrength.value = 0.75 + 0.25 * (1 - opacity)
+    p.grid.uGridWidth.value = g.width
   }
 
   removePlot(id: number) {

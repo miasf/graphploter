@@ -10,12 +10,15 @@ export interface Domain {
   zmax: number
 }
 
-/** 曲面に描く格子線の設定。各方向の線の間隔（0 なら描かない） */
+/** 曲面に描く格子線の設定 */
 export interface GridStyle {
   enabled: boolean
+  /** 各方向の線の間隔（0 なら描かない）。z 方向の線は z = f(x, y) では等高線になる */
   x: number
   y: number
   z: number
+  /** 線の太さ（画素） */
+  width: number
 }
 
 /** 曲面の見た目 */

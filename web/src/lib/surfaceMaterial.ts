@@ -14,6 +14,8 @@ export interface GridUniforms {
   uGridColor: { value: THREE.Color }
   /** 線の濃さ（0〜1） */
   uGridStrength: { value: number }
+  /** 線の太さ（画素） */
+  uGridWidth: { value: number }
   /** 面の不透明度（0 なら格子線だけが見える） */
   uFillOpacity: { value: number }
 }
@@ -23,6 +25,7 @@ export function createGridUniforms(): GridUniforms {
     uGridSpacing: { value: new THREE.Vector3() },
     uGridColor: { value: new THREE.Color() },
     uGridStrength: { value: 0.75 },
+    uGridWidth: { value: 1 },
     uFillOpacity: { value: 1 },
   }
 }
@@ -32,15 +35,17 @@ varying vec3 vGridPos;
 uniform vec3 uGridSpacing;
 uniform vec3 uGridColor;
 uniform float uGridStrength;
+uniform float uGridWidth;
 uniform float uFillOpacity;
 
-// 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（約1画素の太さ）
+// 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（太さ uGridWidth 画素）
 float gridLine(float coord, float spacing) {
   if (spacing <= 0.0) return 0.0;
   float c = coord / spacing;
   float w = fwidth(c);                      // 1画素で c がどれだけ変わるか
-  float d = abs(fract(c - 0.5) - 0.5);      // 一番近い線までの距離
-  float line = 1.0 - smoothstep(0.5 * w, 1.5 * w, d);
+  float d = abs(fract(c - 0.5) - 0.5) / w;  // 一番近い線までの距離（画素）
+  float hw = 0.5 * uGridWidth;               // 太さの半分
+  float line = (1.0 - smoothstep(hw - 0.5, hw + 0.5, d)) * min(uGridWidth, 1.0);
   return line * (1.0 - smoothstep(0.2, 0.5, w)); // 線が細かすぎて潰れるときは薄くする
 }
 `
