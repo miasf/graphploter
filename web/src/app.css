@@ -1,0 +1,57 @@
+/* 色などの共通設定。ダークモードにも対応 */
+:root {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --gutter: #f1f1ef;
+  --text: #1f1f24;
+  --muted: #6b6b75;
+  --border: #e6e6e3;
+  --border-strong: #cfcfcb;
+  --hover: #f0f0ed;
+  --error: #c7362f;
+  --mono: ui-monospace, 'SF Mono', Consolas, 'Cascadia Mono', monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181b;
+    --panel: #1e1f23;
+    --gutter: #26272c;
+    --text: #e8e8ea;
+    --muted: #9a9aa3;
+    --border: #2f3036;
+    --border-strong: #44454c;
+    --hover: #2a2b30;
+    --error: #ff6b63;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--sans);
+}
+
+/* Three.js の文字の重ね合わせ */
+.label-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+.label-layer .tick {
+  font: 11px var(--mono);
+  color: var(--muted);
+}
+.label-layer .axis-name {
+  font: italic 600 15px 'Times New Roman', serif;
+  color: var(--text);
+}

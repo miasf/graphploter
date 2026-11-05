@@ -1,0 +1,21 @@
+[package]
+name = "graph-core"
+version = "0.1.0"
+edition = "2021"
+description = "グラフソフトの計算エンジン（数式の解析・評価・メッシュ生成）"
+
+[lib]
+# cdylib: WASM 用 / rlib: `cargo test` 用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+num-complex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# wasm-opt（追加の最適化ツール）はダウンロードに失敗しやすいので、ひとまず無効にしておく
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
