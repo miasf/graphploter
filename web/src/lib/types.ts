@@ -51,6 +51,8 @@ export interface PlotItem extends PlotStyle {
   source: string
   /** 設定欄を開いているか */
   showSettings: boolean
+  /** 媒介変数表示 (a, b, c) を、成分ごとに縦に並べた入力欄で編集するか */
+  vertical: boolean
   /** 式の誤りの説明（無ければ undefined） */
   error?: string
   /** 計算にかかった時間などの情報 */

@@ -20,6 +20,7 @@
       grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 24, width: 1 },
       lineWidth: 3,
       showSettings: false,
+      vertical: true,
       ranges: { t: ['0', '2pi'], u: ['0', '2pi'], v: ['0', '2pi'] },
       params: '',
       paramSpan: { u: 2 * Math.PI, v: 2 * Math.PI },
@@ -287,6 +288,7 @@
           onRange={(name, side, v) => setRange(item, name, side, v)}
             onToggle={() => toggle(item)}
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
+          onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
           />
         {/each}

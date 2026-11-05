@@ -1,6 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
+  import { joinTuple, splitTuple } from './tuple'
   import type { Domain, GridStyle, ParamRanges, PlotItem } from './types'
 
   interface Props {
@@ -16,6 +17,7 @@
     onRange: (name: keyof ParamRanges, side: 0 | 1, value: string) => void
     onToggle: () => void
     onToggleSettings: () => void
+    onToggleVertical: () => void
     onRemove: () => void
   }
   let {
@@ -30,8 +32,23 @@
     onRange,
     onToggle,
     onToggleSettings,
+    onToggleVertical,
     onRemove,
   }: Props = $props()
+
+  // 1行の入力欄を編集している間は、縦の表示に切り替えない（入力中に欄が入れ替わらないように）
+  let editingLine = $state(false)
+  /** 式が組 (a, b, c) なら成分の配列 */
+  const parts = $derived(splitTuple(item.source))
+  const showVertical = $derived(item.vertical && parts !== null && !editingLine)
+  const COMPONENT_NAMES = ['x', 'y', 'z']
+
+  function setPart(k: number, value: string) {
+    if (!parts) return
+    const next = [...parts]
+    next[k] = value
+    onInput(joinTuple(next))
+  }
 
   /** 媒介変数表示の曲面で選べる分割数（0 は線なし） */
   const DIVISIONS = [0, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48, 60, 72, 96, 120]
@@ -70,15 +87,40 @@
   </div>
 
   <div class="body">
-    <input
-      class="source"
-      type="text"
-      value={item.source}
-      placeholder="例: z = sin(x) cos(y)、(cos t, sin t, t)"
-      spellcheck="false"
-      autocomplete="off"
-      oninput={(e) => onInput(e.currentTarget.value)}
-    />
+    {#if showVertical && parts}
+      <!-- 媒介変数表示: 成分ごとに縦に並べる -->
+      <div class="components">
+        {#each parts as part, k (k)}
+          <label class="component">
+            <span class="name">{COMPONENT_NAMES[k] ?? '?'} =</span>
+            <input
+              class="source"
+              type="text"
+              value={part}
+              spellcheck="false"
+              autocomplete="off"
+              oninput={(e) => setPart(k, e.currentTarget.value)}
+            />
+          </label>
+        {/each}
+      </div>
+      <button class="link" onclick={onToggleVertical}>1行で編集</button>
+    {:else}
+      <input
+        class="source"
+        type="text"
+        value={item.source}
+        placeholder="例: z = sin(x) cos(y)、(cos t, sin t, t)"
+        spellcheck="false"
+        autocomplete="off"
+        onfocus={() => (editingLine = true)}
+        onblur={() => (editingLine = false)}
+        oninput={(e) => onInput(e.currentTarget.value)}
+      />
+      {#if parts && !item.vertical}
+        <button class="link" onclick={onToggleVertical}>縦に並べる</button>
+      {/if}
+    {/if}
     {#each paramNames as name (name)}
       <div class="param-range">
         <input
@@ -301,6 +343,31 @@
     padding: 0;
     border: none;
     background: none;
+    cursor: pointer;
+  }
+  .components {
+    display: grid;
+    gap: 2px;
+  }
+  .component {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .name {
+    font: italic 15px 'Times New Roman', serif;
+    color: var(--muted);
+    min-width: 1.6em;
+  }
+  .link {
+    margin-top: 2px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-size: 12px;
+    text-decoration: underline;
     cursor: pointer;
   }
   .param-range {
