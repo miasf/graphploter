@@ -259,6 +259,7 @@
     }
 
     const res = await requestPlot(
+      item.id,
       source,
       domain,
       resolution,

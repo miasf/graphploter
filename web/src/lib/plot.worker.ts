@@ -1,7 +1,7 @@
 // 計算担当の Web Worker。
 // 重い計算を画面の処理とは別のスレッドで行うので、計算中も画面が固まらない。
 
-import init, { eval_constant, plot } from '../wasm-core/graph_core.js'
+import init, { eval_constant, plot, type MeshResult, type Shape } from '../wasm-core/graph_core.js'
 import type { PlotRequest, PlotResponse } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -19,34 +19,71 @@ function range(name: string, [lo, hi]: [string, string]): [number, number] {
   }
 }
 
+/**
+ * 媒介変数表示の、回転・射影する前の形（n 次元の点）を式ごとに覚えておく。
+ * 式・範囲・パラメータなど「点の計算に関わる入力」が同じなら、回転・表示する軸が変わっても
+ * 式を計算し直さず、射影し直すだけで済む（回転のスライダーが軽く動く）。
+ */
+const shapes = new Map<number, { key: string; shape: Shape }>()
+
+/** 媒介変数表示の点の計算に関わる入力（回転・表示する軸・断面などは含めない） */
+function shapeKey(req: PlotRequest): string {
+  const { source, domain, resolution, ranges, params, stacks, space } = req
+  return JSON.stringify([source, domain, resolution, ranges, params, stacks, space.dims])
+}
+
+function forget(itemId: number) {
+  shapes.get(itemId)?.shape.free()
+  shapes.delete(itemId)
+}
+
 self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
-  const { requestId, source, domain: d, resolution, implicitResolution, ranges, params, space, stacks } = ev.data
+  const req = ev.data
+  const { requestId, itemId, source, domain: d, resolution, implicitResolution, ranges, params, space, stacks } = req
   await ready
 
   let res: PlotResponse
   const t0 = performance.now()
+  const domainArr = new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax])
   try {
     const rangeNames = Object.keys(ranges)
     const rangeValues = rangeNames.map((n) => range(n, ranges[n]))
-    const r = plot(
-      source,
-      new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax]),
-      resolution,
-      implicitResolution,
-      rangeNames.join(','),
-      new Float64Array(rangeValues.flat()),
-      Object.keys(params).join(','),
-      new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
-      space.dims,
-      new Uint32Array(space.axes),
-      new Float64Array(space.slice),
-      new Float64Array(space.ranges),
-      Object.keys(stacks).join(','),
-      new Float64Array(Object.values(stacks).flat()),
-      space.samples,
-      new Float64Array(space.rotation),
-      new Float64Array(space.center),
-    )
+    const key = shapeKey(req)
+    const cached = shapes.get(itemId)
+    let r: MeshResult
+    if (cached && cached.key === key) {
+      // 点は計算済み: 回転・射影だけし直す
+      r = cached.shape.project(
+        domainArr,
+        space.dims,
+        new Uint32Array(space.axes),
+        new Float64Array(space.rotation),
+        new Float64Array(space.center),
+      )
+    } else {
+      r = plot(
+        source,
+        domainArr,
+        resolution,
+        implicitResolution,
+        rangeNames.join(','),
+        new Float64Array(rangeValues.flat()),
+        Object.keys(params).join(','),
+        new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
+        space.dims,
+        new Uint32Array(space.axes),
+        new Float64Array(space.slice),
+        new Float64Array(space.ranges),
+        Object.keys(stacks).join(','),
+        new Float64Array(Object.values(stacks).flat()),
+        space.samples,
+        new Float64Array(space.rotation),
+        new Float64Array(space.center),
+      )
+      forget(itemId)
+      const shape = r.take_shape()
+      if (shape) shapes.set(itemId, { key, shape })
+    }
     const vars = r.params.split(',').filter((s) => s !== '')
     // 曲面の格子線を引くための、媒介変数の範囲の長さ
     const span = (k: number) => {
@@ -71,6 +108,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
     r.free() // Rust 側のメモリを解放
     res = { requestId, ok: true, mesh, kind, ms: performance.now() - t0, usedParams, param }
   } catch (e) {
+    forget(itemId)
     res = { requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
   }
 

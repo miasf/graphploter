@@ -120,6 +120,8 @@ export interface MeshData {
 
 export interface PlotRequest {
   requestId: number
+  /** どの式の依頼か（媒介変数表示の計算結果を、式ごとに使い回すため） */
+  itemId: number
   source: string
   domain: Domain
   /** 陽関数の細かさ（1辺のマス数） */

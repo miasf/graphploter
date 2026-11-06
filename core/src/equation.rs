@@ -67,6 +67,22 @@ impl Space {
         }
     }
 
+    /// 媒介変数表示の点 p（次元の数の成分）を、画面の横・奥・縦の座標に移す1次式。
+    /// 回転していれば q_a = c_a + Σ_k R[a][k] (p_k − c_k)（次元より先の成分は 0）、していなければ q_a = p_a
+    pub fn view_rows(&self) -> [crate::mesh::ViewRow; 3] {
+        let n = self.dims;
+        let rn = rot_dims(n);
+        let c: Vec<f64> = (0..rn).map(|j| self.center.get(j).copied().unwrap_or(0.0)).collect();
+        let m = self.rotation_matrix();
+        self.axes.map(|a| match &m {
+            None => (0.0, (0..n).map(|k| (k == a) as u8 as f64).collect()),
+            Some(m) => {
+                let c0 = c[a] - (0..rn).map(|k| m[a][k] * c[k]).sum::<f64>();
+                (c0, (0..n).map(|k| m[a][k]).collect())
+            }
+        })
+    }
+
     /// 範囲で重ねる名前と範囲（表示していない座標とパラメータ）
     fn ranged(&self) -> Vec<(String, f64, f64)> {
         let mut out: Vec<(String, f64, f64)> = (0..self.dims)
@@ -170,10 +186,11 @@ pub enum Plot {
     Implicit { prog: Program },
     /// 範囲で重ねた立体。`prog` の変数は表示中の3つの座標と、範囲で動かす名前（`ranges` の順）。
     Solid { prog: Program, ranges: Vec<(f64, f64)>, names: Vec<String> },
-    /// 媒介変数表示の曲線。`progs` は表示中の3つの座標の成分で、変数は `vars`（1つ）。
-    Curve { progs: [Program; 3], vars: Vec<String> },
-    /// 媒介変数表示の曲面。`progs` は表示中の3つの座標の成分で、変数は `vars`（2つ）。
-    Surface { progs: [Program; 3], vars: Vec<String> },
+    /// 媒介変数表示の曲線。`progs` はすべての座標の成分（次元の数）で、変数は `vars`（1つ）。
+    /// 回転・射影は、点を計算した後で [`Space::view_rows`] を使って行う（式を計算し直さなくてよい）。
+    Curve { progs: Vec<Program>, vars: Vec<String> },
+    /// 媒介変数表示の曲面。`progs` はすべての座標の成分で、変数は `vars`（2つ）。
+    Surface { progs: Vec<Program>, vars: Vec<String> },
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
 }
@@ -387,7 +404,7 @@ fn param(name: &str, rhs: &Expr, params: &Params) -> Result<Plot, String> {
 }
 
 /// 組 (a, b, c, …) を媒介変数表示としてコンパイルする。
-/// 成分は座標の順（x, y, z, w, …）。表示中の3つの座標の成分だけを描く（残りは射影で落とす）。
+/// 成分は座標の順（x, y, z, w, …）で、すべての成分を計算する。表示する3つの座標への回転・射影は後で行う。
 fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Plot, String> {
     if items.len() > space.dims {
         return Err(format!(
@@ -445,39 +462,17 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
         consts.remove(n);
     }
 
-    // 表示する3つの座標の成分を作る（回転していれば q = R (p − c) + c）
-    let rot = space.rotation_matrix();
-    let shown_exprs: Vec<Expr> = space
-        .axes
-        .iter()
-        .map(|&a| match &rot {
-            None => items[a].clone(),
-            Some(m) => {
-                // 次元より先の成分（回転のときだけ使う w など）は 0
-                let rn = rot_dims(space.dims);
-                let c: Vec<f64> = (0..rn).map(|j| space.center.get(j).copied().unwrap_or(0.0)).collect();
-                let comp = |k: usize| items.get(k).cloned().unwrap_or(Expr::Num(0.0));
-                let c0 = c[a] - (0..rn).map(|k| m[a][k] * c[k]).sum::<f64>();
-                linear(c0, (0..rn).map(|k| (m[a][k], comp(k))).collect())
-            }
-        })
-        .collect();
-
     let var_refs: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
+    let mut progs = Vec::with_capacity(items.len());
     for e in &items {
-        // 表示しない成分も、誤りが無いかだけ確かめる
-        Program::compile_with(e, &var_refs, &consts)?;
-    }
-    let mut progs = Vec::with_capacity(3);
-    for e in &shown_exprs {
         // 組の中の t, u, v は媒介変数なので、同じ名前のパラメータより優先される
         progs.push(Program::compile_with(e, &var_refs, &consts)?);
     }
-    let shown: [Program; 3] = progs.try_into().map_err(|_| "内部エラー".to_string())?;
+    // 回転・射影は点を計算した後で行う（Space::view_rows）
     Ok(if vars.len() == 2 {
-        Plot::Surface { progs: shown, vars }
+        Plot::Surface { progs, vars }
     } else {
-        Plot::Curve { progs: shown, vars }
+        Plot::Curve { progs, vars }
     })
 }
 
@@ -656,31 +651,19 @@ mod tests {
             prog.eval_batch(&[&[7.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]], &mut out);
             assert!(out[0].norm() < 1e-12);
         }
-        // 媒介変数表示も回る: (t, 0, 0) を xy で 90° 回すと (0, t, 0)
+        // 媒介変数表示も回る: 点 (2, 0, 0) を xy で 90° 回すと (0, 2, 0)
         let mut sp = Space::standard();
         sp.rotation[0] = std::f64::consts::FRAC_PI_2;
-        if let Plot::Curve { progs, .. } = compile_with("(t, 0, 0)", &ps, &sp).unwrap() {
-            let mut o = [C::new(0.0, 0.0)];
-            progs[0].eval_batch(&[&[2.0]], &mut o);
-            assert!(o[0].norm() < 1e-12);
-            progs[1].eval_batch(&[&[2.0]], &mut o);
-            assert!((o[0].re - 2.0).abs() < 1e-12);
-        } else {
-            panic!()
-        }
+        let view = |sp: &Space, p: &[f64]| sp.view_rows().map(|(c0, cs)| c0 + cs.iter().zip(p).map(|(c, x)| c * x).sum::<f64>());
+        let q = view(&sp, &[2.0, 0.0, 0.0]);
+        assert!(q[0].abs() < 1e-12 && (q[1] - 2.0).abs() < 1e-12);
         // 次元が5未満でも、回転は5次元（5C2 = 10 通り）。6次元なら 6C2 = 15 通り
         assert_eq!(Space::basic(4, [0, 1, 2], vec![0.0; 4]).rotation.len(), 10);
         assert_eq!(Space::basic(6, [0, 1, 2], vec![0.0; 6]).rotation.len(), 15);
-        // 3次元でも xw 平面で回せる。媒介変数表示 (t, 0, 0) を xw で 60° 回すと、x 成分は t·cos60° に縮む
+        // 3次元でも xw 平面で回せる。点 (2, 0, 0) を xw で 60° 回すと、x 成分は 2·cos60° = 1 に縮む
         let mut sp = Space::standard();
         sp.rotation[2] = std::f64::consts::FRAC_PI_3; // 組 (0,3) = xw は3番目
-        if let Plot::Curve { progs, .. } = compile_with("(t, 0, 0)", &ps, &sp).unwrap() {
-            let mut o = [C::new(0.0, 0.0)];
-            progs[0].eval_batch(&[&[2.0]], &mut o);
-            assert!((o[0].re - 1.0).abs() < 1e-12);
-        } else {
-            panic!()
-        }
+        assert!((view(&sp, &[2.0, 0.0, 0.0])[0] - 1.0).abs() < 1e-12);
         // 陰関数 x = 1 は w 方向に伸びた形なので、xw で 60° 回して w = 0 で見ると x = 1/cos60° = 2
         if let Plot::Implicit { prog } = compile_with("x = 1", &ps, &sp).unwrap() {
             let mut o = [C::new(0.0, 0.0)];

@@ -28,6 +28,8 @@ pub struct MeshResult {
     used_params: Vec<String>,
     /// パラメータの定義なら (名前, 値)
     param: Option<(String, num_complex::Complex64)>,
+    /// 媒介変数表示なら、回転・射影する前の n 次元の点（回転だけ変わったときに使い回す）
+    shape: Option<mesh::NdShape>,
 }
 
 #[wasm_bindgen]
@@ -76,6 +78,18 @@ impl MeshResult {
     #[wasm_bindgen(getter)]
     pub fn param_value(&self) -> Vec<f64> {
         self.param.as_ref().map(|p| vec![p.1.re, p.1.im]).unwrap_or_default()
+    }
+    /// 媒介変数表示なら、回転・射影する前の形を取り出す（取り出せるのは1回だけ）。
+    /// 回転・表示する軸・表示範囲だけが変わったときは、これの `project` で描き直せる
+    pub fn take_shape(&mut self) -> Option<Shape> {
+        let inner = self.shape.take()?;
+        Some(Shape {
+            inner,
+            kind: self.kind.clone(),
+            params: self.params.clone(),
+            curve: self.curve,
+            used_params: self.used_params.clone(),
+        })
     }
     /// 三角形の頂点番号（Uint32Array）
     #[wasm_bindgen(getter)]
@@ -197,21 +211,29 @@ pub fn plot(
             ranges,
             space.samples,
         ),
-        equation::Plot::Surface { progs, vars } => mesh::parametric_surface(
+        equation::Plot::Surface { .. } | equation::Plot::Curve { .. } => mesh::Mesh::default(), // 下で作る
+        equation::Plot::Param { .. } => mesh::Mesh::default(),
+    };
+    // 媒介変数表示: n 次元の点を計算してから、回転・射影する
+    let shape = match &plot {
+        equation::Plot::Surface { progs, vars } => Some(mesh::parametric_surface_nd(
             progs,
-            dom,
             range(&vars[0]),
             range(&vars[1]),
             resolution.clamp(2, 1000) as usize,
-        ),
-        equation::Plot::Curve { progs, vars } => mesh::Mesh {
-            positions: mesh::parametric_curve(progs, range(&vars[0]), 400, size * 2e-4),
-            ..Default::default()
-        },
-        equation::Plot::Param { .. } => mesh::Mesh::default(),
+        )),
+        equation::Plot::Curve { progs, vars } => {
+            Some(mesh::parametric_curve_nd(progs, range(&vars[0]), 400, size * 2e-4))
+        }
+        _ => None,
+    };
+    let inner = match &shape {
+        Some(sh) => mesh::project(sh, &space.view_rows(), dom),
+        None => inner,
     };
     Ok(MeshResult {
         inner,
+        shape,
         kind: plot.kind_label(),
         params: plot.param_vars(),
         curve: matches!(plot, equation::Plot::Curve { .. }),
@@ -221,4 +243,47 @@ pub fn plot(
             _ => None,
         },
     })
+}
+
+/// 媒介変数表示の、回転・射影する前の形（n 次元の点）。Worker が式ごとに持っておく
+#[wasm_bindgen]
+pub struct Shape {
+    inner: mesh::NdShape,
+    kind: String,
+    params: Vec<String>,
+    curve: bool,
+    used_params: Vec<String>,
+}
+
+#[wasm_bindgen]
+impl Shape {
+    /// 回転・表示する軸・表示範囲を変えて、もう一度3次元に射影する（式は計算し直さない）。
+    /// 引数の意味は [`plot`] と同じ
+    pub fn project(
+        &self,
+        domain: &[f64],
+        dims: u32,
+        axes: &[u32],
+        rotation: &[f64],
+        center: &[f64],
+    ) -> Result<MeshResult, JsError> {
+        let n = dims as usize;
+        let rn = equation::rot_dims(n);
+        if domain.len() != 6 || axes.len() != 3 || rotation.len() != rn * (rn - 1) / 2 || n != self.inner.dims {
+            return Err(JsError::new("内部エラー: 射影の指定が合っていません"));
+        }
+        let mut space = equation::Space::basic(n, [axes[0] as usize, axes[1] as usize, axes[2] as usize], vec![0.0; n]);
+        space.rotation = rotation.to_vec();
+        space.center = center.to_vec();
+        let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
+        Ok(MeshResult {
+            inner: mesh::project(&self.inner, &space.view_rows(), dom),
+            shape: None,
+            kind: self.kind.clone(),
+            params: self.params.clone(),
+            curve: self.curve,
+            used_params: self.used_params.clone(),
+            param: None,
+        })
+    }
 }
