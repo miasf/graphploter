@@ -137,8 +137,8 @@ pub fn plot(
         || dims < 3
         || slice.len() != n
         || coord_ranges.len() != 2 * n
-        || rotation.len() != n * (n - 1) / 2
-        || center.len() != n
+        || rotation.len() != equation::rot_dims(n) * (equation::rot_dims(n) - 1) / 2
+        || center.len() != equation::rot_dims(n)
     {
         return Err(err("内部エラー: 範囲や次元の指定が合っていません"));
     }

@@ -1,6 +1,7 @@
 <script lang="ts">
-  // 回転の設定: 中心の点と、座標の組 (i, j) ごとの回転角（n 次元なら nC2 個）
-  import { coordName, prettyName } from './params'
+  // 回転の設定: 中心の点と、座標の組 (i, j) ごとの回転角（m = max(次元, 5) として mC2 個）
+  // 次元が5未満でも、w, w₂ を使った5次元の回転ができる（次元より先の座標は回転のときだけ使う）
+  import { coordName, prettyName, rotDims } from './params'
   import type { Space } from './types'
 
   interface Props {
@@ -16,8 +17,9 @@
   const planes = $derived.by(() => {
     const out: { i: number; j: number; k: number; order: number }[] = []
     let k = 0
-    for (let i = 0; i < space.dims; i++) {
-      for (let j = i + 1; j < space.dims; j++) {
+    const n = rotDims(space.dims)
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
         const shown = Number(space.axes.includes(i)) + Number(space.axes.includes(j))
         out.push({ i, j, k: k++, order: 2 - shown })
       }
@@ -69,7 +71,7 @@
   <div class="center">
     <span class="label">中心</span>
     {#each space.center as c, k (k)}
-      <label>
+      <label class:extra={k >= space.dims}>
         <span class="cname">{prettyName(coordName(k))}</span>
         <input type="number" step="any" value={c} onchange={(e) => setCenter(k, e.currentTarget.valueAsNumber)} />
       </label>
@@ -90,6 +92,12 @@
         {/each}
       </div>
     </details>
+  {/if}
+  {#if space.dims < 5}
+    <p class="hint">
+      {space.dims === 3 ? 'w と w₂' : 'w₂'} は回転のときだけ使う座標です。
+      陰関数・陽関数はその方向にまっすぐ伸びた形、媒介変数表示はその成分が 0 の形として回します。
+    </p>
   {/if}
   <p class="hint">
     「xy」は x と y の平面での回転（x 軸から y 軸の向きが正）。中心の点の周りに、xy, xz, …, yz, … の
@@ -129,6 +137,9 @@
     background: var(--bg);
     color: var(--text);
     font: 12px var(--mono);
+  }
+  .extra {
+    opacity: 0.6;
   }
   .label {
     font-size: 12px;

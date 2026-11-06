@@ -11,6 +11,11 @@ export function coordName(k: number): string {
   return k < 4 ? 'xyzw'[k] : `w${k - 2}`
 }
 
+/** 回転に使う次元。次元が5未満でも、w, w₂ を使った5次元の回転ができる */
+export function rotDims(dims: number): number {
+  return Math.max(dims, 5)
+}
+
 /** 画面に出すときの名前（w2 → w₂） */
 export function prettyName(name: string): string {
   return name.replace(/\d/g, (d) => '₀₁₂₃₄₅₆₇₈₉'[Number(d)])

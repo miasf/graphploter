@@ -396,8 +396,8 @@
     sliceMax: 5,
     ranges: [null, null, null],
     samples: 24,
-    rotation: [0, 0, 0],
-    center: [0, 0, 0],
+    rotation: Array(10).fill(0), // 5次元の回転（5C2 = 10 通り）
+    center: Array(5).fill(0),
   })
   /** 画面の横・奥・縦の軸に表示している座標の名前 */
   const axisNames = $derived(space.axes.map(coordName))

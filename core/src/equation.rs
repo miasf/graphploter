@@ -40,9 +40,10 @@ pub struct Space {
     pub param_ranges: Vec<(String, f64, f64)>,
     /// 範囲を何等分して重ねるか
     pub samples: usize,
-    /// 回転角（ラジアン）。座標の組 (0,1), (0,2), …, (0,n−1), (1,2), … の順に nC2 個
+    /// 回転角（ラジアン）。座標の組 (0,1), (0,2), …, (0,m−1), (1,2), … の順に mC2 個。
+    /// m = max(次元, 5)（次元が5未満でも、w, w₂ を使った5次元の回転ができる）
     pub rotation: Vec<f64>,
-    /// 回転の中心
+    /// 回転の中心（m 個）
     pub center: Vec<f64>,
 }
 
@@ -61,8 +62,8 @@ impl Space {
             ranges: vec![None; dims],
             param_ranges: Vec::new(),
             samples: 24,
-            rotation: vec![0.0; dims * (dims - 1) / 2],
-            center: vec![0.0; dims],
+            rotation: vec![0.0; rot_dims(dims) * (rot_dims(dims) - 1) / 2],
+            center: vec![0.0; rot_dims(dims)],
         }
     }
 
@@ -81,7 +82,7 @@ impl Space {
         if self.rotation.iter().all(|&a| a == 0.0) {
             return None;
         }
-        let n = self.dims;
+        let n = rot_dims(self.dims);
         let mut m: Vec<Vec<f64>> = (0..n).map(|i| (0..n).map(|j| (i == j) as u8 as f64).collect()).collect();
         let mut k = 0;
         for i in 0..n {
@@ -108,9 +109,13 @@ impl Space {
         self.axes.map(coord_name)
     }
 
-    /// 表示していない座標を、断面の値の定数としてパラメータに足す（範囲で重ねるものは除く）
+    /// 表示していない座標を、断面の値の定数としてパラメータに足す（範囲で重ねるものは除く）。
+    /// 次元より先の、回転のときだけ使う座標（3次元のときの w, w₂ など）の値は 0
     fn with_hidden(&self, params: &Params) -> Params {
         let mut ps = params.clone();
+        for k in self.dims..rot_dims(self.dims) {
+            ps.insert(coord_name(k), C::new(0.0, 0.0));
+        }
         for k in 0..self.dims {
             if !self.axes.contains(&k) && self.ranges.get(k).copied().flatten().is_none() {
                 ps.insert(coord_name(k), C::new(self.slice.get(k).copied().unwrap_or(0.0), 0.0));
@@ -121,6 +126,11 @@ impl Space {
         }
         ps
     }
+}
+
+/// 回転に使う次元（次元が5未満でも、5次元の回転ができるようにする）
+pub fn rot_dims(dims: usize) -> usize {
+    dims.max(5)
 }
 
 /// k 番目の座標の名前（0: x, 1: y, 2: z, 3: w, 4: w2, 5: w3, …）
@@ -349,14 +359,16 @@ fn linear(c0: f64, terms: Vec<(f64, Expr)>) -> Expr {
     e
 }
 
-/// 式の中の座標 p_k を、回転後の座標 q で表した p_k = c_k + Σ_j R[j][k] (q_j − c_j) に置き換える
+/// 式の中の座標 p_k を、回転後の座標 q で表した p_k = c_k + Σ_j R[j][k] (q_j − c_j) に置き換える。
+/// 次元より先の座標（回転のときだけ使う w など）は、式には出てこない（その方向にはまっすぐ伸びた形とみなす）
 fn rotate_coords(e: &Expr, m: &[Vec<f64>], space: &Space) -> Expr {
     let n = space.dims;
-    let c = &space.center;
+    let rn = rot_dims(n);
+    let c: Vec<f64> = (0..rn).map(|j| space.center.get(j).copied().unwrap_or(0.0)).collect();
     e.substitute(&|name: &str| {
         let k = coord_index(name).filter(|&k| k < n)?;
-        let c0 = c[k] - (0..n).map(|j| m[j][k] * c[j]).sum::<f64>();
-        Some(linear(c0, (0..n).map(|j| (m[j][k], Expr::Var(coord_name(j)))).collect()))
+        let c0 = c[k] - (0..rn).map(|j| m[j][k] * c[j]).sum::<f64>();
+        Some(linear(c0, (0..rn).map(|j| (m[j][k], Expr::Var(coord_name(j)))).collect()))
     })
 }
 
@@ -441,10 +453,12 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
         .map(|&a| match &rot {
             None => items[a].clone(),
             Some(m) => {
-                let c = &space.center;
-                let n = space.dims;
-                let c0 = c[a] - (0..n).map(|k| m[a][k] * c[k]).sum::<f64>();
-                linear(c0, (0..n).map(|k| (m[a][k], items[k].clone())).collect())
+                // 次元より先の成分（回転のときだけ使う w など）は 0
+                let rn = rot_dims(space.dims);
+                let c: Vec<f64> = (0..rn).map(|j| space.center.get(j).copied().unwrap_or(0.0)).collect();
+                let comp = |k: usize| items.get(k).cloned().unwrap_or(Expr::Num(0.0));
+                let c0 = c[a] - (0..rn).map(|k| m[a][k] * c[k]).sum::<f64>();
+                linear(c0, (0..rn).map(|k| (m[a][k], comp(k))).collect())
             }
         })
         .collect();
@@ -636,7 +650,7 @@ mod tests {
         prog.eval_batch(&[&[5.0, 1.0], &[1.0, 5.0], &[0.0, 0.0]], &mut out);
         assert!(out[0].norm() < 1e-12 && out[1].norm() > 1.0);
         // 中心 (1, 0, 0) の周りで 90° 回すと、平面 x = 1 は中心を通るので y = 0 になる
-        sp.center = vec![1.0, 0.0, 0.0];
+        sp.center = vec![1.0, 0.0, 0.0, 0.0, 0.0];
         let p = compile_with("x = 1", &ps, &sp).unwrap();
         if let Plot::Implicit { prog } = &p {
             prog.eval_batch(&[&[7.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]], &mut out);
@@ -654,8 +668,27 @@ mod tests {
         } else {
             panic!()
         }
-        // 4次元: 回転の数は 4C2 = 6
-        assert_eq!(Space::basic(4, [0, 1, 2], vec![0.0; 4]).rotation.len(), 6);
+        // 次元が5未満でも、回転は5次元（5C2 = 10 通り）。6次元なら 6C2 = 15 通り
+        assert_eq!(Space::basic(4, [0, 1, 2], vec![0.0; 4]).rotation.len(), 10);
+        assert_eq!(Space::basic(6, [0, 1, 2], vec![0.0; 6]).rotation.len(), 15);
+        // 3次元でも xw 平面で回せる。媒介変数表示 (t, 0, 0) を xw で 60° 回すと、x 成分は t·cos60° に縮む
+        let mut sp = Space::standard();
+        sp.rotation[2] = std::f64::consts::FRAC_PI_3; // 組 (0,3) = xw は3番目
+        if let Plot::Curve { progs, .. } = compile_with("(t, 0, 0)", &ps, &sp).unwrap() {
+            let mut o = [C::new(0.0, 0.0)];
+            progs[0].eval_batch(&[&[2.0]], &mut o);
+            assert!((o[0].re - 1.0).abs() < 1e-12);
+        } else {
+            panic!()
+        }
+        // 陰関数 x = 1 は w 方向に伸びた形なので、xw で 60° 回して w = 0 で見ると x = 1/cos60° = 2
+        if let Plot::Implicit { prog } = compile_with("x = 1", &ps, &sp).unwrap() {
+            let mut o = [C::new(0.0, 0.0)];
+            prog.eval_batch(&[&[2.0], &[0.0], &[0.0]], &mut o);
+            assert!(o[0].norm() < 1e-12);
+        } else {
+            panic!()
+        }
     }
 
     #[test]
