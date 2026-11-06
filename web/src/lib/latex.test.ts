@@ -32,6 +32,9 @@ const cases: [string, string][] = [
   ['\\operatorname{\\mathrm{nCr}}\\left(5,2\\right)', 'nCr (5,2)'],
   ['\\operatorname{\\mathrm{floor}}\\left(x\\right)', 'floor (x)'],
   ['\\operatorname{\\mathrm I m}\\left(x\\right)', 'Im (x)'],
+  // ふつうの LaTeX の関数命令
+  ['\\max\\left(\\left|x\\right|,\\left|w\\right|\\right)=1', 'max ( abs(x), abs(w))=1'],
+  ['\\min\\left(x,y\\right)+\\Re\\left(z\\right)', 'min (x,y)+ Re (z)'],
   // 添字（4次元目以降の座標 w₂ や、媒介変数 t₁）
   ['w_{2}+w_3', 'w_2+w_3'],
   ['\\left(t_1,t_{2}\\right)', '(t_1,t_2)'],

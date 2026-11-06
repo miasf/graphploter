@@ -99,6 +99,8 @@ export interface PlotItem extends PlotStyle {
   slider: SliderStyle
   /** この式で使われているパラメータの名前（値が変わったら計算し直す） */
   usedParams: string[]
+  /** 範囲で重ねた立体として描いたことがあるか（最初の1回だけ半透明にするため） */
+  solidSeen?: boolean
 }
 
 /** Rust 側で作ったメッシュ */

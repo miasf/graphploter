@@ -13,6 +13,8 @@ export class LatexError extends Error {}
 /** そのまま関数名として出力するコマンド */
 const FUNCTIONS = new Set([
   'sin', 'cos', 'tan', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log',
+  // ふつうの LaTeX で関数として書かれるもの（\max{…} ではなく \max\left(…\right) の形で使う）
+  'max', 'min', 'arg', 'Re', 'Im',
 ])
 
 /** 単純に置き換えるコマンド */

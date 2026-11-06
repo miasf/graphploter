@@ -303,6 +303,11 @@
     }
 
     dropParam(item)
+    // 範囲で重ねた立体は、内側の境界面（穴など）が外から見えないので、最初は半透明にする
+    if (res.kind === '範囲で重ねた立体' && !item.solidSeen) {
+      item.solidSeen = true
+      if (item.opacity === 1) item.opacity = 0.45
+    }
     item.params = res.mesh.params
     // 初めて使う媒介変数（t₁ など）の範囲の入力欄を用意する（計算エンジン側も 0〜2π を使っている）
     for (const n of item.params) if (!(n in item.ranges)) item.ranges[n] = ['0', '2\\pi']
