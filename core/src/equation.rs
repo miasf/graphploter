@@ -70,17 +70,42 @@ impl Space {
     /// 媒介変数表示の点 p（次元の数の成分）を、画面の横・奥・縦の座標に移す1次式。
     /// 回転していれば q_a = c_a + Σ_k R[a][k] (p_k − c_k)（次元より先の成分は 0）、していなければ q_a = p_a
     pub fn view_rows(&self) -> [crate::mesh::ViewRow; 3] {
+        let m = self.rotation_matrix();
+        self.axes.map(|a| self.view_row(a, &m))
+    }
+
+    /// 回転後の座標 q_a を、点 p の1次式で表したもの（次元より先の成分 p は 0）
+    fn view_row(&self, a: usize, m: &Option<Vec<Vec<f64>>>) -> crate::mesh::ViewRow {
         let n = self.dims;
         let rn = rot_dims(n);
         let c: Vec<f64> = (0..rn).map(|j| self.center.get(j).copied().unwrap_or(0.0)).collect();
-        let m = self.rotation_matrix();
-        self.axes.map(|a| match &m {
+        match m {
             None => (0.0, (0..n).map(|k| (k == a) as u8 as f64).collect()),
             Some(m) => {
                 let c0 = c[a] - (0..rn).map(|k| m[a][k] * c[k]).sum::<f64>();
                 (c0, (0..n).map(|k| m[a][k]).collect())
             }
-        })
+        }
+    }
+
+    /// 射影の設定。`dist` は4次元の遠近法の視点までの距離（0 なら遠近法なし＝平行な射影）。
+    /// 遠近法では、表示していない各座標 h の方向に、中心から距離 dist の所に視点を置き、
+    /// 点を D / (D − (q_h − c_h)) 倍に縮める（視点から遠い＝奥にある点ほど小さく描く）
+    pub fn view(&self, dist: f64) -> crate::mesh::View {
+        let m = self.rotation_matrix();
+        let rn = rot_dims(self.dims);
+        let center = |k: usize| self.center.get(k).copied().unwrap_or(0.0);
+        let hidden = if dist > 0.0 {
+            (0..rn).filter(|k| !self.axes.contains(k)).map(|k| (self.view_row(k, &m), center(k))).collect()
+        } else {
+            Vec::new()
+        };
+        crate::mesh::View {
+            rows: self.axes.map(|a| self.view_row(a, &m)),
+            center: self.axes.map(center),
+            hidden,
+            dist,
+        }
     }
 
     /// 回転が「表示中の座標どうし」と「式が使っていない、表示していない座標どうし」だけか。
@@ -211,11 +236,12 @@ pub enum Plot {
     Implicit { prog: Program },
     /// 範囲で重ねた立体。`prog` の変数は表示中の3つの座標と、範囲で動かす名前（`ranges` の順）。
     Solid { prog: Program, ranges: Vec<(f64, f64)>, names: Vec<String> },
-    /// 媒介変数表示の曲線。`progs` はすべての座標の成分（次元の数）で、変数は `vars`（1つ）。
-    /// 回転・射影は、点を計算した後で [`Space::view_rows`] を使って行う（式を計算し直さなくてよい）。
-    Curve { progs: Vec<Program>, vars: Vec<String> },
-    /// 媒介変数表示の曲面。`progs` はすべての座標の成分で、変数は `vars`（2つ）。
-    Surface { progs: Vec<Program>, vars: Vec<String> },
+    /// 媒介変数表示の曲線。`sets` の1つ1つが1本の曲線で、すべての座標の成分（次元の数）の式。
+    /// 変数は `vars`（1つ）。リスト [a, b] を使うと、組み合わせの数だけ曲線ができる。
+    /// 回転・射影は、点を計算した後で [`Space::view`] を使って行う（式を計算し直さなくてよい）。
+    Curve { sets: Vec<Vec<Program>>, vars: Vec<String> },
+    /// 媒介変数表示の曲面。`sets` の1つ1つが1枚の曲面。変数は `vars`（2つ）。
+    Surface { sets: Vec<Vec<Program>>, vars: Vec<String> },
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
 }
@@ -254,7 +280,7 @@ impl Plot {
                 out.extend(prog.used_params().iter().filter(|n| !names.contains(n)).cloned());
                 return out;
             }
-            Plot::Curve { progs, .. } | Plot::Surface { progs, .. } => progs.iter().collect(),
+            Plot::Curve { sets, .. } | Plot::Surface { sets, .. } => sets.iter().flatten().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
         };
         let mut out: Vec<String> = Vec::new();
@@ -498,17 +524,80 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
     }
 
     let var_refs: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
-    let mut progs = Vec::with_capacity(items.len());
-    for e in &items {
-        // 組の中の t, u, v は媒介変数なので、同じ名前のパラメータより優先される
-        progs.push(Program::compile_with(e, &var_refs, &consts)?);
+    let mut sets = Vec::new();
+    for variant in expand_lists(&items)? {
+        let mut progs = Vec::with_capacity(variant.len());
+        for e in &variant {
+            // 組の中の t, u, v は媒介変数なので、同じ名前のパラメータより優先される
+            progs.push(Program::compile_with(e, &var_refs, &consts)?);
+        }
+        sets.push(progs);
     }
-    // 回転・射影は点を計算した後で行う（Space::view_rows）
+    // 回転・射影は点を計算した後で行う（Space::view）
     Ok(if vars.len() == 2 {
-        Plot::Surface { progs, vars }
+        Plot::Surface { sets, vars }
     } else {
-        Plot::Curve { progs, vars }
+        Plot::Curve { sets, vars }
     })
+}
+
+/// リストを含む式の中で、最初に出てくるリストの要素を返す（リストが無ければ None）
+fn first_list(e: &Expr) -> Option<&Vec<Expr>> {
+    match e {
+        Expr::List(items) => Some(items),
+        Expr::Num(_) | Expr::Const(_) | Expr::Var(_) => None,
+        Expr::Neg(a) => first_list(a),
+        Expr::Bin(_, a, b) => first_list(a).or_else(|| first_list(b)),
+        Expr::Call(_, args) | Expr::Tuple(args) => args.iter().find_map(first_list),
+    }
+}
+
+/// 最初に出てくるリストを `with` に置き換えた式。置き換えたら `done` を true にする
+fn replace_first_list(e: &Expr, with: &Expr, done: &mut bool) -> Expr {
+    if *done {
+        return e.clone();
+    }
+    match e {
+        Expr::List(_) => {
+            *done = true;
+            with.clone()
+        }
+        Expr::Num(_) | Expr::Const(_) | Expr::Var(_) => e.clone(),
+        Expr::Neg(a) => Expr::Neg(Box::new(replace_first_list(a, with, done))),
+        Expr::Bin(o, a, b) => {
+            let a = replace_first_list(a, with, done);
+            let b = replace_first_list(b, with, done);
+            Expr::Bin(*o, Box::new(a), Box::new(b))
+        }
+        Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| replace_first_list(a, with, done)).collect()),
+        Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| replace_first_list(a, with, done)).collect()),
+    }
+}
+
+/// 組の成分に含まれるリストを展開する。リストが複数あれば、すべての組み合わせ（直積）を作る。
+/// 例) (t, [−1, 1], [−1, 1]) → (t, −1, −1), (t, −1, 1), (t, 1, −1), (t, 1, 1)
+fn expand_lists(items: &[Expr]) -> Result<Vec<Vec<Expr>>, String> {
+    const MAX: usize = 256;
+    let mut done: Vec<Vec<Expr>> = Vec::new();
+    let mut todo: Vec<Vec<Expr>> = vec![items.to_vec()];
+    while let Some(variant) = todo.pop() {
+        let Some(list) = variant.iter().find_map(first_list).cloned() else {
+            done.push(variant);
+            continue;
+        };
+        for elem in &list {
+            if first_list(elem).is_some() {
+                return Err("リストの中にリストは書けません".into());
+            }
+            let mut replaced = false;
+            todo.push(variant.iter().map(|e| replace_first_list(e, elem, &mut replaced)).collect());
+        }
+        if done.len() + todo.len() > MAX {
+            return Err(format!("リストの組み合わせが多すぎます（{MAX} 個まで）"));
+        }
+    }
+    done.reverse(); // 書いた順に並べる
+    Ok(done)
 }
 
 /// 変数を含まない式（範囲の指定など）の値を計算する。例: "2pi" → 6.283...
@@ -732,7 +821,7 @@ mod tests {
             panic!("陽関数のまま回す")
         };
         let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, (-3.0, 3.0), (-3.0, 3.0), 6);
-        let m = project(&shape, &sp.view_rows(), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
+        let m = project(&shape, &sp.view(0.0), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
         assert!(!m.positions.is_empty());
         for q in m.positions.chunks_exact(3) {
             assert!((q[1] + 1.0).abs() < 1e-6, "y = {}", q[1]);
@@ -757,6 +846,32 @@ mod tests {
         let mut sp = space4([0, 1, 2], 1.0);
         sp.rotation[7] = 0.2; // 組 (2,3) = zw
         assert!(!sp.rotation_keeps_shown(&["z".into(), "w".into()]));
+    }
+
+    #[test]
+    fn lists() {
+        let ps = Params::new();
+        let sp = space4([0, 1, 2], 0.0);
+        // 正八胞体の x 方向の辺 8 本
+        match compile_with("(t, [-1, 1], [-1, 1], [-1, 1])", &ps, &sp).unwrap() {
+            Plot::Curve { sets, .. } => assert_eq!(sets.len(), 8),
+            _ => panic!(),
+        }
+        // 正八胞体の xy 方向の面 4 枚
+        match compile_with("(u, v, [-1, 1], [-1, 1])", &ps, &sp).unwrap() {
+            Plot::Surface { sets, .. } => assert_eq!(sets.len(), 4),
+            _ => panic!(),
+        }
+        // 式の中のリストも展開される: (t, 2[1, 3]) → (t, 2), (t, 6)
+        let Plot::Curve { sets, .. } = compile_with("(t, 2[1, 3], 0)", &ps, &Space::standard()).unwrap() else {
+            panic!()
+        };
+        let mut o = [C::new(0.0, 0.0)];
+        sets[1][1].eval_batch(&[&[0.0]], &mut o);
+        assert_eq!(o[0], C::new(6.0, 0.0));
+        // 媒介変数表示の外では使えない
+        assert!(compile("z = [1, 2] x").is_err());
+        assert!(compile_with("(t, [[1, 2], 3], 0)", &ps, &Space::standard()).is_err());
     }
 
     #[test]

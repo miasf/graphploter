@@ -43,7 +43,7 @@ const SYMBOLS: Record<string, string> = {
 /** \left / \right の後に来る括弧 → 開き側の出力 */
 const OPENERS: Record<string, string> = {
   '(': '(',
-  '[': '(',
+  '[': '[',
   '\\{': '(',
   '|': ' abs(',
   '\\vert': ' abs(',
@@ -176,12 +176,13 @@ class Converter {
       this.out += `_${sub}`
       return
     }
-    if (t === '[') {
-      this.out += '('
+    // [ ] はリスト（媒介変数表示の中で、要素ごとに図形をまとめて描く）
+    if (t === '[' || t === '\\lbrack') {
+      this.out += '['
       return
     }
-    if (t === ']') {
-      this.out += ')'
+    if (t === ']' || t === '\\rbrack') {
+      this.out += ']'
       return
     }
     if (t === '|' || t === '\\vert' || t === '\\lvert' || t === '\\rvert') {
@@ -241,7 +242,7 @@ class Converter {
         this.seq('\\right')
         if (this.toks[this.i] !== '\\right') throw new LatexError('括弧が閉じていません')
         this.i += 2 // \right と閉じ括弧
-        this.out += ')'
+        this.out += d === '[' ? ']' : ')'
         return
       }
       case 'operatorname':

@@ -344,7 +344,8 @@ pub struct NdShape {
     pub dims: usize,
     /// 点の座標（dims 個ずつ並べる）。定義されない点・線の切れ目は NaN
     pub points: Vec<f64>,
-    /// 曲面なら、格子の1辺の点の数と、各点の媒介変数 (u − u₀, v − v₀)
+    /// 曲面なら、格子の1辺の点の数 m と、各点の媒介変数 (u − u₀, v − v₀)。
+    /// 曲面が何枚あってもよい（m × m 個ずつの点が続けて並ぶ）
     pub grid: Option<(usize, Vec<f32>)>,
 }
 
@@ -371,22 +372,29 @@ fn dist(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>().sqrt()
 }
 
-/// 媒介変数表示の曲面（成分は `progs`、n 次元）を、`n × n` マスの格子で計算する。
-pub fn parametric_surface_nd(progs: &[Program], u: (f64, f64), v: (f64, f64), n: usize) -> NdShape {
+/// 媒介変数表示の曲面を、`n × n` マスの格子で計算する。`sets` の1つ1つが1枚の曲面（n 次元の成分の式）
+pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64), n: usize) -> NdShape {
     let n = n.max(2);
     let m = n + 1;
     let mut us = Vec::with_capacity(m * m);
     let mut vs = Vec::with_capacity(m * m);
-    let mut grid = Vec::with_capacity(m * m * 2);
+    let mut grid1 = Vec::with_capacity(m * m * 2);
     for j in 0..m {
         for i in 0..m {
             let (a, b) = (u.0 + (u.1 - u.0) * i as f64 / n as f64, v.0 + (v.1 - v.0) * j as f64 / n as f64);
             us.push(a);
             vs.push(b);
-            grid.extend_from_slice(&[(a - u.0) as f32, (b - v.0) as f32]);
+            grid1.extend_from_slice(&[(a - u.0) as f32, (b - v.0) as f32]);
         }
     }
-    NdShape { dims: progs.len(), points: eval_nd(progs, &[&us, &vs], m * m), grid: Some((m, grid)) }
+    let dims = sets.first().map_or(0, |p| p.len());
+    let mut points = Vec::with_capacity(sets.len() * m * m * dims);
+    let mut grid = Vec::with_capacity(sets.len() * grid1.len());
+    for progs in sets {
+        points.extend(eval_nd(progs, &[&us, &vs], m * m));
+        grid.extend_from_slice(&grid1);
+    }
+    NdShape { dims, points, grid: Some((m, grid)) }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -440,7 +448,20 @@ pub fn explicit_nd(
 /// 最初に `n` 等分して計算し、曲がっている所・途切れる所だけを細かく分け直す（適応サンプリング）。
 /// 曲線が途切れる所には NaN の点が入る。`tol` は「直線で結んだときのずれ」の許容量（n 次元の距離）。
 /// 回転して3次元に射影しても距離は縮むだけなので、射影した後もこの許容量に収まる。
-pub fn parametric_curve_nd(progs: &[Program], t: (f64, f64), n: usize, tol: f64) -> NdShape {
+pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: f64) -> NdShape {
+    let dims = sets.first().map_or(0, |p| p.len());
+    let mut points = Vec::new();
+    for (k, progs) in sets.iter().enumerate() {
+        if k > 0 {
+            points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
+        }
+        points.extend(curve_nd(progs, t, n, tol));
+    }
+    NdShape { dims, points, grid: None }
+}
+
+/// 1本の曲線の点（適応サンプリング）
+fn curve_nd(progs: &[Program], t: (f64, f64), n: usize, tol: f64) -> Vec<f64> {
     const MAX_POINTS: usize = 200_000;
     const PASSES: usize = 14;
     let d = progs.len();
@@ -508,21 +529,57 @@ pub fn parametric_curve_nd(progs: &[Program], t: (f64, f64), n: usize, tol: f64)
         }
         points.extend_from_slice(&ps[k]);
     }
-    NdShape { dims: d, points, grid: None }
+    points
 }
 
 /// 画面の1つの軸の座標を、n 次元の点の1次式 c₀ + Σ cₖ·pₖ で表したもの（回転と射影）
 pub type ViewRow = (f64, Vec<f64>);
 
-/// n 次元の点の集まりを、`rows`（画面の横・奥・縦の軸）で3次元に射影してメッシュにする。
+/// n 次元の点を、画面の3次元に移す方法（回転・射影・4次元の遠近法）
+#[derive(Debug, Clone)]
+pub struct View {
+    /// 画面の横・奥・縦の座標
+    pub rows: [ViewRow; 3],
+    /// 回転の中心の、画面の横・奥・縦の座標（遠近法で縮めるときの中心）
+    pub center: [f64; 3],
+    /// 遠近法: 表示していない座標（回転後）と、その中心の値
+    pub hidden: Vec<(ViewRow, f64)>,
+    /// 遠近法の視点までの距離（0 なら遠近法なし）
+    pub dist: f64,
+}
+
+impl View {
+    /// 回転なし・遠近法なしで、最初の3つの成分をそのまま画面の軸にする
+    #[cfg(test)]
+    pub fn identity(d: usize) -> View {
+        View { rows: identity_rows(d), center: [0.0; 3], hidden: Vec::new(), dist: 0.0 }
+    }
+
+    /// n 次元の点 p を画面の3次元の点にする。視点より後ろ（または近すぎる）点は NaN
+    fn apply(&self, p: &[f64]) -> [f64; 3] {
+        let row = |(c0, cs): &ViewRow| c0 + cs.iter().zip(p).map(|(c, x)| c * x).sum::<f64>();
+        let q = self.rows.each_ref().map(row);
+        if self.hidden.is_empty() {
+            return q;
+        }
+        let mut s = 1.0;
+        for (r, c) in &self.hidden {
+            let depth = self.dist - (row(r) - c);
+            if depth < self.dist * 0.05 {
+                return [f64::NAN; 3];
+            }
+            s *= self.dist / depth;
+        }
+        [0, 1, 2].map(|a| self.center[a] + (q[a] - self.center[a]) * s)
+    }
+}
+
+/// n 次元の点の集まりを、`view`（回転・射影・4次元の遠近法）で3次元に移してメッシュにする。
 /// 曲面なら三角形と法線も作る。曲線なら点の列（切れ目は NaN）だけ。
-pub fn project(shape: &NdShape, rows: &[ViewRow; 3], dom: Domain) -> Mesh {
+pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     let d = shape.dims;
     let count = shape.points.len().checked_div(d).unwrap_or(0);
-    let to3 = |k: usize| -> [f64; 3] {
-        let p = &shape.points[k * d..(k + 1) * d];
-        rows.clone().map(|(c0, cs)| c0 + cs.iter().zip(p).map(|(c, x)| c * x).sum::<f64>())
-    };
+    let to3 = |k: usize| view.apply(&shape.points[k * d..(k + 1) * d]);
 
     let Some((m, grid)) = &shape.grid else {
         // 曲線: 点をそのまま並べる（NaN は線の切れ目として残る）
@@ -540,24 +597,27 @@ pub fn project(shape: &NdShape, rows: &[ViewRow; 3], dom: Domain) -> Mesh {
     };
     let m = *m;
     let n = m - 1;
-    let mut index_of = vec![NONE; m * m];
+    let mut index_of = vec![NONE; count];
     let mut mesh = Mesh::default();
-    for k in 0..m * m {
+    for (k, slot) in index_of.iter_mut().enumerate() {
         let p = to3(k);
         if ok(&p) {
-            index_of[k] = mesh.push_vertex(p);
+            *slot = mesh.push_vertex(p);
             mesh.grid_coords.extend_from_slice(&[grid[2 * k], grid[2 * k + 1], p[2] as f32]);
         }
     }
-    for j in 0..n {
-        for i in 0..n {
-            let a = index_of[j * m + i];
-            let b = index_of[j * m + i + 1];
-            let c = index_of[(j + 1) * m + i];
-            let e = index_of[(j + 1) * m + i + 1];
-            for tri in [[a, b, e], [a, e, c]] {
-                if !tri.contains(&NONE) {
-                    mesh.indices.extend_from_slice(&tri);
+    // 曲面ごとに m × m 個の点が並んでいる
+    for base in (0..count).step_by(m * m) {
+        for j in 0..n {
+            for i in 0..n {
+                let a = index_of[base + j * m + i];
+                let b = index_of[base + j * m + i + 1];
+                let c = index_of[base + (j + 1) * m + i];
+                let e = index_of[base + (j + 1) * m + i + 1];
+                for tri in [[a, b, e], [a, e, c]] {
+                    if !tri.contains(&NONE) {
+                        mesh.indices.extend_from_slice(&tri);
+                    }
                 }
             }
         }
@@ -680,8 +740,8 @@ mod tests {
     fn param_surface_cylinder() {
         let d = Domain { lo: [-2.0; 3], hi: [2.0; 3] };
         let p = progs3(["cos(u)", "sin(u)", "v"], &["u", "v"]);
-        let shape = parametric_surface_nd(&p, (0.0, std::f64::consts::TAU), (-1.0, 1.0), 20);
-        let m = project(&shape, &identity_rows(3), d);
+        let shape = parametric_surface_nd(&[p], (0.0, std::f64::consts::TAU), (-1.0, 1.0), 20);
+        let m = project(&shape, &View::identity(3), d);
         assert_eq!(m.positions.len(), 21 * 21 * 3);
         assert_eq!(m.grid_coords.len(), m.positions.len());
         // 円柱の法線は横向き（z 成分がほぼ 0）
@@ -692,14 +752,14 @@ mod tests {
     fn curve_adaptive_and_breaks() {
         // 円: 点はすべて半径 1 の上
         let p = progs3(["cos(t)", "sin(t)", "0"], &["t"]);
-        let pts = project(&parametric_curve_nd(&p, (0.0, std::f64::consts::TAU), 8, 1e-3), &identity_rows(3), dom()).positions;
+        let pts = project(&parametric_curve_nd(&[p], (0.0, std::f64::consts::TAU), 8, 1e-3), &View::identity(3), dom()).positions;
         assert!(pts.len() / 3 > 9, "曲がっている所は細かく分け直される");
         for q in pts.chunks_exact(3) {
             assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 1.0).abs() < 1e-5);
         }
         // tan t は極で線が切れる（NaN が入る）
         let p = progs3(["t", "tan(t)", "0"], &["t"]);
-        let pts = parametric_curve_nd(&p, (-3.0, 3.0), 50, 1e-3).points;
+        let pts = parametric_curve_nd(&[p], (-3.0, 3.0), 50, 1e-3).points;
         assert!(pts.iter().any(|v| v.is_nan()));
     }
 
@@ -707,13 +767,25 @@ mod tests {
     fn projection_of_4d() {
         // 4次元のクリフォードトーラス (cos u, sin u, cos v, sin v)。x, y, w を表示すると半径1の円柱
         let p: Vec<Program> = ["cos(u)", "sin(u)", "cos(v)", "sin(v)"].iter().map(|s| prog(s, &["u", "v"])).collect();
-        let shape = parametric_surface_nd(&p, (0.0, 6.0), (0.0, 6.0), 10);
+        let shape = parametric_surface_nd(&[p], (0.0, 6.0), (0.0, 6.0), 10);
         assert_eq!(shape.dims, 4);
         let rows: [ViewRow; 3] = [0, 1, 3].map(|a| (0.0, (0..4).map(|k| (k == a) as u8 as f64).collect()));
-        let m = project(&shape, &rows, Domain { lo: [-2.0; 3], hi: [2.0; 3] });
+        let view = View { rows, center: [0.0; 3], hidden: Vec::new(), dist: 0.0 };
+        let m = project(&shape, &view, Domain { lo: [-2.0; 3], hi: [2.0; 3] });
         for q in m.positions.chunks_exact(3) {
             assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 1.0).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn perspective_4d() {
+        // 4次元の点 (1, 0, 0, w) を、w 方向の距離 4 の視点から見ると、x = 4 / (4 − w) 倍になる
+        let rows = identity_rows(4);
+        let w_row: ViewRow = (0.0, vec![0.0, 0.0, 0.0, 1.0]);
+        let view = View { rows, center: [0.0; 3], hidden: vec![(w_row, 0.0)], dist: 4.0 };
+        assert!((view.apply(&[1.0, 0.0, 0.0, 2.0])[0] - 2.0).abs() < 1e-12); // 手前（w = 2）は大きく
+        assert!((view.apply(&[1.0, 0.0, 0.0, -4.0])[0] - 0.5).abs() < 1e-12); // 奥（w = −4）は小さく
+        assert!(view.apply(&[1.0, 0.0, 0.0, 5.0])[0].is_nan()); // 視点より後ろは描かない
     }
 
     #[test]

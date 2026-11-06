@@ -7,8 +7,11 @@
   interface Props {
     space: Space
     onRotate: (rotation: number[], center: number[]) => void
+    /** 再生中（角度を自動で動かしている）回転の番号 */
+    playing: number[]
+    onPlay: (k: number) => void
   }
-  let { space, onRotate }: Props = $props()
+  let { space, onRotate, playing, onPlay }: Props = $props()
 
   /** 最初から見せる回転の数。これより多い分は折りたたむ */
   const SHOW = 6
@@ -60,7 +63,14 @@
     aria-label="{coordName(p.i)}{coordName(p.j)} 平面の回転角"
     oninput={(e) => setAngle(p.k, e.currentTarget.valueAsNumber)}
   />
-  <span class="value">{space.rotation[p.k]}°</span>
+  <span class="value">{Math.round(space.rotation[p.k])}°</span>
+  <button
+    class="play"
+    class:on={playing.includes(p.k)}
+    onclick={() => onPlay(p.k)}
+    aria-label="{coordName(p.i)}{coordName(p.j)} の回転を{playing.includes(p.k) ? '止める' : '再生する'}"
+    title={playing.includes(p.k) ? '止める' : '回し続ける'}>{playing.includes(p.k) ? '❚❚' : '▶'}</button
+  >
 {/snippet}
 
 <details class="rotation">
@@ -151,7 +161,7 @@
   }
   .planes {
     display: grid;
-    grid-template-columns: 2.6em 1fr 3.5em;
+    grid-template-columns: 2.6em 1fr 3em 1.8em;
     align-items: center;
     gap: 4px 8px;
   }
@@ -163,6 +173,22 @@
     font: 12px var(--mono);
     color: var(--muted);
     text-align: right;
+  }
+  .play {
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--muted);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .play.on {
+    background: #2d70b3;
+    border-color: #2d70b3;
+    color: #fff;
   }
   .more {
     margin-top: 6px;

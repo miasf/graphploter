@@ -32,6 +32,9 @@ const cases: [string, string][] = [
   ['\\operatorname{\\mathrm{nCr}}\\left(5,2\\right)', 'nCr (5,2)'],
   ['\\operatorname{\\mathrm{floor}}\\left(x\\right)', 'floor (x)'],
   ['\\operatorname{\\mathrm I m}\\left(x\\right)', 'Im (x)'],
+  // リスト
+  ['\\left(t,\\left[-1,1\\right],0\\right)', '(t,[-1,1],0)'],
+  ['2[1,3]', '2[1,3]'],
   // ふつうの LaTeX の関数命令
   ['\\max\\left(\\left|x\\right|,\\left|w\\right|\\right)=1', 'max ( abs(x), abs(w))=1'],
   ['\\min\\left(x,y\\right)+\\Re\\left(z\\right)', 'min (x,y)+ Re (z)'],

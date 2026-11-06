@@ -57,6 +57,8 @@ export interface Space {
   rotation: number[]
   /** 回転の中心 */
   center: number[]
+  /** 4次元の遠近法の強さ（0〜100。0 なら平行な射影）。射影で描く図形（媒介変数表示・回した陽関数）だけに効く */
+  perspective: number
 }
 
 /** パラメータ（スライダーで値を決める文字）の値。複素数も扱えるよう実部と虚部を持つ */
@@ -143,6 +145,8 @@ export interface PlotRequest {
     /** 回転角（ラジアン） */
     rotation: number[]
     center: number[]
+    /** 4次元の遠近法の視点までの距離（0 なら遠近法なし） */
+    perspective: number
   }
   /** 範囲で重ねるパラメータ → [最小, 最大] */
   stacks: Record<string, [number, number]>

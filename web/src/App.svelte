@@ -404,6 +404,7 @@
     samples: 24,
     rotation: Array(10).fill(0), // 5次元の回転（5C2 = 10 通り）
     center: Array(5).fill(0),
+    perspective: 0,
   })
   /** 画面の横・奥・縦の軸に表示している座標の名前 */
   const axisNames = $derived(space.axes.map(coordName))
@@ -421,6 +422,81 @@
     space.rotation = rotation
     space.center = center
     replotAll(0)
+  }
+
+  // ---- 回転の再生（角度を自動で動かす）----
+
+  /** 再生中の回転（回転角の番号） */
+  let playing = $state<number[]>([])
+  /** 再生の速さ（度 / 秒） */
+  const PLAY_SPEED = 30
+  let lastFrame = 0
+
+  function togglePlay(k: number) {
+    playing = playing.includes(k) ? playing.filter((j) => j !== k) : [...playing, k]
+    if (playing.length > 0) {
+      lastFrame = performance.now()
+      requestAnimationFrame(playFrame)
+    }
+  }
+
+  function playFrame(now: number) {
+    if (playing.length === 0) return
+    const dt = Math.min(0.1, (now - lastFrame) / 1000)
+    lastFrame = now
+    const rotation = [...space.rotation]
+    for (const k of playing) {
+      // −180〜180 の範囲で回り続ける（小数第1位まで）
+      const a = rotation[k] + PLAY_SPEED * dt
+      rotation[k] = Math.round((((a + 180) % 360) - 180) * 10) / 10
+    }
+    setRotation(rotation, space.center)
+    requestAnimationFrame(playFrame)
+  }
+
+  // ---- 例の読み込み ----
+
+  /**
+   * 正八胞体（4次元の立方体）の辺 32 本を、4次元の遠近法と xw 平面の回転の再生つきで表示する。
+   * ネットでよく見る「内側の立方体が外へ出てきて裏返る」動き
+   */
+  function loadTesseract() {
+    for (const it of items) {
+      it.visible = false
+      viewer?.setStyle(it.id, it)
+    }
+    const edge = (k: number) =>
+      '\\left(' +
+      [0, 1, 2, 3].map((j) => (j === k ? 't' : '\\left[-1,1\\right]')).join(',') +
+      '\\right)'
+    for (let k = 0; k < 4; k++) {
+      items.push(
+        newItem(edge(k), {
+          color: '#2d70b3',
+          lineWidth: 2.5,
+          ranges: { t: ['-1', '1'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
+        }),
+      )
+    }
+    const rotation = Array(10).fill(0)
+    rotation[2] = 20 // xw
+    rotation[4] = 20 // yz（少し斜めから見る）
+    space = {
+      ...space,
+      dims: 4,
+      axes: [0, 1, 2],
+      slice: [0, 0, 0, 0],
+      ranges: [null, null, null, null],
+      rotation,
+      center: Array(5).fill(0),
+      perspective: 40,
+    }
+    // 図形（−1〜1）が大きく見えるよう、表示範囲を狭めて視点もリセットする
+    domain = { xmin: -2.5, xmax: 2.5, ymin: -2.5, ymax: 2.5, zmin: -2.5, zmax: 2.5 }
+    domainError = ''
+    viewer?.setDomain(domain, true)
+    replotAll(0)
+    if (!playing.includes(2)) togglePlay(2) // xw の回転を再生
   }
 
   /** パラメータのスライダーの設定を変えたとき。範囲で重ねる設定が変われば、それを使う式を計算し直す */
@@ -502,11 +578,15 @@
         {/each}
       </ul>
       <button class="add" onclick={addItem}>＋ 式を追加</button>
+      <div class="examples">
+        <span>例:</span>
+        <button class="link-button" onclick={loadTesseract}>正八胞体（4次元の立方体）の回転</button>
+      </div>
 
       <section class="settings">
         <h2>次元</h2>
         <SpacePanel {space} onLayout={setLayout} onSlice={setSlice} />
-        <RotationPanel {space} onRotate={setRotation} />
+        <RotationPanel {space} onRotate={setRotation} {playing} onPlay={togglePlay} />
 
         <h2>表示範囲</h2>
         <div class="ranges">
@@ -566,6 +646,20 @@
 
         <h2>見え方</h2>
         <label class="slider">
+          <span>
+            4次元の遠近感: {space.perspective === 0 ? 'なし（平行な射影）' : `${space.perspective}%`}
+          </span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            bind:value={space.perspective}
+            oninput={() => replotAll(0)}
+          />
+          <span class="note">w などの奥にある部分ほど小さく描く（媒介変数表示・回した陽関数に効く）</span>
+        </label>
+        <label class="slider">
           <span>遠近感: {perspective === 0 ? '平行投影' : `${perspective}%`}</span>
           <input
             type="range"
@@ -609,7 +703,11 @@
           範囲で重ねる: 座標を「範囲」にするか、パラメータの「範囲で重ねる」を押すと、その範囲で動かしたときに
           図形が通る領域（曲面 → 立体、曲線 → 曲面）を描きます
         </li>
-        <li>回転: 中心の点と、座標の組（xy, xw など nC2 通り）ごとの角度で図形を回せます</li>
+        <li>
+          回転: 中心の点と、座標の組（xy, xw など）ごとの角度で図形を回せます。▶ で回し続けます。
+          「4次元の遠近感」を上げると、w の奥にある部分ほど小さく描きます
+        </li>
+        <li>リスト: <code>(t, [-1,1], [-1,1], [-1,1])</code> のように書くと、組み合わせの数だけまとめて描きます</li>
         <li>媒介変数は t（曲線）、u と v（曲面）、または t₁ と t₂。組 (…) の外では t, u, v もパラメータにできます</li>
         <li>
           パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
@@ -723,6 +821,27 @@
     margin: 14px 0;
     font-size: 13px;
     color: var(--muted);
+  }
+  .examples {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 0 16px 8px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .link-button {
+    padding: 0;
+    border: none;
+    background: none;
+    color: #2d70b3;
+    font-size: 13px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .note {
+    font-size: 11px;
   }
   .buttons {
     display: flex;

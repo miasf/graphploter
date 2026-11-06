@@ -63,6 +63,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
           new Uint32Array(space.axes),
           new Float64Array(space.rotation),
           new Float64Array(space.center),
+          space.perspective,
         )
       } catch {
         r = null // 回転した陽関数で、回転が条件を外れた（陰関数として計算し直す）
@@ -87,6 +88,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
         space.samples,
         new Float64Array(space.rotation),
         new Float64Array(space.center),
+        space.perspective,
       )
       forget(itemId)
       const shape = r.take_shape()

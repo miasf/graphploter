@@ -141,6 +141,9 @@ impl Program {
                 }
             }
             Expr::Tuple(_) => return Err("組 (a, b, c) は式の中では使えません".into()),
+            Expr::List(_) => {
+                return Err("リスト [a, b] は、今は媒介変数表示 ( … ) の中でだけ使えます".into())
+            }
         })
     }
 

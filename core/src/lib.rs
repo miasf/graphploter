@@ -126,6 +126,7 @@ pub fn eval_constant(source: &str) -> Result<f64, JsError> {
 /// - `stack_names`, `stack_ranges`: 範囲で重ねるパラメータの名前（カンマ区切り）と [最小, 最大, …]
 /// - `samples`: 範囲を何等分して重ねるか
 /// - `rotation`: 回転角（ラジアン、座標の組 (0,1), (0,2), …, (1,2), … の順）、`center`: 回転の中心
+/// - `perspective`: 4次元の遠近法の視点までの距離（0 なら遠近法なし）。射影で描く図形（媒介変数表示・回した陽関数）だけに効く
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -146,6 +147,7 @@ pub fn plot(
     samples: u32,
     rotation: &[f64],
     center: &[f64],
+    perspective: f64,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
     let n = dims as usize;
@@ -220,14 +222,14 @@ pub fn plot(
     };
     // 媒介変数表示: n 次元の点を計算してから、回転・射影する
     let shape = match &plot {
-        equation::Plot::Surface { progs, vars } => Some(mesh::parametric_surface_nd(
-            progs,
+        equation::Plot::Surface { sets, vars } => Some(mesh::parametric_surface_nd(
+            sets,
             range(&vars[0]),
             range(&vars[1]),
             resolution.clamp(2, 1000) as usize,
         )),
-        equation::Plot::Curve { progs, vars } => {
-            Some(mesh::parametric_curve_nd(progs, range(&vars[0]), 400, size * 2e-4))
+        equation::Plot::Curve { sets, vars } => {
+            Some(mesh::parametric_curve_nd(sets, range(&vars[0]), 400, size * 2e-4))
         }
         // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
         // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）
@@ -256,7 +258,7 @@ pub fn plot(
         _ => None,
     };
     let inner = match &shape {
-        Some(sh) => mesh::project(sh, &space.view_rows(), dom),
+        Some(sh) => mesh::project(sh, &space.view(perspective), dom),
         None => inner,
     };
     Ok(MeshResult {
@@ -304,6 +306,7 @@ impl Shape {
         axes: &[u32],
         rotation: &[f64],
         center: &[f64],
+        perspective: f64,
     ) -> Result<MeshResult, JsError> {
         let n = dims as usize;
         let rn = equation::rot_dims(n);
@@ -320,7 +323,7 @@ impl Shape {
         }
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
         Ok(MeshResult {
-            inner: mesh::project(&self.inner, &space.view_rows(), dom),
+            inner: mesh::project(&self.inner, &space.view(perspective), dom),
             shape: None,
             explicit_used: None,
             kind: self.kind.clone(),

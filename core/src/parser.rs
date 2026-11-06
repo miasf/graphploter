@@ -20,6 +20,8 @@ pub enum Expr {
     Call(Func, Vec<Expr>),
     /// 組 (a, b, c)。媒介変数表示の点を表す
     Tuple(Vec<Expr>),
+    /// リスト [a, b, …]。媒介変数表示の中で使うと、要素ごとに図形をまとめて描く
+    List(Vec<Expr>),
 }
 
 impl Expr {
@@ -37,7 +39,9 @@ impl Expr {
                 a.collect_vars(out);
                 b.collect_vars(out);
             }
-            Expr::Call(_, args) | Expr::Tuple(args) => args.iter().for_each(|a| a.collect_vars(out)),
+            Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => {
+                args.iter().for_each(|a| a.collect_vars(out))
+            }
         }
     }
 
@@ -50,6 +54,7 @@ impl Expr {
             Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(a.substitute(f)), Box::new(b.substitute(f))),
             Expr::Call(g, args) => Expr::Call(*g, args.iter().map(|a| a.substitute(f)).collect()),
             Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| a.substitute(f)).collect()),
+            Expr::List(args) => Expr::List(args.iter().map(|a| a.substitute(f)).collect()),
         }
     }
 
@@ -60,7 +65,7 @@ impl Expr {
             Expr::Num(_) | Expr::Const(_) => false,
             Expr::Neg(a) => a.uses_var(name),
             Expr::Bin(_, a, b) => a.uses_var(name) || b.uses_var(name),
-            Expr::Call(_, args) | Expr::Tuple(args) => args.iter().any(|a| a.uses_var(name)),
+            Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(|a| a.uses_var(name)),
         }
     }
 }
@@ -118,6 +123,8 @@ enum Tok {
     Caret,
     Bang,
     LParen,
+    LBracket,
+    RBracket,
     RParen,
     Comma,
     Eof,
@@ -219,6 +226,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             '^' => Tok::Caret,
             '!' => Tok::Bang,
             '(' => Tok::LParen,
+            '[' => Tok::LBracket,
+            ']' => Tok::RBracket,
             ')' => Tok::RParen,
             ',' => Tok::Comma,
             _ => return err(format!("使えない文字 '{c}' があります"), i),
@@ -296,7 +305,7 @@ impl Parser {
                     BinOp::Div
                 }
                 // 次に値が始まるなら暗黙の掛け算
-                Tok::Num(_) | Tok::Var(_) | Tok::Const(_) | Tok::Func(_) | Tok::LParen => BinOp::Mul,
+                Tok::Num(_) | Tok::Var(_) | Tok::Const(_) | Tok::Func(_) | Tok::LParen | Tok::LBracket => BinOp::Mul,
                 _ => return Ok(lhs),
             };
             let rhs = self.unary()?;
@@ -340,6 +349,15 @@ impl Parser {
             Tok::Num(n) => Ok(Expr::Num(n)),
             Tok::Var(v) => Ok(Expr::Var(v)),
             Tok::Const(c) => Ok(Expr::Const(c)),
+            Tok::LBracket => {
+                let mut items = vec![self.expr()?];
+                while *self.peek() == Tok::Comma {
+                    self.next();
+                    items.push(self.expr()?);
+                }
+                self.expect(Tok::RBracket, "閉じ括弧 ']'")?;
+                Ok(Expr::List(items))
+            }
             Tok::LParen => {
                 let e = self.expr()?;
                 // カンマが続けば組 (a, b, c)

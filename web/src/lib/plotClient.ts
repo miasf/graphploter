@@ -13,6 +13,16 @@ worker.onmessage = (ev: MessageEvent<PlotResponse>) => {
   resolve?.(ev.data)
 }
 
+/**
+ * 4次元の遠近法の強さ（0〜100）→ 視点までの距離。強さ 100% で、表示範囲の半分の 0.6 倍の距離
+ * （表示範囲 −5〜5 なら 3）。距離が近いほど、奥（w の小さい側）の部分が小さく描かれる
+ */
+function perspectiveDistance(strength: number, d: Domain): number {
+  if (strength <= 0) return 0
+  const half = Math.max(d.xmax - d.xmin, d.ymax - d.ymin, d.zmax - d.zmin) / 2
+  return (half * 0.6) / (strength / 100)
+}
+
 /** 曲面の計算を頼む。結果は Promise で返る。 */
 export function requestPlot(
   itemId: number,
@@ -44,6 +54,7 @@ export function requestPlot(
       samples: space.samples,
       rotation: space.rotation.map((deg) => (deg * Math.PI) / 180),
       center: [...space.center],
+      perspective: perspectiveDistance(space.perspective, domain),
     },
     stacks: Object.fromEntries(Object.entries(stacks).map(([k, [a, b]]) => [k, [a, b]])),
   }

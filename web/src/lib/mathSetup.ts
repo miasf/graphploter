@@ -87,6 +87,7 @@ export function setupKeyboard() {
           fn('sign', { operator: true }),
           { latex: '\\Gamma\\left(#0\\right)', label: 'Γ' },
           '!',
+          { latex: '\\left[#0\\right]', label: '[ ]', tooltip: 'リスト（[−1, 1] など）' },
         ],
         [
           fn('mod', { operator: true, args: 2 }),
