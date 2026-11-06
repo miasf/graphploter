@@ -2,7 +2,7 @@
   // パラメータ（a = 1 など）の値を決める部品。
   // 実数モード: スライダー / 複素数モード: 複素平面の上で点を動かす
   import ComplexPad from './ComplexPad.svelte'
-  import { formatNumber, niceStep } from './params'
+  import { formatNumber, niceStep, prettyName } from './params'
   import type { ParamValue, SliderStyle } from './types'
 
   interface Props {
@@ -25,13 +25,22 @@
 
   function toggleComplex() {
     const complex = !slider.complex
-    onSlider({ ...slider, complex })
+    onSlider({ ...slider, complex, stack: complex ? false : slider.stack })
     if (!complex && value.im !== 0) onChange(value.re, 0) // 実数モードに戻すときは虚部を 0 に
+  }
+
+  /** 範囲で重ねる: 最小値〜最大値で動かしたときに図形が通る領域を描く（実数だけ） */
+  function toggleStack() {
+    const stack = !slider.stack
+    onSlider({ ...slider, stack, complex: stack ? false : slider.complex })
+    if (stack && value.im !== 0) onChange(value.re, 0)
   }
 </script>
 
 <div class="param">
-  {#if slider.complex}
+  {#if slider.stack}
+    <p class="value">{name} を {slider.min} 〜 {slider.max} で動かして重ねています</p>
+  {:else if slider.complex}
     <ComplexPad re={value.re} im={value.im} min={slider.min} max={slider.max} {step} {onChange} />
     <p class="value">
       {name} = {formatNumber(value.re, step)}
@@ -59,7 +68,7 @@
       aria-label="{name} の最小値"
       onchange={(e) => setBound('min', e.currentTarget.valueAsNumber)}
     />
-    <span class="dots">{slider.complex ? '≤ Re, Im ≤' : `≤ ${name} ≤`}</span>
+    <span class="dots">{slider.complex ? '≤ Re, Im ≤' : `≤ ${prettyName(name)} ≤`}</span>
     <input
       type="number"
       step="any"
@@ -71,6 +80,9 @@
       複素数
     </button>
   </div>
+  <button class="mode stack" class:on={slider.stack} onclick={toggleStack} title="範囲で動かしたときに図形が通る領域を描く">
+    範囲で重ねる
+  </button>
 </div>
 
 <style>
@@ -116,6 +128,9 @@
     color: var(--muted);
     font-size: 12px;
     cursor: pointer;
+  }
+  .stack {
+    justify-self: start;
   }
   .mode.on {
     background: #2d70b3;

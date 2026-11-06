@@ -4,9 +4,10 @@
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
   import { complexLatex, coordName, latexName, niceStep, prettyName } from './lib/params'
+  import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestPlot } from './lib/plotClient'
-  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem, Space } from './lib/types'
+  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem, SliderStyle, Space } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -28,7 +29,7 @@
       ranges: { t: ['0', '2\\pi'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
       params: [],
       paramSpan: { u: 2 * Math.PI, v: 2 * Math.PI },
-      slider: { min: -10, max: 10, complex: false },
+      slider: { min: -10, max: 10, complex: false, stack: false },
       usedParams: [],
       ...options,
     }
@@ -196,6 +197,17 @@
     return out
   }
 
+  /** 範囲で重ねるパラメータ → [最小, 最大] */
+  function currentStacks(): Record<string, [number, number]> {
+    const out: Record<string, [number, number]> = {}
+    for (const it of items) {
+      if (it.param && !it.error && it.slider.stack && !(it.param.name in out)) {
+        out[it.param.name] = [it.slider.min, it.slider.max]
+      }
+    }
+    return out
+  }
+
   /**
    * パラメータ names が変わった・増えた・消えたとき、それを使う式を計算し直す。
    * エラーの式（未定義だった文字が定義されたかもしれない）と、計算中の式（古い値で計算している）も含める
@@ -203,7 +215,8 @@
   function paramsChanged(names: string[], except?: PlotItem) {
     for (const it of items) {
       if (it === except) continue
-      if (it.usedParams.some((n) => names.includes(n)) || it.error || running.has(it.id)) schedule(it, 0)
+      const uses = it.usedParams.some((n) => names.includes(n)) || it.params.some((n) => names.includes(n))
+      if (uses || it.error || running.has(it.id)) schedule(it, 0)
     }
   }
 
@@ -245,7 +258,16 @@
       return
     }
 
-    const res = await requestPlot(source, domain, resolution, implicitResolution, ranges, currentParams(), space)
+    const res = await requestPlot(
+      source,
+      domain,
+      resolution,
+      implicitResolution,
+      ranges,
+      currentParams(),
+      space,
+      currentStacks(),
+    )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
     if (!res.ok) {
@@ -366,7 +388,17 @@
 
   // ---- 次元（4次元以上）----
 
-  let space = $state<Space>({ dims: 3, axes: [0, 1, 2], slice: [0, 0, 0], sliceMin: -5, sliceMax: 5 })
+  let space = $state<Space>({
+    dims: 3,
+    axes: [0, 1, 2],
+    slice: [0, 0, 0],
+    sliceMin: -5,
+    sliceMax: 5,
+    ranges: [null, null, null],
+    samples: 24,
+    rotation: [0, 0, 0],
+    center: [0, 0, 0],
+  })
   /** 画面の横・奥・縦の軸に表示している座標の名前 */
   const axisNames = $derived(space.axes.map(coordName))
 
@@ -377,6 +409,20 @@
   function setLayout(next: Space) {
     space = next
     replotAll(0)
+  }
+
+  function setRotation(rotation: number[], center: number[]) {
+    space.rotation = rotation
+    space.center = center
+    replotAll(0)
+  }
+
+  /** パラメータのスライダーの設定を変えたとき。範囲で重ねる設定が変われば、それを使う式を計算し直す */
+  function setSlider(item: PlotItem, next: SliderStyle) {
+    const prev = item.slider
+    item.slider = next
+    const stackChanged = prev.stack !== next.stack || (next.stack && (prev.min !== next.min || prev.max !== next.max))
+    if (item.param && stackChanged) paramsChanged([item.param.name], item)
   }
 
   /** 表示しない座標の断面の値を変えたとき: その座標を使う式だけを計算し直す */
@@ -444,7 +490,7 @@
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
             onParam={(re, im) => setParam(item, re, im)}
-            onSlider={(sl) => (item.slider = sl)}
+            onSlider={(sl) => setSlider(item, sl)}
             onAddSlider={(name) => addSlider(item, name)}
           />
         {/each}
@@ -454,6 +500,7 @@
       <section class="settings">
         <h2>次元</h2>
         <SpacePanel {space} onLayout={setLayout} onSlice={setSlice} />
+        <RotationPanel {space} onRotate={setRotation} />
 
         <h2>表示範囲</h2>
         <div class="ranges">
@@ -489,7 +536,18 @@
           />
         </label>
         <label class="slider">
-          <span>陰関数の細かさ: {implicitResolution}³（重いので注意）</span>
+          <span>範囲で重ねる枚数: {space.samples}</span>
+          <input
+            type="range"
+            min="4"
+            max="64"
+            step="2"
+            bind:value={space.samples}
+            onchange={() => replotAll(0)}
+          />
+        </label>
+        <label class="slider">
+          <span>陰関数・立体の細かさ: {implicitResolution}³（重いので注意）</span>
           <input
             type="range"
             min="20"
@@ -541,6 +599,11 @@
           4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（<code>w2</code> と打つと w₂）。
           表示する3つの座標を選び、残りはスライダーで固定した断面を描きます
         </li>
+        <li>
+          範囲で重ねる: 座標を「範囲」にするか、パラメータの「範囲で重ねる」を押すと、その範囲で動かしたときに
+          図形が通る領域（曲面 → 立体、曲線 → 曲面）を描きます
+        </li>
+        <li>回転: 中心の点と、座標の組（xy, xw など nC2 通り）ごとの角度で図形を回せます</li>
         <li>媒介変数は t（曲線）、u と v（曲面）、または t₁ と t₂。組 (…) の外では t, u, v もパラメータにできます</li>
         <li>
           パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。

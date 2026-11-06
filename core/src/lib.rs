@@ -105,6 +105,10 @@ pub fn eval_constant(source: &str) -> Result<f64, JsError> {
 ///   無い媒介変数は 0〜2π
 /// - `param_names`, `param_values`: パラメータ（スライダー）。例: "a,b" と [a の実部, a の虚部, b の実部, …]
 /// - `dims`: 次元、`axes`: 画面の横・奥・縦に表示する座標の番号、`slice`: 各座標の断面の値
+/// - `coord_ranges`: 各座標の「範囲で重ねる」範囲 [x の最小, x の最大, y の最小, …]（重ねない座標は NaN）
+/// - `stack_names`, `stack_ranges`: 範囲で重ねるパラメータの名前（カンマ区切り）と [最小, 最大, …]
+/// - `samples`: 範囲を何等分して重ねるか
+/// - `rotation`: 回転角（ラジアン、座標の組 (0,1), (0,2), …, (1,2), … の順）、`center`: 回転の中心
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -119,9 +123,23 @@ pub fn plot(
     dims: u32,
     axes: &[u32],
     slice: &[f64],
+    coord_ranges: &[f64],
+    stack_names: &str,
+    stack_ranges: &[f64],
+    samples: u32,
+    rotation: &[f64],
+    center: &[f64],
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
-    if domain.len() != 6 || axes.len() != 3 || slice.len() != dims as usize || dims < 3 {
+    let n = dims as usize;
+    if domain.len() != 6
+        || axes.len() != 3
+        || dims < 3
+        || slice.len() != n
+        || coord_ranges.len() != 2 * n
+        || rotation.len() != n * (n - 1) / 2
+        || center.len() != n
+    {
         return Err(err("内部エラー: 範囲や次元の指定が合っていません"));
     }
     let split = |s: &str| -> Vec<String> { s.split(',').filter(|s| !s.is_empty()).map(String::from).collect() };
@@ -137,9 +155,17 @@ pub fn plot(
         .map(|(n, re, im)| (n, num_complex::Complex64::new(re, im)))
         .collect();
     let space = equation::Space {
-        dims: dims as usize,
+        dims: n,
         axes: [axes[0] as usize, axes[1] as usize, axes[2] as usize],
         slice: slice.to_vec(),
+        ranges: coord_ranges
+            .chunks_exact(2)
+            .map(|r| (r[0].is_finite() && r[1].is_finite()).then_some((r[0], r[1])))
+            .collect(),
+        param_ranges: pairs(split(stack_names), stack_ranges)?,
+        samples: samples.clamp(2, 200) as usize,
+        rotation: rotation.to_vec(),
+        center: center.to_vec(),
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
@@ -148,10 +174,11 @@ pub fn plot(
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
-    // 媒介変数の範囲（指定が無ければ 0〜2π）
+    // 媒介変数の範囲（範囲で重ねるパラメータならその範囲。指定が無ければ 0〜2π）
     let range = |name: &str| {
         range_of
             .iter()
+            .chain(space.param_ranges.iter())
             .find(|(n, _, _)| n == name)
             .map(|(_, a, b)| (*a, *b))
             .unwrap_or((0.0, std::f64::consts::TAU))
@@ -163,6 +190,13 @@ pub fn plot(
         equation::Plot::Implicit { prog } => {
             mesh::implicit_surface(prog, dom, implicit_resolution.clamp(2, 300) as usize)
         }
+        equation::Plot::Solid { prog, ranges, .. } => mesh::implicit_solid(
+            prog,
+            dom,
+            implicit_resolution.clamp(2, 300) as usize,
+            ranges,
+            space.samples,
+        ),
         equation::Plot::Surface { progs, vars } => mesh::parametric_surface(
             progs,
             dom,

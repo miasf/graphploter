@@ -41,6 +41,18 @@ impl Expr {
         }
     }
 
+    /// 変数を置き換えた式を作る。`f` が Some を返した変数は、その式に置き換える
+    pub fn substitute(&self, f: &dyn Fn(&str) -> Option<Expr>) -> Expr {
+        match self {
+            Expr::Var(v) => f(v).unwrap_or_else(|| self.clone()),
+            Expr::Num(_) | Expr::Const(_) => self.clone(),
+            Expr::Neg(a) => Expr::Neg(Box::new(a.substitute(f))),
+            Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(a.substitute(f)), Box::new(b.substitute(f))),
+            Expr::Call(g, args) => Expr::Call(*g, args.iter().map(|a| a.substitute(f)).collect()),
+            Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| a.substitute(f)).collect()),
+        }
+    }
+
     /// 式の中で使われている変数名か調べる
     pub fn uses_var(&self, name: &str) -> bool {
         match self {

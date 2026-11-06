@@ -14,6 +14,12 @@
 //!
 //! 表示していない座標と、パラメータは、式の中では定数として扱う。
 //! t, u, v も、組 (…, …) の外ではふつうのパラメータとして使える。
+//!
+//! **範囲で重ねる**: 表示していない座標やパラメータに範囲を付けると、その範囲で動かしたときに
+//! 図形が通る領域を描く（曲面 → 立体、曲線 → 曲面）。
+//!
+//! **回転**: 中心 c と、座標の組 (i, j) ごとの回転角で回転 R を決め、図形上の点 p を
+//! q = R (p − c) + c に動かしてから、断面・射影をとる。式は p = c + Rᵀ (q − c) を代入して q の式にする。
 
 use crate::eval::{Params, Program};
 use crate::parser::{parse, BinOp, Expr, ParseError};
@@ -28,12 +34,73 @@ pub struct Space {
     pub axes: [usize; 3],
     /// 各座標の断面の値（表示していない座標だけが使われる）
     pub slice: Vec<f64>,
+    /// 各座標の「範囲で重ねる」範囲（表示していない座標だけが使われる。None なら断面）
+    pub ranges: Vec<Option<(f64, f64)>>,
+    /// パラメータの「範囲で重ねる」範囲
+    pub param_ranges: Vec<(String, f64, f64)>,
+    /// 範囲を何等分して重ねるか
+    pub samples: usize,
+    /// 回転角（ラジアン）。座標の組 (0,1), (0,2), …, (0,n−1), (1,2), … の順に nC2 個
+    pub rotation: Vec<f64>,
+    /// 回転の中心
+    pub center: Vec<f64>,
 }
 
 impl Space {
     /// ふつうの3次元（x, y, z をそのまま表示）
     pub fn standard() -> Space {
-        Space { dims: 3, axes: [0, 1, 2], slice: vec![0.0; 3] }
+        Space::basic(3, [0, 1, 2], vec![0.0; 3])
+    }
+
+    /// 範囲・回転なしの空間
+    pub fn basic(dims: usize, axes: [usize; 3], slice: Vec<f64>) -> Space {
+        Space {
+            dims,
+            axes,
+            slice,
+            ranges: vec![None; dims],
+            param_ranges: Vec::new(),
+            samples: 24,
+            rotation: vec![0.0; dims * (dims - 1) / 2],
+            center: vec![0.0; dims],
+        }
+    }
+
+    /// 範囲で重ねる名前と範囲（表示していない座標とパラメータ）
+    fn ranged(&self) -> Vec<(String, f64, f64)> {
+        let mut out: Vec<(String, f64, f64)> = (0..self.dims)
+            .filter(|k| !self.axes.contains(k))
+            .filter_map(|k| self.ranges.get(k).copied().flatten().map(|(a, b)| (coord_name(k), a, b)))
+            .collect();
+        out.extend(self.param_ranges.iter().cloned());
+        out
+    }
+
+    /// 回転していれば、回転行列 R（n × n）。回転していなければ None
+    fn rotation_matrix(&self) -> Option<Vec<Vec<f64>>> {
+        if self.rotation.iter().all(|&a| a == 0.0) {
+            return None;
+        }
+        let n = self.dims;
+        let mut m: Vec<Vec<f64>> = (0..n).map(|i| (0..n).map(|j| (i == j) as u8 as f64).collect()).collect();
+        let mut k = 0;
+        for i in 0..n {
+            for j in i + 1..n {
+                let a = self.rotation.get(k).copied().unwrap_or(0.0);
+                k += 1;
+                if a == 0.0 {
+                    continue;
+                }
+                // 組 (i, j) の平面での回転を、これまでの回転の後にかける
+                let (c, s) = (a.cos(), a.sin());
+                let (ri, rj) = (m[i].clone(), m[j].clone());
+                for (col, (pi, pj)) in ri.iter().zip(&rj).enumerate() {
+                    m[i][col] = c * pi - s * pj;
+                    m[j][col] = s * pi + c * pj;
+                }
+            }
+        }
+        Some(m)
     }
 
     /// 表示中の座標の名前（横・奥・縦の順）
@@ -41,13 +108,16 @@ impl Space {
         self.axes.map(coord_name)
     }
 
-    /// 表示していない座標を、断面の値の定数としてパラメータに足す
+    /// 表示していない座標を、断面の値の定数としてパラメータに足す（範囲で重ねるものは除く）
     fn with_hidden(&self, params: &Params) -> Params {
         let mut ps = params.clone();
         for k in 0..self.dims {
-            if !self.axes.contains(&k) {
+            if !self.axes.contains(&k) && self.ranges.get(k).copied().flatten().is_none() {
                 ps.insert(coord_name(k), C::new(self.slice.get(k).copied().unwrap_or(0.0), 0.0));
             }
+        }
+        for (n, _, _) in &self.param_ranges {
+            ps.remove(n);
         }
         ps
     }
@@ -88,6 +158,8 @@ pub enum Plot {
     Explicit { axis: usize, names: [String; 3], prog: Program },
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
     Implicit { prog: Program },
+    /// 範囲で重ねた立体。`prog` の変数は表示中の3つの座標と、範囲で動かす名前（`ranges` の順）。
+    Solid { prog: Program, ranges: Vec<(f64, f64)>, names: Vec<String> },
     /// 媒介変数表示の曲線。`progs` は表示中の3つの座標の成分で、変数は `vars`（1つ）。
     Curve { progs: [Program; 3], vars: Vec<String> },
     /// 媒介変数表示の曲面。`progs` は表示中の3つの座標の成分で、変数は `vars`（2つ）。
@@ -105,6 +177,7 @@ impl Plot {
                 format!("{} = f({}, {})", names[*axis], names[a], names[b])
             }
             Plot::Implicit { .. } => "陰関数".into(),
+            Plot::Solid { .. } => "範囲で重ねた立体".into(),
             Plot::Curve { .. } => "媒介変数表示の曲線".into(),
             Plot::Surface { .. } => "媒介変数表示の曲面".into(),
             Plot::Param { .. } => "パラメータ".into(),
@@ -123,6 +196,12 @@ impl Plot {
     pub fn used_params(&self) -> Vec<String> {
         let progs: Vec<&Program> = match self {
             Plot::Explicit { prog, .. } | Plot::Implicit { prog } => vec![prog],
+            Plot::Solid { prog, names, .. } => {
+                // 範囲で重ねている名前も「使ったもの」に含める（範囲が変わったら計算し直すため）
+                let mut out = names.clone();
+                out.extend(prog.used_params().iter().filter(|n| !names.contains(n)).cloned());
+                return out;
+            }
             Plot::Curve { progs, .. } | Plot::Surface { progs, .. } => progs.iter().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
         };
@@ -176,22 +255,24 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     let shown = space.shown();
     let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
     let consts = space.with_hidden(params);
+    let rot = space.rotation_matrix();
 
     let parts: Vec<&str> = source.split('=').collect();
-    match parts.as_slice() {
+    let (l, r) = match parts.as_slice() {
         [rhs] => {
             let e = parse_at(rhs, 0)?;
             check_dims(&e, space)?;
             if let Expr::Tuple(items) = e {
                 return parametric(items, params, space);
             }
+            // = が無い式は「縦の軸の座標 = 式」
             if e.uses_var(&shown[2]) {
                 return Err(format!(
                     "{} を含む式は「… = 0」のように = を付けてください（陰関数になります）",
                     shown[2]
                 ));
             }
-            explicit(2, &e, &shown, &consts)
+            (Expr::Var(shown[2].clone()), e)
         }
         [lhs, rhs] => {
             let l = parse_at(lhs, 0)?;
@@ -200,16 +281,6 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
             check_dims(&r, space)?;
             if matches!(l, Expr::Tuple(_)) || matches!(r, Expr::Tuple(_)) {
                 return Err("媒介変数表示は = を付けずに (x(t), y(t), z(t)) の形で書いてください".into());
-            }
-            // 片方が表示中の座標1つだけで、もう片方にその座標が無ければ陽関数
-            for (axis, name) in shown.iter().enumerate() {
-                let single = |e: &Expr| matches!(e, Expr::Var(v) if v == name);
-                if single(&l) && !r.uses_var(name) {
-                    return explicit(axis, &r, &shown, &consts);
-                }
-                if single(&r) && !l.uses_var(name) {
-                    return explicit(axis, &l, &shown, &consts);
-                }
             }
             // 左辺が座標以外の名前で、右辺に座標が無ければパラメータの定義
             if let Expr::Var(name) = &l {
@@ -223,14 +294,70 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
                     return param(name, &r, params);
                 }
             }
-            if !shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
-                return Err(format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")));
-            }
-            let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
-            Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)? })
+            (l, r)
         }
-        _ => Err("= は1つだけにしてください".into()),
+        _ => return Err("= は1つだけにしてください".into()),
+    };
+
+    // 回転していれば、元の座標 p を回転後の座標 q の式に置き換える
+    let (l, r) = match &rot {
+        Some(m) => (rotate_coords(&l, m, space), rotate_coords(&r, m, space)),
+        None => (l, r),
+    };
+
+    // 範囲で重ねる名前を使っていれば、立体
+    let ranged: Vec<(String, f64, f64)> =
+        space.ranged().into_iter().filter(|(n, _, _)| l.uses_var(n) || r.uses_var(n)).collect();
+    if !ranged.is_empty() {
+        let mut vars: Vec<&str> = shown_refs.to_vec();
+        vars.extend(ranged.iter().map(|(n, _, _)| n.as_str()));
+        let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
+        let prog = Program::compile_with(&f, &vars, &consts)?;
+        return Ok(Plot::Solid {
+            prog,
+            ranges: ranged.iter().map(|&(_, a, b)| (a, b)).collect(),
+            names: ranged.into_iter().map(|(n, _, _)| n).collect(),
+        });
     }
+
+    // 片方が表示中の座標1つだけで、もう片方にその座標が無ければ陽関数（回転すると陰関数になる）
+    // 左辺を優先して調べる（z = x なら「z = f(x, y)」）
+    for (one, other) in [(&l, &r), (&r, &l)] {
+        for (axis, name) in shown.iter().enumerate() {
+            if matches!(one, Expr::Var(v) if v == name) && !other.uses_var(name) {
+                return explicit(axis, other, &shown, &consts);
+            }
+        }
+    }
+    if !shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
+        return Err(format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")));
+    }
+    let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
+    Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)? })
+}
+
+/// 1次式 c₀ + Σ cⱼ·eⱼ を作る（係数がほぼ 0 の項は省く）
+fn linear(c0: f64, terms: Vec<(f64, Expr)>) -> Expr {
+    let mut e = Expr::Num(c0);
+    for (c, t) in terms {
+        if c.abs() < 1e-14 {
+            continue;
+        }
+        let term = if (c - 1.0).abs() < 1e-14 { t } else { Expr::Bin(BinOp::Mul, Box::new(Expr::Num(c)), Box::new(t)) };
+        e = Expr::Bin(BinOp::Add, Box::new(e), Box::new(term));
+    }
+    e
+}
+
+/// 式の中の座標 p_k を、回転後の座標 q で表した p_k = c_k + Σ_j R[j][k] (q_j − c_j) に置き換える
+fn rotate_coords(e: &Expr, m: &[Vec<f64>], space: &Space) -> Expr {
+    let n = space.dims;
+    let c = &space.center;
+    e.substitute(&|name: &str| {
+        let k = coord_index(name).filter(|&k| k < n)?;
+        let c0 = c[k] - (0..n).map(|j| m[j][k] * c[j]).sum::<f64>();
+        Some(linear(c0, (0..n).map(|j| (m[j][k], Expr::Var(coord_name(j)))).collect()))
+    })
 }
 
 /// パラメータの定義 name = rhs。右辺の値を計算する
@@ -290,13 +417,49 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
         return Err("媒介変数が3つ以上の図形（立体）はまだ描けません".into());
     }
 
-    let var_refs: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
-    let mut progs = Vec::with_capacity(items.len());
-    for e in &items {
-        // 組の中の t, u, v は媒介変数なので、同じ名前のパラメータより優先される
-        progs.push(Program::compile_with(e, &var_refs, params)?);
+    // 範囲で重ねるパラメータを使っていれば、それも媒介変数として動かす（曲線 → 曲面）
+    let ranged: Vec<String> = space
+        .param_ranges
+        .iter()
+        .map(|(n, _, _)| n.clone())
+        .filter(|n| !vars.contains(n) && items.iter().any(|e| e.uses_var(n)))
+        .collect();
+    if vars.len() + ranged.len() > 2 {
+        return Err("曲面を範囲で重ねた立体はまだ描けません".into());
     }
-    let shown: [Program; 3] = space.axes.map(|k| progs[k].clone());
+    vars.extend(ranged);
+    let mut consts = params.clone();
+    for (n, _, _) in &space.param_ranges {
+        consts.remove(n);
+    }
+
+    // 表示する3つの座標の成分を作る（回転していれば q = R (p − c) + c）
+    let rot = space.rotation_matrix();
+    let shown_exprs: Vec<Expr> = space
+        .axes
+        .iter()
+        .map(|&a| match &rot {
+            None => items[a].clone(),
+            Some(m) => {
+                let c = &space.center;
+                let n = space.dims;
+                let c0 = c[a] - (0..n).map(|k| m[a][k] * c[k]).sum::<f64>();
+                linear(c0, (0..n).map(|k| (m[a][k], items[k].clone())).collect())
+            }
+        })
+        .collect();
+
+    let var_refs: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
+    for e in &items {
+        // 表示しない成分も、誤りが無いかだけ確かめる
+        Program::compile_with(e, &var_refs, &consts)?;
+    }
+    let mut progs = Vec::with_capacity(3);
+    for e in &shown_exprs {
+        // 組の中の t, u, v は媒介変数なので、同じ名前のパラメータより優先される
+        progs.push(Program::compile_with(e, &var_refs, &consts)?);
+    }
+    let shown: [Program; 3] = progs.try_into().map_err(|_| "内部エラー".to_string())?;
     Ok(if vars.len() == 2 {
         Plot::Surface { progs: shown, vars }
     } else {
@@ -336,7 +499,7 @@ mod tests {
     }
 
     fn space4(axes: [usize; 3], w: f64) -> Space {
-        Space { dims: 4, axes, slice: vec![0.0, 0.0, 0.0, w] }
+        Space::basic(4, axes, vec![0.0, 0.0, 0.0, w])
     }
 
     #[test]
@@ -429,8 +592,70 @@ mod tests {
         assert!(compile_with("(t_1, t_2, t_3, 0)", &ps, &sp).err().unwrap().contains("3つ以上"));
         assert!(compile_with("(1, 2, 3, 4, 5)", &ps, &sp).err().unwrap().contains("次元を 5"));
         // 5次元目は w₂
-        let sp5 = Space { dims: 5, axes: [0, 3, 4], slice: vec![0.5; 5] };
+        let sp5 = Space::basic(5, [0, 3, 4], vec![0.5; 5]);
         assert_eq!(compile_with("w_2 = x + w", &ps, &sp5).unwrap().kind_label(), "w2 = f(x, w)");
+    }
+
+    #[test]
+    fn ranges_make_solids() {
+        let ps = Params::new();
+        // w を範囲で重ねる: 超球の断面（球）を重ねた立体
+        let mut sp = space4([0, 1, 2], 0.0);
+        sp.ranges[3] = Some((-1.0, 1.0));
+        let p = compile_with("x^2 + y^2 + z^2 + w^2 = 4", &ps, &sp).unwrap();
+        assert_eq!(p.kind_label(), "範囲で重ねた立体");
+        // w を使わない式は、ふつうの曲面のまま
+        assert_eq!(compile_with("z = x", &ps, &sp).unwrap().kind_label(), "z = f(x, y)");
+        // パラメータを範囲で重ねる: 陽関数 → 立体、曲線 → 曲面
+        let mut sp = Space::standard();
+        sp.param_ranges.push(("a".into(), 0.0, 2.0));
+        assert_eq!(compile_with("z = a x^2", &ps, &sp).unwrap().kind_label(), "範囲で重ねた立体");
+        let p = compile_with("(cos t, sin t, a)", &ps, &sp).unwrap();
+        assert_eq!(p.kind_label(), "媒介変数表示の曲面");
+        assert_eq!(p.param_vars(), vec!["t", "a"]);
+        assert!(compile_with("(u, v, a)", &ps, &sp).err().unwrap().contains("まだ"));
+    }
+
+    #[test]
+    fn rotation() {
+        use crate::eval::Program;
+        let ps = Params::new();
+        // xy 平面で 90° 回すと、点 (1, 0, 0) は (0, 1, 0) に移る
+        let mut sp = Space::standard();
+        sp.rotation[0] = std::f64::consts::FRAC_PI_2;
+        let m = sp.rotation_matrix().unwrap();
+        assert!((m[0][0]).abs() < 1e-12 && (m[1][0] - 1.0).abs() < 1e-12);
+        // 平面 x = 1 は、回すと平面 y = 1 になる（陰関数として描かれる）
+        let p = compile_with("x = 1", &ps, &sp).unwrap();
+        let prog: &Program = match &p {
+            Plot::Implicit { prog } => prog,
+            _ => panic!("回転すると陰関数になる"),
+        };
+        let mut out = [C::new(0.0, 0.0); 2];
+        // (5, 1, 0) は y = 1 の上、(1, 5, 0) は上にない
+        prog.eval_batch(&[&[5.0, 1.0], &[1.0, 5.0], &[0.0, 0.0]], &mut out);
+        assert!(out[0].norm() < 1e-12 && out[1].norm() > 1.0);
+        // 中心 (1, 0, 0) の周りで 90° 回すと、平面 x = 1 は中心を通るので y = 0 になる
+        sp.center = vec![1.0, 0.0, 0.0];
+        let p = compile_with("x = 1", &ps, &sp).unwrap();
+        if let Plot::Implicit { prog } = &p {
+            prog.eval_batch(&[&[7.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]], &mut out);
+            assert!(out[0].norm() < 1e-12);
+        }
+        // 媒介変数表示も回る: (t, 0, 0) を xy で 90° 回すと (0, t, 0)
+        let mut sp = Space::standard();
+        sp.rotation[0] = std::f64::consts::FRAC_PI_2;
+        if let Plot::Curve { progs, .. } = compile_with("(t, 0, 0)", &ps, &sp).unwrap() {
+            let mut o = [C::new(0.0, 0.0)];
+            progs[0].eval_batch(&[&[2.0]], &mut o);
+            assert!(o[0].norm() < 1e-12);
+            progs[1].eval_batch(&[&[2.0]], &mut o);
+            assert!((o[0].re - 2.0).abs() < 1e-12);
+        } else {
+            panic!()
+        }
+        // 4次元: 回転の数は 4C2 = 6
+        assert_eq!(Space::basic(4, [0, 1, 2], vec![0.0; 4]).rotation.len(), 6);
     }
 
     #[test]

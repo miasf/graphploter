@@ -49,6 +49,14 @@ export interface Space {
   /** 断面のスライダーの範囲 */
   sliceMin: number
   sliceMax: number
+  /** 各座標を「範囲で重ねる」なら [最小, 最大]、断面なら null（表示していない座標だけが使われる） */
+  ranges: ([number, number] | null)[]
+  /** 範囲を何等分して重ねるか */
+  samples: number
+  /** 回転角（度）。座標の組 (0,1), (0,2), …, (0,n−1), (1,2), … の順に nC2 個 */
+  rotation: number[]
+  /** 回転の中心 */
+  center: number[]
 }
 
 /** パラメータ（スライダーで値を決める文字）の値。複素数も扱えるよう実部と虚部を持つ */
@@ -63,6 +71,8 @@ export interface SliderStyle {
   max: number
   /** 複素数モード（複素平面の上で点を動かして値を決める） */
   complex: boolean
+  /** 範囲で重ねる（min〜max で動かしたときに図形が通る領域を描く） */
+  stack: boolean
 }
 
 /** 式の一覧の1行 */
@@ -119,7 +129,19 @@ export interface PlotRequest {
   ranges: ParamRanges
   /** ほかの行で定義されているパラメータ */
   params: Record<string, ParamValue>
-  space: { dims: number; axes: number[]; slice: number[] }
+  space: {
+    dims: number
+    axes: number[]
+    slice: number[]
+    /** 各座標の範囲 [最小, 最大, …]（重ねない座標は NaN） */
+    ranges: number[]
+    samples: number
+    /** 回転角（ラジアン） */
+    rotation: number[]
+    center: number[]
+  }
+  /** 範囲で重ねるパラメータ → [最小, 最大] */
+  stacks: Record<string, [number, number]>
 }
 
 export type PlotResponse =

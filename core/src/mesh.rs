@@ -153,6 +153,17 @@ const EDGES: [[usize; 2]; 12] = [
 
 /// 陰関数の曲面 F(x, y, z) = 0 を作る。`prog` の変数は x, y, z。
 pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
+    implicit_solid(prog, dom, n, &[], 0)
+}
+
+/// 範囲で重ねた立体: 変数 r₁, r₂, … をそれぞれ `ranges` の範囲で動かしたとき、
+/// 曲面 F(x, y, z, r₁, r₂, …) = 0 が通る領域の境界面を作る。
+/// `prog` の変数は x, y, z, r₁, r₂, …。`ranges` が空なら、ふつうの陰関数の曲面。
+///
+/// F が r について連続なら、点 p が領域に入る ⇔ min_r F(p, r) ≤ 0 ≤ max_r F(p, r)。
+/// そこで G(p) = max(min_r F, −max_r F) を作ると、領域の内側で G ≤ 0 になるので、G = 0 の面を作ればよい。
+/// min, max は、範囲をそれぞれ `samples` 等分した点での値から求める（近似）。
+pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize) -> Mesh {
     // 表示範囲の外側に1マスずつ広げて計算する。Surface Nets 法は範囲の端で曲面が
     // ギザギザに途切れるので、少しはみ出して作っておき、端は描画側で真っ直ぐ切り落とす。
     let n = n.max(2);
@@ -179,11 +190,40 @@ pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
         }
         let mut zs = vec![0.0; m * m];
         let mut out = vec![C::new(0.0, 0.0); m * m];
+        let combos = sample_combos(ranges, samples);
+        let mut extra = vec![vec![0.0; m * m]; ranges.len()];
+        let mut lo = vec![f64::INFINITY; m * m];
+        let mut hi = vec![f64::NEG_INFINITY; m * m];
         for k in 0..m {
             zs.fill(dom.at(2, k as f64, n));
-            prog.eval_batch(&[&xs, &ys, &zs], &mut out);
-            for (dst, v) in f[k * m * m..(k + 1) * m * m].iter_mut().zip(&out) {
-                *dst = as_real(*v) as f32;
+            let layer = &mut f[k * m * m..(k + 1) * m * m];
+            if ranges.is_empty() {
+                prog.eval_batch(&[&xs, &ys, &zs], &mut out);
+                for (dst, v) in layer.iter_mut().zip(&out) {
+                    *dst = as_real(*v) as f32;
+                }
+                continue;
+            }
+            // 範囲の各点で F を計算して、最小値と最大値をとる
+            lo.fill(f64::INFINITY);
+            hi.fill(f64::NEG_INFINITY);
+            for combo in &combos {
+                for (arr, &v) in extra.iter_mut().zip(combo) {
+                    arr.fill(v);
+                }
+                let mut inputs: Vec<&[f64]> = vec![&xs, &ys, &zs];
+                inputs.extend(extra.iter().map(|a| a.as_slice()));
+                prog.eval_batch(&inputs, &mut out);
+                for p in 0..m * m {
+                    let v = as_real(out[p]);
+                    if v.is_finite() {
+                        lo[p] = lo[p].min(v);
+                        hi[p] = hi[p].max(v);
+                    }
+                }
+            }
+            for p in 0..m * m {
+                layer[p] = if lo[p].is_finite() { lo[p].max(-hi[p]) as f32 } else { f32::NAN };
             }
         }
     }
@@ -266,6 +306,30 @@ pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
 
     compute_normals(&mut mesh);
     mesh
+}
+
+/// 範囲 `ranges` の中から、計算に使う点の組を作る。各範囲を等分し、組の総数は 4096 個まで
+fn sample_combos(ranges: &[(f64, f64)], samples: usize) -> Vec<Vec<f64>> {
+    if ranges.is_empty() {
+        return vec![vec![]];
+    }
+    let k = ranges.len() as f64;
+    let per = ((samples.max(2) as f64).min(4096f64.powf(1.0 / k))).floor().max(2.0) as usize;
+    let mut combos: Vec<Vec<f64>> = vec![vec![]];
+    for &(a, b) in ranges {
+        let vals: Vec<f64> = (0..per).map(|s| a + (b - a) * s as f64 / (per - 1) as f64).collect();
+        combos = combos
+            .into_iter()
+            .flat_map(|c| {
+                vals.iter().map(move |&v| {
+                    let mut c2 = c.clone();
+                    c2.push(v);
+                    c2
+                })
+            })
+            .collect();
+    }
+    combos
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +609,37 @@ mod tests {
         let p = progs3(["t", "tan(t)", "0"], &["t"]);
         let pts = parametric_curve(&p, (-3.0, 3.0), 50, 1e-3);
         assert!(pts.iter().any(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn solid_by_range() {
+        // 球 x² + y² + z² = r² を 0.3 ≤ r ≤ 0.7 で重ねると、内側に穴のある厚い球殻になる。
+        // 境界は半径 0.3 と 0.7 の2つの球面
+        let p = prog("x^2 + y^2 + z^2 - r^2", &["x", "y", "z", "r"]);
+        let m = implicit_solid(&p, dom(), 40, &[(0.3, 0.7)], 16);
+        assert!(!m.indices.is_empty());
+        let (mut inner, mut outer) = (0, 0);
+        for (q, nv) in m.positions.chunks_exact(3).zip(m.normals.chunks_exact(3)) {
+            let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            let dot = (q[0] * nv[0] + q[1] * nv[1] + q[2] * nv[2]) / len;
+            if (len - 0.3).abs() < 0.04 {
+                inner += 1;
+                assert!(dot < 0.0, "内側の面の法線は中心向き（立体の外向き）");
+            } else if (len - 0.7).abs() < 0.04 {
+                outer += 1;
+                assert!(dot > 0.0, "外側の面の法線は外向き");
+            } else {
+                panic!("境界面以外に頂点がある: 半径 {len}");
+            }
+        }
+        assert!(inner > 0 && outer > 0);
+    }
+
+    #[test]
+    fn combos() {
+        assert_eq!(sample_combos(&[], 10), vec![Vec::<f64>::new()]);
+        assert_eq!(sample_combos(&[(0.0, 1.0)], 3), vec![vec![0.0], vec![0.5], vec![1.0]]);
+        assert_eq!(sample_combos(&[(0.0, 1.0), (0.0, 1.0)], 100).len(), 64 * 64);
     }
 
     /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`

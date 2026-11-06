@@ -20,7 +20,7 @@ function range(name: string, [lo, hi]: [string, string]): [number, number] {
 }
 
 self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
-  const { requestId, source, domain: d, resolution, implicitResolution, ranges, params, space } = ev.data
+  const { requestId, source, domain: d, resolution, implicitResolution, ranges, params, space, stacks } = ev.data
   await ready
 
   let res: PlotResponse
@@ -40,13 +40,19 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
       space.dims,
       new Uint32Array(space.axes),
       new Float64Array(space.slice),
+      new Float64Array(space.ranges),
+      Object.keys(stacks).join(','),
+      new Float64Array(Object.values(stacks).flat()),
+      space.samples,
+      new Float64Array(space.rotation),
+      new Float64Array(space.center),
     )
     const vars = r.params.split(',').filter((s) => s !== '')
     // 曲面の格子線を引くための、媒介変数の範囲の長さ
     const span = (k: number) => {
       const v = vars[k]
       if (v === undefined) return 2 * Math.PI
-      const rg = v in ranges ? rangeValues[rangeNames.indexOf(v)] : [0, 2 * Math.PI]
+      const rg = v in ranges ? rangeValues[rangeNames.indexOf(v)] : (stacks[v] ?? [0, 2 * Math.PI])
       return rg[1] - rg[0]
     }
     const mesh = {

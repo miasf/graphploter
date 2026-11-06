@@ -22,6 +22,7 @@ export function requestPlot(
   ranges: ParamRanges,
   params: Record<string, ParamValue>,
   space: Space,
+  stacks: Record<string, [number, number]>,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -33,7 +34,16 @@ export function requestPlot(
     // Svelte の $state（Proxy）は Worker に送れないので、ふつうの配列にコピーする
     ranges: Object.fromEntries(Object.entries(ranges).map(([k, [a, b]]) => [k, [a, b]])),
     params: Object.fromEntries(Object.entries(params).map(([k, p]) => [k, { re: p.re, im: p.im }])),
-    space: { dims: space.dims, axes: [...space.axes], slice: [...space.slice] },
+    space: {
+      dims: space.dims,
+      axes: [...space.axes],
+      slice: [...space.slice],
+      ranges: space.ranges.flatMap((r) => (r ? [r[0], r[1]] : [NaN, NaN])),
+      samples: space.samples,
+      rotation: space.rotation.map((deg) => (deg * Math.PI) / 180),
+      center: [...space.center],
+    },
+    stacks: Object.fromEntries(Object.entries(stacks).map(([k, [a, b]]) => [k, [a, b]])),
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)
