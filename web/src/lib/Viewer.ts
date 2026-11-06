@@ -7,7 +7,6 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
-import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import type { Domain, MeshData, PlotStyle } from './types'
 
@@ -24,22 +23,55 @@ function fmt(v: number): string {
   return String(Number(v.toPrecision(10)))
 }
 
-function label(text: string, className: string, pos: THREE.Vector3): CSS2DObject {
-  const el = document.createElement('div')
-  el.className = className
-  el.textContent = text
-  const obj = new CSS2DObject(el)
-  obj.position.copy(pos)
-  return obj
+/**
+ * 目盛りの数字・軸の名前の文字。文字を描いた小さな画像（スプライト）として WebGL で描く。
+ * （HTML の要素にすると、グラフを回すたびに全部の位置を書き換えることになって重い）
+ * 画面上の大きさを一定にするため、`w`, `h`（CSS ピクセル）から毎回の描画前に大きさを決める。
+ */
+interface TextLabel {
+  sprite: THREE.Sprite
+  w: number
+  h: number
+}
+
+function makeLabel(text: string, font: string, color: string, pos: THREE.Vector3): TextLabel {
+  const dpr = 2 // くっきり見えるよう、2倍の細かさで描いておく
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  ctx.font = font
+  const size = Number(/(\d+)px/.exec(font)?.[1] ?? 12)
+  const w = Math.ceil(ctx.measureText(text).width) + 4
+  const h = Math.ceil(size * 1.4)
+  canvas.width = w * dpr
+  canvas.height = h * dpr
+  ctx.scale(dpr, dpr)
+  ctx.font = font
+  ctx.fillStyle = color
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(text, w / 2, h / 2)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  const mat = new THREE.SpriteMaterial({ map: tex, sizeAttenuation: false, depthTest: false, depthWrite: false })
+  const sprite = new THREE.Sprite(mat)
+  sprite.position.copy(pos)
+  sprite.renderOrder = 10 // いつも手前に描く
+  return { sprite, w, h }
 }
 
 interface Theme {
   background: number
   box: number
   grid: number
+  /** 目盛りの数字の色 */
+  tick: string
+  /** 軸の名前の色 */
+  text: string
 }
-const LIGHT: Theme = { background: 0xf7f7f4, box: 0x9a9aa2, grid: 0xd6d6d2 }
-const DARK: Theme = { background: 0x1b1c20, box: 0x6a6b72, grid: 0x34353b }
+const LIGHT: Theme = { background: 0xf7f7f4, box: 0x9a9aa2, grid: 0xd6d6d2, tick: '#6b6b75', text: '#1f1f24' }
+const DARK: Theme = { background: 0x1b1c20, box: 0x6a6b72, grid: 0x34353b, tick: '#9a9aa3', text: '#e8e8ea' }
+const TICK_FONT = "11px ui-monospace, 'SF Mono', Consolas, monospace"
+const AXIS_FONT = "italic 600 15px 'Times New Roman', serif"
 
 /** 1つの式の描画物 */
 type PlotObject =
@@ -54,7 +86,8 @@ type PlotObject =
 
 export class Viewer {
   private renderer: THREE.WebGLRenderer
-  private labelRenderer: CSS2DRenderer
+  /** 目盛りの数字・軸の名前 */
+  private labels: TextLabel[] = []
   private scene = new THREE.Scene()
   private camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000)
   private controls: OrbitControls
@@ -72,17 +105,29 @@ export class Viewer {
   private resizeObserver: ResizeObserver
   private stopped = false
 
+  // ---- 描画を軽くするための状態 ----
+  /** 描き直しが必要か（何も変わっていなければ描かない） */
+  private dirty = true
+  /** ふつうのときの画素密度（スマホの高い密度は 2 倍までに抑える） */
+  private basePixelRatio = Math.min(window.devicePixelRatio, 2)
+  /** 指やマウスでグラフを動かしている最中か */
+  private interacting = false
+  /** 動かしている最中は画素密度を下げて描く */
+  private lowRes = false
+  /** カメラが（ほぼ）止まってから何フレームたったか */
+  private stillFrames = 0
+  /** 前のフレームのカメラの位置と向き（止まったかどうかの判定に使う） */
+  private lastCamPos = new THREE.Vector3()
+  private lastCamQuat = new THREE.Quaternion()
+
   constructor(private container: HTMLElement) {
     // 描画の土台
     this.renderer = new THREE.WebGLRenderer({ antialias: true })
-    this.renderer.setPixelRatio(window.devicePixelRatio)
+    this.renderer.setPixelRatio(this.basePixelRatio)
     this.renderer.localClippingEnabled = true // 表示範囲の外を切り落とすため
     container.appendChild(this.renderer.domElement)
 
     // 文字（目盛りの数字）用の重ね合わせ
-    this.labelRenderer = new CSS2DRenderer()
-    this.labelRenderer.domElement.className = 'label-layer'
-    container.appendChild(this.labelRenderer.domElement)
 
     this.theme = LIGHT
     this.scene.background = new THREE.Color(this.theme.background)
@@ -91,6 +136,13 @@ export class Viewer {
     this.camera.up.set(0, 0, 1)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
+    this.controls.dampingFactor = 0.1 // 指を離した後の慣性の回転を、少し早めに止める
+    // グラフを動かし始めたら画素密度を下げ、止まったら元に戻す（動いている間は細部が見えにくいので、軽さを優先）
+    this.controls.addEventListener('start', () => {
+      this.interacting = true
+      this.setLowRes(true)
+    })
+    this.controls.addEventListener('end', () => (this.interacting = false))
 
     // 照明: 空と地面からの柔らかい光 + カメラと一緒に動く光（どの向きから見ても明るい）
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8888aa, 1.4))
@@ -114,13 +166,25 @@ export class Viewer {
     this.container.replaceChildren()
   }
 
+  /** 次のフレームで描き直す */
+  invalidate() {
+    this.dirty = true
+  }
+
+  private setLowRes(on: boolean) {
+    if (this.lowRes === on) return
+    this.lowRes = on
+    this.renderer.setPixelRatio(on ? Math.min(this.basePixelRatio, 1) : this.basePixelRatio)
+    this.dirty = true
+  }
+
   private resize() {
     const w = this.container.clientWidth
     const h = this.container.clientHeight
     if (w === 0 || h === 0) return
+    this.dirty = true
     this.camera.aspect = w / h
     this.renderer.setSize(w, h)
-    this.labelRenderer.setSize(w, h)
     for (const p of this.plots.values()) {
       if (p.kind === 'curve') (p.line.material as LineMaterial).resolution.set(w, h)
     }
@@ -146,15 +210,41 @@ export class Viewer {
       this.camera.clearViewOffset()
     }
     this.camera.updateProjectionMatrix()
+    this.dirty = true
   }
 
   private loop = () => {
     if (this.stopped) return
     requestAnimationFrame(this.loop)
-    this.controls.update()
+    // カメラが動いたか（慣性で動き続けている間も true）
+    if (this.controls.update()) this.dirty = true
+    // 目に見えるほど動いたか。慣性の終わりのごくわずかな動きは「止まった」とみなす
+    const dist = this.camera.position.distanceTo(this.controls.target)
+    const visible =
+      this.camera.position.distanceTo(this.lastCamPos) > dist * 3e-4 ||
+      this.camera.quaternion.angleTo(this.lastCamQuat) > 3e-4
+    this.lastCamPos.copy(this.camera.position)
+    this.lastCamQuat.copy(this.camera.quaternion)
+    if (visible) {
+      this.stillFrames = 0
+    } else if (++this.stillFrames > 4 && !this.interacting) {
+      this.setLowRes(false) // 止まったら、元の画素密度で描き直す
+    }
+    // 何も変わっていなければ描かない（止まっているときに電池を使わない）
+    if (!this.dirty) return
+    this.dirty = false
     this.updateClipRange()
+    this.updateLabelSizes()
     this.renderer.render(this.scene, this.camera)
-    this.labelRenderer.render(this.scene, this.camera)
+  }
+
+  /**
+   * 文字の画面上の大きさを、CSS ピクセルで一定にする。
+   * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
+   */
+  private updateLabelSizes() {
+    const k = 2 / (this.container.clientHeight * this.camera.projectionMatrix.elements[5])
+    for (const l of this.labels) l.sprite.scale.set(l.w * k, l.h * k, 1)
   }
 
   /** 表示範囲の対角線の長さ */
@@ -181,6 +271,7 @@ export class Viewer {
    * 見た目の大きさが変わらないよう、視野角を変えると同時にカメラを前後に動かす。
    */
   setPerspective(strength: number) {
+    this.dirty = true
     const tanNew = Math.max(strength, 0.004) // ちょうど 0 は計算できないので、ほぼ平行投影で代用
     const target = this.controls.target
     const offset = this.camera.position.clone().sub(target)
@@ -194,12 +285,14 @@ export class Viewer {
 
   /** 軸の名前を変える */
   setAxisNames(names: string[]) {
+    this.dirty = true
     this.axisNames = [...names]
     if (this.domain) this.buildFrame(this.domain)
   }
 
   /** 背景の明暗を切り替える */
   setDark(dark: boolean) {
+    this.dirty = true
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
     if (this.domain) this.buildFrame(this.domain)
@@ -207,6 +300,7 @@ export class Viewer {
 
   /** 表示範囲を設定し、軸・目盛り・枠を作り直す */
   setDomain(d: Domain, resetCamera = false) {
+    this.dirty = true
     const first = this.domain === null
     this.domain = { ...d }
 
@@ -232,6 +326,7 @@ export class Viewer {
 
   /** カメラを斜め上からの見やすい位置に戻す */
   resetCamera() {
+    this.dirty = true
     const d = this.domain
     if (!d) return
     const center = new THREE.Vector3((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
@@ -251,7 +346,20 @@ export class Viewer {
         ;(o.material as THREE.Material).dispose()
       }
     })
+    for (const l of this.labels) {
+      l.sprite.material.map?.dispose()
+      l.sprite.material.dispose()
+    }
+    this.labels = []
     this.frame.clear()
+    const label = (text: string, kind: 'tick' | 'axis-name', pos: THREE.Vector3) => {
+      const l =
+        kind === 'tick'
+          ? makeLabel(text, TICK_FONT, this.theme.tick, pos)
+          : makeLabel(text, AXIS_FONT, this.theme.text, pos)
+      this.labels.push(l)
+      return l.sprite
+    }
 
     const t = this.theme
     const lo = new THREE.Vector3(d.xmin, d.ymin, d.zmin)
@@ -310,48 +418,71 @@ export class Viewer {
 
   /** 式 id の曲面・曲線を設定（作り直し） */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
-    this.removePlot(id)
-    if (mesh.curve) {
-      this.setCurve(id, mesh.positions)
+    const old = this.plots.get(id)
+    const kind = mesh.curve ? 'curve' : 'surface'
+    // 同じ種類なら、材質（シェーダー）はそのまま使い、形のデータだけ差し替える。
+    // 回転を再生しているときなど、毎フレーム形が変わるときに軽くなる
+    if (old && old.kind === kind) {
+      if (old.kind === 'curve') {
+        old.line.geometry.dispose()
+        old.line.geometry = this.curveGeometry(mesh.positions)
+      } else {
+        const m = old.group.children[0] as THREE.Mesh
+        m.geometry.dispose()
+        m.geometry = this.surfaceGeometry(mesh)
+        old.uvSpan = mesh.params.length === 2 ? mesh.paramSpan : null
+      }
     } else {
-      this.setSurface(id, mesh)
+      this.removePlot(id)
+      if (mesh.curve) this.setCurve(id, mesh.positions)
+      else this.setSurface(id, mesh)
     }
     this.setStyle(id, style)
   }
 
-  private setSurface(id: number, mesh: MeshData) {
+  private surfaceGeometry(mesh: MeshData): THREE.BufferGeometry {
     const geo = new THREE.BufferGeometry()
     const pos = new THREE.BufferAttribute(mesh.positions, 3)
     geo.setAttribute('position', pos)
     geo.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3))
     geo.setAttribute('gridCoord', mesh.gridCoords.length > 0 ? new THREE.BufferAttribute(mesh.gridCoords, 3) : pos)
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
+    return geo
+  }
 
-    // 表面と裏面で色の明るさを変えて、どちら側を見ているか分かるようにする
+  private setSurface(id: number, mesh: MeshData) {
+    // 表と裏は1つの材質で描く（裏面はシェーダーで暗くする）
     const grid = createGridUniforms()
-    const front = createSurfaceMaterial(THREE.FrontSide, grid, this.clipPlanes)
-    const back = createSurfaceMaterial(THREE.BackSide, grid, this.clipPlanes)
     const group = new THREE.Group()
-    group.add(new THREE.Mesh(geo, front), new THREE.Mesh(geo, back))
+    group.add(new THREE.Mesh(this.surfaceGeometry(mesh), createSurfaceMaterial(grid, this.clipPlanes)))
     const uvSpan = mesh.params.length === 2 ? mesh.paramSpan : null
     this.plots.set(id, { kind: 'surface', group, grid, uvSpan })
     this.scene.add(group)
   }
 
-  /** 曲線。点の列を、隣り合う2点ずつの線分にする（NaN の所は線を切る） */
-  private setCurve(id: number, pts: Float32Array) {
-    const seg: number[] = []
+  /** 曲線の形。点の列を、隣り合う2点ずつの線分にする（NaN の所は線を切る） */
+  private curveGeometry(pts: Float32Array): LineSegmentsGeometry {
+    // 線分の数を先に数えて、配列を1回で確保する（毎フレーム作り直すときに軽いように）
     const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
+    let n = 0
+    for (let k = 0; k + 5 < pts.length; k += 3) if (ok(k) && ok(k + 3)) n++
+    const seg = new Float32Array(n * 6)
+    let o = 0
     for (let k = 0; k + 5 < pts.length; k += 3) {
       if (ok(k) && ok(k + 3)) {
-        seg.push(pts[k], pts[k + 1], pts[k + 2], pts[k + 3], pts[k + 4], pts[k + 5])
+        seg.set(pts.subarray(k, k + 6), o)
+        o += 6
       }
     }
     const geo = new LineSegmentsGeometry()
-    if (seg.length > 0) geo.setPositions(seg)
+    if (n > 0) geo.setPositions(seg)
+    return geo
+  }
+
+  private setCurve(id: number, pts: Float32Array) {
     const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
     mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
-    const line = new LineSegments2(geo, mat)
+    const line = new LineSegments2(this.curveGeometry(pts), mat)
     this.plots.set(id, { kind: 'curve', line })
     this.scene.add(line)
   }
@@ -360,6 +491,7 @@ export class Viewer {
   setStyle(id: number, style: PlotStyle) {
     const p = this.plots.get(id)
     if (!p) return
+    this.dirty = true
     const c = new THREE.Color(style.color)
 
     if (p.kind === 'curve') {
@@ -371,13 +503,12 @@ export class Viewer {
     }
 
     p.group.visible = style.visible
-    const [front, back] = p.group.children as THREE.Mesh[]
-    ;(front.material as THREE.MeshStandardMaterial).color.copy(c)
-    ;(back.material as THREE.MeshStandardMaterial).color.copy(c).multiplyScalar(0.55)
+    const [mesh0] = p.group.children as THREE.Mesh[]
+    ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
 
     // 面の不透明度。1 未満なら半透明として描き、奥の面や線も透けて見えるようにする
     const opacity = Math.min(1, Math.max(0, style.opacity))
-    for (const mesh of [front, back]) {
+    for (const mesh of [mesh0]) {
       const m = mesh.material as THREE.MeshStandardMaterial
       const transparent = opacity < 1
       if (m.transparent !== transparent) {
@@ -409,15 +540,15 @@ export class Viewer {
   removePlot(id: number) {
     const p = this.plots.get(id)
     if (!p) return
+    this.dirty = true
     if (p.kind === 'curve') {
       p.line.geometry.dispose()
       ;(p.line.material as THREE.Material).dispose()
       this.scene.remove(p.line)
     } else {
-      const [front, back] = p.group.children as THREE.Mesh[]
-      front.geometry.dispose()
-      ;(front.material as THREE.Material).dispose()
-      ;(back.material as THREE.Material).dispose()
+      const [mesh] = p.group.children as THREE.Mesh[]
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
       this.scene.remove(p.group)
     }
     this.plots.delete(id)

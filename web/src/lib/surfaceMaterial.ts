@@ -56,6 +56,8 @@ float gridLine(float coord, float spacing) {
 
 const FRAGMENT_APPLY = /* glsl */ `
 {
+  // 裏面は暗くして、どちら側を見ているか分かるようにする（表と裏を1回で描けるので、メッシュが1つで済む）
+  if (!gl_FrontFacing) diffuseColor.rgb *= 0.55;
   float g = max(max(gridLine(vGridPos.x, uGridSpacing.x),
                     gridLine(vGridPos.y, uGridSpacing.y)),
                 gridLine(vGridPos.z, uGridSpacing.z));
@@ -66,15 +68,12 @@ const FRAGMENT_APPLY = /* glsl */ `
 }
 `
 
-export function createSurfaceMaterial(
-  side: THREE.Side,
-  grid: GridUniforms,
-  clippingPlanes: THREE.Plane[],
-): THREE.MeshStandardMaterial {
+/** 曲面の材質（表と裏の両面を描く。裏面はシェーダーで暗くする） */
+export function createSurfaceMaterial(grid: GridUniforms, clippingPlanes: THREE.Plane[]): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({
-    side,
-    roughness: side === THREE.BackSide ? 0.7 : 0.55,
-    metalness: side === THREE.BackSide ? 0.0 : 0.05,
+    side: THREE.DoubleSide,
+    roughness: 0.55,
+    metalness: 0.05,
     clippingPlanes,
   })
   // Three.js が作るシェーダーのコードに、格子線の処理を差し込む

@@ -39,19 +39,3 @@ body {
   color: var(--text);
   font: 15px/1.5 var(--sans);
 }
-
-/* Three.js の文字の重ね合わせ */
-.label-layer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-}
-.label-layer .tick {
-  font: 11px var(--mono);
-  color: var(--muted);
-}
-.label-layer .axis-name {
-  font: italic 600 15px 'Times New Roman', serif;
-  color: var(--text);
-}
