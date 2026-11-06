@@ -1,17 +1,32 @@
 // 計算担当の Web Worker。
 // 重い計算を画面の処理とは別のスレッドで行うので、計算中も画面が固まらない。
 
-import init, { eval_constant, plot, type MeshResult, type Shape } from '../wasm-core/graph_core.js'
+import init, { eval_range, last_used_params, plot, type MeshResult, type Shape } from '../wasm-core/graph_core.js'
 import type { PlotRequest, PlotResponse } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
 
-/** 範囲の文字列（"2pi" など）を数値にする。誤りがあれば説明付きで投げる */
-function range(name: string, [lo, hi]: [string, string]): [number, number] {
+/**
+ * 範囲の文字列（"2pi" や、パラメータを使った "b" など）を数値にする。誤りがあれば説明付きで投げる。
+ * 使ったパラメータの名前は `used` に足す（パラメータが変わったら計算し直すため）
+ */
+function range(
+  name: string,
+  [lo, hi]: [string, string],
+  params: PlotRequest['params'],
+  used: Set<string>,
+): [number, number] {
+  const names = Object.keys(params).join(',')
+  const values = new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im]))
+  const value = (src: string) => {
+    const v = eval_range(src, names, values)
+    for (const n of last_used_params().split(',')) if (n) used.add(n)
+    return v
+  }
   try {
-    const a = eval_constant(lo)
-    const b = eval_constant(hi)
+    const a = value(lo)
+    const b = value(hi)
     if (!(a < b)) throw new Error('左の値を右の値より小さくしてください')
     return [a, b]
   } catch (e) {
@@ -51,7 +66,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
   const domainArr = new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax])
   try {
     const rangeNames = Object.keys(ranges)
-    const rangeValues = rangeNames.map((n) => range(n, ranges[n]))
+    const rangeUsed = new Set<string>()
+    const rangeValues = rangeNames.map((n) => range(n, ranges[n], params, rangeUsed))
     const cached = shapes.get(itemId)
     let r: MeshResult | null = null
     if (cached && cached.key === shapeKey(req, cached.shape.view_dependent)) {
@@ -112,7 +128,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
       paramSpan: { u: span(0), v: span(1) },
     }
     const kind = r.kind
-    const usedParams = r.used_params.split(',').filter((s) => s !== '')
+    const usedParams = [...new Set([...r.used_params.split(',').filter((s) => s !== ''), ...rangeUsed])]
     const pv = r.param_value
     const param = r.param_name ? { name: r.param_name, re: pv[0], im: pv[1] } : null
     r.free() // Rust 側のメモリを解放

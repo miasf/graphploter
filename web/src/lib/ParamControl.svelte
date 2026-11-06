@@ -11,8 +11,11 @@
     slider: SliderStyle
     onChange: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
+    /** 値を自動で動かしているか */
+    playing: boolean
+    onPlay: () => void
   }
-  let { name, value, slider, onChange, onSlider }: Props = $props()
+  let { name, value, slider, onChange, onSlider, playing, onPlay }: Props = $props()
 
   /** 値を丸める刻み（範囲のおよそ 1/200） */
   const step = $derived(niceStep(slider.max - slider.min, 200))
@@ -48,6 +51,14 @@
       {formatNumber(Math.abs(value.im), step)}<i>i</i>
     </p>
   {:else}
+    <div class="slider-row">
+    <button
+      class="play"
+      class:on={playing}
+      onclick={onPlay}
+      aria-label="{name} を{playing ? '止める' : '自動で動かす'}"
+      title={playing ? '止める' : '最小値から最大値まで自動で動かす'}>{playing ? '❚❚' : '▶'}</button
+    >
     <input
       class="slider"
       type="range"
@@ -58,6 +69,7 @@
       aria-label="{name} の値"
       oninput={(e) => onChange(e.currentTarget.valueAsNumber, 0)}
     />
+    </div>
   {/if}
 
   <div class="bounds">
@@ -91,8 +103,30 @@
     gap: 6px;
     margin-top: 6px;
   }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
   .slider {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
+  }
+  .play {
+    width: 28px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .play.on {
+    background: #2d70b3;
+    border-color: #2d70b3;
+    color: #fff;
   }
   .value {
     margin: 0;

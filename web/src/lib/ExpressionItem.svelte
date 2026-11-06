@@ -28,6 +28,9 @@
     /** パラメータの値を変えたとき */
     onParam: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
+    /** パラメータを再生中か（値を自動で動かしている） */
+    paramPlaying: boolean
+    onPlayParam: () => void
     /** 「a のスライダーを追加」を押したとき */
     onAddSlider: (name: string) => void
     /** 式の欄でエンターが押されたとき（この下に新しい式を足す） */
@@ -54,6 +57,8 @@
     onRemove,
     onParam,
     onSlider,
+    paramPlaying,
+    onPlayParam,
     onAddSlider,
     onEnter,
     onDrag,
@@ -184,7 +189,15 @@
       </div>
     {/each}
     {#if item.param && !item.error}
-      <ParamControl name={item.param.name} value={item.param} slider={item.slider} onChange={onParam} {onSlider} />
+      <ParamControl
+        name={item.param.name}
+        value={item.param}
+        slider={item.slider}
+        onChange={onParam}
+        {onSlider}
+        playing={paramPlaying}
+        onPlay={onPlayParam}
+      />
     {/if}
     {#if item.error}
       <p class="error">{item.error}</p>

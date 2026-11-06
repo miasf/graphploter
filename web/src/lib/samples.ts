@@ -18,6 +18,8 @@ export interface Sample {
   items: SampleItem[]
   /** 式を追加するだけでなく、表示範囲や回転も設定する特別な例 */
   special?: 'tesseract'
+  /** 追加したら、このパラメータを再生する（値を自動で動かす） */
+  play?: string
 }
 
 export interface SampleGroup {
@@ -52,6 +54,28 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           {
             latex: '\\left(4\\cos t,4\\sin t,\\frac{t}{5}\\right)',
             options: { color: '#c74440', ranges: { t: ['-4\\pi', '4\\pi'], u: TWO_PI, v: TWO_PI } },
+          },
+        ],
+      },
+      {
+        label: '伸びるらせん（0 ≤ t ≤ b の b を再生）',
+        play: 'b',
+        items: [
+          { latex: 'b=0.1', param: 'b', options: { slider: { min: 0, max: 24, complex: false, stack: false } } },
+          {
+            latex: '\\left(3\\cos t,3\\sin t,\\frac{t}{4}-3\\right)',
+            options: { color: '#c74440', lineWidth: 4, ranges: { t: ['0', 'b'], u: TWO_PI, v: TWO_PI } },
+          },
+        ],
+      },
+      {
+        label: '広がるトーラス（0 ≤ u ≤ c の c を再生）',
+        play: 'c',
+        items: [
+          { latex: 'c=0.1', param: 'c', options: { slider: { min: 0, max: 6.3, complex: false, stack: false } } },
+          {
+            latex: '\\left(\\left(3+\\cos v\\right)\\cos u,\\left(3+\\cos v\\right)\\sin u,\\sin v\\right)',
+            options: { color: '#6042a6', ranges: { t: TWO_PI, u: ['0', 'c'], v: TWO_PI } },
           },
         ],
       },

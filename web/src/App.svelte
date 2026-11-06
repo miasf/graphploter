@@ -236,7 +236,7 @@
   // （陰関数は 1/8 の計算量）。指を離したら、粗く計算した式だけを細かく計算し直す。
   let pointerOnControl = false
   const coarseItems = new Set<number>()
-  const isCoarse = () => pointerOnControl || playing.length > 0
+  const isCoarse = () => pointerOnControl || playing.length > 0 || playingParams.length > 0
 
   function refine() {
     viewer?.setBusy(isCoarse())
@@ -383,12 +383,13 @@
       const prev = item.param
       item.param = res.param
       if (res.param.im !== 0) item.slider.complex = true
-      // 値がスライダーの範囲の外なら、範囲を広げる
-      const m = Math.max(Math.abs(res.param.re), Math.abs(res.param.im))
-      if (m > item.slider.max || -m < item.slider.min) {
-        const r = Math.max(1, 2 ** Math.ceil(Math.log2(m)))
-        item.slider.min = -r
-        item.slider.max = r
+      // 値がスライダーの範囲の外なら、範囲を広げる（範囲の中なら、そのまま）
+      const { re, im } = res.param
+      const outside = (v: number) => v < item.slider.min || v > item.slider.max
+      if (outside(re) || (im !== 0 && outside(im))) {
+        const r = Math.max(1, 2 ** Math.ceil(Math.log2(Math.max(Math.abs(re), Math.abs(im)))))
+        item.slider.min = Math.min(item.slider.min, -r)
+        item.slider.max = Math.max(item.slider.max, r)
       }
       if (!prev || prev.name !== res.param.name || prev.re !== res.param.re || prev.im !== res.param.im) {
         paramsChanged(prev && prev.name !== res.param.name ? [prev.name, res.param.name] : [res.param.name], item)
@@ -570,26 +571,64 @@
 
   function togglePlay(k: number) {
     playing = playing.includes(k) ? playing.filter((j) => j !== k) : [...playing, k]
-    if (playing.length > 0) {
+    animationChanged()
+  }
+
+  // ---- パラメータの再生（スライダーの値を自動で動かす）----
+
+  /** 再生中のパラメータの行（式の id） */
+  let playingParams = $state<number[]>([])
+  /** パラメータの再生: 最小値から最大値まで 4 秒で動かし、最大値に来たら最小値に戻る */
+  const PARAM_PLAY_SECONDS = 4
+
+  function togglePlayParam(item: PlotItem) {
+    playingParams = playingParams.includes(item.id)
+      ? playingParams.filter((id) => id !== item.id)
+      : [...playingParams, item.id]
+    animationChanged()
+  }
+
+  let animating = false
+  function animationChanged() {
+    const any = playing.length > 0 || playingParams.length > 0
+    if (any && !animating) {
+      animating = true
       viewer?.setBusy(true)
       lastFrame = performance.now()
       requestAnimationFrame(playFrame)
-    } else {
+    } else if (!any) {
       refine() // 再生を止めたら、細かく計算し直す
     }
   }
 
   function playFrame(now: number) {
-    if (playing.length === 0) return
+    if (playing.length === 0 && playingParams.length === 0) {
+      animating = false
+      return
+    }
     const dt = Math.min(0.1, (now - lastFrame) / 1000)
     lastFrame = now
-    const rotation = [...space.rotation]
-    for (const k of playing) {
-      // −180〜180 の範囲で回り続ける（小数第1位まで）
-      const a = rotation[k] + PLAY_SPEED * dt
-      rotation[k] = Math.round((((a + 180) % 360) - 180) * 10) / 10
+    if (playing.length > 0) {
+      const rotation = [...space.rotation]
+      for (const k of playing) {
+        // −180〜180 の範囲で回り続ける（小数第1位まで）
+        const a = rotation[k] + PLAY_SPEED * dt
+        rotation[k] = Math.round((((a + 180) % 360) - 180) * 10) / 10
+      }
+      setRotation(rotation, space.center)
     }
-    setRotation(rotation, space.center)
+    for (const id of playingParams) {
+      const it = items.find((x) => x.id === id)
+      if (!it || it.error) {
+        playingParams = playingParams.filter((x) => x !== id) // 消された・パラメータでなくなった
+        continue
+      }
+      if (!it.param) continue // まだ計算が終わっていない
+      const { min, max } = it.slider
+      let v = it.param.re + ((max - min) / PARAM_PLAY_SECONDS) * dt
+      if (v > max) v = min // 最後まで行ったら最初から
+      setParam(it, v, 0)
+    }
     requestAnimationFrame(playFrame)
   }
 
@@ -617,6 +656,11 @@
       if (si.param && defined.has(si.param)) continue // 同じ名前のパラメータがすでにある
       items.push(newItem(si.latex, si.options ?? {}))
       schedule(items[items.length - 1], 0)
+    }
+    // パラメータを再生する例
+    if (sample.play) {
+      const p = items.find((it) => (it.param?.name ?? latexParamName(it.latex)) === sample.play)
+      if (p && !playingParams.includes(p.id)) togglePlayParam(p)
     }
     // 追加した式が見えるところまで一覧を動かす
     await tick()
@@ -741,6 +785,8 @@
             onRemove={() => removeItem(item)}
             onParam={(re, im) => setParam(item, re, im)}
             onSlider={(sl) => setSlider(item, sl)}
+            paramPlaying={playingParams.includes(item.id)}
+            onPlayParam={() => togglePlayParam(item)}
             onAddSlider={(name) => addSlider(item, name)}
             onEnter={() => insertAfter(item)}
             onDrag={(phase, e) => dragItem(item, phase, e)}

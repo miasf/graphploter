@@ -602,13 +602,20 @@ fn expand_lists(items: &[Expr]) -> Result<Vec<Vec<Expr>>, String> {
 
 /// 変数を含まない式（範囲の指定など）の値を計算する。例: "2pi" → 6.283...
 pub fn eval_constant(source: &str) -> Result<f64, String> {
+    eval_constant_with(source, &Params::new()).map(|(v, _)| v)
+}
+
+/// パラメータを使ってよい式の値を計算する（媒介変数の範囲 0 ≤ t ≤ b など）。
+/// 値と、使ったパラメータの名前を返す
+pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<String>), String> {
     let e = parse_at(source, 0)?;
-    let prog = Program::compile(&e, &[]).map_err(|_| "数値と、pi などの定数だけで書いてください".to_string())?;
+    let prog = Program::compile_with(&e, &[], params)
+        .map_err(|_| "数値と、pi などの定数・パラメータだけで書いてください".to_string())?;
     let mut out = [C::new(0.0, 0.0)];
     prog.eval_batch(&[], &mut out);
     let v = crate::eval::as_real(out[0]);
     if v.is_finite() {
-        Ok(v)
+        Ok((v, prog.used_params().to_vec()))
     } else {
         Err("実数の値になりません".into())
     }
@@ -872,6 +879,14 @@ mod tests {
         // 媒介変数表示の外では使えない
         assert!(compile("z = [1, 2] x").is_err());
         assert!(compile_with("(t, [[1, 2], 3], 0)", &ps, &Space::standard()).is_err());
+    }
+
+    #[test]
+    fn constants_with_params() {
+        let mut ps = Params::new();
+        ps.insert("b".into(), C::new(3.0, 0.0));
+        assert_eq!(eval_constant_with("2b", &ps).unwrap(), (6.0, vec!["b".to_string()]));
+        assert!(eval_constant_with("2c", &ps).is_err());
     }
 
     #[test]

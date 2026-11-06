@@ -113,6 +113,34 @@ pub fn eval_constant(source: &str) -> Result<f64, JsError> {
     equation::eval_constant(source).map_err(|e| JsError::new(&e))
 }
 
+/// パラメータを使ってよい式の値（媒介変数の範囲 0 ≤ t ≤ b など）。
+/// 戻り値は [値]。使ったパラメータの名前は `last_used_params` で取り出す
+#[wasm_bindgen]
+pub fn eval_range(source: &str, param_names: &str, param_values: &[f64]) -> Result<f64, JsError> {
+    let names: Vec<&str> = param_names.split(',').filter(|s| !s.is_empty()).collect();
+    if param_values.len() != names.len() * 2 {
+        return Err(JsError::new("内部エラー: パラメータの数が違います"));
+    }
+    let consts: eval::Params = names
+        .iter()
+        .enumerate()
+        .map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1])))
+        .collect();
+    let (v, used) = equation::eval_constant_with(source, &consts).map_err(|e| JsError::new(&e))?;
+    LAST_USED.with(|u| *u.borrow_mut() = used.join(","));
+    Ok(v)
+}
+
+thread_local! {
+    static LAST_USED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// 直前の `eval_range` で使ったパラメータの名前（カンマ区切り）
+#[wasm_bindgen]
+pub fn last_used_params() -> String {
+    LAST_USED.with(|u| u.borrow().clone())
+}
+
 /// 式を解析して、曲面（または曲線）を作る。
 ///
 /// - `domain`: 表示範囲 [横の最小, 横の最大, 奥の最小, 奥の最大, 縦の最小, 縦の最大]
