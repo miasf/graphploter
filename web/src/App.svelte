@@ -925,8 +925,17 @@
           floor ceil round sign Re Im conj arg、2つの引数: mod min max nCr nPr、階乗: <code>n!</code>
         </li>
         <li>
-          特殊関数: gamma（Γ）, beta(a, b), psi（ψ, ディガンマ）, zeta（ζ）, erf, erfc, besselJ(ν, z), besselI(ν, z)。
-          すべて複素数で使えます（数式キーボードの「特殊」タブ）
+          特殊関数（すべて複素数で使えます。よく使うものは数式キーボードの「特殊」タブにあります）
+          <ul>
+            <li>ガンマ系: gamma(z)（Γ）, gamma(a, z)（上側不完全）, gammaP(a, z), gammaQ(a, z), loggamma, beta(a, b), beta(z, a, b), betaRegularized(z, a, b), digamma（psi, ψ）, polygamma(n, z), pochhammer(a, n), binomial(n, k)</li>
+            <li>ゼータ系: zeta(s)（ζ）, zeta(s, a)（フルヴィッツ）, polylog(s, z)（Li）, dirichletEta(s)</li>
+            <li>誤差関数・積分: erf, erfc, erfi, dawson, fresnelS, fresnelC, Ei, En(n, z), li, Si, Ci, Shi, Chi, sinc</li>
+            <li>ベッセル系: besselJ(ν, z), besselY, besselI, besselK, hankelH1, hankelH2, sphericalJ(n, z), sphericalY, airyAi(z), airyBi, airyAiPrime, airyBiPrime</li>
+            <li>直交多項式: legendreP(n, x), legendreP(n, m, x), hermiteH(n, x), laguerreL(n, x), laguerreL(n, a, x), chebyshevT(n, x), chebyshevU, gegenbauerC(n, a, x), jacobiP(n, a, b, x), sphericalHarmonicY(l, m, θ, φ)</li>
+            <li>超幾何関数: hyp0F1(b, z), hyp1F1(a, b, z), hyp2F1(a, b, c, z), hypU(a, b, z)</li>
+            <li>楕円系（m = k²）: ellipticK(m), ellipticE(m), ellipticE(φ, m), ellipticF(φ, m), ellipticPi(n, m), ellipticPi(n, φ, m), jacobiSN(u, m), jacobiCN, jacobiDN</li>
+            <li>その他: lambertW(z)（productLog）, lambertW(k, z)（第 k 枝）</li>
+          </ul>
         </li>
           <li>複素数の結果が実数でない点は描かれません</li>
           <li>

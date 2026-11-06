@@ -27,6 +27,9 @@ const cases: [string, string][] = [
   ['\\lfloor x\\rfloor', 'floor(x)'],
   ['z=\\exponentialE^{x}', 'z=e^(x)'],
   ['x^2+y^2+z^2=4', 'x^(2)+y^(2)+z^(2)=4'],
+  // 名前に数字を含む関数・長い関数名
+  ['\\operatorname{hyp2F1}\\left(1,1,2,x\\right)', 'hyp2F1 (1,1,2,x)'],
+  ['x\\operatorname{\\mathrm{sinc}}\\left(x\\right)', 'x sinc (x)'],
   // 数式キーボードの関数キーで入れると、名前の中に \mathrm が入れ子になる
   ['z=\\operatorname{\\mathrm{Im}}\\left(xyi\\right)', 'z= Im (xyi)'],
   ['\\operatorname{\\mathrm{nCr}}\\left(5,2\\right)', 'nCr (5,2)'],

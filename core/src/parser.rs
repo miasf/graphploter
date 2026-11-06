@@ -138,9 +138,8 @@ struct Token {
 
 /// 識別子として認識する名前（関数と定数）。長いものを優先して照合する。
 fn named_tokens() -> Vec<(&'static str, Tok)> {
-    let mut v: Vec<(&'static str, Tok)> = Func::ALL
-        .iter()
-        .flat_map(|f| f.names().iter().map(move |n| (*n, Tok::Func(*f))))
+    let mut v: Vec<(&'static str, Tok)> = Func::all()
+        .flat_map(|f| f.names().iter().map(move |n| (*n, Tok::Func(f))))
         .collect();
     v.push(("pi", Tok::Const(Constant::Pi)));
     v.push(("π", Tok::Const(Constant::Pi)));
@@ -182,11 +181,20 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
         // 英字の並び: 関数名・定数を最長一致で取り出し、残りは1文字ずつ変数にする
         // 例) "xsinx" → x, sin, x
         if c.is_alphabetic() {
-            let mut end = i;
-            while end < chars.len() && chars[end].is_alphabetic() {
-                end += 1;
-            }
-            while i < end {
+            while i < chars.len() && chars[i].is_alphabetic() {
+                // 数字を含む名前（hyp2F1 など）は英字の並びの外まで見て探す
+                let full: String = chars[i..].iter().collect();
+                if let Some((name, tok)) =
+                    names.iter().find(|(n, _)| n.chars().any(|d| d.is_ascii_digit()) && full.starts_with(n))
+                {
+                    out.push(Token { tok: tok.clone(), pos: i });
+                    i += name.chars().count();
+                    continue;
+                }
+                let mut end = i;
+                while end < chars.len() && chars[end].is_alphabetic() {
+                    end += 1;
+                }
                 let rest: String = chars[i..end].iter().collect();
                 if let Some((name, tok)) = names.iter().find(|(n, _)| rest.starts_with(n)) {
                     out.push(Token { tok: tok.clone(), pos: i });
@@ -403,9 +411,10 @@ impl Parser {
             vec![self.power()?]
         };
 
-        if args.len() != f.arity() {
+        if !f.arities().contains(&args.len()) {
+            let counts: Vec<String> = f.arities().iter().map(|n| n.to_string()).collect();
             return err(
-                format!("{} の引数は {} 個です（{} 個あります）", f.names()[0], f.arity(), args.len()),
+                format!("{} の引数は {} 個です（{} 個あります）", f.names()[0], counts.join(" か "), args.len()),
                 pos,
             );
         }

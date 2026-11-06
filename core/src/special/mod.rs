@@ -1,5 +1,19 @@
 //! 特殊関数（複素数対応）。今後ここに増やしていく。
 
+mod bessel;
+mod elliptic;
+mod expint;
+mod gamma_ext;
+mod hyper;
+mod ortho;
+
+pub use bessel::*;
+pub use elliptic::*;
+pub use expint::*;
+pub use gamma_ext::*;
+pub use hyper::*;
+pub use ortho::*;
+
 use num_complex::Complex64 as C;
 use std::f64::consts::PI;
 
@@ -36,6 +50,14 @@ pub fn gamma(z: C) -> C {
     }
     let t = z + LANCZOS_G + 0.5;
     (2.0 * PI).sqrt() * t.powc(z + 0.5) * (-t).exp() * x
+}
+
+/// 1 / Γ(z)（極では 0）
+pub fn rgamma(z: C) -> C {
+    if z.re < 0.5 && z.im == 0.0 && z.re == z.re.round() {
+        return C::new(0.0, 0.0);
+    }
+    1.0 / gamma(z)
 }
 
 /// 実数の整数なら、その値を返す
@@ -139,7 +161,7 @@ pub fn digamma(z: C) -> C {
 
 /// 誤差関数 erf(z) = (2/√π) ∫₀ᶻ e^(−t²) dt
 pub fn erf(z: C) -> C {
-    if z.norm() <= 3.0 {
+    if use_erf_series(z) {
         erf_series(z)
     } else if z.re >= 0.0 {
         1.0 - erfc_cf(z)
@@ -150,7 +172,7 @@ pub fn erf(z: C) -> C {
 
 /// 相補誤差関数 erfc(z) = 1 − erf(z)
 pub fn erfc(z: C) -> C {
-    if z.norm() <= 3.0 {
+    if use_erf_series(z) {
         1.0 - erf_series(z)
     } else if z.re >= 0.0 {
         erfc_cf(z)
@@ -159,12 +181,18 @@ pub fn erfc(z: C) -> C {
     }
 }
 
+/// 級数を使うかどうか。級数の桁落ちはおよそ e^(2 (Re z)²) 倍なので、|Re z| が小さければ
+/// |z| が大きくても級数を使う（虚軸の近くでは連分数の収束が悪い）
+fn use_erf_series(z: C) -> bool {
+    z.norm() <= 3.0 || z.re.abs() <= 2.5
+}
+
 /// erf の級数 (2/√π) Σ (−1)ⁿ z²ⁿ⁺¹ / (n! (2n + 1))（|z| が小さいとき）
 fn erf_series(z: C) -> C {
     let z2 = z * z;
     let mut term = z; // (−1)ⁿ z²ⁿ⁺¹ / n!
     let mut sum = z;
-    for n in 1..200 {
+    for n in 1..5000 {
         term *= -z2 / n as f64;
         let t = term / (2 * n + 1) as f64;
         sum += t;
@@ -180,7 +208,7 @@ fn erf_series(z: C) -> C {
 fn erfc_cf(z: C) -> C {
     // 後ろから計算する（項の数は十分大きく取る）
     let mut f = z;
-    for k in (1..120).rev() {
+    for k in (1..300).rev() {
         f = z + (k as f64 / 2.0) / f;
     }
     (-z * z).exp() / (PI.sqrt() * f)
@@ -272,7 +300,15 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
         let f = if sign < 0.0 && n % 2.0 == 1.0 { -1.0 } else { 1.0 };
         return f * bessel_series(-nu, z, sign);
     }
-    if sign < 0.0 && z.norm() > 25.0 + nu.norm() * nu.norm() / 2.0 {
+    if sign < 0.0 && z.re < 0.0 && z.norm() > 10.0 {
+        // J_ν(w e^(iπs)) = e^(iπνs) J_ν(w)
+        let (w, s) = bessel::reflect(z);
+        return (C::new(0.0, PI * s) * nu).exp() * bessel_series(nu, w, sign);
+    }
+    if sign < 0.0 && bessel::use_schlafli(nu, z) {
+        return bessel::schlafli(nu, z).0;
+    }
+    if sign < 0.0 && bessel::use_asymptotic(nu, z) {
         return bessel_j_asymptotic(nu, z);
     }
     if z == C::new(0.0, 0.0) {
@@ -294,22 +330,8 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
 
 /// J_ν(z) の漸近展開（|z| が大きいとき）
 fn bessel_j_asymptotic(nu: C, z: C) -> C {
-    let mu = 4.0 * nu * nu;
+    let (p, q) = bessel::hankel_pq(nu, z);
     let w = z - nu * (PI / 2.0) - PI / 4.0;
-    // P, Q の級数（数項）
-    let mut p = C::new(1.0, 0.0);
-    let mut q = C::new(0.0, 0.0);
-    let mut t = C::new(1.0, 0.0);
-    let eight_z = 8.0 * z;
-    for k in 1..12 {
-        let kk = (2 * k - 1) as f64;
-        t *= (mu - kk * kk) / (k as f64 * eight_z);
-        if k % 2 == 1 {
-            q += if (k / 2) % 2 == 0 { t } else { -t };
-        } else {
-            p += if (k / 2) % 2 == 1 { -t } else { t };
-        }
-    }
     (2.0 / (PI * z)).sqrt() * (w.cos() * p - w.sin() * q)
 }
 

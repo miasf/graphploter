@@ -25,6 +25,8 @@ enum Op {
     Bin(BinOp, usize, usize),
     Call1(Func, usize),
     Call2(Func, usize, usize),
+    /// 引数が3つ以上の関数
+    CallN(Func, Vec<usize>),
 }
 
 /// パラメータ（スライダーで値を決める文字）の名前と値
@@ -82,6 +84,10 @@ impl Program {
                 (Some(a), Some(b)) => Some(f.eval2(a, b)),
                 _ => None,
             },
+            Op::CallN(f, args) => {
+                let vals: Option<Vec<C>> = args.iter().map(|&a| self.const_of(a)).collect();
+                vals.map(|v| f.call(&v))
+            }
             _ => None,
         };
         self.ops.push(match folded {
@@ -132,12 +138,14 @@ impl Program {
                 self.push(Op::Bin(*o, a, b))
             }
             Expr::Call(f, args) => {
-                let a = self.emit(&args[0])?;
-                if f.arity() == 2 {
-                    let b = self.emit(&args[1])?;
-                    self.push(Op::Call2(*f, a, b))
-                } else {
-                    self.push(Op::Call1(*f, a))
+                let mut ids = Vec::with_capacity(args.len());
+                for a in args {
+                    ids.push(self.emit(a)?);
+                }
+                match ids.as_slice() {
+                    [a] => self.push(Op::Call1(*f, *a)),
+                    [a, b] => self.push(Op::Call2(*f, *a, *b)),
+                    _ => self.push(Op::CallN(*f, ids)),
                 }
             }
             Expr::Tuple(_) => return Err("組 (a, b, c) は式の中では使えません".into()),
@@ -195,6 +203,15 @@ impl Program {
                         let (a, b) = (&done[*a][..len], &done[*b][..len]);
                         for j in 0..len {
                             dst[j] = f.eval2(a[j], b[j]);
+                        }
+                    }
+                    Op::CallN(f, args) => {
+                        let mut vals = vec![C::new(0.0, 0.0); args.len()];
+                        for (j, d) in dst.iter_mut().enumerate() {
+                            for (v, &a) in vals.iter_mut().zip(args) {
+                                *v = done[a][j];
+                            }
+                            *d = f.call(&vals);
                         }
                     }
                 }

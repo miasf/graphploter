@@ -109,6 +109,23 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         label: 'ベッセル関数 J₀ の膜',
         items: [{ latex: 'z=2\\operatorname{besselJ}\\left(0,2\\sqrt{x^2+y^2}\\right)', options: { color: '#c74440' } }],
       },
+      {
+        label: '球面調和関数 Y₃² の形',
+        items: [
+          {
+            latex:
+              '\\left(5\\left|\\operatorname{Re}\\left(\\operatorname{sphericalHarmonicY}\\left(3,2,u,v\\right)\\right)\\right|\\sin u\\cos v,5\\left|\\operatorname{Re}\\left(\\operatorname{sphericalHarmonicY}\\left(3,2,u,v\\right)\\right)\\right|\\sin u\\sin v,5\\left|\\operatorname{Re}\\left(\\operatorname{sphericalHarmonicY}\\left(3,2,u,v\\right)\\right)\\right|\\cos u\\right)',
+            options: { color: '#388c46', ranges: { t: TWO_PI, u: ['0', '\\pi'], v: TWO_PI } },
+          },
+        ],
+      },
+      {
+        label: 'エアリー関数 Ai と Bi',
+        items: [
+          { latex: '\\left(t,\\operatorname{airyAi}\\left(t\\right),0\\right)', options: { color: '#c74440', lineWidth: 4, ranges: { t: ['-5', '3'], u: TWO_PI, v: TWO_PI } } },
+          { latex: '\\left(t,\\operatorname{airyBi}\\left(t\\right),0\\right)', options: { color: '#2d70b3', lineWidth: 4, ranges: { t: ['-5', '2'], u: TWO_PI, v: TWO_PI } } },
+        ],
+      },
     ],
   },
   {

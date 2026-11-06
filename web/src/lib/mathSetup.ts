@@ -13,6 +13,14 @@ MathfieldElement.soundsDirectory = null // キーを押したときの音を鳴�
  * ここに無い関数名（floor, mod, nCr など）は文字のまま残り、計算エンジン側で関数として読まれる。
  */
 export const SHORTCUTS: Record<string, string> = {
+  // 下の短い変換（sin、log、gamma など）を中に含む長い関数名は、そのままの名前で残す
+  // （例: "sinc" が「\sin c」に、"digamma" が「di Γ」にならないように）
+  ...Object.fromEntries(
+    [
+      'sinc', 'gammaP', 'gammaQ', 'loggamma', 'lngamma', 'digamma', 'polygamma', 'polylog',
+      'expIntegralEi', 'expIntegralE', 'logIntegral', 'sinIntegral', 'cosIntegral', 'sinhIntegral', 'coshIntegral',
+    ].map((f) => [f, `\\operatorname{${f}}`]),
+  ),
   pi: '\\pi',
   sqrt: '\\sqrt{#?}',
   gamma: '\\Gamma',
@@ -113,15 +121,27 @@ export function setupKeyboard() {
       rows: [
         [
           { latex: '\\Gamma\\left(#0\\right)', label: 'Γ(z)', class: 'small' },
-          { latex: '\\operatorname{beta}\\left(#?,#?\\right)', label: 'B(a,b)', class: 'small' },
+          { latex: '\\operatorname{beta}\\left(#?,#?\\right)', label: 'B(a,b)', class: 'small', tooltip: 'beta' },
           { latex: '\\psi\\left(#0\\right)', label: 'ψ(z)', class: 'small' },
           { latex: '\\zeta\\left(#0\\right)', label: 'ζ(s)', class: 'small' },
+          fn('erf', { operator: true }),
+          { latex: '\\operatorname{polylog}\\left(#?,#?\\right)', label: 'Liₛ(z)', class: 'small', tooltip: 'polylog' },
         ],
         [
-          fn('erf', { operator: true }),
-          fn('erfc', { operator: true }),
-          { latex: '\\operatorname{besselJ}\\left(#?,#?\\right)', label: 'J_ν(z)', class: 'small' },
-          { latex: '\\operatorname{besselI}\\left(#?,#?\\right)', label: 'I_ν(z)', class: 'small' },
+          { latex: '\\operatorname{besselJ}\\left(#?,#?\\right)', label: 'J_ν(z)', class: 'small', tooltip: 'besselJ' },
+          { latex: '\\operatorname{besselY}\\left(#?,#?\\right)', label: 'Y_ν(z)', class: 'small', tooltip: 'besselY' },
+          { latex: '\\operatorname{besselI}\\left(#?,#?\\right)', label: 'I_ν(z)', class: 'small', tooltip: 'besselI' },
+          { latex: '\\operatorname{besselK}\\left(#?,#?\\right)', label: 'K_ν(z)', class: 'small', tooltip: 'besselK' },
+          { latex: '\\operatorname{airyAi}\\left(#?\\right)', label: 'Ai(z)', class: 'small', tooltip: 'airyAi' },
+          { latex: '\\operatorname{airyBi}\\left(#?\\right)', label: 'Bi(z)', class: 'small', tooltip: 'airyBi' },
+        ],
+        [
+          { latex: '\\operatorname{legendreP}\\left(#?,#?\\right)', label: 'Pₙ(x)', class: 'small', tooltip: 'legendreP' },
+          { latex: '\\operatorname{hermiteH}\\left(#?,#?\\right)', label: 'Hₙ(x)', class: 'small', tooltip: 'hermiteH' },
+          { latex: '\\operatorname{ellipticK}\\left(#?\\right)', label: 'K(m)', class: 'small', tooltip: 'ellipticK' },
+          { latex: '\\operatorname{ellipticE}\\left(#?\\right)', label: 'E(m)', class: 'small', tooltip: 'ellipticE' },
+          { latex: '\\operatorname{lambertW}\\left(#?\\right)', label: 'W(z)', class: 'small', tooltip: 'lambertW' },
+          { latex: '\\operatorname{hyp2F1}\\left(#?,#?,#?,#?\\right)', label: '₂F₁', class: 'small', tooltip: 'hyp2F1' },
         ],
         [fn('sec'), fn('csc'), fn('cot'), fn('arcsinh', { operator: true }), fn('arccosh', { operator: true }), fn('arctanh', { operator: true })],
         ['[left]', '[right]', '[backspace]', '[return]'],
