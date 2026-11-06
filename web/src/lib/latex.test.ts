@@ -27,6 +27,11 @@ const cases: [string, string][] = [
   ['\\lfloor x\\rfloor', 'floor(x)'],
   ['z=\\exponentialE^{x}', 'z=e^(x)'],
   ['x^2+y^2+z^2=4', 'x^(2)+y^(2)+z^(2)=4'],
+  // 数式キーボードの関数キーで入れると、名前の中に \mathrm が入れ子になる
+  ['z=\\operatorname{\\mathrm{Im}}\\left(xyi\\right)', 'z= Im (xyi)'],
+  ['\\operatorname{\\mathrm{nCr}}\\left(5,2\\right)', 'nCr (5,2)'],
+  ['\\operatorname{\\mathrm{floor}}\\left(x\\right)', 'floor (x)'],
+  ['\\operatorname{\\mathrm I m}\\left(x\\right)', 'Im (x)'],
 ]
 for (const [input, want] of cases) check(input, latexToText(input), want)
 

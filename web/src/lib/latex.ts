@@ -134,9 +134,16 @@ class Converter {
     return r.trim()
   }
 
-  /** {…} の中身を変換せずに文字列として返す（\operatorname{nCr} など） */
-  private rawGroup(): string {
-    if (this.toks[this.i] !== '{') return this.toks[this.i++] ?? ''
+  /**
+   * {…} の中身を変換せずに文字列として返す（\operatorname{nCr} など）。
+   * lettersOnly なら、中の命令（\mathrm など）と {} を除いた文字だけを返す
+   */
+  private rawGroup(lettersOnly = false): string {
+    const keep = (t: string) => !lettersOnly || !(t.startsWith('\\') || t === '{' || t === '}')
+    if (this.toks[this.i] !== '{') {
+      const t = this.toks[this.i++] ?? ''
+      return keep(t) ? t : ''
+    }
     this.i++
     let depth = 1
     let s = ''
@@ -144,7 +151,7 @@ class Converter {
       const t = this.toks[this.i++]
       if (t === '{') depth++
       if (t === '}' && --depth === 0) break
-      s += t
+      if (keep(t)) s += t
     }
     return s
   }
@@ -233,7 +240,9 @@ class Converter {
       case 'text':
       case 'mathit':
       case 'mathbf': {
-        const s = this.rawGroup().replace(/\\/g, '')
+        // 中身は名前の文字だけを取り出す。数式キーボードから入れると
+        // \operatorname{\mathrm{Im}} のように命令が入れ子になることがあるため、命令名と {} を取り除く
+        const s = this.rawGroup(true)
         this.out += s === 'e' || s === 'i' ? s : ` ${s} `
         return
       }
