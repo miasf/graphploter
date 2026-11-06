@@ -6,8 +6,12 @@
 //! - `(x(t), y(t), z(t))`                              → 媒介変数表示の曲線
 //! - `(x(u,v), y(u,v), z(u,v))`                        → 媒介変数表示の曲面
 //!   （成分が2つなら z = 0 の平面上）
+//! - `a = 1`（x, y, z, t, u, v 以外の1文字 = 数）       → パラメータ（スライダー）の定義
+//!
+//! パラメータは、ほかの式の中では定数として扱う。
 
-use crate::eval::Program;
+use crate::eval::{Params, Program};
+use num_complex::Complex64 as C;
 use crate::parser::{parse, BinOp, Expr, ParseError};
 
 pub const AXES: [&str; 3] = ["x", "y", "z"];
@@ -23,7 +27,12 @@ pub enum Plot {
     Curve { progs: [Program; 3] },
     /// 媒介変数表示の曲面。`progs` は x, y, z 成分で、変数は u, v。
     Surface { progs: [Program; 3] },
+    /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
+    Param { name: String, value: C, uses: Vec<String> },
 }
+
+/// 座標と媒介変数の名前（パラメータの名前には使えない）
+const RESERVED: [&str; 6] = ["x", "y", "z", "t", "u", "v"];
 
 impl Plot {
     /// 画面に出す説明
@@ -36,7 +45,26 @@ impl Plot {
             Plot::Implicit { .. } => "陰関数".into(),
             Plot::Curve { .. } => "媒介変数表示の曲線".into(),
             Plot::Surface { .. } => "媒介変数表示の曲面".into(),
+            Plot::Param { .. } => "パラメータ".into(),
         }
+    }
+
+    /// 使われたパラメータの名前
+    pub fn used_params(&self) -> Vec<String> {
+        let progs: Vec<&Program> = match self {
+            Plot::Explicit { prog, .. } | Plot::Implicit { prog } => vec![prog],
+            Plot::Curve { progs } | Plot::Surface { progs } => progs.iter().collect(),
+            Plot::Param { uses, .. } => return uses.clone(),
+        };
+        let mut out: Vec<String> = Vec::new();
+        for p in progs {
+            for n in p.used_params() {
+                if !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+        }
+        out
     }
 
     /// 媒介変数の名前（媒介変数表示でなければ空）
@@ -63,18 +91,24 @@ fn parse_at(src: &str, offset: usize) -> Result<Expr, String> {
     parse(src).map_err(|e| ParseError { pos: e.pos + offset, ..e }.to_string())
 }
 
+/// パラメータなしでコンパイルする
 pub fn compile(source: &str) -> Result<Plot, String> {
+    compile_with(source, &Params::new())
+}
+
+/// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
+pub fn compile_with(source: &str, params: &Params) -> Result<Plot, String> {
     let parts: Vec<&str> = source.split('=').collect();
     match parts.as_slice() {
         [rhs] => {
             let e = parse_at(rhs, 0)?;
             if let Expr::Tuple(items) = e {
-                return parametric(items);
+                return parametric(items, params);
             }
             if e.uses_var("z") {
                 return Err("z を含む式は「… = 0」のように = を付けてください（陰関数になります）".into());
             }
-            explicit(2, &e)
+            explicit(2, &e, params)
         }
         [lhs, rhs] => {
             let l = parse_at(lhs, 0)?;
@@ -86,21 +120,48 @@ pub fn compile(source: &str) -> Result<Plot, String> {
             for (axis, name) in AXES.iter().enumerate() {
                 let single = |e: &Expr| matches!(e, Expr::Var(v) if v == name);
                 if single(&l) && !r.uses_var(name) {
-                    return explicit(axis, &r);
+                    return explicit(axis, &r, params);
                 }
                 if single(&r) && !l.uses_var(name) {
-                    return explicit(axis, &l);
+                    return explicit(axis, &l, params);
                 }
             }
+            // 左辺が x, y, z, t, u, v 以外の1文字で、右辺に座標・媒介変数が無ければパラメータの定義
+            if let Expr::Var(name) = &l {
+                let uses_reserved = RESERVED.iter().any(|v| r.uses_var(v));
+                if !RESERVED.contains(&name.as_str()) && !uses_reserved {
+                    if r.uses_var(name) {
+                        return Err(format!("{name} の定義の右辺に {name} 自身は使えません"));
+                    }
+                    return param(name, &r, params);
+                }
+            }
+            if !AXES.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
+                return Err("x, y, z のどれかを使った式にしてください".into());
+            }
             let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
-            Ok(Plot::Implicit { prog: Program::compile(&f, &AXES)? })
+            Ok(Plot::Implicit { prog: Program::compile_with(&f, &AXES, params)? })
         }
         _ => Err("= は1つだけにしてください".into()),
     }
 }
 
+/// パラメータの定義 name = rhs。右辺の値を計算する
+fn param(name: &str, rhs: &Expr, params: &Params) -> Result<Plot, String> {
+    // 自分自身は使えないので、ほかのパラメータだけを渡す
+    let mut others = params.clone();
+    others.remove(name);
+    let prog = Program::compile_with(rhs, &[], &others)?;
+    let mut out = [C::new(0.0, 0.0)];
+    prog.eval_batch(&[], &mut out);
+    if !(out[0].re.is_finite() && out[0].im.is_finite()) {
+        return Err(format!("{name} の値が計算できません"));
+    }
+    Ok(Plot::Param { name: name.to_string(), value: out[0], uses: prog.used_params().to_vec() })
+}
+
 /// 組 (a, b, c) を媒介変数表示としてコンパイルする
-fn parametric(mut items: Vec<Expr>) -> Result<Plot, String> {
+fn parametric(mut items: Vec<Expr>, params: &Params) -> Result<Plot, String> {
     match items.len() {
         2 => items.push(Expr::Num(0.0)),
         3 => {}
@@ -114,7 +175,7 @@ fn parametric(mut items: Vec<Expr>) -> Result<Plot, String> {
     let vars: &[&str] = if surface { &["u", "v"] } else { &["t"] };
     let mut progs = Vec::with_capacity(3);
     for e in &items {
-        progs.push(Program::compile(e, vars)?);
+        progs.push(Program::compile_with(e, vars, params)?);
     }
     let progs: [Program; 3] = progs.try_into().map_err(|_| "内部エラー".to_string())?;
     Ok(if surface { Plot::Surface { progs } } else { Plot::Curve { progs } })
@@ -134,9 +195,9 @@ pub fn eval_constant(source: &str) -> Result<f64, String> {
     }
 }
 
-fn explicit(axis: usize, e: &Expr) -> Result<Plot, String> {
+fn explicit(axis: usize, e: &Expr, params: &Params) -> Result<Plot, String> {
     let (a, b) = others(axis);
-    let prog = Program::compile(e, &[AXES[a], AXES[b]])?;
+    let prog = Program::compile_with(e, &[AXES[a], AXES[b]], params)?;
     Ok(Plot::Explicit { axis, prog })
 }
 
@@ -171,6 +232,30 @@ mod tests {
         assert!(kind("(1, 2, 3, 4)").starts_with("error"));
         // 括弧の掛け算は組ではない
         assert_eq!(kind("(x+1)(y-1)"), "z = f(x, y)");
+    }
+
+    #[test]
+    fn params() {
+        assert_eq!(kind("a = 2"), "パラメータ");
+        assert_eq!(kind("k = 2pi + i"), "パラメータ");
+        assert_eq!(kind("a = x + 1"), "error: 変数 'a' はここでは使えません（使える変数: x, y, z）");
+        assert!(kind("t = 1").starts_with("error")); // t は媒介変数なので使えない
+        let mut ps = Params::new();
+        ps.insert("a".into(), C::new(3.0, 0.0));
+        // a を使う式
+        let p = compile_with("z = a x", &ps).unwrap();
+        assert_eq!(p.used_params(), vec!["a".to_string()]);
+        // ほかのパラメータを使うパラメータ
+        match compile_with("b = 2a + i", &ps).unwrap() {
+            Plot::Param { name, value, uses } => {
+                assert_eq!(name, "b");
+                assert_eq!(value, C::new(6.0, 1.0));
+                assert_eq!(uses, vec!["a".to_string()]);
+            }
+            _ => panic!(),
+        }
+        // 自分自身は使えない
+        assert!(compile_with("a = a + 1", &ps).is_err());
     }
 
     #[test]

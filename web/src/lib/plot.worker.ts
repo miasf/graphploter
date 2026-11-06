@@ -20,7 +20,7 @@ function range(name: string, [lo, hi]: [string, string]): [number, number] {
 }
 
 self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
-  const { requestId, source, domain: d, resolution, implicitResolution, ranges } = ev.data
+  const { requestId, source, domain: d, resolution, implicitResolution, ranges, params } = ev.data
   await ready
 
   let res: PlotResponse
@@ -35,6 +35,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
       resolution,
       implicitResolution,
       new Float64Array([...t, ...u, ...v]),
+      Object.keys(params).join(','),
+      new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
     )
     const mesh = {
       positions: r.positions,
@@ -46,8 +48,11 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
       paramSpan: { u: u[1] - u[0], v: v[1] - v[0] },
     }
     const kind = r.kind
+    const usedParams = r.used_params.split(',').filter((s) => s !== '')
+    const pv = r.param_value
+    const param = r.param_name ? { name: r.param_name, re: pv[0], im: pv[1] } : null
     r.free() // Rust 側のメモリを解放
-    res = { requestId, ok: true, mesh, kind, ms: performance.now() - t0 }
+    res = { requestId, ok: true, mesh, kind, ms: performance.now() - t0, usedParams, param }
   } catch (e) {
     res = { requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
   }

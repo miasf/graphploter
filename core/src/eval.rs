@@ -27,20 +27,34 @@ enum Op {
     Call2(Func, usize, usize),
 }
 
+/// パラメータ（スライダーで値を決める文字）の名前と値
+pub type Params = std::collections::BTreeMap<String, C>;
+
 /// コンパイル済みの式
 #[derive(Debug, Clone)]
 pub struct Program {
     ops: Vec<Op>,
     /// 変数名（`Var(k)` の k 番目の名前）
     vars: Vec<String>,
+    /// 使ってよいパラメータ（式の中では定数として扱う）
+    params: Params,
+    /// 実際に使われたパラメータの名前
+    used_params: Vec<String>,
 }
 
 impl Program {
     /// 構文木をコンパイルする。`vars` は使ってよい変数名の一覧。
     pub fn compile(expr: &Expr, vars: &[&str]) -> Result<Program, String> {
+        Self::compile_with(expr, vars, &Params::new())
+    }
+
+    /// パラメータ付きでコンパイルする。`params` にある文字は、その値の定数として扱う。
+    pub fn compile_with(expr: &Expr, vars: &[&str], params: &Params) -> Result<Program, String> {
         let mut p = Program {
             ops: Vec::new(),
             vars: vars.iter().map(|s| s.to_string()).collect(),
+            params: params.clone(),
+            used_params: Vec::new(),
         };
         p.emit(expr)?;
         Ok(p)
@@ -48,6 +62,11 @@ impl Program {
 
     pub fn vars(&self) -> &[String] {
         &self.vars
+    }
+
+    /// この式で使われたパラメータの名前
+    pub fn used_params(&self) -> &[String] {
+        &self.used_params
     }
 
     /// 命令を1つ追加して、その番号を返す。引数がすべて定数なら、その場で計算して定数にする。
@@ -87,15 +106,22 @@ impl Program {
                 Constant::E => C::new(E, 0.0),
                 Constant::I => C::new(0.0, 1.0),
             })),
-            Expr::Var(name) => match self.vars.iter().position(|v| v == name) {
-                Some(k) => self.push(Op::Var(k)),
-                None => {
+            Expr::Var(name) => {
+                if let Some(k) = self.vars.iter().position(|v| v == name) {
+                    self.push(Op::Var(k))
+                } else if let Some(&c) = self.params.get(name) {
+                    if !self.used_params.contains(name) {
+                        self.used_params.push(name.clone());
+                    }
+                    self.push(Op::Const(c))
+                } else {
+                    // この文言は画面側で「スライダーを追加」ボタンを出すのに使っている（変えるときは注意）
                     return Err(format!(
                         "変数 '{name}' はここでは使えません（使える変数: {}）",
                         self.vars.join(", ")
-                    ))
+                    ));
                 }
-            },
+            }
             Expr::Neg(a) => {
                 let a = self.emit(a)?;
                 self.push(Op::Neg(a))
@@ -266,6 +292,18 @@ mod tests {
         assert!((eval_xy("x!", 5.0, 0.0).re - 120.0).abs() < 1e-9);
         assert!((eval_xy("3!^2", 0.0, 0.0).re - 36.0).abs() < 1e-9);
         assert!((eval_xy("-x!", 3.0, 0.0).re + 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn params_are_constants() {
+        let mut ps = Params::new();
+        ps.insert("a".into(), C::new(2.0, 0.0));
+        ps.insert("b".into(), C::new(0.0, 1.0));
+        let p = Program::compile_with(&parse("a x + b").unwrap(), &["x"], &ps).unwrap();
+        let mut out = [C::new(0.0, 0.0)];
+        p.eval_batch(&[&[3.0]], &mut out);
+        assert_eq!(out[0], C::new(6.0, 1.0));
+        assert_eq!(p.used_params(), &["a".to_string(), "b".to_string()]);
     }
 
     #[test]

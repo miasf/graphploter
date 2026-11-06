@@ -45,6 +45,20 @@ export interface ParamRanges {
   v: [string, string]
 }
 
+/** パラメータ（スライダーで値を決める文字）の値。複素数も扱えるよう実部と虚部を持つ */
+export interface ParamValue {
+  re: number
+  im: number
+}
+
+/** パラメータのスライダーの設定 */
+export interface SliderStyle {
+  min: number
+  max: number
+  /** 複素数モード（複素平面の上で点を動かして値を決める） */
+  complex: boolean
+}
+
 /** 式の一覧の1行 */
 export interface PlotItem extends PlotStyle {
   id: number
@@ -64,6 +78,11 @@ export interface PlotItem extends PlotStyle {
   params: ParamKind
   /** 媒介変数 u, v の範囲の長さ（格子線の分割に使う） */
   paramSpan: { u: number; v: number }
+  /** この行がパラメータの定義（a = 1 など）なら、その名前と値 */
+  param?: { name: string } & ParamValue
+  slider: SliderStyle
+  /** この式で使われているパラメータの名前（値が変わったら計算し直す） */
+  usedParams: string[]
 }
 
 /** Rust 側で作ったメッシュ */
@@ -91,8 +110,19 @@ export interface PlotRequest {
   /** 陰関数の細かさ（立方体の1辺のマス数） */
   implicitResolution: number
   ranges: ParamRanges
+  /** ほかの行で定義されているパラメータ */
+  params: Record<string, ParamValue>
 }
 
 export type PlotResponse =
-  | { requestId: number; ok: true; mesh: MeshData; kind: string; ms: number }
+  | {
+      requestId: number
+      ok: true
+      mesh: MeshData
+      kind: string
+      ms: number
+      usedParams: string[]
+      /** パラメータの定義だったときの名前と値 */
+      param: ({ name: string } & ParamValue) | null
+    }
   | { requestId: number; ok: false; error: string }

@@ -3,7 +3,9 @@
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
   import { joinTuple, splitTuple } from './latex'
   import MathInput from './MathInput.svelte'
-  import type { Domain, GridStyle, ParamRanges, PlotItem } from './types'
+  import ParamControl from './ParamControl.svelte'
+  import { missingParam } from './params'
+  import type { Domain, GridStyle, ParamRanges, PlotItem, SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -21,6 +23,11 @@
     onToggleSettings: () => void
     onToggleVertical: () => void
     onRemove: () => void
+    /** パラメータの値を変えたとき */
+    onParam: (re: number, im: number) => void
+    onSlider: (slider: SliderStyle) => void
+    /** 「a のスライダーを追加」を押したとき */
+    onAddSlider: (name: string) => void
   }
   let {
     item,
@@ -36,7 +43,13 @@
     onToggleSettings,
     onToggleVertical,
     onRemove,
+    onParam,
+    onSlider,
+    onAddSlider,
   }: Props = $props()
+
+  /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
+  const missing = $derived(missingParam(item.error))
 
   // 1行の入力欄を編集している間は、縦の表示に切り替えない（入力中に欄が入れ替わらないように）
   let editingLine = $state(false)
@@ -78,7 +91,8 @@
 <li class="item" class:has-error={!!item.error}>
   <div class="gutter">
     <span class="index">{index + 1}</span>
-    <button
+    {#if !item.param}
+      <button
       class="swatch"
       class:off={!item.visible}
       style:--c={item.color}
@@ -86,6 +100,7 @@
       aria-label={item.visible ? '非表示にする' : '表示する'}
       onclick={onToggle}
     ></button>
+    {/if}
   </div>
 
   <div class="body">
@@ -134,13 +149,19 @@
         />
       </div>
     {/each}
+    {#if item.param && !item.error}
+      <ParamControl name={item.param.name} value={item.param} slider={item.slider} onChange={onParam} {onSlider} />
+    {/if}
     {#if item.error}
       <p class="error">{item.error}</p>
-    {:else if item.info}
+      {#if missing}
+        <button class="add-slider" onclick={() => onAddSlider(missing)}>＋ {missing} のスライダーを追加</button>
+      {/if}
+    {:else if item.info && !item.param}
       <p class="info">{item.info}</p>
     {/if}
 
-    {#if item.showSettings}
+    {#if item.showSettings && !item.param}
       <div class="settings">
         <label class="row">
           <span class="label">色</span>
@@ -239,7 +260,8 @@
   </div>
 
   <div class="actions">
-    <button
+    {#if !item.param}
+      <button
       class="icon"
       class:active={item.showSettings}
       title="見た目の設定"
@@ -247,6 +269,7 @@
       aria-expanded={item.showSettings}
       onclick={onToggleSettings}>⚙</button
     >
+    {/if}
     <button class="icon" title="削除" aria-label="削除" onclick={onRemove}>×</button>
   </div>
 </li>
@@ -300,6 +323,16 @@
   }
   .info {
     color: var(--muted);
+  }
+  .add-slider {
+    margin-top: 6px;
+    padding: 4px 10px;
+    border: 1px solid #2d70b3;
+    border-radius: 999px;
+    background: none;
+    color: #2d70b3;
+    font-size: 13px;
+    cursor: pointer;
   }
   .settings {
     margin-top: 10px;

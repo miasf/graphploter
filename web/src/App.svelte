@@ -3,8 +3,9 @@
   import { onMount } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
+  import { complexLatex, niceStep } from './lib/params'
   import { requestPlot } from './lib/plotClient'
-  import type { Domain, GridStyle, ParamRanges, PlotItem } from './lib/types'
+  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -26,14 +27,18 @@
       ranges: { t: ['0', '2\\pi'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
       params: '',
       paramSpan: { u: 2 * Math.PI, v: 2 * Math.PI },
+      slider: { min: -10, max: 10, complex: false },
+      usedParams: [],
       ...options,
     }
   }
 
   // ---- 画面の状態 ----
   let items = $state<PlotItem[]>([
+    // パラメータ（スライダー）。下の式の a を動かせる
+    newItem('a=1'),
     // 格子線だけの曲面（面の不透明度 0）
-    newItem('z=2e^{-\\frac{x^2+y^2}{4}}-1', {
+    newItem('z=2ae^{-\\frac{x^2+y^2}{4}}-1', {
       color: '#3fb6c8',
       opacity: 0,
       grid: { enabled: true, x: 0.25, y: 0.25, z: 0, u: 24, v: 24, width: 1 },
@@ -157,6 +162,10 @@
   const latest = new Map<number, number>()
   // 入力中に毎回計算しないよう、少し待ってから計算する（デバウンス）
   const timers = new Map<number, ReturnType<typeof setTimeout>>()
+  // 計算中の式。計算中にもう一度頼まれたら、終わってから最新の状態でもう1回だけ計算する
+  // （スライダーを動かし続けても、依頼が溜まって遅れないように）
+  const running = new Set<number>()
+  const again = new Set<number>()
 
   function schedule(item: PlotItem, delay = 200) {
     clearTimeout(timers.get(item.id))
@@ -164,6 +173,48 @@
   }
 
   async function replot(item: PlotItem) {
+    if (running.has(item.id)) {
+      again.add(item.id)
+      return
+    }
+    running.add(item.id)
+    try {
+      await replotNow(item)
+    } finally {
+      running.delete(item.id)
+      if (again.delete(item.id) && items.includes(item)) replot(item)
+    }
+  }
+
+  /** いま定義されているパラメータ（同じ名前が複数あれば上の行を優先） */
+  function currentParams(): Record<string, ParamValue> {
+    const out: Record<string, ParamValue> = {}
+    for (const it of items) {
+      if (it.param && !it.error && !(it.param.name in out)) out[it.param.name] = { re: it.param.re, im: it.param.im }
+    }
+    return out
+  }
+
+  /**
+   * パラメータ names が変わった・増えた・消えたとき、それを使う式を計算し直す。
+   * エラーの式（未定義だった文字が定義されたかもしれない）と、計算中の式（古い値で計算している）も含める
+   */
+  function paramsChanged(names: string[], except?: PlotItem) {
+    for (const it of items) {
+      if (it === except) continue
+      if (it.usedParams.some((n) => names.includes(n)) || it.error || running.has(it.id)) schedule(it, 0)
+    }
+  }
+
+  /** この行がパラメータでなくなったときの後始末 */
+  function dropParam(item: PlotItem) {
+    if (!item.param) return
+    const name = item.param.name
+    item.param = undefined
+    paramsChanged([name], item)
+  }
+
+  async function replotNow(item: PlotItem) {
     if (!viewer) return
     const token = (latest.get(item.id) ?? 0) + 1
     latest.set(item.id, token)
@@ -179,6 +230,7 @@
       viewer.removePlot(item.id)
       item.error = e instanceof Error ? e.message : String(e)
       item.info = undefined
+      dropParam(item)
       return
     }
 
@@ -186,27 +238,53 @@
       viewer.removePlot(item.id)
       item.error = undefined
       item.info = undefined
+      item.usedParams = []
+      dropParam(item)
       return
     }
 
-    const res = await requestPlot(source, domain, resolution, implicitResolution, ranges)
+    const res = await requestPlot(source, domain, resolution, implicitResolution, ranges, currentParams())
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
-    if (res.ok) {
-      item.params = res.mesh.params
-      item.paramSpan = res.mesh.paramSpan
-      viewer.setPlot(item.id, res.mesh, item)
-      item.error = undefined
-      const size = res.mesh.curve
-        ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
-        : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
-      item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
-    } else {
+    if (!res.ok) {
       viewer.removePlot(item.id)
       // 「（8文字目）」のような位置は、変換後の式での位置なので入力欄とは合わない。表示しない
       item.error = res.error.replace(/（\d+文字目）/g, '')
       item.info = undefined
+      dropParam(item)
+      return
     }
+
+    item.error = undefined
+    item.usedParams = res.usedParams
+
+    if (res.param) {
+      // パラメータの定義（a = 1 など）: グラフは描かず、値を覚えてスライダーを出す
+      viewer.removePlot(item.id)
+      const prev = item.param
+      item.param = res.param
+      if (res.param.im !== 0) item.slider.complex = true
+      // 値がスライダーの範囲の外なら、範囲を広げる
+      const m = Math.max(Math.abs(res.param.re), Math.abs(res.param.im))
+      if (m > item.slider.max || -m < item.slider.min) {
+        const r = Math.max(1, 2 ** Math.ceil(Math.log2(m)))
+        item.slider.min = -r
+        item.slider.max = r
+      }
+      if (!prev || prev.name !== res.param.name || prev.re !== res.param.re || prev.im !== res.param.im) {
+        paramsChanged(prev && prev.name !== res.param.name ? [prev.name, res.param.name] : [res.param.name], item)
+      }
+      return
+    }
+
+    dropParam(item)
+    item.params = res.mesh.params
+    item.paramSpan = res.mesh.paramSpan
+    viewer.setPlot(item.id, res.mesh, item)
+    const size = res.mesh.curve
+      ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
+      : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
+    item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
   }
 
   function replotAll(delay = 200) {
@@ -223,6 +301,24 @@
   function removeItem(item: PlotItem) {
     viewer?.removePlot(item.id)
     items.splice(items.indexOf(item), 1)
+    if (item.param) paramsChanged([item.param.name])
+  }
+
+  /** 「a のスライダーを追加」: その式のすぐ上に a = 1 の行を足す */
+  function addSlider(item: PlotItem, name: string) {
+    const k = items.indexOf(item)
+    items.splice(k, 0, newItem(`${name}=1`))
+    schedule(items[k], 0) // items[k] は Svelte の状態に入ったもの（元のオブジェクトではない）
+  }
+
+  /** スライダー・複素平面でパラメータの値を変えたとき */
+  function setParam(item: PlotItem, re: number, im: number) {
+    if (!item.param) return
+    const step = niceStep(item.slider.max - item.slider.min, 200)
+    item.param.re = re
+    item.param.im = im
+    item.latex = `${item.param.name}=${complexLatex(re, im, step)}`
+    paramsChanged([item.param.name], item)
   }
 
   function setLatex(item: PlotItem, latex: string) {
@@ -321,6 +417,9 @@
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
+            onParam={(re, im) => setParam(item, re, im)}
+            onSlider={(sl) => (item.slider = sl)}
+            onAddSlider={(name) => addSlider(item, name)}
           />
         {/each}
       </ul>
@@ -409,6 +508,10 @@
           π、<code>sqrt</code> → √ に自動で変わります
         </li>
         <li>スマホでは数式用のキーボードが出ます（123 / f(x) / abc のタブで切り替え）</li>
+        <li>
+          パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
+          「複素数」を押すと、複素平面の上で点を動かして値を決められます
+        </li>
         <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
           <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
         </ul>

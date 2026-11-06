@@ -25,6 +25,9 @@ pub struct MeshResult {
     kind: String,
     params: &'static str,
     curve: bool,
+    used_params: Vec<String>,
+    /// パラメータの定義なら (名前, 値)
+    param: Option<(String, num_complex::Complex64)>,
 }
 
 #[wasm_bindgen]
@@ -59,6 +62,21 @@ impl MeshResult {
     pub fn grid_coords(&self) -> Vec<f32> {
         self.inner.grid_coords.clone()
     }
+    /// この式で使われたパラメータの名前（カンマ区切り）
+    #[wasm_bindgen(getter)]
+    pub fn used_params(&self) -> String {
+        self.used_params.join(",")
+    }
+    /// パラメータの定義なら、その名前（そうでなければ空）
+    #[wasm_bindgen(getter)]
+    pub fn param_name(&self) -> String {
+        self.param.as_ref().map(|p| p.0.clone()).unwrap_or_default()
+    }
+    /// パラメータの値 [実部, 虚部]
+    #[wasm_bindgen(getter)]
+    pub fn param_value(&self) -> Vec<f64> {
+        self.param.as_ref().map(|p| vec![p.1.re, p.1.im]).unwrap_or_default()
+    }
     /// 三角形の頂点番号（Uint32Array）
     #[wasm_bindgen(getter)]
     pub fn indices(&self) -> Vec<u32> {
@@ -84,18 +102,32 @@ pub fn eval_constant(source: &str) -> Result<f64, JsError> {
 /// - `resolution`: 陽関数・媒介変数表示の曲面の格子の細かさ（1辺のマス数）
 /// - `implicit_resolution`: 陰関数の格子の細かさ（立方体の1辺のマス数。計算量はこの3乗）
 /// - `params`: 媒介変数の範囲 [t0, t1, u0, u1, v0, v1]
+/// - `param_names`: パラメータ（スライダー）の名前をカンマ区切りで並べたもの。例: "a,b"
+/// - `param_values`: パラメータの値 [a の実部, a の虚部, b の実部, b の虚部, ...]
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn plot(
     source: &str,
     domain: &[f64],
     resolution: u32,
     implicit_resolution: u32,
     params: &[f64],
+    param_names: &str,
+    param_values: &[f64],
 ) -> Result<MeshResult, JsError> {
     if domain.len() != 6 || params.len() != 6 {
         return Err(JsError::new("内部エラー: 範囲の数が違います"));
     }
-    let plot = equation::compile(source).map_err(|e| JsError::new(&e))?;
+    let names: Vec<&str> = param_names.split(',').filter(|s| !s.is_empty()).collect();
+    if param_values.len() != names.len() * 2 {
+        return Err(JsError::new("内部エラー: パラメータの数が違います"));
+    }
+    let consts: eval::Params = names
+        .iter()
+        .enumerate()
+        .map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1])))
+        .collect();
+    let plot = equation::compile_with(source, &consts).map_err(|e| JsError::new(&e))?;
     let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
     let inner = match &plot {
@@ -116,11 +148,17 @@ pub fn plot(
             positions: mesh::parametric_curve(progs, (params[0], params[1]), 400, size * 2e-4),
             ..Default::default()
         },
+        equation::Plot::Param { .. } => mesh::Mesh::default(),
     };
     Ok(MeshResult {
         inner,
         kind: plot.kind_label(),
         params: plot.params(),
         curve: matches!(plot, equation::Plot::Curve { .. }),
+        used_params: plot.used_params(),
+        param: match &plot {
+            equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
+            _ => None,
+        },
     })
 }
