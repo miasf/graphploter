@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
+  import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
   import { complexLatex, coordName, latexName, niceStep, prettyName } from './lib/params'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
@@ -78,12 +79,87 @@
 
   onMount(() => {
     viewer = new Viewer(viewerEl)
-    viewer.setDark(dark)
-    viewer.setPerspective(perspective / 100)
-    viewer.setDomain(domain)
-    items.forEach(replot)
+    ;(async () => {
+      // 共有リンクで開いた、またはブラウザに保存してあるなら、その状態に戻す
+      const saved = await loadInitial()
+      if (saved) restore(saved)
+      viewer?.setDark(dark)
+      viewer?.setPerspective(perspective / 100)
+      viewer?.setDomain(domain, true)
+      loaded = true
+      items.forEach(replot)
+    })()
     return () => viewer?.dispose()
   })
+
+  // ---- 保存・共有 ----
+
+  /** 保存した状態を読み込み終わったか（それまでは自動保存しない） */
+  let loaded = $state(false)
+
+  /** 今の式と設定（保存する分だけ） */
+  function snapshot(): SavedState {
+    return $state.snapshot({
+      version: 1 as const,
+      items: items.map((it) => ({
+        latex: it.latex,
+        color: it.color,
+        visible: it.visible,
+        opacity: it.opacity,
+        grid: it.grid,
+        lineWidth: it.lineWidth,
+        ranges: it.ranges,
+        vertical: it.vertical,
+        slider: it.slider,
+      })),
+      domain,
+      resolution,
+      implicitResolution,
+      perspective,
+      dark,
+      space,
+    })
+  }
+
+  function restore(s: SavedState) {
+    nextId = 1
+    items = s.items.map((si) => newItem(si.latex, { ...si }))
+    domain = s.domain
+    resolution = s.resolution
+    implicitResolution = s.implicitResolution
+    perspective = s.perspective
+    dark = s.dark
+    space = s.space
+  }
+
+  // 変わるたびに（少し待ってから）ブラウザに保存する
+  let saveTimer: ReturnType<typeof setTimeout> | undefined
+  $effect(() => {
+    if (!loaded) return
+    const state = snapshot() // ここで読んだ値が変わると、この処理がもう一度動く
+    clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => saveLocal(state), 500)
+  })
+
+  let shareMessage = $state('')
+  async function copyShareLink() {
+    const url = await shareUrl(snapshot())
+    try {
+      await navigator.clipboard.writeText(url)
+      shareMessage = 'リンクをコピーしました'
+    } catch {
+      // コピーできない環境では、アドレス欄に入れて見せる
+      history.replaceState(null, '', url)
+      shareMessage = 'アドレス欄のリンクを共有してください'
+    }
+    setTimeout(() => (shareMessage = ''), 3000)
+  }
+
+  function resetAll() {
+    if (!confirm('式と設定をすべて最初の状態に戻します。よろしいですか？')) return
+    clearLocal()
+    location.reload()
+  }
 
   // ---- スマホ用: 下から引き出すシート ----
   //
@@ -755,6 +831,15 @@
             oninput={() => viewer?.setPerspective(perspective / 100)}
           />
         </label>
+        <h2>保存・共有</h2>
+        <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
+        <div class="buttons">
+          <button class="secondary" onclick={copyShareLink}>共有リンクをコピー</button>
+          <button class="secondary" onclick={resetAll}>最初の状態に戻す</button>
+        </div>
+        {#if shareMessage}<p class="note">{shareMessage}</p>{/if}
+
+        <h2>視点</h2>
         <div class="buttons">
           <button class="secondary" onclick={() => viewer?.resetCamera()}>視点をリセット</button>
           <button class="secondary" onclick={() => (dark = !dark)}>{dark ? '明るい背景' : '暗い背景'}</button>
