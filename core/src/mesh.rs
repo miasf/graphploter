@@ -389,6 +389,52 @@ pub fn parametric_surface_nd(progs: &[Program], u: (f64, f64), v: (f64, f64), n:
     NdShape { dims: progs.len(), points: eval_nd(progs, &[&us, &vs], m * m), grid: Some((m, grid)) }
 }
 
+/// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
+/// 回転が表示中の座標どうしだけのときに、媒介変数表示 (u, v, f(u, v)) と同じように回すために使う。
+///
+/// - `axes`: 表示中の3つの座標の番号、`base`: 各座標の値（表示していない座標は断面の値）
+/// - `u`, `v`: 残り2つの座標を動かす範囲
+///
+/// 格子線用の座標には、u, v の値そのもの（元の座標の値）を入れる。回転しても、格子線は元の座標の
+/// きりの良い値の所に引かれる。
+#[allow(clippy::too_many_arguments)]
+pub fn explicit_nd(
+    prog: &Program,
+    axis: usize,
+    axes: [usize; 3],
+    base: &[f64],
+    u: (f64, f64),
+    v: (f64, f64),
+    n: usize,
+) -> NdShape {
+    let n = n.max(2);
+    let m = n + 1;
+    let (ua, va) = others(axis);
+    let d = base.len();
+    let mut us = Vec::with_capacity(m * m);
+    let mut vs = Vec::with_capacity(m * m);
+    let mut grid = Vec::with_capacity(m * m * 2);
+    for j in 0..m {
+        for i in 0..m {
+            let (a, b) = (u.0 + (u.1 - u.0) * i as f64 / n as f64, v.0 + (v.1 - v.0) * j as f64 / n as f64);
+            us.push(a);
+            vs.push(b);
+            grid.extend_from_slice(&[a as f32, b as f32]);
+        }
+    }
+    let mut vals = vec![C::new(0.0, 0.0); m * m];
+    prog.eval_batch(&[&us, &vs], &mut vals);
+    let mut points = Vec::with_capacity(m * m * d);
+    for k in 0..m * m {
+        let mut p = base.to_vec();
+        p[axes[ua]] = us[k];
+        p[axes[va]] = vs[k];
+        p[axes[axis]] = as_real(vals[k]);
+        points.extend_from_slice(&p);
+    }
+    NdShape { dims: d, points, grid: Some((m, grid)) }
+}
+
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
 ///
 /// 最初に `n` 等分して計算し、曲がっている所・途切れる所だけを細かく分け直す（適応サンプリング）。

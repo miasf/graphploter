@@ -83,6 +83,29 @@ impl Space {
         })
     }
 
+    /// 回転が「表示中の座標どうし」と「式が使っていない、表示していない座標どうし」だけか。
+    /// そうなら、表示中の3つの座標の空間は回転で自分自身に移るので、図形をそのまま回して描ける。
+    /// `used` は式が使っている名前。
+    pub fn rotation_keeps_shown(&self, used: &[String]) -> bool {
+        let n = rot_dims(self.dims);
+        let mut k = 0;
+        for i in 0..n {
+            for j in i + 1..n {
+                let angle = self.rotation.get(k).copied().unwrap_or(0.0);
+                k += 1;
+                if angle == 0.0 {
+                    continue;
+                }
+                let (si, sj) = (self.axes.contains(&i), self.axes.contains(&j));
+                let unused = |c: usize| !used.contains(&coord_name(c));
+                if !(si && sj || !si && !sj && unused(i) && unused(j)) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// 範囲で重ねる名前と範囲（表示していない座標とパラメータ）
     fn ranged(&self) -> Vec<(String, f64, f64)> {
         let mut out: Vec<(String, f64, f64)> = (0..self.dims)
@@ -181,7 +204,9 @@ fn is_param_var(name: &str) -> bool {
 pub enum Plot {
     /// 陽関数。表示中の `axis` 番目の座標（0: 横, 1: 奥, 2: 縦）が、残り2つの関数になっている。
     /// `prog` の変数は、残り2つの表示中の座標（軸の順）。
-    Explicit { axis: usize, names: [String; 3], prog: Program },
+    /// `rotated` が true なら、表示中の座標どうしの回転だけをしているので、
+    /// 媒介変数表示 (u, v, f(u, v)) と同じように点を計算してから回転・射影する（[`Space::view_rows`]）。
+    Explicit { axis: usize, names: [String; 3], prog: Program, rotated: bool },
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
     Implicit { prog: Program },
     /// 範囲で重ねた立体。`prog` の変数は表示中の3つの座標と、範囲で動かす名前（`ranges` の順）。
@@ -326,6 +351,21 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         _ => return Err("= は1つだけにしてください".into()),
     };
 
+    // 陽関数で、回転が表示中の座標どうしだけなら、曲面をそのまま回せばよい（媒介変数表示と同じ扱い）
+    if rot.is_some() && !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
+        let mut used = Vec::new();
+        l.collect_vars(&mut used);
+        r.collect_vars(&mut used);
+        if space.rotation_keeps_shown(&used) {
+            if let Some(p) = find_explicit(&l, &r, &shown, &consts)? {
+                return Ok(match p {
+                    Plot::Explicit { axis, names, prog, .. } => Plot::Explicit { axis, names, prog, rotated: true },
+                    other => other,
+                });
+            }
+        }
+    }
+
     // 回転していれば、元の座標 p を回転後の座標 q の式に置き換える
     let (l, r) = match &rot {
         Some(m) => (rotate_coords(&l, m, space), rotate_coords(&r, m, space)),
@@ -348,13 +388,8 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     }
 
     // 片方が表示中の座標1つだけで、もう片方にその座標が無ければ陽関数（回転すると陰関数になる）
-    // 左辺を優先して調べる（z = x なら「z = f(x, y)」）
-    for (one, other) in [(&l, &r), (&r, &l)] {
-        for (axis, name) in shown.iter().enumerate() {
-            if matches!(one, Expr::Var(v) if v == name) && !other.uses_var(name) {
-                return explicit(axis, other, &shown, &consts);
-            }
-        }
+    if let Some(p) = find_explicit(&l, &r, &shown, &consts)? {
+        return Ok(p);
     }
     if !shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
         return Err(format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")));
@@ -493,7 +528,19 @@ pub fn eval_constant(source: &str) -> Result<f64, String> {
 fn explicit(axis: usize, e: &Expr, shown: &[String; 3], consts: &Params) -> Result<Plot, String> {
     let (a, b) = others(axis);
     let prog = Program::compile_with(e, &[&shown[a], &shown[b]], consts)?;
-    Ok(Plot::Explicit { axis, names: shown.clone(), prog })
+    Ok(Plot::Explicit { axis, names: shown.clone(), prog, rotated: false })
+}
+
+/// 片方が表示中の座標1つだけで、もう片方にその座標が無ければ陽関数。左辺を優先して調べる（z = x なら「z = f(x, y)」）
+fn find_explicit(l: &Expr, r: &Expr, shown: &[String; 3], consts: &Params) -> Result<Option<Plot>, String> {
+    for (one, other) in [(l, r), (r, l)] {
+        for (axis, name) in shown.iter().enumerate() {
+            if matches!(one, Expr::Var(v) if v == name) && !other.uses_var(name) {
+                return explicit(axis, other, shown, consts).map(Some);
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -634,8 +681,8 @@ mod tests {
         sp.rotation[0] = std::f64::consts::FRAC_PI_2;
         let m = sp.rotation_matrix().unwrap();
         assert!((m[0][0]).abs() < 1e-12 && (m[1][0] - 1.0).abs() < 1e-12);
-        // 平面 x = 1 は、回すと平面 y = 1 になる（陰関数として描かれる）
-        let p = compile_with("x = 1", &ps, &sp).unwrap();
+        // 平面 x − 1 = 0 は、回すと平面 y = 1 になる（陽関数の形でないので、陰関数として式に代入して回す）
+        let p = compile_with("x - 1 = 0", &ps, &sp).unwrap();
         let prog: &Program = match &p {
             Plot::Implicit { prog } => prog,
             _ => panic!("回転すると陰関数になる"),
@@ -646,7 +693,7 @@ mod tests {
         assert!(out[0].norm() < 1e-12 && out[1].norm() > 1.0);
         // 中心 (1, 0, 0) の周りで 90° 回すと、平面 x = 1 は中心を通るので y = 0 になる
         sp.center = vec![1.0, 0.0, 0.0, 0.0, 0.0];
-        let p = compile_with("x = 1", &ps, &sp).unwrap();
+        let p = compile_with("x - 1 = 0", &ps, &sp).unwrap();
         if let Plot::Implicit { prog } = &p {
             prog.eval_batch(&[&[7.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]], &mut out);
             assert!(out[0].norm() < 1e-12);
@@ -672,6 +719,44 @@ mod tests {
         } else {
             panic!()
         }
+    }
+
+    #[test]
+    fn explicit_rotation_points() {
+        use crate::mesh::{explicit_nd, project, Domain};
+        // z = 1（高さ 1 の平面）を yz で 90° 回すと、y = −1 の平面になる
+        let ps = Params::new();
+        let mut sp = Space::standard();
+        sp.rotation[4] = std::f64::consts::FRAC_PI_2; // 組 (1,2) = yz
+        let Plot::Explicit { axis, prog, rotated: true, .. } = compile_with("z = 1", &ps, &sp).unwrap() else {
+            panic!("陽関数のまま回す")
+        };
+        let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, (-3.0, 3.0), (-3.0, 3.0), 6);
+        let m = project(&shape, &sp.view_rows(), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
+        assert!(!m.positions.is_empty());
+        for q in m.positions.chunks_exact(3) {
+            assert!((q[1] + 1.0).abs() < 1e-6, "y = {}", q[1]);
+        }
+    }
+
+    #[test]
+    fn explicit_rotation_as_surface() {
+        let ps = Params::new();
+        let mut sp = Space::standard();
+        // xz で回すだけなら、陽関数のまま（点を計算してから回す）
+        sp.rotation[1] = 0.3;
+        assert!(matches!(compile_with("z = x y", &ps, &sp).unwrap(), Plot::Explicit { rotated: true, .. }));
+        // xw（表示していない w の方向）が絡むと、陰関数として計算し直す
+        sp.rotation[2] = 0.3;
+        assert!(matches!(compile_with("z = x y", &ps, &sp).unwrap(), Plot::Implicit { .. }));
+        // 式が使っていない座標どうし（3次元のときの w と w₂）の回転は、影響しない
+        let mut sp = Space::standard();
+        sp.rotation[9] = 0.5; // 組 (3,4) = ww₂
+        assert!(sp.rotation_keeps_shown(&["x".into(), "y".into(), "z".into()]));
+        // 4次元で、断面の値として w を使う式に zw の回転をかけると、陰関数
+        let mut sp = space4([0, 1, 2], 1.0);
+        sp.rotation[7] = 0.2; // 組 (2,3) = zw
+        assert!(!sp.rotation_keeps_shown(&["z".into(), "w".into()]));
     }
 
     #[test]

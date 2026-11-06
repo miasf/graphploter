@@ -26,10 +26,14 @@ function range(name: string, [lo, hi]: [string, string]): [number, number] {
  */
 const shapes = new Map<number, { key: string; shape: Shape }>()
 
-/** 媒介変数表示の点の計算に関わる入力（回転・表示する軸・断面などは含めない） */
-function shapeKey(req: PlotRequest): string {
+/**
+ * 点の計算に関わる入力（回転は含めない）。
+ * 回転した陽関数から作った点（view が true）は、表示する軸・断面の値・回転の中心にもよる
+ */
+function shapeKey(req: PlotRequest, view: boolean): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
-  return JSON.stringify([source, domain, resolution, ranges, params, stacks, space.dims])
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims]
+  return JSON.stringify(view ? [...base, space.axes, space.slice, space.center] : base)
 }
 
 function forget(itemId: number) {
@@ -48,19 +52,23 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
   try {
     const rangeNames = Object.keys(ranges)
     const rangeValues = rangeNames.map((n) => range(n, ranges[n]))
-    const key = shapeKey(req)
     const cached = shapes.get(itemId)
-    let r: MeshResult
-    if (cached && cached.key === key) {
+    let r: MeshResult | null = null
+    if (cached && cached.key === shapeKey(req, cached.shape.view_dependent)) {
       // 点は計算済み: 回転・射影だけし直す
-      r = cached.shape.project(
-        domainArr,
-        space.dims,
-        new Uint32Array(space.axes),
-        new Float64Array(space.rotation),
-        new Float64Array(space.center),
-      )
-    } else {
+      try {
+        r = cached.shape.project(
+          domainArr,
+          space.dims,
+          new Uint32Array(space.axes),
+          new Float64Array(space.rotation),
+          new Float64Array(space.center),
+        )
+      } catch {
+        r = null // 回転した陽関数で、回転が条件を外れた（陰関数として計算し直す）
+      }
+    }
+    if (!r) {
       r = plot(
         source,
         domainArr,
@@ -82,7 +90,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
       )
       forget(itemId)
       const shape = r.take_shape()
-      if (shape) shapes.set(itemId, { key, shape })
+      if (shape) shapes.set(itemId, { key: shapeKey(req, shape.view_dependent), shape })
     }
     const vars = r.params.split(',').filter((s) => s !== '')
     // 曲面の格子線を引くための、媒介変数の範囲の長さ

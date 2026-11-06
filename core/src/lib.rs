@@ -30,6 +30,8 @@ pub struct MeshResult {
     param: Option<(String, num_complex::Complex64)>,
     /// 媒介変数表示なら、回転・射影する前の n 次元の点（回転だけ変わったときに使い回す）
     shape: Option<mesh::NdShape>,
+    /// 回転した陽関数なら、式が使っている名前（回転が条件を満たすか確かめるため）
+    explicit_used: Option<Vec<String>>,
 }
 
 #[wasm_bindgen]
@@ -85,6 +87,7 @@ impl MeshResult {
         let inner = self.shape.take()?;
         Some(Shape {
             inner,
+            explicit_used: self.explicit_used.clone(),
             kind: self.kind.clone(),
             params: self.params.clone(),
             curve: self.curve,
@@ -198,6 +201,7 @@ pub fn plot(
             .unwrap_or((0.0, std::f64::consts::TAU))
     };
     let inner = match &plot {
+        equation::Plot::Explicit { rotated: true, .. } => mesh::Mesh::default(), // 下で作る
         equation::Plot::Explicit { axis, prog, .. } => {
             mesh::explicit_surface(prog, dom, resolution.clamp(2, 1000) as usize, *axis)
         }
@@ -225,6 +229,30 @@ pub fn plot(
         equation::Plot::Curve { progs, vars } => {
             Some(mesh::parametric_curve_nd(progs, range(&vars[0]), 400, size * 2e-4))
         }
+        // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
+        // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）
+        equation::Plot::Explicit { axis, prog, rotated: true, .. } => {
+            let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
+            let rho = (0..3)
+                .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let (ua, va) = equation::others(*axis);
+            Some(mesh::explicit_nd(
+                prog,
+                *axis,
+                space.axes,
+                &space.slice,
+                (c[ua] - rho, c[ua] + rho),
+                (c[va] - rho, c[va] + rho),
+                resolution.clamp(2, 1000) as usize,
+            ))
+        }
+        _ => None,
+    };
+    // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
+    let explicit_used = match &plot {
+        equation::Plot::Explicit { rotated: true, .. } => Some(plot.used_params()),
         _ => None,
     };
     let inner = match &shape {
@@ -234,6 +262,7 @@ pub fn plot(
     Ok(MeshResult {
         inner,
         shape,
+        explicit_used,
         kind: plot.kind_label(),
         params: plot.param_vars(),
         curve: matches!(plot, equation::Plot::Curve { .. }),
@@ -249,6 +278,7 @@ pub fn plot(
 #[wasm_bindgen]
 pub struct Shape {
     inner: mesh::NdShape,
+    explicit_used: Option<Vec<String>>,
     kind: String,
     params: Vec<String>,
     curve: bool,
@@ -257,8 +287,16 @@ pub struct Shape {
 
 #[wasm_bindgen]
 impl Shape {
+    /// 回転した陽関数から作った形か。そうなら、表示する軸・断面の値・回転の中心が変わると使い回せない
+    #[wasm_bindgen(getter)]
+    pub fn view_dependent(&self) -> bool {
+        self.explicit_used.is_some()
+    }
+
     /// 回転・表示する軸・表示範囲を変えて、もう一度3次元に射影する（式は計算し直さない）。
-    /// 引数の意味は [`plot`] と同じ
+    /// 引数の意味は [`plot`] と同じ。
+    /// 回転した陽関数で、新しい回転が「表示中の座標どうし」でなくなったときは
+    /// "RECOMPUTE" というエラーを返す（陰関数として計算し直す必要がある）
     pub fn project(
         &self,
         domain: &[f64],
@@ -275,10 +313,16 @@ impl Shape {
         let mut space = equation::Space::basic(n, [axes[0] as usize, axes[1] as usize, axes[2] as usize], vec![0.0; n]);
         space.rotation = rotation.to_vec();
         space.center = center.to_vec();
+        if let Some(used) = &self.explicit_used {
+            if space.rotation.iter().all(|&a| a == 0.0) || !space.rotation_keeps_shown(used) {
+                return Err(JsError::new("RECOMPUTE"));
+            }
+        }
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
         Ok(MeshResult {
             inner: mesh::project(&self.inner, &space.view_rows(), dom),
             shape: None,
+            explicit_used: None,
             kind: self.kind.clone(),
             params: self.params.clone(),
             curve: self.curve,
