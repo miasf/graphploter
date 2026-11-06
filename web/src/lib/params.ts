@@ -1,4 +1,6 @@
-// パラメータ（スライダー）まわりの小さな関数
+// パラメータ（スライダー）・次元まわりの小さな関数
+
+import type { Space } from './types'
 
 /** 座標（x, y, z, w, w2, w3, …）と定数（e, i）の名前か。これらはパラメータにできない。
  *  t, u, v は組 (…, …) の外ではパラメータにできる */
@@ -9,6 +11,28 @@ export function isReserved(name: string): boolean {
 /** k 番目の座標の名前（0: x, 1: y, 2: z, 3: w, 4: w2, …） */
 export function coordName(k: number): string {
   return k < 4 ? 'xyzw'[k] : `w${k - 2}`
+}
+
+/** 座標の組 (i, j)（i < j）を、回転角と同じ順に並べたもの */
+export function pairs(n: number): [number, number][] {
+  const out: [number, number][] = []
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) out.push([i, j])
+  return out
+}
+
+/** 次元を n に変えた空間の設定。断面の値・範囲・回転角は、同じ座標（の組）のものを引き継ぐ */
+export function resizeSpace(space: Space, n: number): Space {
+  n = Math.max(3, Math.min(10, n))
+  const slice = Array.from({ length: n }, (_, k) => space.slice[k] ?? 0)
+  const ranges = Array.from({ length: n }, (_, k) => space.ranges[k] ?? null)
+  // 回転は max(次元, 5) 次元で行う
+  const center = Array.from({ length: rotDims(n) }, (_, k) => space.center[k] ?? 0)
+  const oldAngle = new Map<string, number>()
+  pairs(rotDims(space.dims)).forEach(([i, j], k) => oldAngle.set(`${i},${j}`, space.rotation[k] ?? 0))
+  const rotation = pairs(rotDims(n)).map(([i, j]) => oldAngle.get(`${i},${j}`) ?? 0)
+  // 表示中の座標が無くなる場合は、x, y, z の表示に戻す
+  const axes = space.axes.every((a) => a < n) ? space.axes : ([0, 1, 2] as [number, number, number])
+  return { ...space, dims: n, axes: [...axes] as [number, number, number], slice, ranges, center, rotation }
 }
 
 /** 回転に使う次元。次元が5未満でも、w, w₂ を使った5次元の回転ができる */

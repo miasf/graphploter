@@ -1,6 +1,6 @@
 <script lang="ts">
   // 次元の設定: 次元の数、画面の横・奥・縦に表示する座標、表示しない座標の断面の値
-  import { coordName, formatNumber, niceStep, prettyName, rotDims } from './params'
+  import { coordName, formatNumber, niceStep, prettyName, resizeSpace } from './params'
   import type { Space } from './types'
 
   interface Props {
@@ -28,24 +28,7 @@
 
   /** 次元を変える。回転角は、同じ座標の組のものを引き継ぐ */
   function setDims(n: number) {
-    n = Math.max(3, Math.min(10, n))
-    const slice = Array.from({ length: n }, (_, k) => space.slice[k] ?? 0)
-    const ranges = Array.from({ length: n }, (_, k) => space.ranges[k] ?? null)
-    // 回転は max(次元, 5) 次元で行う
-    const center = Array.from({ length: rotDims(n) }, (_, k) => space.center[k] ?? 0)
-    const oldAngle = new Map<string, number>()
-    pairs(rotDims(space.dims)).forEach(([i, j], k) => oldAngle.set(`${i},${j}`, space.rotation[k] ?? 0))
-    const rotation = pairs(rotDims(n)).map(([i, j]) => oldAngle.get(`${i},${j}`) ?? 0)
-    // 表示中の座標が無くなる場合は、x, y, z の表示に戻す
-    const axes = space.axes.every((a) => a < n) ? space.axes : ([0, 1, 2] as [number, number, number])
-    onLayout({ ...space, dims: n, axes: [...axes] as [number, number, number], slice, ranges, center, rotation })
-  }
-
-  /** 座標の組 (i, j)（i < j）を、回転角と同じ順に並べたもの */
-  function pairs(n: number): [number, number][] {
-    const out: [number, number][] = []
-    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) out.push([i, j])
-    return out
+    onLayout(resizeSpace(space, n))
   }
 
   function setRange(k: number, side: 0 | 1, v: number) {

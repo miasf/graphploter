@@ -4,7 +4,8 @@
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, latexName, niceStep, prettyName } from './lib/params'
+  import { complexLatex, coordName, latexName, niceStep, prettyName, resizeSpace } from './lib/params'
+  import { SAMPLE_GROUPS, type Sample } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestPlot } from './lib/plotClient'
@@ -37,28 +38,8 @@
   }
 
   // ---- 画面の状態 ----
-  let items = $state<PlotItem[]>([
-    // パラメータ（スライダー）。下の式の a を動かせる
-    newItem('a=1'),
-    // 格子線だけの曲面（面の不透明度 0）
-    newItem('z=2ae^{-\\frac{x^2+y^2}{4}}-1', {
-      color: '#3fb6c8',
-      opacity: 0,
-      grid: { enabled: true, x: 0.25, y: 0.25, z: 0, u: 24, v: 24, width: 1 },
-    }),
-    // 媒介変数表示の曲線（らせん）
-    newItem('\\left(4\\cos t,4\\sin t,\\frac{t}{5}\\right)', {
-      color: '#c74440',
-      ranges: { t: ['-4\\pi', '4\\pi'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
-    }),
-    // 媒介変数表示の曲面（トーラス）
-    newItem('\\left(\\left(3+\\cos v\\right)\\cos u,\\left(3+\\cos v\\right)\\sin u,\\sin v\\right)', {
-      visible: false,
-      color: '#6042a6',
-    }),
-    newItem('x^2+y^2+z^2=4', { visible: false }),
-    newItem('z=\\left|\\Gamma\\left(x+iy\\right)\\right|', { visible: false }),
-  ])
+  // 最初は空の式が1つだけ。例は「サンプル」からタップして追加する
+  let items = $state<PlotItem[]>([newItem('')])
   let domain = $state<Domain>({ xmin: -5, xmax: 5, ymin: -5, ymax: 5, zmin: -3, zmax: 3 })
   let resolution = $state(150)
   let implicitResolution = $state(80)
@@ -618,6 +599,35 @@
    * 正八胞体（4次元の立方体）の辺 32 本を、4次元の遠近法と xw 平面の回転の再生つきで表示する。
    * ネットでよく見る「内側の立方体が外へ出てきて裏返る」動き
    */
+  /** サンプルを一覧の最後に追加する（今ある式は消さない） */
+  async function addSample(sample: Sample) {
+    if (sample.special === 'tesseract') {
+      loadTesseract()
+      return
+    }
+    // 4次元の例などは、次元が足りなければ増やす
+    if (sample.dims && space.dims < sample.dims) setLayout(resizeSpace(space, sample.dims))
+    // 空の式が1つだけなら、それはサンプルで置き換える
+    if (items.length === 1 && items[0].latex === '') {
+      viewer?.removePlot(items[0].id)
+      items.splice(0, 1)
+    }
+    const defined = new Set(items.map((it) => it.param?.name ?? latexParamName(it.latex)))
+    for (const si of sample.items) {
+      if (si.param && defined.has(si.param)) continue // 同じ名前のパラメータがすでにある
+      items.push(newItem(si.latex, si.options ?? {}))
+      schedule(items[items.length - 1], 0)
+    }
+    // 追加した式が見えるところまで一覧を動かす
+    await tick()
+    listEl.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+
+  /** 「a=1」のような式なら、そのパラメータの名前（まだ計算していない式のため、文字の形だけで調べる） */
+  function latexParamName(latex: string): string | undefined {
+    return /^([a-zA-Z])\s*=/.exec(latex)?.[1]
+  }
+
   function loadTesseract() {
     for (const it of items) {
       it.visible = false
@@ -739,10 +749,19 @@
         {/each}
       </ul>
       <button class="add" onclick={addItem}>＋ 式を追加</button>
-      <div class="examples">
-        <span>例:</span>
-        <button class="link-button" onclick={loadTesseract}>正八胞体（4次元の立方体）の回転</button>
-      </div>
+      <details class="samples" open>
+        <summary>サンプル（タップで追加）</summary>
+        {#each SAMPLE_GROUPS as group (group.title)}
+          <div class="sample-group">
+            <span class="sample-title">{group.title}</span>
+            <div class="chips">
+              {#each group.samples as sample (sample.label)}
+                <button class="chip" onclick={() => addSample(sample)}>{sample.label}</button>
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </details>
 
       <section class="settings">
         <h2>次元</h2>
@@ -997,23 +1016,40 @@
     font-size: 13px;
     color: var(--muted);
   }
-  .examples {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
+  .samples {
     margin: 0 16px 8px;
     font-size: 13px;
+  }
+  .samples summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 4px 0;
+  }
+  .sample-group {
+    margin-top: 6px;
+  }
+  .sample-title {
+    font-size: 11px;
     color: var(--muted);
   }
-  .link-button {
-    padding: 0;
-    border: none;
-    background: none;
-    color: #2d70b3;
-    font-size: 13px;
-    text-decoration: underline;
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .chip {
+    padding: 5px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
     cursor: pointer;
+  }
+  .chip:hover {
+    background: var(--hover);
   }
   .note {
     font-size: 11px;
