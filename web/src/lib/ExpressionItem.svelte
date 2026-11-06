@@ -30,6 +30,12 @@
     onSlider: (slider: SliderStyle) => void
     /** 「a のスライダーを追加」を押したとき */
     onAddSlider: (name: string) => void
+    /** 式の欄でエンターが押されたとき（この下に新しい式を足す） */
+    onEnter: () => void
+    /** 並べ替えのつまみをドラッグしたとき */
+    onDrag: (phase: 'start' | 'move' | 'end', e: PointerEvent) => void
+    /** ドラッグして動かしている最中か */
+    dragging: boolean
   }
   let {
     item,
@@ -49,6 +55,9 @@
     onParam,
     onSlider,
     onAddSlider,
+    onEnter,
+    onDrag,
+    dragging,
   }: Props = $props()
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
@@ -92,9 +101,26 @@
   })
 </script>
 
-<li class="item" class:has-error={!!item.error}>
+<li class="item" class:has-error={!!item.error} class:dragging>
   <div class="gutter">
-    <span class="index">{index + 1}</span>
+    <!-- 並べ替えのつまみ（上下にドラッグして式の順番を変える） -->
+    <span
+      class="index"
+      role="button"
+      tabindex="-1"
+      aria-label="式 {index + 1} を動かす（上下にドラッグ）"
+      title="上下にドラッグして並べ替え"
+      onpointerdown={(e) => {
+        e.currentTarget.setPointerCapture(e.pointerId)
+        onDrag('start', e)
+      }}
+      onpointermove={(e) => onDrag('move', e)}
+      onpointerup={(e) => onDrag('end', e)}
+      onpointercancel={(e) => onDrag('end', e)}
+    >
+      <span class="grip">⋮⋮</span>
+      {index + 1}
+    </span>
     {#if !item.param}
       <button
       class="swatch"
@@ -118,7 +144,9 @@
               value={part}
               label="{COMPONENT_NAMES[k] ?? '?'} 成分"
               keyboardToggle={k === 0}
+              autofocus={item.autofocus && k === 0}
               onInput={(v) => setPart(k, v)}
+              {onEnter}
             />
           </div>
         {/each}
@@ -129,8 +157,10 @@
         value={item.latex}
         label="式 {index + 1}"
         placeholder="z=\sin x\cos y"
+        autofocus={item.autofocus}
         onInput={(v) => onInput(v)}
         onFocusChange={(f) => (editingLine = f)}
+        {onEnter}
       />
       {#if parts && !item.vertical}
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
@@ -298,8 +328,31 @@
     border-left-color: var(--error);
   }
   .index {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2px 6px;
     font-size: 11px;
+    line-height: 1.1;
     color: var(--muted);
+    cursor: grab;
+    touch-action: none; /* ドラッグ中に画面がスクロールしないように */
+    user-select: none;
+    border-radius: 4px;
+  }
+  .index:hover {
+    background: var(--hover);
+  }
+  .grip {
+    font-size: 9px;
+    letter-spacing: -2px;
+    opacity: 0.6;
+  }
+  .item.dragging {
+    position: relative;
+    z-index: 2;
+    box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+    opacity: 0.95;
   }
   .swatch {
     width: 22px;

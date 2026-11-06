@@ -71,7 +71,7 @@ export function setupKeyboard() {
           '3',
           '-',
         ],
-        ['[left]', '[right]', '[backspace]', { label: '[hide-keyboard]', width: 1.5 }, '[separator-5]', '0', '.', '+'],
+        ['[left]', '[right]', '[backspace]', '[hide-keyboard]', '[separator-5]', '0', '.', '+', '[return]'],
       ],
     },
     {

@@ -1,6 +1,6 @@
 <script lang="ts">
   // アプリの画面全体。左に式の一覧、右に3D表示。
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
   import { complexLatex, coordName, latexName, niceStep, prettyName } from './lib/params'
@@ -330,6 +330,46 @@
     items.push(it)
   }
 
+  /** エンター: その式のすぐ下に空の式を足して、そこに入力を始める */
+  async function insertAfter(item: PlotItem) {
+    const k = items.indexOf(item) + 1
+    items.splice(k, 0, newItem('', { autofocus: true }))
+    await tick()
+    items[k].autofocus = false // 入力欄が作られて入力が始まったら、もう要らない
+  }
+
+  // ---- 並べ替え（左端の番号をつまんで上下にドラッグ）----
+
+  let listEl: HTMLElement
+  let dragId = $state<number | null>(null)
+
+  function dragItem(item: PlotItem, phase: 'start' | 'move' | 'end', e: PointerEvent) {
+    if (phase === 'start') {
+      dragId = item.id
+      return
+    }
+    if (dragId !== item.id) return
+    if (phase === 'end') {
+      dragId = null
+      return
+    }
+    // 指（マウス）の高さが、ほかの式の真ん中より上なら、その式の前に入れる
+    const rows = Array.from(listEl.children) as HTMLElement[]
+    const from = items.indexOf(item)
+    let to = items.length - 1
+    for (let k = 0; k < rows.length; k++) {
+      const r = rows[k].getBoundingClientRect()
+      if (e.clientY < r.top + r.height / 2) {
+        to = k > from ? k - 1 : k
+        break
+      }
+    }
+    if (to !== from) {
+      items.splice(from, 1)
+      items.splice(to, 0, item)
+    }
+  }
+
   function removeItem(item: PlotItem) {
     viewer?.removePlot(item.id)
     items.splice(items.indexOf(item), 1)
@@ -554,7 +594,7 @@
 
     <div class="panel-body">
 
-      <ul class="list">
+      <ul class="list" bind:this={listEl}>
         {#each items as item, i (item.id)}
           <ExpressionItem
             {item}
@@ -574,6 +614,9 @@
             onParam={(re, im) => setParam(item, re, im)}
             onSlider={(sl) => setSlider(item, sl)}
             onAddSlider={(name) => addSlider(item, name)}
+            onEnter={() => insertAfter(item)}
+            onDrag={(phase, e) => dragItem(item, phase, e)}
+            dragging={dragId === item.id}
           />
         {/each}
       </ul>
@@ -713,6 +756,7 @@
           パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
           「複素数」を押すと、複素平面の上で点を動かして値を決められます
         </li>
+        <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
         <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
           <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
         </ul>
