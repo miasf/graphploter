@@ -310,6 +310,18 @@ mod tests {
     }
 
     #[test]
+    fn special_functions_in_expressions() {
+        let v = |src: &str| eval_xy(src, 2.0, 0.0);
+        assert!((v("zeta(x)").re - std::f64::consts::PI.powi(2) / 6.0).abs() < 1e-12);
+        assert!((v("erf(0)").re).abs() < 1e-15);
+        assert!((v("beta(x, 3)").re - 1.0 / 12.0).abs() < 1e-12);
+        assert!((v("besselJ(0, 1)").re - 0.765_197_686_557_966_6).abs() < 1e-12);
+        assert!((v("psi(1)").re + 0.577_215_664_901_532_9).abs() < 1e-12);
+        assert!((v("arcsinh(sinh(x))").re - 2.0).abs() < 1e-12);
+        assert!((v("cot(x) tan(x)").re - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn unknown_variable() {
         assert!(Program::compile(&parse("x + a").unwrap(), &["x", "y"]).is_err());
     }

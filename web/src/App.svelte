@@ -856,8 +856,12 @@
           <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
           <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>
           <li>
-            関数: sin cos tan arcsin arccos arctan sinh cosh tanh exp ln log sqrt abs floor ceil round sign
-          Re Im conj arg gamma、2つの引数: mod(a, b) min max nCr(n, r) nPr(n, r)、階乗: <code>n!</code>
+            関数: sin cos tan sec csc cot arcsin arccos arctan sinh cosh tanh arcsinh arccosh arctanh exp ln log sqrt abs
+          floor ceil round sign Re Im conj arg、2つの引数: mod min max nCr nPr、階乗: <code>n!</code>
+        </li>
+        <li>
+          特殊関数: gamma（Γ）, beta(a, b), psi（ψ, ディガンマ）, zeta（ζ）, erf, erfc, besselJ(ν, z), besselI(ν, z)。
+          すべて複素数で使えます（数式キーボードの「特殊」タブ）
         </li>
           <li>複素数の結果が実数でない点は描かれません</li>
           <li>

@@ -14,13 +14,15 @@ export class LatexError extends Error {}
 const FUNCTIONS = new Set([
   'sin', 'cos', 'tan', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log',
   // ふつうの LaTeX で関数として書かれるもの（\max{…} ではなく \max\left(…\right) の形で使う）
-  'max', 'min', 'arg', 'Re', 'Im',
+  'max', 'min', 'arg', 'Re', 'Im', 'sec', 'csc', 'cot',
 ])
 
 /** 単純に置き換えるコマンド */
 const SYMBOLS: Record<string, string> = {
   pi: ' pi ',
   Gamma: ' gamma ',
+  zeta: ' zeta ',
+  psi: ' psi ',
   exponentialE: 'e',
   imaginaryI: 'i',
   cdot: '*',

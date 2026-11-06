@@ -42,8 +42,22 @@ pub enum Func {
     Im,
     Conj,
     Arg,
+    // 三角関数・双曲線関数の追加
+    Sec,
+    Csc,
+    Cot,
+    Asinh,
+    Acosh,
+    Atanh,
     // 特殊関数
     Gamma,
+    Beta,
+    Digamma,
+    Erf,
+    Erfc,
+    Zeta,
+    BesselJ,
+    BesselI,
 }
 
 impl Func {
@@ -75,7 +89,20 @@ impl Func {
         Func::Im,
         Func::Conj,
         Func::Arg,
+        Func::Sec,
+        Func::Csc,
+        Func::Cot,
+        Func::Asinh,
+        Func::Acosh,
+        Func::Atanh,
         Func::Gamma,
+        Func::Beta,
+        Func::Digamma,
+        Func::Erf,
+        Func::Erfc,
+        Func::Zeta,
+        Func::BesselJ,
+        Func::BesselI,
     ];
 
     /// 入力で使える名前（最初のものが代表名）
@@ -108,14 +135,27 @@ impl Func {
             Func::Im => &["Im"],
             Func::Conj => &["conj"],
             Func::Arg => &["arg"],
+            Func::Sec => &["sec"],
+            Func::Csc => &["csc"],
+            Func::Cot => &["cot"],
+            Func::Asinh => &["arcsinh", "asinh"],
+            Func::Acosh => &["arccosh", "acosh"],
+            Func::Atanh => &["arctanh", "atanh"],
             Func::Gamma => &["gamma", "Γ"],
+            Func::Beta => &["beta"],
+            Func::Digamma => &["digamma", "psi", "ψ"],
+            Func::Erf => &["erf"],
+            Func::Erfc => &["erfc"],
+            Func::Zeta => &["zeta", "ζ"],
+            Func::BesselJ => &["besselJ"],
+            Func::BesselI => &["besselI"],
         }
     }
 
     /// 引数の個数
     pub fn arity(self) -> usize {
         match self {
-            Func::Mod | Func::Min | Func::Max | Func::NCr | Func::NPr => 2,
+            Func::Mod | Func::Min | Func::Max | Func::NCr | Func::NPr | Func::Beta | Func::BesselJ | Func::BesselI => 2,
             _ => 1,
         }
     }
@@ -154,7 +194,17 @@ impl Func {
             Func::Im => C::new(z.im, 0.0),
             Func::Conj => z.conj(),
             Func::Arg => C::new(z.arg(), 0.0),
+            Func::Sec => 1.0 / z.cos(),
+            Func::Csc => 1.0 / z.sin(),
+            Func::Cot => z.cos() / z.sin(),
+            Func::Asinh => z.asinh(),
+            Func::Acosh => z.acosh(),
+            Func::Atanh => z.atanh(),
             Func::Gamma => special::gamma(z),
+            Func::Digamma => special::digamma(z),
+            Func::Erf => special::erf(z),
+            Func::Erfc => special::erfc(z),
+            Func::Zeta => special::zeta(z),
             _ => C::new(f64::NAN, f64::NAN),
         }
     }
@@ -184,6 +234,10 @@ impl Func {
             }
             Func::NCr => special::binomial(a, b),
             Func::NPr => special::permutation(a, b),
+            Func::Beta => special::beta(a, b),
+            // besselJ(ν, z): 1つ目が次数 ν、2つ目が変数 z
+            Func::BesselJ => special::bessel_j(a, b),
+            Func::BesselI => special::bessel_i(a, b),
             _ => C::new(f64::NAN, f64::NAN),
         }
     }

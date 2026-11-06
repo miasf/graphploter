@@ -98,6 +98,221 @@ pub fn permutation(n: C, r: C) -> C {
     gamma(n + 1.0) / gamma(n - r + 1.0)
 }
 
+// ---------------------------------------------------------------------------
+// ベータ関数・ディガンマ関数
+// ---------------------------------------------------------------------------
+
+/// ベータ関数 B(a, b) = Γ(a) Γ(b) / Γ(a + b)
+pub fn beta(a: C, b: C) -> C {
+    gamma(a) * gamma(b) / gamma(a + b)
+}
+
+/// ディガンマ関数 ψ(z) = Γ'(z) / Γ(z)。
+/// Re z < 1/2 は相反公式 ψ(1 − z) − ψ(z) = π cot(πz)、それ以外は ψ(z) = ψ(z + 1) − 1/z で
+/// z を大きくしてから漸近展開 ψ(z) ≈ ln z − 1/(2z) − Σ B₂ₖ / (2k z²ᵏ) を使う。
+pub fn digamma(z: C) -> C {
+    if z.re < 0.5 {
+        if z.im == 0.0 && z.re == z.re.round() {
+            return C::new(f64::NAN, f64::NAN); // 極（0 以下の整数）
+        }
+        // cot は cos / sin で計算する（tan だと z = −1/2 などで 0 / 0 になる）
+        let w = PI * z;
+        return digamma(1.0 - z) - PI * w.cos() / w.sin();
+    }
+    let mut z = z;
+    let mut acc = C::new(0.0, 0.0);
+    while z.norm() < 10.0 {
+        acc -= 1.0 / z;
+        z += 1.0;
+    }
+    let z2 = 1.0 / (z * z);
+    // B₂/2, B₄/4, B₆/6, B₈/8, B₁₀/10, B₁₂/12
+    let series = z2
+        * (1.0 / 12.0
+            - z2 * (1.0 / 120.0 - z2 * (1.0 / 252.0 - z2 * (1.0 / 240.0 - z2 * (1.0 / 132.0 - z2 * (691.0 / 32760.0))))));
+    acc + z.ln() - 0.5 / z - series
+}
+
+// ---------------------------------------------------------------------------
+// 誤差関数
+// ---------------------------------------------------------------------------
+
+/// 誤差関数 erf(z) = (2/√π) ∫₀ᶻ e^(−t²) dt
+pub fn erf(z: C) -> C {
+    if z.norm() <= 3.0 {
+        erf_series(z)
+    } else if z.re >= 0.0 {
+        1.0 - erfc_cf(z)
+    } else {
+        -(1.0 - erfc_cf(-z))
+    }
+}
+
+/// 相補誤差関数 erfc(z) = 1 − erf(z)
+pub fn erfc(z: C) -> C {
+    if z.norm() <= 3.0 {
+        1.0 - erf_series(z)
+    } else if z.re >= 0.0 {
+        erfc_cf(z)
+    } else {
+        2.0 - erfc_cf(-z)
+    }
+}
+
+/// erf の級数 (2/√π) Σ (−1)ⁿ z²ⁿ⁺¹ / (n! (2n + 1))（|z| が小さいとき）
+fn erf_series(z: C) -> C {
+    let z2 = z * z;
+    let mut term = z; // (−1)ⁿ z²ⁿ⁺¹ / n!
+    let mut sum = z;
+    for n in 1..200 {
+        term *= -z2 / n as f64;
+        let t = term / (2 * n + 1) as f64;
+        sum += t;
+        if t.norm() < 1e-17 * sum.norm() {
+            break;
+        }
+    }
+    sum * (2.0 / PI.sqrt())
+}
+
+/// erfc の連分数（Re z > 0 で |z| が大きいとき）:
+/// erfc z = e^(−z²)/√π · 1 / (z + (1/2) / (z + 1 / (z + (3/2) / (z + 2 / (z + …)))))
+fn erfc_cf(z: C) -> C {
+    // 後ろから計算する（項の数は十分大きく取る）
+    let mut f = z;
+    for k in (1..120).rev() {
+        f = z + (k as f64 / 2.0) / f;
+    }
+    (-z * z).exp() / (PI.sqrt() * f)
+}
+
+// ---------------------------------------------------------------------------
+// ゼータ関数
+// ---------------------------------------------------------------------------
+
+/// リーマンのゼータ関数 ζ(s)。
+/// Re s ≥ 1/2 はボーウェインの方法（交代級数 η(s) を速く収束させる）、Re s < 1/2 は関数等式
+/// ζ(s) = 2ˢ πˢ⁻¹ sin(πs/2) Γ(1 − s) ζ(1 − s) を使う。s = 1 は極。
+pub fn zeta(s: C) -> C {
+    if s == C::new(1.0, 0.0) {
+        return C::new(f64::INFINITY, 0.0);
+    }
+    if s == C::new(0.0, 0.0) {
+        return C::new(-0.5, 0.0); // 関数等式では 0 × ∞ になるので、値を直接返す
+    }
+    if s.re < 0.5 {
+        let two = C::new(2.0, 0.0);
+        let pi = C::new(PI, 0.0);
+        return two.powc(s) * pi.powc(s - 1.0) * (PI * s / 2.0).sin() * gamma(1.0 - s) * zeta(1.0 - s);
+    }
+    // 項の数は、虚部が大きいほど増やす（ボーウェインの誤差の見積もりによる）
+    let n = (50.0 + 1.3 * s.im.abs()).min(400.0) as usize;
+    BORWEIN.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let (d, ln_k) = cache.entry(n).or_insert_with(|| borwein_coefficients(n));
+        let dn = d[n];
+        let mut sum = C::new(0.0, 0.0);
+        for k in 0..n {
+            let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+            // (k + 1)^(−s) = e^(−s ln(k + 1))
+            sum += sign * (d[k] - dn) * (-s * ln_k[k]).exp();
+        }
+        -sum / (dn * (1.0 - C::new(2.0, 0.0).powc(1.0 - s)))
+    })
+}
+
+/// 項の数 n → (係数 d, ln(k + 1) の表)
+type BorweinCache = std::collections::HashMap<usize, (Vec<f64>, Vec<f64>)>;
+
+thread_local! {
+    /// ボーウェインの方法の係数（項の数 n ごとに1回だけ計算して使い回す）
+    static BORWEIN: std::cell::RefCell<BorweinCache> = std::cell::RefCell::new(BorweinCache::new());
+}
+
+/// 係数 d_k = n Σ_{i=0}^{k} (n + i − 1)! 4ⁱ / ((n − i)! (2i)!)（k = 0..n）と、ln(k + 1)（k = 0..n−1）。
+/// 桁あふれを防ぐため対数で計算する
+fn borwein_coefficients(n: usize) -> (Vec<f64>, Vec<f64>) {
+    // ln(m!) の表
+    let mut lf = vec![0.0f64; 2 * n + 1];
+    for m in 1..lf.len() {
+        lf[m] = lf[m - 1] + (m as f64).ln();
+    }
+    let mut d = vec![0.0f64; n + 1];
+    let mut sum_i = 0.0f64;
+    for (i, slot) in d.iter_mut().enumerate() {
+        let log_t = lf[n + i - 1] - lf[n - i] - lf[2 * i] + i as f64 * 4f64.ln();
+        sum_i += log_t.exp();
+        *slot = n as f64 * sum_i;
+    }
+    let ln_k = (0..n).map(|k| ((k + 1) as f64).ln()).collect();
+    (d, ln_k)
+}
+
+// ---------------------------------------------------------------------------
+// ベッセル関数
+// ---------------------------------------------------------------------------
+
+/// 第1種ベッセル関数 J_ν(z)（ν も z も複素数でよい）
+pub fn bessel_j(nu: C, z: C) -> C {
+    bessel_series(nu, z, -1.0)
+}
+
+/// 第1種変形ベッセル関数 I_ν(z)
+pub fn bessel_i(nu: C, z: C) -> C {
+    bessel_series(nu, z, 1.0)
+}
+
+/// J_ν（sign = −1）と I_ν（sign = +1）の共通の計算。
+/// |z| が小さいときは級数 Σ (sign)ᵏ (z/2)^(2k+ν) / (k! Γ(k + ν + 1))、
+/// J で |z| が大きいときは漸近展開を使う
+fn bessel_series(nu: C, z: C, sign: f64) -> C {
+    // ν が負の整数: J₋ₙ = (−1)ⁿ Jₙ、I₋ₙ = Iₙ
+    if nu.im == 0.0 && nu.re < 0.0 && nu.re == nu.re.round() {
+        let n = -nu.re;
+        let f = if sign < 0.0 && n % 2.0 == 1.0 { -1.0 } else { 1.0 };
+        return f * bessel_series(-nu, z, sign);
+    }
+    if sign < 0.0 && z.norm() > 25.0 + nu.norm() * nu.norm() / 2.0 {
+        return bessel_j_asymptotic(nu, z);
+    }
+    if z == C::new(0.0, 0.0) {
+        return if nu == C::new(0.0, 0.0) { C::new(1.0, 0.0) } else { C::new(0.0, 0.0) };
+    }
+    let h = z / 2.0;
+    let h2 = sign * h * h;
+    let mut term = h.powc(nu) / gamma(nu + 1.0);
+    let mut sum = term;
+    for k in 1..500 {
+        term *= h2 / (k as f64 * (nu + k as f64));
+        sum += term;
+        if term.norm() < 1e-17 * sum.norm() && k > 2 {
+            break;
+        }
+    }
+    sum
+}
+
+/// J_ν(z) の漸近展開（|z| が大きいとき）
+fn bessel_j_asymptotic(nu: C, z: C) -> C {
+    let mu = 4.0 * nu * nu;
+    let w = z - nu * (PI / 2.0) - PI / 4.0;
+    // P, Q の級数（数項）
+    let mut p = C::new(1.0, 0.0);
+    let mut q = C::new(0.0, 0.0);
+    let mut t = C::new(1.0, 0.0);
+    let eight_z = 8.0 * z;
+    for k in 1..12 {
+        let kk = (2 * k - 1) as f64;
+        t *= (mu - kk * kk) / (k as f64 * eight_z);
+        if k % 2 == 1 {
+            q += if (k / 2) % 2 == 0 { t } else { -t };
+        } else {
+            p += if (k / 2) % 2 == 1 { -t } else { t };
+        }
+    }
+    (2.0 / (PI * z)).sqrt() * (w.cos() * p - w.sin() * q)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +349,53 @@ mod tests {
         assert_eq!(permutation(r(5.0), r(0.0)), r(1.0));
         assert_eq!(permutation(r(2.0), r(5.0)), r(0.0));
         assert!(close(permutation(r(4.5), r(1.0)), r(4.5), 1e-12));
+    }
+
+    #[test]
+    fn beta_digamma() {
+        let r = |x: f64| C::new(x, 0.0);
+        assert!(close(beta(r(2.0), r(3.0)), r(1.0 / 12.0), 1e-12));
+        assert!(close(digamma(r(1.0)), r(-0.577_215_664_901_532_9), 1e-12));
+        assert!(close(digamma(r(0.5)), r(-1.963_510_026_021_423_5), 1e-12));
+        assert!(close(digamma(r(-0.5)), r(0.036_489_973_978_576_52), 1e-11));
+        assert!(close(digamma(C::new(0.0, 1.0)), C::new(0.094_650_320_622_476_97, 2.076_674_047_468_581), 1e-11));
+    }
+
+    #[test]
+    fn error_function() {
+        let r = |x: f64| C::new(x, 0.0);
+        assert!(close(erf(r(0.5)), r(0.520_499_877_813_046_5), 1e-13));
+        assert!(close(erf(r(3.5)), r(0.999_999_256_901_627_7), 1e-13));
+        assert!(close(erf(r(-4.0)), r(-0.999_999_984_582_742_1), 1e-13));
+        assert!(close(erfc(r(5.0)), r(1.537_459_794_428_034_8e-12), 1e-10));
+        assert!(close(erf(C::new(1.0, 1.0)), C::new(1.316_151_281_697_947_7, 0.190_453_469_237_834_7), 1e-12));
+        assert!(close(erf(C::new(3.0, 2.0)), C::new(0.998_963_278_856_817_3, -0.000_011_546_724_379_290_6), 1e-11));
+    }
+
+    #[test]
+    fn zeta_function() {
+        let r = |x: f64| C::new(x, 0.0);
+        assert!(close(zeta(r(2.0)), r(PI * PI / 6.0), 1e-12));
+        assert!(close(zeta(r(3.0)), r(1.202_056_903_159_594_2), 1e-12));
+        assert!(close(zeta(r(0.0)), r(-0.5), 1e-12));
+        assert!(close(zeta(r(-1.0)), r(-1.0 / 12.0), 1e-11));
+        assert!(close(zeta(r(0.5)), r(-1.460_354_508_809_586_8), 1e-11));
+        // 最初の非自明な零点 1/2 + 14.1347…i
+        assert!(zeta(C::new(0.5, 14.134_725_141_734_693)).norm() < 1e-8);
+        assert!(!zeta(r(1.0)).norm().is_finite());
+    }
+
+    #[test]
+    fn bessel() {
+        let r = |x: f64| C::new(x, 0.0);
+        assert!(close(bessel_j(r(0.0), r(1.0)), r(0.765_197_686_557_966_6), 1e-13));
+        assert!(close(bessel_j(r(1.0), r(2.5)), r(0.497_094_102_464_274_1), 1e-13));
+        assert!(close(bessel_j(r(0.0), r(10.0)), r(-0.245_935_764_451_348_3), 1e-11));
+        assert!(close(bessel_j(r(0.0), r(30.0)), r(-0.086_367_983_581_040_2), 1e-7));
+        assert!(close(bessel_j(r(0.5), r(1.0)), r((2.0 / PI).sqrt() * 1f64.sin()), 1e-13));
+        assert!(close(bessel_j(r(-1.0), r(2.5)), r(-0.497_094_102_464_274_1), 1e-13));
+        assert!(close(bessel_i(r(0.0), r(1.0)), r(1.266_065_877_752_008_4), 1e-13));
+        assert!(close(bessel_j(r(2.0), r(0.0)), r(0.0), 1e-15));
     }
 
     #[test]

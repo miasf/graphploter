@@ -41,7 +41,7 @@
   - 未定義の文字を使うと「a のスライダーを追加」ボタンが出る
   - 「複素数」モードでは、複素平面の上で点をドラッグして複素数の値を決められる
 - 計算はすべて複素数で行う（例: `z = abs(gamma(x + iy))`）
-- 特殊関数: ガンマ関数 `gamma`
+- 特殊関数（すべて複素数で使える）: ガンマ関数 `gamma`、ベータ関数 `beta(a, b)`、ディガンマ関数 `psi`、ゼータ関数 `zeta`、誤差関数 `erf` `erfc`、ベッセル関数 `besselJ(ν, z)` `besselI(ν, z)`
 - 式の追加・削除・色変更・表示切り替え、表示範囲と細かさの変更
 - 保存・共有: 式と設定はブラウザに自動で保存され、次に開いたときに戻る。「共有リンクをコピー」で、状態を圧縮して URL の # の後ろに入れたリンクを作る
 
@@ -159,7 +159,8 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
 - 掛け算の `*` は省略可: `2xy`, `x sin(y)`, `(x+1)(x-1)`
 - 括弧なしの関数: `sin x`, `sin^2 x`（= `(sin x)^2`）
 - 定数: `pi`（`π`）, `e`, `i`（虚数単位）
-- 関数: `sin cos tan arcsin arccos arctan sinh cosh tanh exp ln log sqrt abs floor ceil round sign Re Im conj arg gamma`
+- 関数: `sin cos tan sec csc cot arcsin arccos arctan sinh cosh tanh arcsinh arccosh arctanh exp ln log sqrt abs floor ceil round sign Re Im conj arg`
+- 特殊関数: `gamma`（Γ）, `beta(a, b)`, `psi`（ψ）, `zeta`（ζ）, `erf`, `erfc`, `besselJ(ν, z)`, `besselI(ν, z)`
 - 2 つの引数の関数: `mod(a, b)`（余り）, `min(a, b)`, `max(a, b)`, `nCr(n, r)`（二項係数）, `nPr(n, r)`（順列）
 - 階乗: `n!`（= Γ(n + 1) なので整数でなくてもよい）
 - 結果が実数にならない点（例: `x < 0` での `sqrt(x)`）は描かれない
@@ -174,6 +175,7 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
    - ~~座標 w, w₂, …、表示する座標の選択、断面~~ ✅
    - ~~範囲で重ねて立体にする、n 次元の回転と射影~~ ✅
    - 今後: 曲面を範囲で重ねた立体（媒介変数3つ）、立体の切り口のふた
-5. 複素関数の表示方法（定義域の色分けなど）と特殊関数の追加
+5. 複素関数の表示方法（定義域の色分けなど）、特殊関数のさらなる追加（Y_ν, 楕円積分, 超幾何関数など）
+   - ~~特殊関数: β, ψ, ζ, erf, erfc, J_ν, I_ν~~ ✅
 6. 2D 表示への切り替え
 7. ~~数式入力を MathLive にする~~ ✅

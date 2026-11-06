@@ -21,7 +21,7 @@ export const SHORTCUTS: Record<string, string> = {
     ['w', 't'].flatMap((c) => Array.from({ length: 9 }, (_, k) => [`${c}${k + 1}`, `${c}_{${k + 1}}`])),
   ),
   ...Object.fromEntries(
-    ['sin', 'cos', 'tan', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log'].map((f) => [
+    ['sin', 'cos', 'tan', 'sec', 'csc', 'cot', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log'].map((f) => [
       f,
       `\\${f}`,
     ]),
@@ -105,6 +105,26 @@ export function setupKeyboard() {
           '[right]',
           '[backspace]',
         ],
+      ],
+    },
+    {
+      label: '特殊',
+      tooltip: '特殊関数',
+      rows: [
+        [
+          { latex: '\\Gamma\\left(#0\\right)', label: 'Γ(z)', class: 'small' },
+          { latex: '\\operatorname{beta}\\left(#?,#?\\right)', label: 'B(a,b)', class: 'small' },
+          { latex: '\\psi\\left(#0\\right)', label: 'ψ(z)', class: 'small' },
+          { latex: '\\zeta\\left(#0\\right)', label: 'ζ(s)', class: 'small' },
+        ],
+        [
+          fn('erf', { operator: true }),
+          fn('erfc', { operator: true }),
+          { latex: '\\operatorname{besselJ}\\left(#?,#?\\right)', label: 'J_ν(z)', class: 'small' },
+          { latex: '\\operatorname{besselI}\\left(#?,#?\\right)', label: 'I_ν(z)', class: 'small' },
+        ],
+        [fn('sec'), fn('csc'), fn('cot'), fn('arcsinh', { operator: true }), fn('arccosh', { operator: true }), fn('arctanh', { operator: true })],
+        ['[left]', '[right]', '[backspace]', '[return]'],
       ],
     },
     'alphabetic',
