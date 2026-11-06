@@ -101,6 +101,8 @@ export interface PlotItem extends PlotStyle {
   slider: SliderStyle
   /** この式で使われているパラメータの名前（値が変わったら計算し直す） */
   usedParams: string[]
+  /** 非表示の間に計算し直す必要が生じた（表示したときに計算する） */
+  stale?: boolean
   /** 表示されたらすぐ入力を始める（エンターで新しく足した式） */
   autofocus?: boolean
   /** 範囲で重ねた立体として描いたことがあるか（最初の1回だけ半透明にするため） */

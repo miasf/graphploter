@@ -174,7 +174,40 @@
     timers.set(item.id, setTimeout(() => replot(item), delay))
   }
 
+  // ---- 操作中は粗く計算する ----
+  // スライダーや複素平面を動かしている間・回転を再生している間は、細かさを半分にして計算する
+  // （陰関数は 1/8 の計算量）。指を離したら、粗く計算した式だけを細かく計算し直す。
+  let pointerOnControl = false
+  const coarseItems = new Set<number>()
+  const isCoarse = () => pointerOnControl || playing.length > 0
+
+  function refine() {
+    viewer?.setBusy(isCoarse())
+    if (isCoarse()) return
+    for (const it of items) if (coarseItems.has(it.id)) schedule(it, 0)
+  }
+
+  window.addEventListener('pointerdown', (e) => {
+    const t = e.target as Element | null
+    if (t?.closest('input[type=range], svg.pad')) {
+      pointerOnControl = true
+      viewer?.setBusy(true)
+    }
+  })
+  for (const ev of ['pointerup', 'pointercancel'] as const) {
+    window.addEventListener(ev, () => {
+      if (!pointerOnControl) return
+      pointerOnControl = false
+      refine()
+    })
+  }
+
   async function replot(item: PlotItem) {
+    // 非表示の式は計算しない（表示したときに計算する）。パラメータの行は、ほかの式が使うので計算する
+    if (!item.visible && !item.param) {
+      item.stale = true
+      return
+    }
     if (running.has(item.id)) {
       again.add(item.id)
       return
@@ -232,6 +265,10 @@
     if (!viewer) return
     const token = (latest.get(item.id) ?? 0) + 1
     latest.set(item.id, token)
+    item.stale = false
+    const coarse = isCoarse()
+    if (coarse) coarseItems.add(item.id)
+    else coarseItems.delete(item.id)
 
     // 数式入力欄の LaTeX を、計算エンジン用の式に変換する
     let source: string
@@ -262,8 +299,8 @@
       item.id,
       source,
       domain,
-      resolution,
-      implicitResolution,
+      coarse ? Math.max(20, Math.round(resolution / 2)) : resolution,
+      coarse ? Math.max(16, Math.round(implicitResolution / 2)) : implicitResolution,
       ranges,
       currentParams(),
       space,
@@ -426,6 +463,8 @@
   function toggle(item: PlotItem) {
     item.visible = !item.visible
     viewer?.setStyle(item.id, item)
+    // 非表示の間に変わっていたら、表示したときに計算し直す
+    if (item.visible && item.stale) schedule(item, 0)
   }
 
   // ---- 表示範囲 ----
@@ -475,8 +514,11 @@
   function togglePlay(k: number) {
     playing = playing.includes(k) ? playing.filter((j) => j !== k) : [...playing, k]
     if (playing.length > 0) {
+      viewer?.setBusy(true)
       lastFrame = performance.now()
       requestAnimationFrame(playFrame)
+    } else {
+      refine() // 再生を止めたら、細かく計算し直す
     }
   }
 

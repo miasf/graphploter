@@ -3,14 +3,21 @@
 import type { Domain, ParamRanges, ParamValue, PlotRequest, PlotResponse, Space } from './types'
 import PlotWorker from './plot.worker.ts?worker'
 
-const worker = new PlotWorker()
+/**
+ * 計算担当の Worker を CPU のコア数に合わせて最大4つ用意し、式ごとに担当を決めて並列に計算する。
+ * 同じ式はいつも同じ Worker が担当する（媒介変数表示の点を Worker の中で覚えて使い回すため）
+ */
+const WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1))
+const workers = Array.from({ length: WORKERS }, () => new PlotWorker())
 let nextId = 1
 const pending = new Map<number, (r: PlotResponse) => void>()
 
-worker.onmessage = (ev: MessageEvent<PlotResponse>) => {
-  const resolve = pending.get(ev.data.requestId)
-  pending.delete(ev.data.requestId)
-  resolve?.(ev.data)
+for (const w of workers) {
+  w.onmessage = (ev: MessageEvent<PlotResponse>) => {
+    const resolve = pending.get(ev.data.requestId)
+    pending.delete(ev.data.requestId)
+    resolve?.(ev.data)
+  }
 }
 
 /**
@@ -60,6 +67,6 @@ export function requestPlot(
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)
-    worker.postMessage(req)
+    workers[itemId % WORKERS].postMessage(req)
   })
 }

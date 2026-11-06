@@ -112,6 +112,8 @@ export class Viewer {
   private basePixelRatio = Math.min(window.devicePixelRatio, 2)
   /** 指やマウスでグラフを動かしている最中か */
   private interacting = false
+  /** スライダーを動かしている・回転を再生しているなど、グラフが次々に変わっている最中か */
+  private busy = false
   /** 動かしている最中は画素密度を下げて描く */
   private lowRes = false
   /** カメラが（ほぼ）止まってから何フレームたったか */
@@ -171,6 +173,16 @@ export class Viewer {
     this.dirty = true
   }
 
+  /**
+   * スライダーを動かしている間など、グラフが次々に変わる間は true にする。
+   * その間は、グラフを回しているときと同じく画素密度を下げて描く（止まったら元に戻す）
+   */
+  setBusy(on: boolean) {
+    this.busy = on
+    if (on) this.setLowRes(true)
+    this.dirty = true
+  }
+
   private setLowRes(on: boolean) {
     if (this.lowRes === on) return
     this.lowRes = on
@@ -227,7 +239,7 @@ export class Viewer {
     this.lastCamQuat.copy(this.camera.quaternion)
     if (visible) {
       this.stillFrames = 0
-    } else if (++this.stillFrames > 4 && !this.interacting) {
+    } else if (++this.stillFrames > 4 && !this.interacting && !this.busy) {
       this.setLowRes(false) // 止まったら、元の画素密度で描き直す
     }
     // 何も変わっていなければ描かない（止まっているときに電池を使わない）
