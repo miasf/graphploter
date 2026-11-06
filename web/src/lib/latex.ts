@@ -166,7 +166,14 @@ class Converter {
       this.out += '^(' + this.arg() + ')'
       return
     }
-    if (t === '_') throw new LatexError('添字（_）はまだ使えません')
+    if (t === '_') {
+      // 添字: w_{2} → w_2、t_1 → t_1（文字の後ろに数字だけを付けられる）
+      const sub = this.arg()
+      if (!/^\d+$/.test(sub)) throw new LatexError('添字には数字だけを書いてください（例: w₂）')
+      if (!/[a-zA-Z]$/.test(this.out)) throw new LatexError('添字は文字の後ろに付けてください（例: w₂）')
+      this.out += `_${sub}`
+      return
+    }
     if (t === '[') {
       this.out += '('
       return

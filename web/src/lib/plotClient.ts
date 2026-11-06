@@ -1,6 +1,6 @@
 // Web Worker に計算を頼むための窓口。
 
-import type { Domain, ParamRanges, ParamValue, PlotRequest, PlotResponse } from './types'
+import type { Domain, ParamRanges, ParamValue, PlotRequest, PlotResponse, Space } from './types'
 import PlotWorker from './plot.worker.ts?worker'
 
 const worker = new PlotWorker()
@@ -21,6 +21,7 @@ export function requestPlot(
   implicitResolution: number,
   ranges: ParamRanges,
   params: Record<string, ParamValue>,
+  space: Space,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -30,8 +31,9 @@ export function requestPlot(
     resolution,
     implicitResolution,
     // Svelte の $state（Proxy）は Worker に送れないので、ふつうの配列にコピーする
-    ranges: { t: [...ranges.t], u: [...ranges.u], v: [...ranges.v] },
+    ranges: Object.fromEntries(Object.entries(ranges).map(([k, [a, b]]) => [k, [a, b]])),
     params: Object.fromEntries(Object.entries(params).map(([k, p]) => [k, { re: p.re, im: p.im }])),
+    space: { dims: space.dims, axes: [...space.axes], slice: [...space.slice] },
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)

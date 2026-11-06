@@ -1,7 +1,25 @@
 // パラメータ（スライダー）まわりの小さな関数
 
-/** 座標・媒介変数・定数の名前。パラメータには使えない */
-export const RESERVED = new Set(['x', 'y', 'z', 't', 'u', 'v', 'e', 'i'])
+/** 座標（x, y, z, w, w2, w3, …）と定数（e, i）の名前か。これらはパラメータにできない。
+ *  t, u, v は組 (…, …) の外ではパラメータにできる */
+export function isReserved(name: string): boolean {
+  return /^([xyzei]|w\d*)$/.test(name)
+}
+
+/** k 番目の座標の名前（0: x, 1: y, 2: z, 3: w, 4: w2, …） */
+export function coordName(k: number): string {
+  return k < 4 ? 'xyzw'[k] : `w${k - 2}`
+}
+
+/** 画面に出すときの名前（w2 → w₂） */
+export function prettyName(name: string): string {
+  return name.replace(/\d/g, (d) => '₀₁₂₃₄₅₆₇₈₉'[Number(d)])
+}
+
+/** 数式入力欄（LaTeX）での名前（t1 → t_{1}） */
+export function latexName(name: string): string {
+  return name.replace(/^([a-zA-Z])(\d+)$/, '$1_{$2}')
+}
 
 /** 範囲 range をおよそ n 個に区切る「きりの良い」刻み（1, 2, 5 × 10^k） */
 export function niceStep(range: number, n: number): number {
@@ -33,6 +51,6 @@ export function complexLatex(re: number, im: number, step: number): string {
  * パラメータにできない文字（x など）なら null。
  */
 export function missingParam(error: string | undefined): string | null {
-  const m = error?.match(/変数 '([a-zA-Z])' はここでは使えません/)
-  return m && !RESERVED.has(m[1]) ? m[1] : null
+  const m = error?.match(/変数 '([a-zA-Z]\d*)' はここでは使えません/)
+  return m && !isReserved(m[1]) ? m[1] : null
 }

@@ -23,6 +23,24 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// 式の中で使われている変数名を集める（重複なし、出てきた順）
+    pub fn collect_vars(&self, out: &mut Vec<String>) {
+        match self {
+            Expr::Var(v) => {
+                if !out.contains(v) {
+                    out.push(v.clone());
+                }
+            }
+            Expr::Num(_) | Expr::Const(_) => {}
+            Expr::Neg(a) => a.collect_vars(out),
+            Expr::Bin(_, a, b) => {
+                a.collect_vars(out);
+                b.collect_vars(out);
+            }
+            Expr::Call(_, args) | Expr::Tuple(args) => args.iter().for_each(|a| a.collect_vars(out)),
+        }
+    }
+
     /// 式の中で使われている変数名か調べる
     pub fn uses_var(&self, name: &str) -> bool {
         match self {
@@ -157,6 +175,25 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     out.push(Token { tok: Tok::Var(chars[i].to_string()), pos: i });
                     i += 1;
+                }
+            }
+            // 添字: "w_2" は1つの変数 "w2" にする（直前が1文字の変数のときだけ）
+            if chars.get(i) == Some(&'_') {
+                let us = i;
+                i += 1;
+                let ds = i;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let digits: String = chars[ds..i].iter().collect();
+                match out.last_mut() {
+                    Some(Token { tok: Tok::Var(v), .. }) if !digits.is_empty() && v.chars().count() == 1 => {
+                        // w₁ は w と同じ座標（4次元目）
+                        if !(v == "w" && digits == "1") {
+                            v.push_str(&digits);
+                        }
+                    }
+                    _ => return err("_ の後には数字を書いてください（例: w_2）", us),
                 }
             }
             continue;
@@ -400,6 +437,22 @@ mod tests {
         assert_eq!(parse("sinx").unwrap(), a);
         assert!(matches!(parse("sinh(x)").unwrap(), Expr::Call(Func::Sinh, _)));
         assert!(matches!(parse("sin^2 x").unwrap(), Expr::Bin(BinOp::Pow, _, _)));
+    }
+
+    #[test]
+    fn subscripts() {
+        assert_eq!(parse("w_2").unwrap(), Expr::Var("w2".into()));
+        assert_eq!(
+            parse("2t_1x").unwrap(),
+            Expr::Bin(
+                BinOp::Mul,
+                Box::new(Expr::Bin(BinOp::Mul, Box::new(Expr::Num(2.0)), var("t1"))),
+                var("x")
+            )
+        );
+        assert_eq!(parse("w_1").unwrap(), Expr::Var("w".into()));
+        assert!(parse("x_").is_err());
+        assert!(parse("sin_2").is_err());
     }
 
     #[test]

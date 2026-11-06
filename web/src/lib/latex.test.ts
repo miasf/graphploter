@@ -32,11 +32,14 @@ const cases: [string, string][] = [
   ['\\operatorname{\\mathrm{nCr}}\\left(5,2\\right)', 'nCr (5,2)'],
   ['\\operatorname{\\mathrm{floor}}\\left(x\\right)', 'floor (x)'],
   ['\\operatorname{\\mathrm I m}\\left(x\\right)', 'Im (x)'],
+  // 添字（4次元目以降の座標 w₂ や、媒介変数 t₁）
+  ['w_{2}+w_3', 'w_2+w_3'],
+  ['\\left(t_1,t_{2}\\right)', '(t_1,t_2)'],
 ]
 for (const [input, want] of cases) check(input, latexToText(input), want)
 
 // 変換できないものはエラーになる
-for (const input of ['x_{1}', '\\alpha', '\\frac{1}']) {
+for (const input of ['x_{a}', '2_{1}', '\\alpha', '\\frac{1}']) {
   let threw = false
   try {
     latexToText(input)

@@ -16,6 +16,10 @@ export const SHORTCUTS: Record<string, string> = {
   pi: '\\pi',
   sqrt: '\\sqrt{#?}',
   gamma: '\\Gamma',
+  // w2 → w₂、t1 → t₁ のように、w と t の後ろの数字は添字にする（4次元目以降の座標・媒介変数）
+  ...Object.fromEntries(
+    ['w', 't'].flatMap((c) => Array.from({ length: 9 }, (_, k) => [`${c}${k + 1}`, `${c}_{${k + 1}}`])),
+  ),
   ...Object.fromEntries(
     ['sin', 'cos', 'tan', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log'].map((f) => [
       f,
@@ -39,8 +43,21 @@ export function setupKeyboard() {
       label: '123',
       tooltip: '数字と記号',
       rows: [
-        ['x', 'y', 'z', 't', 'u', 'v', '[separator-5]', '7', '8', '9', { latex: '\\frac{#@}{#?}', label: '÷' }],
-        ['(', ')', ',', '\\pi', { latex: '\\imaginaryI', label: 'i' }, 'e', '[separator-5]', '4', '5', '6', { latex: '\\cdot', label: '×' }],
+        ['x', 'y', 'z', 'w', 't', 'u', 'v', '[separator-5]', '7', '8', '9', { latex: '\\frac{#@}{#?}', label: '÷' }],
+        [
+          '(',
+          ')',
+          ',',
+          '\\pi',
+          { latex: '\\imaginaryI', label: 'i' },
+          'e',
+          { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（w₂ など）' },
+          '[separator-5]',
+          '4',
+          '5',
+          '6',
+          { latex: '\\cdot', label: '×' },
+        ],
         [
           { latex: '#@^{2}', label: 'x²' },
           { latex: '#@^{#?}', label: 'xⁿ' },

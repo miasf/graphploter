@@ -4,21 +4,23 @@
   import { joinTuple, splitTuple } from './latex'
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
-  import { missingParam } from './params'
-  import type { Domain, GridStyle, ParamRanges, PlotItem, SliderStyle } from './types'
+  import { missingParam, prettyName } from './params'
+  import type { Domain, GridStyle, PlotItem, SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
     index: number
     /** 表示範囲（格子線の間隔の選択肢を決めるのに使う） */
     domain: Domain
+    /** 画面の横・奥・縦の軸に表示している座標の名前（ふつうは x, y, z） */
+    axisNames: string[]
     /** 式（LaTeX）が書き換えられたとき */
     onInput: (latex: string) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
     onLineWidth: (width: number) => void
-    onRange: (name: keyof ParamRanges, side: 0 | 1, value: string) => void
+    onRange: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
     onToggleSettings: () => void
     onToggleVertical: () => void
@@ -33,6 +35,7 @@
     item,
     index,
     domain,
+    axisNames,
     onInput,
     onColor,
     onGrid,
@@ -70,16 +73,17 @@
   const divIndex = (n: number) =>
     DIVISIONS.reduce((best, d, k) => (Math.abs(d - n) < Math.abs(DIVISIONS[best] - n) ? k : best), 0)
 
-  /** 範囲の入力欄を出す媒介変数 */
-  const paramNames = $derived<(keyof ParamRanges)[]>(
-    item.params === 't' ? ['t'] : item.params === 'uv' ? ['u', 'v'] : [],
-  )
+  /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
+  const paramNames = $derived(item.params.filter((n) => n in item.ranges))
+  const isCurve = $derived(item.params.length === 1)
+  const isSurface = $derived(item.params.length === 2)
 
-  const gridAxes = [
-    { axis: 'x', label: 'x 方向' },
-    { axis: 'y', label: 'y 方向' },
-    { axis: 'z', label: 'z（等高線）' },
-  ] as const
+  // 格子線の方向（grid.x, grid.y, grid.z は、画面の横・奥・縦の軸の方向）
+  const gridAxes = $derived([
+    { axis: 'x', label: `${prettyName(axisNames[0])} 方向` },
+    { axis: 'y', label: `${prettyName(axisNames[1])} 方向` },
+    { axis: 'z', label: `${prettyName(axisNames[2])}（等高線）` },
+  ] as const)
 
   const ranges = $derived({
     x: domain.xmax - domain.xmin,
@@ -140,7 +144,7 @@
           label="{name} の最小値"
           onInput={(v) => onRange(name, 0, v)}
         />
-        <span>≤ {name} ≤</span>
+        <span>≤ {prettyName(name)} ≤</span>
         <MathInput
           small
           value={item.ranges[name][1]}
@@ -172,7 +176,7 @@
             oninput={(e) => onColor(e.currentTarget.value)}
           />
         </label>
-        {#if item.params === 't'}
+        {#if isCurve}
           <div class="sliders">
             <span class="label">線の太さ</span>
             <input
@@ -208,11 +212,11 @@
             格子線
           </label>
           <div class="sliders" class:disabled={!item.grid.enabled}>
-            {#if item.params === 'uv'}
-              <!-- 媒介変数表示の曲面: u, v の範囲を何等分するか -->
-              {#each ['u', 'v'] as const as axis (axis)}
+            {#if isSurface}
+              <!-- 媒介変数表示の曲面: 2つの媒介変数（u, v など）の範囲を何等分するか -->
+              {#each ['u', 'v'] as const as axis, n (axis)}
                 {@const k = divIndex(item.grid[axis])}
-                <span class="label">{axis} 方向</span>
+                <span class="label">{prettyName(item.params[n])} 方向</span>
                 <input
                   type="range"
                   min="0"
@@ -225,7 +229,7 @@
                 <span class="value">{k === 0 ? 'なし' : `${DIVISIONS[k]} 等分`}</span>
               {/each}
             {/if}
-            {#each item.params === 'uv' ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
+            {#each isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
               {@const options = spacingOptions(ranges[axis])}
               {@const index = spacingToIndex(item.grid[axis], options)}
               <span class="label">{label}</span>

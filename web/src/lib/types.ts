@@ -35,14 +35,20 @@ export interface PlotStyle {
   lineWidth: number
 }
 
-/** 媒介変数の名前: 't'（曲線）, 'uv'（曲面）, ''（媒介変数表示でない） */
-export type ParamKind = 't' | 'uv' | ''
+/** 媒介変数の範囲。媒介変数の名前（t, u, v, t1, …）→ [最小, 最大]（入力欄の LaTeX のまま。2π などの式も書ける） */
+export type ParamRanges = Record<string, [string, string]>
 
-/** 媒介変数の範囲（入力欄の LaTeX のまま。2π などの式も書ける） */
-export interface ParamRanges {
-  t: [string, string]
-  u: [string, string]
-  v: [string, string]
+/** 座標空間の設定（4次元以上のとき、どの座標を表示し、残りをどの値で固定するか） */
+export interface Space {
+  /** 次元（3 以上） */
+  dims: number
+  /** 画面の横・奥・縦の軸に表示する座標の番号（0: x, 1: y, 2: z, 3: w, 4: w₂, …） */
+  axes: [number, number, number]
+  /** 各座標の断面の値（表示していない座標だけが使われる） */
+  slice: number[]
+  /** 断面のスライダーの範囲 */
+  sliceMin: number
+  sliceMax: number
 }
 
 /** パラメータ（スライダーで値を決める文字）の値。複素数も扱えるよう実部と虚部を持つ */
@@ -74,8 +80,8 @@ export interface PlotItem extends PlotStyle {
   info?: string
   /** 媒介変数の範囲 */
   ranges: ParamRanges
-  /** 最後に描けたときの媒介変数の種類（範囲の入力欄を出すのに使う） */
-  params: ParamKind
+  /** 最後に描けたときの媒介変数の名前（範囲の入力欄を出すのに使う）。例: ['t'], ['u', 'v'] */
+  params: string[]
   /** 媒介変数 u, v の範囲の長さ（格子線の分割に使う） */
   paramSpan: { u: number; v: number }
   /** この行がパラメータの定義（a = 1 など）なら、その名前と値 */
@@ -94,7 +100,8 @@ export interface MeshData {
   gridCoords: Float32Array
   /** 曲線なら true（positions は点の列で、途切れる所に NaN） */
   curve: boolean
-  params: ParamKind
+  /** 媒介変数の名前 */
+  params: string[]
   /** 媒介変数 u, v の範囲の長さ */
   paramSpan: { u: number; v: number }
 }
@@ -112,6 +119,7 @@ export interface PlotRequest {
   ranges: ParamRanges
   /** ほかの行で定義されているパラメータ */
   params: Record<string, ParamValue>
+  space: { dims: number; axes: number[]; slice: number[] }
 }
 
 export type PlotResponse =

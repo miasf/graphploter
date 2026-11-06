@@ -3,9 +3,10 @@
   import { onMount } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
-  import { complexLatex, niceStep } from './lib/params'
+  import { complexLatex, coordName, latexName, niceStep, prettyName } from './lib/params'
+  import SpacePanel from './lib/SpacePanel.svelte'
   import { requestPlot } from './lib/plotClient'
-  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem } from './lib/types'
+  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem, Space } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -25,7 +26,7 @@
       showSettings: false,
       vertical: true,
       ranges: { t: ['0', '2\\pi'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
-      params: '',
+      params: [],
       paramSpan: { u: 2 * Math.PI, v: 2 * Math.PI },
       slider: { min: -10, max: 10, complex: false },
       usedParams: [],
@@ -224,8 +225,9 @@
     let ranges: ParamRanges
     try {
       source = latexToText(item.latex)
-      const conv = ([a, b]: [string, string]): [string, string] => [latexToText(a), latexToText(b)]
-      ranges = { t: conv(item.ranges.t), u: conv(item.ranges.u), v: conv(item.ranges.v) }
+      ranges = Object.fromEntries(
+        Object.entries(item.ranges).map(([k, [a, b]]) => [k, [latexToText(a), latexToText(b)] as [string, string]]),
+      )
     } catch (e) {
       viewer.removePlot(item.id)
       item.error = e instanceof Error ? e.message : String(e)
@@ -243,7 +245,7 @@
       return
     }
 
-    const res = await requestPlot(source, domain, resolution, implicitResolution, ranges, currentParams())
+    const res = await requestPlot(source, domain, resolution, implicitResolution, ranges, currentParams(), space)
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
     if (!res.ok) {
@@ -279,6 +281,8 @@
 
     dropParam(item)
     item.params = res.mesh.params
+    // 初めて使う媒介変数（t₁ など）の範囲の入力欄を用意する（計算エンジン側も 0〜2π を使っている）
+    for (const n of item.params) if (!(n in item.ranges)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
     viewer.setPlot(item.id, res.mesh, item)
     const size = res.mesh.curve
@@ -317,7 +321,7 @@
     const step = niceStep(item.slider.max - item.slider.min, 200)
     item.param.re = re
     item.param.im = im
-    item.latex = `${item.param.name}=${complexLatex(re, im, step)}`
+    item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step)}`
     paramsChanged([item.param.name], item)
   }
 
@@ -341,7 +345,7 @@
     viewer?.setStyle(item.id, item)
   }
 
-  function setRange(item: PlotItem, name: keyof ParamRanges, side: 0 | 1, value: string) {
+  function setRange(item: PlotItem, name: string, side: 0 | 1, value: string) {
     item.ranges[name][side] = value
     schedule(item, 300)
   }
@@ -359,6 +363,27 @@
   // ---- 表示範囲 ----
 
   const axes = ['x', 'y', 'z'] as const
+
+  // ---- 次元（4次元以上）----
+
+  let space = $state<Space>({ dims: 3, axes: [0, 1, 2], slice: [0, 0, 0], sliceMin: -5, sliceMax: 5 })
+  /** 画面の横・奥・縦の軸に表示している座標の名前 */
+  const axisNames = $derived(space.axes.map(coordName))
+
+  $effect(() => {
+    viewer?.setAxisNames(axisNames.map(prettyName))
+  })
+
+  function setLayout(next: Space) {
+    space = next
+    replotAll(0)
+  }
+
+  /** 表示しない座標の断面の値を変えたとき: その座標を使う式だけを計算し直す */
+  function setSlice(k: number, value: number) {
+    space.slice[k] = value
+    paramsChanged([coordName(k)])
+  }
 
   function setBound(key: keyof Domain, value: number) {
     if (!Number.isFinite(value)) return
@@ -407,6 +432,7 @@
             {item}
             index={i}
             {domain}
+            {axisNames}
             onInput={(s) => setLatex(item, s)}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
@@ -426,6 +452,9 @@
       <button class="add" onclick={addItem}>＋ 式を追加</button>
 
       <section class="settings">
+        <h2>次元</h2>
+        <SpacePanel {space} onLayout={setLayout} onSlice={setSlice} />
+
         <h2>表示範囲</h2>
         <div class="ranges">
           {#each axes as a (a)}
@@ -436,7 +465,7 @@
                 value={domain[`${a}min`]}
                 onchange={(e) => setBound(`${a}min`, e.currentTarget.valueAsNumber)}
               />
-              <span class="axis">≤ {a} ≤</span>
+              <span class="axis">≤ {prettyName(axisNames[axes.indexOf(a)])} ≤</span>
               <input
                 type="number"
                 step="any"
@@ -508,6 +537,11 @@
           π、<code>sqrt</code> → √ に自動で変わります
         </li>
         <li>スマホでは数式用のキーボードが出ます（123 / f(x) / abc のタブで切り替え）</li>
+        <li>
+          4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（<code>w2</code> と打つと w₂）。
+          表示する3つの座標を選び、残りはスライダーで固定した断面を描きます
+        </li>
+        <li>媒介変数は t（曲線）、u と v（曲面）、または t₁ と t₂。組 (…) の外では t, u, v もパラメータにできます</li>
         <li>
           パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
           「複素数」を押すと、複素平面の上で点を動かして値を決められます

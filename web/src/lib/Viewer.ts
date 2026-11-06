@@ -62,6 +62,8 @@ export class Viewer {
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
   private clipPlanes: THREE.Plane[] = []
   private domain: Domain | null = null
+  /** 画面の横・奥・縦の軸の名前（4次元以上で w などを表示するとき変わる） */
+  private axisNames = ['x', 'y', 'z']
   private theme: Theme
   /** 遠近感の強さ = tan(視野角 / 2)。小さいほど平行投影に近い */
   private perspective = Math.tan(THREE.MathUtils.degToRad(22.5))
@@ -190,6 +192,12 @@ export class Viewer {
     this.camera.updateProjectionMatrix()
   }
 
+  /** 軸の名前を変える */
+  setAxisNames(names: string[]) {
+    this.axisNames = [...names]
+    if (this.domain) this.buildFrame(this.domain)
+  }
+
   /** 背景の明暗を切り替える */
   setDark(dark: boolean) {
     this.theme = dark ? DARK : LIGHT
@@ -271,9 +279,9 @@ export class Viewer {
     const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
     const o = new THREE.Vector3(clamp(0, d.xmin, d.xmax), clamp(0, d.ymin, d.ymax), clamp(0, d.zmin, d.zmax))
     const axes: [THREE.Vector3, THREE.Vector3, number, string][] = [
-      [new THREE.Vector3(d.xmin, o.y, o.z), new THREE.Vector3(d.xmax, o.y, o.z), 0xd9534f, 'x'],
-      [new THREE.Vector3(o.x, d.ymin, o.z), new THREE.Vector3(o.x, d.ymax, o.z), 0x4caf50, 'y'],
-      [new THREE.Vector3(o.x, o.y, d.zmin), new THREE.Vector3(o.x, o.y, d.zmax), 0x3f7fd9, 'z'],
+      [new THREE.Vector3(d.xmin, o.y, o.z), new THREE.Vector3(d.xmax, o.y, o.z), 0xd9534f, this.axisNames[0]],
+      [new THREE.Vector3(o.x, d.ymin, o.z), new THREE.Vector3(o.x, d.ymax, o.z), 0x4caf50, this.axisNames[1]],
+      [new THREE.Vector3(o.x, o.y, d.zmin), new THREE.Vector3(o.x, o.y, d.zmax), 0x3f7fd9, this.axisNames[2]],
     ]
     for (const [a, b, color, name] of axes) {
       const g = new THREE.BufferGeometry().setFromPoints([a, b])
@@ -325,7 +333,7 @@ export class Viewer {
     const back = createSurfaceMaterial(THREE.BackSide, grid, this.clipPlanes)
     const group = new THREE.Group()
     group.add(new THREE.Mesh(geo, front), new THREE.Mesh(geo, back))
-    const uvSpan = mesh.params === 'uv' ? mesh.paramSpan : null
+    const uvSpan = mesh.params.length === 2 ? mesh.paramSpan : null
     this.plots.set(id, { kind: 'surface', group, grid, uvSpan })
     this.scene.add(group)
   }

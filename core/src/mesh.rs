@@ -457,7 +457,7 @@ fn compute_normals(mesh: &mut Mesh) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::equation::AXES;
+    const AXES: [&str; 3] = ["x", "y", "z"];
     use crate::parser::parse;
 
     fn dom() -> Domain {

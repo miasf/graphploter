@@ -23,7 +23,7 @@ use wasm_bindgen::prelude::*;
 pub struct MeshResult {
     inner: mesh::Mesh,
     kind: String,
-    params: &'static str,
+    params: Vec<String>,
     curve: bool,
     used_params: Vec<String>,
     /// パラメータの定義なら (名前, 値)
@@ -47,10 +47,10 @@ impl MeshResult {
     pub fn kind(&self) -> String {
         self.kind.clone()
     }
-    /// 媒介変数の名前: "t"（曲線）, "uv"（曲面）, ""（媒介変数表示でない）
+    /// 媒介変数の名前（カンマ区切り）。例: "t"（曲線）, "u,v"（曲面）, ""（媒介変数表示でない）
     #[wasm_bindgen(getter)]
     pub fn params(&self) -> String {
-        self.params.into()
+        self.params.join(",")
     }
     /// 曲線なら true。このとき positions は線の点の列（途切れる所に NaN）で、indices は空。
     #[wasm_bindgen(getter)]
@@ -98,12 +98,13 @@ pub fn eval_constant(source: &str) -> Result<f64, JsError> {
 
 /// 式を解析して、曲面（または曲線）を作る。
 ///
-/// - `domain`: 表示範囲 [xmin, xmax, ymin, ymax, zmin, zmax]
+/// - `domain`: 表示範囲 [横の最小, 横の最大, 奥の最小, 奥の最大, 縦の最小, 縦の最大]
 /// - `resolution`: 陽関数・媒介変数表示の曲面の格子の細かさ（1辺のマス数）
 /// - `implicit_resolution`: 陰関数の格子の細かさ（立方体の1辺のマス数。計算量はこの3乗）
-/// - `params`: 媒介変数の範囲 [t0, t1, u0, u1, v0, v1]
-/// - `param_names`: パラメータ（スライダー）の名前をカンマ区切りで並べたもの。例: "a,b"
-/// - `param_values`: パラメータの値 [a の実部, a の虚部, b の実部, b の虚部, ...]
+/// - `range_names`, `ranges`: 媒介変数の範囲。例: "t,u,v" と [t0, t1, u0, u1, v0, v1]。
+///   無い媒介変数は 0〜2π
+/// - `param_names`, `param_values`: パラメータ（スライダー）。例: "a,b" と [a の実部, a の虚部, b の実部, …]
+/// - `dims`: 次元、`axes`: 画面の横・奥・縦に表示する座標の番号、`slice`: 各座標の断面の値
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -111,41 +112,66 @@ pub fn plot(
     domain: &[f64],
     resolution: u32,
     implicit_resolution: u32,
-    params: &[f64],
+    range_names: &str,
+    ranges: &[f64],
     param_names: &str,
     param_values: &[f64],
+    dims: u32,
+    axes: &[u32],
+    slice: &[f64],
 ) -> Result<MeshResult, JsError> {
-    if domain.len() != 6 || params.len() != 6 {
-        return Err(JsError::new("内部エラー: 範囲の数が違います"));
+    let err = |m: &str| JsError::new(m);
+    if domain.len() != 6 || axes.len() != 3 || slice.len() != dims as usize || dims < 3 {
+        return Err(err("内部エラー: 範囲や次元の指定が合っていません"));
     }
-    let names: Vec<&str> = param_names.split(',').filter(|s| !s.is_empty()).collect();
-    if param_values.len() != names.len() * 2 {
-        return Err(JsError::new("内部エラー: パラメータの数が違います"));
-    }
-    let consts: eval::Params = names
-        .iter()
-        .enumerate()
-        .map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1])))
+    let split = |s: &str| -> Vec<String> { s.split(',').filter(|s| !s.is_empty()).map(String::from).collect() };
+    let pairs = |names: Vec<String>, vals: &[f64]| -> Result<Vec<(String, f64, f64)>, JsError> {
+        if vals.len() != names.len() * 2 {
+            return Err(err("内部エラー: 名前と値の数が合っていません"));
+        }
+        Ok(names.into_iter().enumerate().map(|(k, n)| (n, vals[2 * k], vals[2 * k + 1])).collect())
+    };
+    let range_of = pairs(split(range_names), ranges)?;
+    let consts: eval::Params = pairs(split(param_names), param_values)?
+        .into_iter()
+        .map(|(n, re, im)| (n, num_complex::Complex64::new(re, im)))
         .collect();
-    let plot = equation::compile_with(source, &consts).map_err(|e| JsError::new(&e))?;
+    let space = equation::Space {
+        dims: dims as usize,
+        axes: [axes[0] as usize, axes[1] as usize, axes[2] as usize],
+        slice: slice.to_vec(),
+    };
+    if space.axes.iter().any(|&a| a >= space.dims) {
+        return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
+    }
+
+    let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
+    // 媒介変数の範囲（指定が無ければ 0〜2π）
+    let range = |name: &str| {
+        range_of
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, a, b)| (*a, *b))
+            .unwrap_or((0.0, std::f64::consts::TAU))
+    };
     let inner = match &plot {
-        equation::Plot::Explicit { axis, prog } => {
+        equation::Plot::Explicit { axis, prog, .. } => {
             mesh::explicit_surface(prog, dom, resolution.clamp(2, 1000) as usize, *axis)
         }
         equation::Plot::Implicit { prog } => {
             mesh::implicit_surface(prog, dom, implicit_resolution.clamp(2, 300) as usize)
         }
-        equation::Plot::Surface { progs } => mesh::parametric_surface(
+        equation::Plot::Surface { progs, vars } => mesh::parametric_surface(
             progs,
             dom,
-            (params[2], params[3]),
-            (params[4], params[5]),
+            range(&vars[0]),
+            range(&vars[1]),
             resolution.clamp(2, 1000) as usize,
         ),
-        equation::Plot::Curve { progs } => mesh::Mesh {
-            positions: mesh::parametric_curve(progs, (params[0], params[1]), 400, size * 2e-4),
+        equation::Plot::Curve { progs, vars } => mesh::Mesh {
+            positions: mesh::parametric_curve(progs, range(&vars[0]), 400, size * 2e-4),
             ..Default::default()
         },
         equation::Plot::Param { .. } => mesh::Mesh::default(),
@@ -153,7 +179,7 @@ pub fn plot(
     Ok(MeshResult {
         inner,
         kind: plot.kind_label(),
-        params: plot.params(),
+        params: plot.param_vars(),
         curve: matches!(plot, equation::Plot::Curve { .. }),
         used_params: plot.used_params(),
         param: match &plot {
