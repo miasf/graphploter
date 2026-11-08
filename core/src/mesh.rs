@@ -649,21 +649,20 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         if k > 0 {
             points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
         }
-        points.extend(curve_nd(progs, t, n, tol));
+        points.extend(curve_nd(&|ts: &[f64]| eval_nd(progs, &[ts], ts.len()), progs.len(), t, n, tol));
     }
     NdShape { dims, points, grid: None, solid: false }
 }
 
-/// 1本の曲線の点（適応サンプリング）
-fn curve_nd(progs: &[Program], t: (f64, f64), n: usize, tol: f64) -> Vec<f64> {
+/// 1本の曲線の点（適応サンプリング）。`eval` は媒介変数の値の列から、d 次元の点を並べたものを計算する
+fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize, tol: f64) -> Vec<f64> {
     const MAX_POINTS: usize = 200_000;
     const PASSES: usize = 14;
-    let d = progs.len();
     let split = |flat: Vec<f64>| -> Vec<Vec<f64>> { flat.chunks_exact(d).map(|c| c.to_vec()).collect() };
 
     let n = n.max(2);
     let mut ts: Vec<f64> = (0..=n).map(|k| t.0 + (t.1 - t.0) * k as f64 / n as f64).collect();
-    let mut ps = split(eval_nd(progs, &[&ts], ts.len()));
+    let mut ps = split(eval(&ts));
     // 区間 [ts[k], ts[k+1]] をまだ分け直す必要があるか
     let mut todo = vec![true; ts.len() - 1];
 
@@ -675,7 +674,7 @@ fn curve_nd(progs: &[Program], t: (f64, f64), n: usize, tol: f64) -> Vec<f64> {
             break;
         }
         let mids: Vec<f64> = cand.iter().map(|&k| 0.5 * (ts[k] + ts[k + 1])).collect();
-        let mps = split(eval_nd(progs, &[&mids], mids.len()));
+        let mps = split(eval(&mids));
 
         // 中点を入れるべきか判定しながら、新しい列を作る
         let mut nts = Vec::with_capacity(ts.len() + cand.len());
@@ -724,6 +723,157 @@ fn curve_nd(progs: &[Program], t: (f64, f64), n: usize, tol: f64) -> Vec<f64> {
         points.extend_from_slice(&ps[k]);
     }
     points
+}
+
+// ---------------------------------------------------------------------------
+// 2D 表示（画面の縦の座標を 0 にして、横・奥の平面に描く）
+// ---------------------------------------------------------------------------
+
+/// 縦の座標を 0 にして平らにする（2D 表示）。曲面の法線はすべて +縦 の向きにする
+pub fn flatten(mesh: &mut Mesh, curve: bool) {
+    for p in mesh.positions.chunks_exact_mut(3) {
+        if p[2].is_finite() {
+            p[2] = 0.0;
+        }
+    }
+    if !curve {
+        mesh.normals = (0..mesh.positions.len() / 3).flat_map(|_| [0.0f32, 0.0, 1.0]).collect();
+    }
+}
+
+/// 2D 表示の `z = f(x, y)`（縦の座標が横・奥の座標の関数）: 平面を f の値で塗る（色の濃さと等高線）。
+/// 頂点は (x, y, 0)、格子線用の座標は (x, y, f) なので、z 方向の格子線が等高線になる。
+/// 複素数の色分けをするなら、[`explicit_surface_with`] と同じく偏角の色を付ける
+pub fn flat_map(prog: &Program, dom: Domain, n: usize, mode: ComplexMode) -> Mesh {
+    let n = n.max(2);
+    let m = n + 1;
+    let mut xs = Vec::with_capacity(m * m);
+    let mut ys = Vec::with_capacity(m * m);
+    for j in 0..m {
+        for i in 0..m {
+            xs.push(dom.at(0, i as f64, n));
+            ys.push(dom.at(1, j as f64, n));
+        }
+    }
+    let mut vals = vec![C::new(0.0, 0.0); m * m];
+    prog.eval_batch(&[&xs, &ys], &mut vals);
+    let mut index_of = vec![NONE; m * m];
+    let mut mesh = Mesh::default();
+    for k in 0..m * m {
+        let z = vals[k];
+        let w = match mode {
+            ComplexMode::Off => as_real(z),
+            ComplexMode::Abs => z.norm(),
+            ComplexMode::Re => z.re,
+            ComplexMode::Im => z.im,
+        };
+        if !w.is_finite() || !z.re.is_finite() || !z.im.is_finite() {
+            continue;
+        }
+        index_of[k] = mesh.push_vertex([xs[k], ys[k], 0.0]);
+        mesh.grid_coords.extend_from_slice(&[xs[k] as f32, ys[k] as f32, w as f32]);
+        if mode != ComplexMode::Off {
+            let r = z.norm();
+            let (c, s) = if r > 0.0 { (z.re / r, z.im / r) } else { (0.0, 0.0) };
+            mesh.complex.extend_from_slice(&[c as f32, s as f32, r.log2().max(-1e6) as f32]);
+        }
+    }
+    for j in 0..n {
+        for i in 0..n {
+            let a = index_of[j * m + i];
+            let b = index_of[j * m + i + 1];
+            let c = index_of[(j + 1) * m + i];
+            let d = index_of[(j + 1) * m + i + 1];
+            for tri in [[a, b, d], [a, d, c]] {
+                if !tri.contains(&NONE) {
+                    mesh.indices.extend_from_slice(&tri);
+                }
+            }
+        }
+    }
+    flatten(&mut mesh, false);
+    mesh
+}
+
+/// 2D 表示の陽関数の曲線 `y = f(x)`（`axis` = 1）や `x = f(y)`（`axis` = 0）。
+/// `prog` の変数は残り2つの表示中の座標（2つ目は縦の座標で、0 にする）。曲がっている所を細かく計算する
+pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> Mesh {
+    let free = if axis == 0 { 1 } else { 0 };
+    let eval = |ts: &[f64]| -> Vec<f64> {
+        let zeros = vec![0.0; ts.len()];
+        let mut out = vec![C::new(0.0, 0.0); ts.len()];
+        prog.eval_batch(&[ts, &zeros], &mut out);
+        let mut pts = Vec::with_capacity(ts.len() * 3);
+        for (t, v) in ts.iter().zip(&out) {
+            let mut p = [0.0; 3];
+            p[free] = *t;
+            p[axis] = as_real(*v);
+            if !p[axis].is_finite() {
+                p = [f64::NAN; 3];
+            }
+            pts.extend_from_slice(&p);
+        }
+        pts
+    };
+    let points = curve_nd(&eval, 3, (dom.lo[free], dom.hi[free]), 400, tol);
+    Mesh { positions: points.iter().map(|&v| v as f32).collect(), ..Default::default() }
+}
+
+/// 2D 表示の陰関数の曲線 F(x, y, 0) = 0。`prog` の変数は表示中の3つの座標（縦の座標は 0）。
+/// 格子の各マスで、辺の上の F = 0 の点を結ぶ（マーチング・スクエア法）。
+/// 線分ごとに (p, q, NaN) と並べる（NaN で線を切る）
+pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
+    let n = n.max(2);
+    let m = n + 1;
+    let mut xs = Vec::with_capacity(m * m);
+    let mut ys = Vec::with_capacity(m * m);
+    for j in 0..m {
+        for i in 0..m {
+            xs.push(dom.at(0, i as f64, n));
+            ys.push(dom.at(1, j as f64, n));
+        }
+    }
+    let zs = vec![0.0; m * m];
+    let mut out = vec![C::new(0.0, 0.0); m * m];
+    prog.eval_batch(&[&xs, &ys, &zs], &mut out);
+    let f: Vec<f64> = out.iter().map(|v| as_real(*v)).collect();
+    let mut pts: Vec<f32> = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            // マスの4つの角（反時計回り）
+            let ks = [j * m + i, j * m + i + 1, (j + 1) * m + i + 1, (j + 1) * m + i];
+            let v = ks.map(|k| f[k]);
+            if v.iter().any(|x| !x.is_finite()) {
+                continue;
+            }
+            // 符号が変わる辺の上の F = 0 の点
+            let mut cross: Vec<[f64; 2]> = Vec::with_capacity(4);
+            for e in 0..4 {
+                let (a, b) = (e, (e + 1) % 4);
+                if (v[a] < 0.0) != (v[b] < 0.0) {
+                    let t = v[a] / (v[a] - v[b]);
+                    let (ka, kb) = (ks[a], ks[b]);
+                    cross.push([xs[ka] + (xs[kb] - xs[ka]) * t, ys[ka] + (ys[kb] - ys[ka]) * t]);
+                }
+            }
+            let pairs: Vec<(usize, usize)> = match cross.len() {
+                2 => vec![(0, 1)],
+                4 => {
+                    // 鞍点: マスの中心の値で、どちらの組み合わせで結ぶか決める
+                    let center = v.iter().sum::<f64>() / 4.0;
+                    // 中心が角 0 と同じ側なら、角 0 と 2 がつながっていて、角 1 と 3 が切り離される
+                    if (center < 0.0) == (v[0] < 0.0) { vec![(0, 1), (2, 3)] } else { vec![(0, 3), (1, 2)] }
+                }
+                _ => vec![],
+            };
+            for (a, b) in pairs {
+                pts.extend_from_slice(&[cross[a][0] as f32, cross[a][1] as f32, 0.0]);
+                pts.extend_from_slice(&[cross[b][0] as f32, cross[b][1] as f32, 0.0]);
+                pts.extend_from_slice(&[f32::NAN; 3]);
+            }
+        }
+    }
+    Mesh { positions: pts, ..Default::default() }
 }
 
 /// 画面の1つの軸の座標を、n 次元の点の1次式 c₀ + Σ cₖ·pₖ で表したもの（回転と射影）
@@ -1117,6 +1267,32 @@ mod tests {
         assert!((area(&f.cap(dom(), 2, 0.0, true, 60)) - 0.49 * std::f64::consts::PI).abs() < 0.01);
         // 球の外で切ると、ふたは無い
         assert!(f.cap(dom(), 0, 0.9, true, 30).indices.is_empty());
+    }
+
+    #[test]
+    fn two_d() {
+        // 円 x² + y² = 0.49 の曲線: 点はすべて半径 0.7 の上
+        let p = prog("x^2 + y^2 + z - 0.49", &AXES); // 縦の座標 z は 0 になる
+        let m = implicit_curve_2d(&p, dom(), 40);
+        assert!(m.positions.len() > 30 * 9);
+        for q in m.positions.chunks_exact(3).filter(|q| q[0].is_finite()) {
+            assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 0.7).abs() < 0.01);
+            assert_eq!(q[2], 0.0);
+        }
+        // y = x²（式の変数は x と縦の z）
+        let p = prog("x^2 + z", &["x", "z"]);
+        let m = explicit_curve_2d(&p, 1, dom(), 1e-4);
+        for q in m.positions.chunks_exact(3).filter(|q| q[0].is_finite()) {
+            assert!((q[1] - q[0] * q[0]).abs() < 1e-5);
+        }
+        // z = x y の塗り分け: 頂点は z = 0、格子線用の座標の3つ目が値
+        let p = prog("x y", &["x", "y"]);
+        let m = flat_map(&p, dom(), 4, ComplexMode::Off);
+        for (q, g) in m.positions.chunks_exact(3).zip(m.grid_coords.chunks_exact(3)) {
+            assert_eq!(q[2], 0.0);
+            assert!((g[2] - q[0] * q[1]).abs() < 1e-6);
+        }
+        assert_eq!(m.indices.len(), 4 * 4 * 2 * 3);
     }
 
     #[test]

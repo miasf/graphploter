@@ -98,7 +98,7 @@
   const divAxes = $derived(item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const))
 
   /** 陽関数（z = f(x, y) など）か。複素数の色分けができる */
-  const isExplicit = $derived(/ = f\(/.test(item.kind ?? ''))
+  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? ''))
   const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
     { mode: 'off', label: 'しない' },
     { mode: 'abs', label: '高さ |f|' },

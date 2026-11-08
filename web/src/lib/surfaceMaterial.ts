@@ -22,6 +22,11 @@ export interface GridUniforms {
   uFillOpacity: { value: number }
   /** 1 なら複素数の偏角で色を付ける（頂点の complexValue を使う） */
   uComplex: { value: number }
+  /** 1 なら 2D の塗り分け: 値 vGridPos.z が uHeatRange の範囲のどこにあるかで、色の濃さを変える */
+  uHeat: { value: number }
+  uHeatRange: { value: THREE.Vector2 }
+  /** 1 なら裏面を暗くしない（2D 表示では面の表裏に意味が無い） */
+  uNoBackShade: { value: number }
 }
 
 export function createGridUniforms(): GridUniforms {
@@ -32,6 +37,9 @@ export function createGridUniforms(): GridUniforms {
     uGridWidth: { value: 1 },
     uFillOpacity: { value: 1 },
     uComplex: { value: 0 },
+    uHeat: { value: 0 },
+    uHeatRange: { value: new THREE.Vector2(-1, 1) },
+    uNoBackShade: { value: 0 },
   }
 }
 
@@ -39,6 +47,9 @@ const FRAGMENT_HEADER = /* glsl */ `
 varying vec3 vGridPos;
 varying vec3 vComplex;
 uniform float uComplex;
+uniform float uHeat;
+uniform vec2 uHeatRange;
+uniform float uNoBackShade;
 uniform vec3 uGridSpacing;
 uniform vec3 uGridColor;
 uniform float uGridStrength;
@@ -72,9 +83,13 @@ const FRAGMENT_APPLY = /* glsl */ `
     rgb = mix(vec3(1.0), rgb, 0.85);
     float band = fract(vComplex.z);
     diffuseColor.rgb = rgb * (0.72 + 0.28 * band);
+  } else if (uHeat > 0.5) {
+    // 2D の塗り分け: 値が小さいほど暗く、大きいほど明るく（範囲の外は端の色）
+    float h = clamp((vGridPos.z - uHeatRange.x) / (uHeatRange.y - uHeatRange.x), 0.0, 1.0);
+    diffuseColor.rgb = mix(diffuseColor.rgb * 0.25, mix(diffuseColor.rgb, vec3(1.0), 0.75), h);
   }
   // 裏面は暗くして、どちら側を見ているか分かるようにする（表と裏を1回で描けるので、メッシュが1つで済む）
-  if (!gl_FrontFacing) diffuseColor.rgb *= 0.55;
+  if (!gl_FrontFacing && uNoBackShade < 0.5) diffuseColor.rgb *= 0.55;
   float g = max(max(gridLine(vGridPos.x, uGridSpacing.x),
                     gridLine(vGridPos.y, uGridSpacing.y)),
                 gridLine(vGridPos.z, uGridSpacing.z));

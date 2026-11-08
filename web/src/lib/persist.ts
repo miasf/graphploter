@@ -31,6 +31,8 @@ export interface SavedState {
   space: Space
   /** 立体の切り口（古い保存データには無い） */
   cut?: CutStyle
+  /** 2D 表示（古い保存データには無い） */
+  flat?: boolean
 }
 
 const STORAGE_KEY = 'graphploter:state'

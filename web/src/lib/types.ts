@@ -161,6 +161,8 @@ export interface MeshData {
   curve: boolean
   /** 媒介変数表示の立体（閉じた面で外向き）なら true。切り口のふたは描画側で作る */
   solid: boolean
+  /** 2D 表示の z = f(x, y) の塗り分け（格子線用の座標の3つ目が値。値で色の濃さを変える） */
+  heat: boolean
   /** 媒介変数の名前 */
   params: string[]
   /** 媒介変数の範囲の長さ */
@@ -201,6 +203,8 @@ export interface PlotRequest {
   cut: CutRequest
   /** 陽関数の複素数の色分け */
   complexMode: ComplexMode
+  /** 2D 表示（縦の座標を 0 にして平面に描く） */
+  flat: boolean
 }
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */

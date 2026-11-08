@@ -54,6 +54,7 @@ export function requestPlot(
   stacks: Record<string, [number, number]>,
   cut: CutRequest,
   complexMode: ComplexMode = 'off',
+  flat = false,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -79,6 +80,7 @@ export function requestPlot(
     stacks: Object.fromEntries(Object.entries(stacks).map(([k, [a, b]]) => [k, [a, b]])),
     cut: cut && { ...cut },
     complexMode,
+    flat,
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)

@@ -124,6 +124,8 @@ export class Viewer {
   /** 曲面・曲線を切り落とす平面（表示範囲 + 切り口） */
   private clipPlanes: THREE.Plane[] = []
   private nextOrder = 0
+  /** 2D 表示（真上から見て、回転させない） */
+  private flat = false
   private domain: Domain | null = null
   /** 画面の横・奥・縦の軸の名前（4次元以上で w などを表示するとき変わる） */
   private axisNames = ['x', 'y', 'z']
@@ -354,20 +356,53 @@ export class Viewer {
       new THREE.Plane(new THREE.Vector3(-1, 0, 0), d.xmax),
       new THREE.Plane(new THREE.Vector3(0, 1, 0), -d.ymin),
       new THREE.Plane(new THREE.Vector3(0, -1, 0), d.ymax),
-      new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin),
-      new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax),
     ]
+    // 2D 表示では、図形は z = 0 の平面にあるので z の範囲では切らない
+    if (!this.flat) {
+      this.boxPlanes.push(
+        new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin),
+        new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax),
+      )
+    }
     this.applyClipping()
+    for (const p of this.plots.values()) {
+      if (p.kind === 'surface') p.grid.uHeatRange.value.set(d.zmin, d.zmax)
+    }
 
     this.buildFrame(d)
     if (first || resetCamera) this.resetCamera()
   }
 
-  /** カメラを斜め上からの見やすい位置に戻す */
+  /**
+   * 2D 表示に切り替える。真上から見て、ドラッグは回転ではなく移動にする。
+   * 図形は計算担当が z = 0 の平面に作る（縦の座標を 0 にする）
+   */
+  setFlat(on: boolean) {
+    if (this.flat === on) return
+    this.flat = on
+    this.controls.enableRotate = !on
+    this.controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE
+    this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
+    this.camera.up.set(0, on ? 1 : 0, on ? 0 : 1)
+    for (const p of this.plots.values()) if (p.kind === 'surface') p.grid.uNoBackShade.value = on ? 1 : 0
+    if (this.domain) this.setDomain(this.domain, true)
+  }
+
+  /** カメラを斜め上からの見やすい位置に戻す（2D 表示なら真上から） */
   resetCamera() {
     this.dirty = true
     const d = this.domain
     if (!d) return
+    if (this.flat) {
+      // 表示範囲の長方形が画面に収まる距離（縦長の画面では横幅に合わせる）
+      const c = new THREE.Vector3((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, 0)
+      const half = Math.max((d.ymax - d.ymin) / 2, (d.xmax - d.xmin) / 2 / this.camera.aspect) * 1.12
+      this.controls.target.copy(c)
+      this.camera.position.copy(c).add(new THREE.Vector3(0, 0, half / this.perspective))
+      this.camera.lookAt(c)
+      this.updateClipRange()
+      return
+    }
     const center = new THREE.Vector3((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
     const size = this.sceneSize()
     // 縦長の画面（スマホ）では横幅に収まるよう、その分だけ遠くから見る
@@ -404,12 +439,15 @@ export class Viewer {
     const lo = new THREE.Vector3(d.xmin, d.ymin, d.zmin)
     const hi = new THREE.Vector3(d.xmax, d.ymax, d.zmax)
 
-    // 外枠
+    // 外枠（2D 表示では z = 0 の長方形）
+    if (this.flat) {
+      lo.z = hi.z = 0
+    }
     const box = new THREE.Box3Helper(new THREE.Box3(lo, hi), t.box)
     this.frame.add(box)
 
     // 床（z = 0、範囲外なら一番下）の方眼
-    const zFloor = d.zmin <= 0 && 0 <= d.zmax ? 0 : d.zmin
+    const zFloor = this.flat ? 0 : d.zmin <= 0 && 0 <= d.zmax ? 0 : d.zmin
     const step = niceStep(Math.max(d.xmax - d.xmin, d.ymax - d.ymin))
     const pts: number[] = []
     for (let x = Math.ceil(d.xmin / step) * step; x <= d.xmax + 1e-9; x += step) {
@@ -424,12 +462,17 @@ export class Viewer {
 
     // 座標軸（原点を通る。原点が範囲外なら範囲の端に寄せる）
     const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
-    const o = new THREE.Vector3(clamp(0, d.xmin, d.xmax), clamp(0, d.ymin, d.ymax), clamp(0, d.zmin, d.zmax))
+    const o = new THREE.Vector3(
+      clamp(0, d.xmin, d.xmax),
+      clamp(0, d.ymin, d.ymax),
+      this.flat ? 0 : clamp(0, d.zmin, d.zmax),
+    )
     const axes: [THREE.Vector3, THREE.Vector3, number, string][] = [
       [new THREE.Vector3(d.xmin, o.y, o.z), new THREE.Vector3(d.xmax, o.y, o.z), 0xd9534f, this.axisNames[0]],
       [new THREE.Vector3(o.x, d.ymin, o.z), new THREE.Vector3(o.x, d.ymax, o.z), 0x4caf50, this.axisNames[1]],
       [new THREE.Vector3(o.x, o.y, d.zmin), new THREE.Vector3(o.x, o.y, d.zmax), 0x3f7fd9, this.axisNames[2]],
     ]
+    if (this.flat) axes.pop() // 2D 表示では縦の軸は無い
     for (const [a, b, color, name] of axes) {
       const g = new THREE.BufferGeometry().setFromPoints([a, b])
       this.frame.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color })))
@@ -448,7 +491,21 @@ export class Viewer {
       this.frame.add(label(fmt(x), 'tick', new THREE.Vector3(x, d.ymin - pad, zFloor)))
     }
     for (const y of ticks(d.ymin, d.ymax, step)) {
-      this.frame.add(label(fmt(y), 'tick', new THREE.Vector3(d.xmax + pad, y, zFloor)))
+      // 2D 表示では左の辺に並べる
+      const x = this.flat ? d.xmin - pad * 1.3 : d.xmax + pad
+      this.frame.add(label(fmt(y), 'tick', new THREE.Vector3(x, y, zFloor)))
+    }
+    if (this.flat) {
+      // 枠・方眼・軸は、z = 0 にある図形の下に描く（同じ高さで重なってちらつかないように）
+      this.frame.traverse((o) => {
+        if (o instanceof THREE.LineSegments) {
+          const m = o.material as THREE.Material
+          m.depthTest = false
+          m.depthWrite = false
+          o.renderOrder = -10000
+        }
+      })
+      return
     }
     for (const z of ticks(d.zmin, d.zmax, niceStep(d.zmax - d.zmin, 6))) {
       this.frame.add(label(fmt(z), 'tick', new THREE.Vector3(d.xmin - pad, d.ymin - pad, z)))
@@ -472,6 +529,7 @@ export class Viewer {
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
         old.solid = mesh.solid
         old.grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
+        old.grid.uHeat.value = mesh.heat ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = m.geometry
       }
     } else {
@@ -681,6 +739,9 @@ export class Viewer {
     group.add(new THREE.Mesh(this.surfaceGeometry(mesh), createSurfaceMaterial(grid, this.clipPlanes)))
     const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
     grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
+    grid.uHeat.value = mesh.heat ? 1 : 0
+    grid.uNoBackShade.value = this.flat ? 1 : 0
+    if (this.domain) grid.uHeatRange.value.set(this.domain.zmin, this.domain.zmax)
     this.plots.set(id, {
       kind: 'surface',
       group,

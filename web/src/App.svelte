@@ -57,11 +57,13 @@
   let domainError = $state('')
   /** 遠近感（0: 平行投影 〜 100: 強い透視投影） */
   let perspective = $state(41)
+  /** 2D 表示（縦の座標を 0 にして、横・奥の平面に描く） */
+  let flat = $state(false)
   /** 立体の切り口 */
   let cut = $state<CutStyle>({ enabled: false, axis: 0, pos: 0, flip: false })
   /** 計算担当・描画に渡す切り口の指定 */
   function cutRequest(): CutRequest {
-    return cut.enabled ? { axis: cut.axis, pos: cut.pos, keepBelow: !cut.flip } : null
+    return cut.enabled && !flat ? { axis: cut.axis, pos: cut.pos, keepBelow: !cut.flip } : null
   }
   /** 暗い配色にするか（最初は OS の設定に合わせる） */
   let dark = $state(window.matchMedia('(prefers-color-scheme: dark)').matches)
@@ -82,7 +84,8 @@
       const saved = await loadInitial()
       if (saved) restore(saved)
       viewer?.setDark(dark)
-      viewer?.setPerspective(perspective / 100)
+      viewer?.setPerspective(flat ? 0 : perspective / 100)
+      viewer?.setFlat(flat)
       viewer?.setDomain(domain, true)
       viewer?.setCut(cutRequest())
       loaded = true
@@ -119,6 +122,7 @@
       dark,
       space,
       cut,
+      flat,
     })
   }
 
@@ -132,6 +136,7 @@
     dark = s.dark
     space = s.space
     if (s.cut) cut = s.cut
+    flat = s.flat ?? false
   }
 
   // 変わるたびに（少し待ってから）ブラウザに保存する
@@ -385,6 +390,7 @@
       currentStacks(),
       cutRequest(),
       item.complexMode ?? 'off',
+      flat,
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -761,6 +767,18 @@
     paramsChanged([coordName(k)])
   }
 
+  // ---- 2D 表示 ----
+
+  function setFlat(on: boolean) {
+    flat = on
+    viewer?.setFlat(on)
+    viewer?.setCut(cutRequest())
+    // 2D は真上からほぼ平行に見る。3D に戻したら元の遠近感にする
+    viewer?.setPerspective(on ? 0 : perspective / 100)
+    viewer?.resetCamera()
+    replotAll(0)
+  }
+
   // ---- 立体の切り口 ----
 
   /** 陰関数・範囲で重ねた立体の式（切り口のふたを計算担当が作る） */
@@ -965,11 +983,12 @@
             max="100"
             step="1"
             bind:value={perspective}
-            oninput={() => viewer?.setPerspective(perspective / 100)}
+            oninput={() => !flat && viewer?.setPerspective(perspective / 100)}
           />
         </label>
         <h2>切り口</h2>
-        <label class="check-row">
+        {#if flat}<p class="note">2D 表示では使えません</p>{/if}
+        <label class="check-row" class:disabled={flat}>
           <input type="checkbox" checked={cut.enabled} onchange={(e) => setCut({ enabled: e.currentTarget.checked })} />
           立体を平面で切って、切り口を見る
         </label>
@@ -1085,6 +1104,13 @@
   </aside>
 
   <main class="viewer" bind:this={viewerEl}></main>
+  <button
+    class="mode-toggle"
+    onclick={() => setFlat(!flat)}
+    title={flat ? '3D 表示に切り替える' : '2D 表示に切り替える（真上から見た平面に描く）'}
+  >
+    {flat ? '3D' : '2D'}
+  </button>
 </div>
 
 <style>
@@ -1282,6 +1308,23 @@
     position: relative;
     overflow: hidden;
     min-height: 0;
+  }
+  /* 2D / 3D の切り替え（グラフの右上） */
+  .mode-toggle {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 5;
+    min-width: 44px;
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
   }
 
   /* スマホなど幅が狭いときは、グラフを全画面にして、式の一覧を下から引き出すシートにする */
