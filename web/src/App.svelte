@@ -111,6 +111,7 @@
         grid: it.grid,
         lineWidth: it.lineWidth,
         complexMode: it.complexMode,
+        walls: it.walls,
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
@@ -391,6 +392,7 @@
       cutRequest(),
       item.complexMode ?? 'off',
       flat,
+      item.walls ?? false,
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -548,6 +550,11 @@
   function setRange(item: PlotItem, name: string, side: 0 | 1, value: string) {
     item.ranges[name][side] = value
     schedule(item, 300)
+  }
+
+  function setWalls(item: PlotItem, on: boolean) {
+    item.walls = on
+    schedule(item, 0)
   }
 
   function setComplexMode(item: PlotItem, mode: ComplexMode) {
@@ -867,6 +874,7 @@
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
             onComplexMode={(m) => setComplexMode(item, m)}
+            onWalls={(on) => setWalls(item, on)}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}
             onToggle={() => toggle(item)}

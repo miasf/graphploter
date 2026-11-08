@@ -16,6 +16,7 @@ export interface SavedItem {
   vertical: boolean
   slider: SliderStyle
   complexMode?: ComplexMode
+  walls?: boolean
 }
 
 /** 保存する状態全体 */

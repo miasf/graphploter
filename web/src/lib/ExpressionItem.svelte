@@ -20,6 +20,7 @@
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
     onComplexMode: (mode: ComplexMode) => void
+    onWalls: (on: boolean) => void
     onLineWidth: (width: number) => void
     onRange: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
@@ -51,6 +52,7 @@
     onGrid,
     onOpacity,
     onComplexMode,
+    onWalls,
     onLineWidth,
     onRange,
     onToggle,
@@ -260,6 +262,12 @@
             <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
           </div>
 
+          {#if isExplicit && !/塗り分け/.test(item.kind ?? '')}
+            <label class="check">
+              <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
+              値が飛ぶ所（floor の段差など）に壁を描く
+            </label>
+          {/if}
           {#if isExplicit}
             <div class="complex-mode">
               <span class="label">複素数の色分け</span>

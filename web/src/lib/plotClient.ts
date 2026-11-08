@@ -55,6 +55,7 @@ export function requestPlot(
   cut: CutRequest,
   complexMode: ComplexMode = 'off',
   flat = false,
+  walls = false,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -81,6 +82,7 @@ export function requestPlot(
     cut: cut && { ...cut },
     complexMode,
     flat,
+    walls,
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)

@@ -49,6 +49,15 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
       },
       { label: '鞍形 z = (x² − y²)/4', items: [{ latex: 'z=\\frac{x^2-y^2}{4}' }] },
       {
+        label: '階段 z = ⌊x⌋/2 + ⌊y⌋/4（段差の壁つき）',
+        items: [
+          {
+            latex: 'z=\\frac{\\lfloor x\\rfloor}{2}+\\frac{\\lfloor y\\rfloor}{4}',
+            options: { color: '#1a9ea0', walls: true },
+          },
+        ],
+      },
+      {
         label: 'らせん（曲線）',
         items: [
           {

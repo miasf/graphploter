@@ -177,6 +177,7 @@ pub fn last_used_params() -> String {
 /// - `rotation`: 回転角（ラジアン、座標の組 (0,1), (0,2), …, (1,2), … の順）、`center`: 回転の中心
 /// - `perspective`: 4次元の遠近法の視点までの距離（0 なら遠近法なし）。射影で描く図形（媒介変数表示・回した陽関数）だけに効く
 /// - `complex_mode`: 陽関数の複素数の色分け（0: しない, 1: 高さ |f|, 2: 高さ Re f, 3: 高さ Im f。色は偏角）
+/// - `walls`: 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか
 /// - `flat`: 2D 表示。縦の軸の座標を 0 にして、横・奥の平面に描く。
 ///   縦の座標 = f(横, 奥) は平面の塗り分け、陰関数・ほかの陽関数は曲線、範囲で重ねた立体は塗った領域になる
 #[wasm_bindgen]
@@ -201,6 +202,7 @@ pub fn plot(
     center: &[f64],
     perspective: f64,
     complex_mode: u32,
+    walls: bool,
     flat: bool,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
@@ -272,7 +274,7 @@ pub fn plot(
             mesh::Mesh::default()
         }
         equation::Plot::Explicit { axis, prog, .. } => {
-            mesh::explicit_surface_with(prog, dom, resolution.clamp(2, 1000) as usize, *axis, complex_mode)
+            mesh::explicit_surface_full(prog, dom, resolution.clamp(2, 1000) as usize, *axis, complex_mode, walls)
         }
         equation::Plot::Implicit { prog } => {
             mesh::implicit_surface(prog, dom, implicit_resolution.clamp(2, 300) as usize)

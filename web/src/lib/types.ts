@@ -124,6 +124,8 @@ export interface PlotItem extends PlotStyle {
   solidSeen?: boolean
   /** 複素数の色分け（陽関数だけ。古い保存データには無い） */
   complexMode?: ComplexMode
+  /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
+  walls?: boolean
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
 }
@@ -205,6 +207,8 @@ export interface PlotRequest {
   complexMode: ComplexMode
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
+  /** 陽関数の段差の壁 */
+  walls: boolean
 }
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
