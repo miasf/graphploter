@@ -8,8 +8,18 @@
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
-  import { requestPlot } from './lib/plotClient'
-  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem, SliderStyle, Space } from './lib/types'
+  import { requestCap, requestPlot } from './lib/plotClient'
+  import type {
+    CutRequest,
+    CutStyle,
+    Domain,
+    GridStyle,
+    ParamRanges,
+    ParamValue,
+    PlotItem,
+    SliderStyle,
+    Space,
+  } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -46,6 +56,12 @@
   let domainError = $state('')
   /** 遠近感（0: 平行投影 〜 100: 強い透視投影） */
   let perspective = $state(41)
+  /** 立体の切り口 */
+  let cut = $state<CutStyle>({ enabled: false, axis: 0, pos: 0, flip: false })
+  /** 計算担当・描画に渡す切り口の指定 */
+  function cutRequest(): CutRequest {
+    return cut.enabled ? { axis: cut.axis, pos: cut.pos, keepBelow: !cut.flip } : null
+  }
   /** 暗い配色にするか（最初は OS の設定に合わせる） */
   let dark = $state(window.matchMedia('(prefers-color-scheme: dark)').matches)
 
@@ -67,6 +83,7 @@
       viewer?.setDark(dark)
       viewer?.setPerspective(perspective / 100)
       viewer?.setDomain(domain, true)
+      viewer?.setCut(cutRequest())
       loaded = true
       items.forEach(replot)
     })()
@@ -99,6 +116,7 @@
       perspective,
       dark,
       space,
+      cut,
     })
   }
 
@@ -111,6 +129,7 @@
     perspective = s.perspective
     dark = s.dark
     space = s.space
+    if (s.cut) cut = s.cut
   }
 
   // 変わるたびに（少し待ってから）ブラウザに保存する
@@ -362,6 +381,7 @@
       currentParams(),
       space,
       currentStacks(),
+      cutRequest(),
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -410,6 +430,7 @@
     for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
     viewer.setPlot(item.id, res.mesh, item)
+    viewer.setCap(item.id, res.cap, item)
     const size = res.mesh.curve
       ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
@@ -727,6 +748,41 @@
     paramsChanged([coordName(k)])
   }
 
+  // ---- 立体の切り口 ----
+
+  /** 陰関数・範囲で重ねた立体の式（切り口のふたを計算担当が作る） */
+  const capKinds = ['陰関数', '範囲で重ねた立体']
+  /** 切り口のふたの細かさ（陰関数の格子の2倍） */
+  const capResolution = () => (isCoarse() ? implicitResolution : implicitResolution * 2)
+  /** ふたの依頼の番号（古い結果を捨てるため） */
+  const capToken = new Map<number, number>()
+
+  /** 切り口を変えたとき: 描画側の切り落としを変え、陰関数などのふただけを作り直す（式は計算し直さない） */
+  async function setCut(next: Partial<CutStyle>) {
+    Object.assign(cut, next)
+    const req = cutRequest()
+    viewer?.setCut(req)
+    await Promise.all(
+      items
+        .filter((it) => it.visible && !it.error && it.info && capKinds.some((k) => it.info!.startsWith(k)))
+        .map(async (it) => {
+          const token = (capToken.get(it.id) ?? 0) + 1
+          capToken.set(it.id, token)
+          const res = await requestCap(it.id, req, capResolution())
+          if (capToken.get(it.id) === token) viewer?.setCap(it.id, res.cap, it)
+        }),
+    )
+  }
+
+  /** 切り口の軸の範囲（表示範囲） */
+  const cutRange = $derived(
+    [
+      [domain.xmin, domain.xmax],
+      [domain.ymin, domain.ymax],
+      [domain.zmin, domain.zmax],
+    ][cut.axis],
+  )
+
   function setBound(key: keyof Domain, value: number) {
     if (!Number.isFinite(value)) return
     domain[key] = value
@@ -898,6 +954,49 @@
             oninput={() => viewer?.setPerspective(perspective / 100)}
           />
         </label>
+        <h2>切り口</h2>
+        <label class="check-row">
+          <input type="checkbox" checked={cut.enabled} onchange={(e) => setCut({ enabled: e.currentTarget.checked })} />
+          立体を平面で切って、切り口を見る
+        </label>
+        {#if cut.enabled}
+          <div class="cut-axes" role="group" aria-label="切る向き">
+            {#each [0, 1, 2] as const as k (k)}
+              <button
+                class="secondary"
+                class:selected={cut.axis === k}
+                onclick={() => {
+                  const [lo, hi] = [
+                    [domain.xmin, domain.xmax],
+                    [domain.ymin, domain.ymax],
+                    [domain.zmin, domain.zmax],
+                  ][k]
+                  setCut({ axis: k, pos: Math.min(hi, Math.max(lo, cut.pos)) })
+                }}>{prettyName(axisNames[k])} = 一定</button
+              >
+            {/each}
+          </div>
+          <label class="slider">
+            <span>位置: {prettyName(axisNames[cut.axis])} = {Number(cut.pos.toPrecision(4))}</span>
+            <input
+              type="range"
+              min={cutRange[0]}
+              max={cutRange[1]}
+              step={(cutRange[1] - cutRange[0]) / 200}
+              value={cut.pos}
+              oninput={(e) => setCut({ pos: e.currentTarget.valueAsNumber })}
+            />
+          </label>
+          <div class="buttons">
+            <button class="secondary" onclick={() => setCut({ flip: !cut.flip })}>
+              {cut.flip ? `${prettyName(axisNames[cut.axis])} ≥ ${Number(cut.pos.toPrecision(4))} を表示中` : `${prettyName(axisNames[cut.axis])} ≤ ${Number(cut.pos.toPrecision(4))} を表示中`}（反対側にする）
+            </button>
+          </div>
+          <p class="note">
+            立体（陰関数・範囲で重ねた立体・媒介変数3つの立体）の切り口はふたをして塗ります。陰関数は、式の両側のうち表示範囲の中で狭いほうを中身とします
+          </p>
+        {/if}
+
         <h2>保存・共有</h2>
         <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
         <div class="buttons">
@@ -1127,6 +1226,23 @@
     color: var(--error);
     font-size: 12px;
     margin: 6px 0 0;
+  }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    margin: 8px 0;
+  }
+  .cut-axes {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .secondary.selected {
+    border-color: var(--accent, #2d70b3);
+    background: var(--hover);
+    font-weight: 600;
   }
   .help {
     padding: 0 16px 16px;

@@ -189,41 +189,12 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
             }
         }
         let mut zs = vec![0.0; m * m];
-        let mut out = vec![C::new(0.0, 0.0); m * m];
         let combos = sample_combos(ranges, samples);
-        let mut extra = vec![vec![0.0; m * m]; ranges.len()];
-        let mut lo = vec![f64::INFINITY; m * m];
-        let mut hi = vec![f64::NEG_INFINITY; m * m];
         for k in 0..m {
             zs.fill(dom.at(2, k as f64, n));
             let layer = &mut f[k * m * m..(k + 1) * m * m];
-            if ranges.is_empty() {
-                prog.eval_batch(&[&xs, &ys, &zs], &mut out);
-                for (dst, v) in layer.iter_mut().zip(&out) {
-                    *dst = as_real(*v) as f32;
-                }
-                continue;
-            }
-            // 範囲の各点で F を計算して、最小値と最大値をとる
-            lo.fill(f64::INFINITY);
-            hi.fill(f64::NEG_INFINITY);
-            for combo in &combos {
-                for (arr, &v) in extra.iter_mut().zip(combo) {
-                    arr.fill(v);
-                }
-                let mut inputs: Vec<&[f64]> = vec![&xs, &ys, &zs];
-                inputs.extend(extra.iter().map(|a| a.as_slice()));
-                prog.eval_batch(&inputs, &mut out);
-                for p in 0..m * m {
-                    let v = as_real(out[p]);
-                    if v.is_finite() {
-                        lo[p] = lo[p].min(v);
-                        hi[p] = hi[p].max(v);
-                    }
-                }
-            }
-            for p in 0..m * m {
-                layer[p] = if lo[p].is_finite() { lo[p].max(-hi[p]) as f32 } else { f32::NAN };
+            for (dst, v) in layer.iter_mut().zip(field_values(prog, &combos, [&xs, &ys, &zs])) {
+                *dst = v as f32;
             }
         }
     }
@@ -306,6 +277,139 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
 
     compute_normals(&mut mesh);
     mesh
+}
+
+/// 点 (xs, ys, zs) での F の値。範囲で重ねる立体なら G = max(min F, −max F)（[`implicit_solid`] を参照）。
+/// `combos` は範囲で動かす変数の値の組（[`sample_combos`]）。範囲が無ければ `[[]]`
+fn field_values(prog: &Program, combos: &[Vec<f64>], [xs, ys, zs]: [&[f64]; 3]) -> Vec<f64> {
+    let len = xs.len();
+    let mut out = vec![C::new(0.0, 0.0); len];
+    if combos.len() == 1 && combos[0].is_empty() {
+        prog.eval_batch(&[xs, ys, zs], &mut out);
+        return out.iter().map(|v| as_real(*v)).collect();
+    }
+    // 範囲の各点で F を計算して、最小値と最大値をとる
+    let mut lo = vec![f64::INFINITY; len];
+    let mut hi = vec![f64::NEG_INFINITY; len];
+    let mut extra = vec![vec![0.0; len]; combos.first().map_or(0, |c| c.len())];
+    for combo in combos {
+        for (arr, &v) in extra.iter_mut().zip(combo) {
+            arr.fill(v);
+        }
+        let mut inputs: Vec<&[f64]> = vec![xs, ys, zs];
+        inputs.extend(extra.iter().map(|a| a.as_slice()));
+        prog.eval_batch(&inputs, &mut out);
+        for p in 0..len {
+            let v = as_real(out[p]);
+            if v.is_finite() {
+                lo[p] = lo[p].min(v);
+                hi[p] = hi[p].max(v);
+            }
+        }
+    }
+    (0..len).map(|p| if lo[p].is_finite() { lo[p].max(-hi[p]) } else { f64::NAN }).collect()
+}
+
+/// 陰関数・範囲で重ねた立体の「中身」。切り口のふたを作るのに使う
+#[derive(Debug, Clone)]
+pub struct Field {
+    /// F（変数は表示中の3つの座標と、範囲で動かす変数）
+    pub prog: Program,
+    /// 範囲で動かす変数の値の組（範囲が無ければ `[[]]`）
+    pub combos: Vec<Vec<f64>>,
+    /// F < 0 の側が中身なら true（F > 0 の側なら false）
+    pub negative: bool,
+}
+
+impl Field {
+    /// 範囲で重ねた立体なら G ≤ 0 の側が中身。陰関数 F = 0 は、どちらの側が中身か決まっていないので、
+    /// 表示範囲の中で狭いほう（例: 球なら内側）を中身とする
+    pub fn new(prog: &Program, ranges: &[(f64, f64)], samples: usize, dom: Domain) -> Field {
+        let combos = sample_combos(ranges, samples);
+        let mut negative = true;
+        if ranges.is_empty() {
+            let n = 16;
+            let (mut xs, mut ys, mut zs) = (Vec::new(), Vec::new(), Vec::new());
+            for k in 0..n {
+                for j in 0..n {
+                    for i in 0..n {
+                        // マスの中心（表示範囲の面の上は避ける）
+                        xs.push(dom.at(0, i as f64 + 0.5, n));
+                        ys.push(dom.at(1, j as f64 + 0.5, n));
+                        zs.push(dom.at(2, k as f64 + 0.5, n));
+                    }
+                }
+            }
+            let v = field_values(prog, &combos, [&xs, &ys, &zs]);
+            let neg = v.iter().filter(|&&f| f < 0.0).count();
+            let pos = v.iter().filter(|&&f| f > 0.0).count();
+            negative = neg <= pos;
+        }
+        Field { prog: prog.clone(), combos, negative }
+    }
+
+    /// 平面「`axis` 番目の座標 = `pos`」での切り口（中身の部分）を、`n × n` マスの格子で三角形にする。
+    /// 法線は、切り落とした側（`keep_below` なら座標が大きい側）を向く
+    pub fn cap(&self, dom: Domain, axis: usize, pos: f64, keep_below: bool, n: usize) -> Mesh {
+        let n = n.max(2);
+        let m = n + 1;
+        let (ua, va) = others(axis);
+        let mut cols: [Vec<f64>; 3] = [vec![0.0; m * m], vec![0.0; m * m], vec![0.0; m * m]];
+        for j in 0..m {
+            for i in 0..m {
+                cols[ua][j * m + i] = dom.at(ua, i as f64, n);
+                cols[va][j * m + i] = dom.at(va, j as f64, n);
+                cols[axis][j * m + i] = pos;
+            }
+        }
+        let f = field_values(&self.prog, &self.combos, [&cols[0], &cols[1], &cols[2]]);
+        // 中身なら負になる値
+        let g: Vec<f64> = if self.negative { f } else { f.iter().map(|v| -v).collect() };
+        let point = |k: usize| [cols[0][k], cols[1][k], cols[2][k]];
+
+        let mut mesh = Mesh::default();
+        // 各マスを2つの三角形に分け、三角形ごとに中身の部分（g < 0）を切り出す（値は辺の上で直線で補間）
+        for j in 0..n {
+            for i in 0..n {
+                let (a, b, c, d) = (j * m + i, j * m + i + 1, (j + 1) * m + i, (j + 1) * m + i + 1);
+                for tri in [[a, b, d], [a, d, c]] {
+                    if tri.iter().any(|&k| !g[k].is_finite()) || tri.iter().all(|&k| g[k] >= 0.0) {
+                        continue;
+                    }
+                    let mut poly: Vec<[f64; 3]> = Vec::with_capacity(4);
+                    for e in 0..3 {
+                        let (p, q) = (tri[e], tri[(e + 1) % 3]);
+                        if g[p] < 0.0 {
+                            poly.push(point(p));
+                        }
+                        if (g[p] < 0.0) != (g[q] < 0.0) {
+                            let t = g[p] / (g[p] - g[q]);
+                            let (pp, pq) = (point(p), point(q));
+                            poly.push([0, 1, 2].map(|x| pp[x] + (pq[x] - pp[x]) * t));
+                        }
+                    }
+                    let base = mesh.positions.len() as u32 / 3;
+                    for p in &poly {
+                        mesh.push_vertex(*p);
+                    }
+                    for k in 1..poly.len() as u32 - 1 {
+                        mesh.indices.extend_from_slice(&[base, base + k, base + k + 1]);
+                    }
+                }
+            }
+        }
+        // 三角形の向き: (ua, va, axis) が x→y→z の順の巡回なら、そのままで +axis の向き
+        let up = (ua + 1) % 3 == va;
+        if up != keep_below {
+            for t in mesh.indices.chunks_exact_mut(3) {
+                t.swap(1, 2);
+            }
+        }
+        let mut nrm = [0.0f32; 3];
+        nrm[axis] = if keep_below { 1.0 } else { -1.0 };
+        mesh.normals = (0..mesh.positions.len() / 3).flat_map(|_| nrm).collect();
+        mesh
+    }
 }
 
 /// 範囲 `ranges` の中から、計算に使う点の組を作る。各範囲を等分し、組の総数は 4096 個まで
@@ -916,6 +1020,41 @@ mod tests {
             }
         }
         assert!(inner > 0 && outer > 0);
+    }
+
+    #[test]
+    fn caps() {
+        // 球 x² + y² + z² = 0.49 を z = 0 で切った切り口は半径 0.7 の円（面積 ≈ 0.49π）
+        let p = prog("x^2 + y^2 + z^2 - 0.49", &AXES);
+        let f = Field::new(&p, &[], 0, dom());
+        assert!(f.negative);
+        let area = |m: &Mesh| -> f64 {
+            m.indices
+                .chunks_exact(3)
+                .map(|t| {
+                    let v = |k: u32| {
+                        let k = k as usize * 3;
+                        [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+                    };
+                    let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+                    let (e1, e2) = ([b[0] - a[0], b[1] - a[1]], [c[0] - a[0], c[1] - a[1]]);
+                    (e1[0] * e2[1] - e1[1] * e2[0]) / 2.0 // xy 平面での向き付きの面積
+                })
+                .sum()
+        };
+        let m = f.cap(dom(), 2, 0.0, true, 60);
+        assert!((area(&m) - 0.49 * std::f64::consts::PI).abs() < 0.01, "{}", area(&m));
+        assert!(m.positions.chunks_exact(3).all(|q| q[2] == 0.0));
+        // 下側を残すなら、ふたは上（+z）向き。上側を残すなら下向き
+        assert!(m.normals[2] == 1.0);
+        assert!(area(&f.cap(dom(), 2, 0.0, false, 60)) < 0.0);
+        // 左右を入れ替えた式 0.49 = x² + y² + z² でも、狭いほう（球の内側）が中身
+        let p = prog("0.49 - (x^2 + y^2 + z^2)", &AXES);
+        let f = Field::new(&p, &[], 0, dom());
+        assert!(!f.negative);
+        assert!((area(&f.cap(dom(), 2, 0.0, true, 60)) - 0.49 * std::f64::consts::PI).abs() < 0.01);
+        // 球の外で切ると、ふたは無い
+        assert!(f.cap(dom(), 0, 0.9, true, 30).indices.is_empty());
     }
 
     #[test]

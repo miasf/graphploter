@@ -118,6 +118,26 @@ export interface PlotItem extends PlotStyle {
   solidSeen?: boolean
 }
 
+/** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */
+export interface CutStyle {
+  enabled: boolean
+  axis: 0 | 1 | 2
+  /** 切る位置（その軸の座標） */
+  pos: number
+  /** false なら座標が pos 以下の側を残す。true なら pos 以上の側を残す */
+  flip: boolean
+}
+
+/** 計算担当に渡す切り口の指定（切らないなら null） */
+export type CutRequest = { axis: number; pos: number; keepBelow: boolean } | null
+
+/** 切り口のふた（陰関数・範囲で重ねた立体の中身を、切り口の平面で切った部分） */
+export interface CapData {
+  positions: Float32Array
+  normals: Float32Array
+  indices: Uint32Array
+}
+
 /** Rust 側で作ったメッシュ */
 export interface MeshData {
   positions: Float32Array
@@ -127,6 +147,8 @@ export interface MeshData {
   gridCoords: Float32Array
   /** 曲線なら true（positions は点の列で、途切れる所に NaN） */
   curve: boolean
+  /** 媒介変数表示の立体（閉じた面で外向き）なら true。切り口のふたは描画側で作る */
+  solid: boolean
   /** 媒介変数の名前 */
   params: string[]
   /** 媒介変数の範囲の長さ */
@@ -163,7 +185,21 @@ export interface PlotRequest {
   }
   /** 範囲で重ねるパラメータ → [最小, 最大] */
   stacks: Record<string, [number, number]>
+  /** 切り口（陰関数・範囲で重ねた立体のふたを作る） */
+  cut: CutRequest
 }
+
+/** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
+export interface CapRequest {
+  type: 'cap'
+  requestId: number
+  itemId: number
+  cut: CutRequest
+  /** ふたの格子の1辺のマス数 */
+  resolution: number
+}
+
+export type CapResponse = { requestId: number; cap: CapData | null }
 
 export type PlotResponse =
   | {
@@ -175,5 +211,7 @@ export type PlotResponse =
       usedParams: string[]
       /** パラメータの定義だったときの名前と値 */
       param: ({ name: string } & ParamValue) | null
+      /** 切り口のふた（陰関数・範囲で重ねた立体を切っているときだけ） */
+      cap: CapData | null
     }
   | { requestId: number; ok: false; error: string }

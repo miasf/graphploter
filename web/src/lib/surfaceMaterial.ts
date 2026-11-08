@@ -45,6 +45,8 @@ float gridLine(float coord, float spacing) {
   if (spacing <= 0.0 || coord < -1e29) return 0.0;
   float c = coord / spacing;
   float w = fwidth(c);                      // 1画素で c がどれだけ変わるか
+  // 座標が変わらない面（例: 切り口のふた y = 0 の上の y）には線を引かない（0 / 0 で面全体が線になるのを防ぐ）
+  if (w <= 0.0) return 0.0;
   float d = abs(fract(c - 0.5) - 0.5) / w;  // 一番近い線までの距離（画素）
   float hw = 0.5 * uGridWidth;               // 太さの半分
   float line = (1.0 - smoothstep(hw - 0.5, hw + 0.5, d)) * min(uGridWidth, 1.0);

@@ -1,6 +1,16 @@
 // Web Worker に計算を頼むための窓口。
 
-import type { Domain, ParamRanges, ParamValue, PlotRequest, PlotResponse, Space } from './types'
+import type {
+  CapRequest,
+  CapResponse,
+  CutRequest,
+  Domain,
+  ParamRanges,
+  ParamValue,
+  PlotRequest,
+  PlotResponse,
+  Space,
+} from './types'
 import PlotWorker from './plot.worker.ts?worker'
 
 /**
@@ -10,10 +20,10 @@ import PlotWorker from './plot.worker.ts?worker'
 const WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1))
 const workers = Array.from({ length: WORKERS }, () => new PlotWorker())
 let nextId = 1
-const pending = new Map<number, (r: PlotResponse) => void>()
+const pending = new Map<number, (r: any) => void>()
 
 for (const w of workers) {
-  w.onmessage = (ev: MessageEvent<PlotResponse>) => {
+  w.onmessage = (ev: MessageEvent<PlotResponse | CapResponse>) => {
     const resolve = pending.get(ev.data.requestId)
     pending.delete(ev.data.requestId)
     resolve?.(ev.data)
@@ -41,6 +51,7 @@ export function requestPlot(
   params: Record<string, ParamValue>,
   space: Space,
   stacks: Record<string, [number, number]>,
+  cut: CutRequest,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -64,7 +75,21 @@ export function requestPlot(
       perspective: perspectiveDistance(space.perspective, domain),
     },
     stacks: Object.fromEntries(Object.entries(stacks).map(([k, [a, b]]) => [k, [a, b]])),
+    cut: cut && { ...cut },
   }
+  return new Promise((resolve) => {
+    pending.set(requestId, resolve)
+    workers[itemId % WORKERS].postMessage(req)
+  })
+}
+
+/**
+ * 切り口の位置だけが変わったときに、陰関数・範囲で重ねた立体の切り口のふただけを作り直す。
+ * その式をまだ計算していなければ null が返る
+ */
+export function requestCap(itemId: number, cut: CutRequest, resolution: number): Promise<CapResponse> {
+  const requestId = nextId++
+  const req: CapRequest = { type: 'cap', requestId, itemId, cut: cut && { ...cut }, resolution }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)
     workers[itemId % WORKERS].postMessage(req)

@@ -32,6 +32,10 @@ pub struct MeshResult {
     shape: Option<mesh::NdShape>,
     /// 回転した陽関数なら、式が使っている名前（回転が条件を満たすか確かめるため）
     explicit_used: Option<Vec<String>>,
+    /// 陰関数・範囲で重ねた立体なら、その中身（切り口のふたを作るため）
+    field: Option<(mesh::Field, mesh::Domain)>,
+    /// 媒介変数表示の立体（閉じた面）なら true。切り口のふたは描画側で作る
+    solid: bool,
 }
 
 #[wasm_bindgen]
@@ -93,6 +97,15 @@ impl MeshResult {
             curve: self.curve,
             used_params: self.used_params.clone(),
         })
+    }
+    /// 媒介変数表示の立体（閉じた面で、外向きにそろっている）なら true
+    #[wasm_bindgen(getter)]
+    pub fn solid(&self) -> bool {
+        self.solid
+    }
+    /// 陰関数・範囲で重ねた立体なら、切り口のふたを作るための中身を取り出す（取り出せるのは1回だけ）
+    pub fn take_field(&mut self) -> Option<CapSource> {
+        self.field.take().map(|(inner, dom)| CapSource { inner, dom })
     }
     /// 三角形の頂点番号（Uint32Array）
     #[wasm_bindgen(getter)]
@@ -231,6 +244,11 @@ pub fn plot(
             .map(|(_, a, b)| (*a, *b))
             .unwrap_or((0.0, std::f64::consts::TAU))
     };
+    let field = match &plot {
+        equation::Plot::Implicit { prog } => Some((mesh::Field::new(prog, &[], 0, dom), dom)),
+        equation::Plot::Solid { prog, ranges, .. } => Some((mesh::Field::new(prog, ranges, space.samples, dom), dom)),
+        _ => None,
+    };
     let inner = match &plot {
         equation::Plot::Explicit { rotated: true, .. } => mesh::Mesh::default(), // 下で作る
         equation::Plot::Explicit { axis, prog, .. } => {
@@ -300,7 +318,9 @@ pub fn plot(
     };
     Ok(MeshResult {
         inner,
+        solid: shape.as_ref().is_some_and(|s| s.solid),
         shape,
+        field,
         explicit_used,
         kind: plot.kind_label(),
         params: plot.param_vars(),
@@ -361,6 +381,8 @@ impl Shape {
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
         Ok(MeshResult {
             inner: mesh::project(&self.inner, &space.view(perspective), dom),
+            solid: self.inner.solid,
+            field: None,
             shape: None,
             explicit_used: None,
             kind: self.kind.clone(),
@@ -368,6 +390,36 @@ impl Shape {
             curve: self.curve,
             used_params: self.used_params.clone(),
             param: None,
+        })
+    }
+}
+
+/// 陰関数・範囲で重ねた立体の中身。切り口の位置だけが変わったときは、これで切り口のふただけを作り直す
+#[wasm_bindgen]
+pub struct CapSource {
+    inner: mesh::Field,
+    dom: mesh::Domain,
+}
+
+#[wasm_bindgen]
+impl CapSource {
+    /// 平面「画面の `axis` 番目（0: 横, 1: 奥, 2: 縦）の座標 = `pos`」での切り口のふた。
+    /// `keep_below` なら座標が `pos` 以下の側を残す（ふたは反対側を向く）。`n` は格子の1辺のマス数
+    pub fn cap(&self, axis: u32, pos: f64, keep_below: bool, n: u32) -> Result<MeshResult, JsError> {
+        if axis > 2 {
+            return Err(JsError::new("内部エラー: 切り口の軸の番号が違います"));
+        }
+        Ok(MeshResult {
+            inner: self.inner.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize),
+            kind: String::new(),
+            params: Vec::new(),
+            curve: false,
+            used_params: Vec::new(),
+            param: None,
+            shape: None,
+            explicit_used: None,
+            field: None,
+            solid: false,
         })
     }
 }

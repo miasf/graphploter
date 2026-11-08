@@ -8,7 +8,7 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
-import type { Domain, MeshData, ParamSpan, PlotStyle } from './types'
+import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
 /** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
 function niceStep(range: number, target = 8): number {
@@ -73,14 +73,37 @@ const DARK: Theme = { background: 0x1b1c20, box: 0x6a6b72, grid: 0x34353b, tick:
 const TICK_FONT = "11px ui-monospace, 'SF Mono', Consolas, monospace"
 const AXIS_FONT = "italic 600 15px 'Times New Roman', serif"
 
+/**
+ * 媒介変数表示の立体の切り口のふた（ステンシルバッファを使う）。
+ *
+ * 切り口の平面上の点 P が立体の中にあるかは、カメラから P への視線が、残した側で立体の面を何回出入りしたかで分かる。
+ * 1. inc: 視線が立体に「入る」向きの面を描き、その画素のステンシルを 1 増やす（色・奥行きは書かない）
+ * 2. dec: 「出る」向きの面を描き、ステンシルを 1 減らす（0 より下には減らさない）
+ * 3. quad: 切り口の平面（表示範囲の断面の長方形）を、ステンシルが 0 でない画素にだけ描き、ステンシルを 0 に戻す
+ * カメラが切り落とした側にいるときは P から奥へ、残した側にいるときはカメラから P までを数えるので、
+ * 「入る」面は前者なら裏面、後者なら表面になる（毎フレーム確かめて入れ替える）
+ */
+interface StencilCap {
+  inc: THREE.Mesh
+  dec: THREE.Mesh
+  quad: THREE.Mesh
+}
+
 /** 1つの式の描画物 */
 type PlotObject =
   | {
       kind: 'surface'
-      group: THREE.Group // 表面用と裏面用の2つのメッシュ
+      group: THREE.Group // 曲面（と切り口のふた）
       grid: GridUniforms
       /** 媒介変数表示なら u, v（立体なら3つ目も）の範囲の長さ（格子線を媒介変数に沿って引く） */
       uvSpan: ParamSpan | null
+      /** 媒介変数表示の立体か（切り口のふたをステンシルで作る） */
+      solid: boolean
+      /** 陰関数・範囲で重ねた立体の切り口のふた（計算担当が作ったもの） */
+      cap: THREE.Mesh | null
+      stencil: StencilCap | null
+      /** ステンシルで描く順番を決める番号 */
+      order: number
     }
   | { kind: 'curve'; line: LineSegments2 }
 
@@ -93,7 +116,14 @@ export class Viewer {
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
+  /** 表示範囲の外を切り落とす6枚の平面 */
+  private boxPlanes: THREE.Plane[] = []
+  /** 切り口の平面（切らないなら null） */
+  private cutPlane: THREE.Plane | null = null
+  private cut: CutRequest = null
+  /** 曲面・曲線を切り落とす平面（表示範囲 + 切り口） */
   private clipPlanes: THREE.Plane[] = []
+  private nextOrder = 0
   private domain: Domain | null = null
   /** 画面の横・奥・縦の軸の名前（4次元以上で w などを表示するとき変わる） */
   private axisNames = ['x', 'y', 'z']
@@ -124,7 +154,8 @@ export class Viewer {
 
   constructor(private container: HTMLElement) {
     // 描画の土台
-    this.renderer = new THREE.WebGLRenderer({ antialias: true })
+    // ステンシルバッファは、媒介変数表示の立体の切り口のふたに使う
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true })
     this.renderer.setPixelRatio(this.basePixelRatio)
     this.renderer.localClippingEnabled = true // 表示範囲の外を切り落とすため
     container.appendChild(this.renderer.domElement)
@@ -247,6 +278,7 @@ export class Viewer {
     this.dirty = false
     this.updateClipRange()
     this.updateLabelSizes()
+    this.updateStencilSides()
     this.renderer.render(this.scene, this.camera)
   }
 
@@ -317,7 +349,7 @@ export class Viewer {
     this.domain = { ...d }
 
     // 範囲の外を切り落とす6枚の平面
-    this.clipPlanes = [
+    this.boxPlanes = [
       new THREE.Plane(new THREE.Vector3(1, 0, 0), -d.xmin),
       new THREE.Plane(new THREE.Vector3(-1, 0, 0), d.xmax),
       new THREE.Plane(new THREE.Vector3(0, 1, 0), -d.ymin),
@@ -325,12 +357,7 @@ export class Viewer {
       new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin),
       new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax),
     ]
-    for (const p of this.plots.values()) {
-      const obj = p.kind === 'surface' ? p.group : p.line
-      obj.traverse((o) => {
-        if (o instanceof THREE.Mesh) (o.material as THREE.Material).clippingPlanes = this.clipPlanes
-      })
-    }
+    this.applyClipping()
 
     this.buildFrame(d)
     if (first || resetCamera) this.resetCamera()
@@ -443,13 +470,194 @@ export class Viewer {
         m.geometry.dispose()
         m.geometry = this.surfaceGeometry(mesh)
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
+        old.solid = mesh.solid
+        if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = m.geometry
       }
     } else {
       this.removePlot(id)
       if (mesh.curve) this.setCurve(id, mesh.positions)
       else this.setSurface(id, mesh)
     }
+    this.updateStencil(id)
     this.setStyle(id, style)
+  }
+
+  // ---- 切り口 ----
+
+  /** 曲面・曲線・ふたの材質に、切り落とす平面を設定し直す */
+  private applyClipping() {
+    this.clipPlanes = this.cutPlane ? [...this.boxPlanes, this.cutPlane] : this.boxPlanes
+    for (const p of this.plots.values()) {
+      if (p.kind === 'curve') {
+        ;(p.line.material as THREE.Material).clippingPlanes = this.clipPlanes
+        continue
+      }
+      ;((p.group.children[0] as THREE.Mesh).material as THREE.Material).clippingPlanes = this.clipPlanes
+      // ふたは切り口の平面の上にあるので、切り口の平面では切らない
+      if (p.cap) (p.cap.material as THREE.Material).clippingPlanes = this.boxPlanes
+      if (p.stencil) {
+        ;(p.stencil.inc.material as THREE.Material).clippingPlanes = this.clipPlanes
+        ;(p.stencil.dec.material as THREE.Material).clippingPlanes = this.clipPlanes
+        ;(p.stencil.quad.material as THREE.Material).clippingPlanes = this.boxPlanes
+      }
+    }
+    for (const id of this.plots.keys()) this.updateStencil(id)
+    this.dirty = true
+  }
+
+  /**
+   * 切り口を設定する（null なら切らない）。画面の軸 axis の座標が pos の平面で切り、
+   * keepBelow なら座標が pos 以下の側を残す
+   */
+  setCut(cut: CutRequest) {
+    this.cut = cut && { ...cut }
+    if (!cut) {
+      this.cutPlane = null
+    } else {
+      const n = new THREE.Vector3().setComponent(cut.axis, cut.keepBelow ? -1 : 1)
+      this.cutPlane = new THREE.Plane(n, cut.keepBelow ? cut.pos : -cut.pos)
+    }
+    this.stencilSideKept = null
+    this.applyClipping()
+  }
+
+  /** 陰関数・範囲で重ねた立体の切り口のふたを設定する（null なら消す） */
+  setCap(id: number, cap: CapData | null, style: PlotStyle) {
+    const p = this.plots.get(id)
+    if (!p || p.kind !== 'surface') return
+    this.dirty = true
+    if (p.cap) {
+      p.cap.geometry.dispose()
+      if (!cap || cap.indices.length === 0) {
+        ;(p.cap.material as THREE.Material).dispose()
+        p.group.remove(p.cap)
+        p.cap = null
+        return
+      }
+    }
+    if (!cap || cap.indices.length === 0) return
+    const geo = new THREE.BufferGeometry()
+    const pos = new THREE.BufferAttribute(cap.positions, 3)
+    geo.setAttribute('position', pos)
+    geo.setAttribute('normal', new THREE.BufferAttribute(cap.normals, 3))
+    geo.setAttribute('gridCoord', pos)
+    geo.setIndex(new THREE.BufferAttribute(cap.indices, 1))
+    if (p.cap) {
+      p.cap.geometry = geo
+    } else {
+      // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
+      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes))
+      p.group.add(p.cap)
+      this.setStyle(id, style)
+    }
+  }
+
+  /** 媒介変数表示の立体のステンシルのふたを、切っているなら作り、切っていないなら消す */
+  private updateStencil(id: number) {
+    const p = this.plots.get(id)
+    if (!p || p.kind !== 'surface') return
+    const want = p.solid && this.cutPlane !== null && this.cut !== null && this.domain !== null
+    if (!want) {
+      if (p.stencil) {
+        for (const m of [p.stencil.inc, p.stencil.dec, p.stencil.quad]) {
+          ;(m.material as THREE.Material).dispose()
+          p.group.remove(m)
+        }
+        p.stencil.quad.geometry.dispose()
+        p.stencil = null
+      }
+      return
+    }
+    const main = p.group.children[0] as THREE.Mesh
+    if (!p.stencil) {
+      const pass = (op: THREE.StencilOp) =>
+        new THREE.MeshBasicMaterial({
+          colorWrite: false,
+          depthWrite: false,
+          depthTest: false,
+          stencilWrite: true,
+          stencilFunc: THREE.AlwaysStencilFunc,
+          stencilFail: op,
+          stencilZFail: op,
+          stencilZPass: op,
+          clippingPlanes: this.clipPlanes,
+        })
+      const inc = new THREE.Mesh(main.geometry, pass(THREE.IncrementWrapStencilOp))
+      const dec = new THREE.Mesh(main.geometry, pass(THREE.DecrementStencilOp))
+      const quadMat = new THREE.MeshStandardMaterial({
+        side: THREE.DoubleSide,
+        roughness: 0.7,
+        metalness: 0.05,
+        stencilWrite: true,
+        stencilRef: 0,
+        stencilFunc: THREE.NotEqualStencilFunc,
+        stencilFail: THREE.ReplaceStencilOp,
+        stencilZFail: THREE.ReplaceStencilOp,
+        stencilZPass: THREE.ReplaceStencilOp,
+        clippingPlanes: this.boxPlanes,
+      })
+      const quad = new THREE.Mesh(new THREE.BufferGeometry(), quadMat)
+      // 次の立体のために、ステンシルを 0 に戻しておく（ふたが描かれなかった画素も含めて）
+      quad.onAfterRender = (r) => r.clearStencil()
+      const base = -3000 + 3 * p.order
+      inc.renderOrder = base
+      dec.renderOrder = base + 1
+      quad.renderOrder = base + 2
+      for (const m of [inc, dec, quad]) m.frustumCulled = false
+      p.stencil = { inc, dec, quad }
+      p.group.add(inc, dec, quad)
+      this.stencilSideKept = null // 次の描画で向きを決め直す
+      const style = this.styles.get(id)
+      if (style) queueMicrotask(() => this.setStyle(id, style)) // 色・不透明度をふたにも反映する
+    }
+    // 切り口の長方形（表示範囲の断面）。法線は切り落とした側に向ける
+    const d = this.domain!
+    const cut = this.cut!
+    const lo = [d.xmin, d.ymin, d.zmin]
+    const hi = [d.xmax, d.ymax, d.zmax]
+    const [a, b] = [0, 1, 2].filter((k) => k !== cut.axis)
+    const corner = (u: number, v: number) => {
+      const q = [0, 0, 0]
+      q[cut.axis] = cut.pos
+      q[a] = u ? hi[a] : lo[a]
+      q[b] = v ? hi[b] : lo[b]
+      return q
+    }
+    const nrm = [0, 0, 0]
+    nrm[cut.axis] = cut.keepBelow ? 1 : -1
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([...corner(0, 0), ...corner(1, 0), ...corner(1, 1), ...corner(0, 1)], 3))
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute([...nrm, ...nrm, ...nrm, ...nrm], 3))
+    // 三角形の向き: (a, b, 切る軸) が x→y→z の順の巡回なら、頂点の順のままで +軸 の向き
+    const up = (a + 1) % 3 === b
+    geo.setIndex(up === cut.keepBelow ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2])
+    p.stencil.quad.geometry.dispose()
+    p.stencil.quad.geometry = geo
+    p.stencil.inc.geometry = p.stencil.dec.geometry = main.geometry
+  }
+
+  /** ステンシルの inc / dec で使っている面の向きが、カメラが残した側にいるときのものか */
+  private stencilSideKept: boolean | null = null
+
+  /** カメラが切り口のどちら側にいるかで、ステンシルで数える面の向きを入れ替える */
+  private updateStencilSides() {
+    if (!this.cutPlane) return
+    const kept = this.cutPlane.distanceToPoint(this.camera.position) >= 0
+    if (kept === this.stencilSideKept) return
+    this.stencilSideKept = kept
+    for (const p of this.plots.values()) {
+      if (p.kind !== 'surface' || !p.stencil) continue
+      const set = (m: THREE.Mesh, side: THREE.Side) => {
+        const mat = m.material as THREE.Material
+        if (mat.side !== side) {
+          mat.side = side
+          mat.needsUpdate = true
+        }
+      }
+      // 「入る」面: カメラが残した側なら表面（カメラから P まで）、切り落とした側なら裏面（P から奥）
+      set(p.stencil.inc, kept ? THREE.FrontSide : THREE.BackSide)
+      set(p.stencil.dec, kept ? THREE.BackSide : THREE.FrontSide)
+    }
   }
 
   private surfaceGeometry(mesh: MeshData): THREE.BufferGeometry {
@@ -468,7 +676,16 @@ export class Viewer {
     const group = new THREE.Group()
     group.add(new THREE.Mesh(this.surfaceGeometry(mesh), createSurfaceMaterial(grid, this.clipPlanes)))
     const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
-    this.plots.set(id, { kind: 'surface', group, grid, uvSpan })
+    this.plots.set(id, {
+      kind: 'surface',
+      group,
+      grid,
+      uvSpan,
+      solid: mesh.solid,
+      cap: null,
+      stencil: null,
+      order: this.nextOrder++,
+    })
     this.scene.add(group)
   }
 
@@ -499,10 +716,14 @@ export class Viewer {
     this.scene.add(line)
   }
 
+  /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
+  private styles = new Map<number, PlotStyle>()
+
   /** 色・表示/非表示・格子線などの見た目だけを変える（計算し直さない） */
   setStyle(id: number, style: PlotStyle) {
     const p = this.plots.get(id)
     if (!p) return
+    this.styles.set(id, style)
     this.dirty = true
     const c = new THREE.Color(style.color)
 
@@ -517,10 +738,28 @@ export class Viewer {
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
+    // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）
+    const capColor = c.clone().lerp(new THREE.Color(0xffffff), 0.3)
+    if (p.cap) (p.cap.material as THREE.MeshStandardMaterial).color.copy(capColor)
+    if (p.stencil) (p.stencil.quad.material as THREE.MeshStandardMaterial).color.copy(capColor)
 
     // 面の不透明度。1 未満なら半透明として描き、奥の面や線も透けて見えるようにする
     const opacity = Math.min(1, Math.max(0, style.opacity))
-    for (const mesh of [mesh0]) {
+    if (p.stencil) {
+      // ふたが半透明なら、ステンシルを数える面も同じ順番（半透明の物の列）で描く
+      const transparent = opacity < 1
+      for (const m of [p.stencil.inc, p.stencil.dec, p.stencil.quad]) {
+        const mat = m.material as THREE.Material
+        if (mat.transparent !== transparent) {
+          mat.transparent = transparent
+          mat.needsUpdate = true
+        }
+      }
+      const q = p.stencil.quad.material as THREE.MeshStandardMaterial
+      q.opacity = Math.max(opacity, 0.15)
+      q.depthWrite = !transparent
+    }
+    for (const mesh of p.cap ? [mesh0, p.cap] : [mesh0]) {
       const m = mesh.material as THREE.MeshStandardMaterial
       const transparent = opacity < 1
       if (m.transparent !== transparent) {
@@ -560,11 +799,14 @@ export class Viewer {
       ;(p.line.material as THREE.Material).dispose()
       this.scene.remove(p.line)
     } else {
-      const [mesh] = p.group.children as THREE.Mesh[]
-      mesh.geometry.dispose()
-      ;(mesh.material as THREE.Material).dispose()
+      for (const o of p.group.children as THREE.Mesh[]) {
+        // ステンシルの inc / dec は曲面と形のデータを共有しているので、材質だけを捨てる
+        if (!p.stencil || (o !== p.stencil.inc && o !== p.stencil.dec)) o.geometry.dispose()
+        ;(o.material as THREE.Material).dispose()
+      }
       this.scene.remove(p.group)
     }
     this.plots.delete(id)
+    this.styles.delete(id)
   }
 }
