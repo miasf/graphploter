@@ -166,7 +166,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       complexValues: r.complex_values,
       curve: r.curve,
       solid: r.solid,
-      heat: r.kind.endsWith('の値で塗り分け'),
+      heat: r.kind.includes('の値で塗り分け'),
       params: vars,
       paramSpan: vars.length === 3 ? { u: span(0), v: span(1), w: span(2) } : { u: span(0), v: span(1) },
     }

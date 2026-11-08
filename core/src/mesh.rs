@@ -1138,6 +1138,59 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
     points
 }
 
+/// いくつかのメッシュを1つにまとめる（リストで複数の図形になったとき）。曲線なら間に NaN を入れて線を切る
+pub fn merge(meshes: Vec<Mesh>, curve: bool) -> Mesh {
+    let mut out = Mesh::default();
+    let grid = meshes.iter().any(|m| !m.grid_coords.is_empty());
+    let complex = meshes.iter().any(|m| !m.complex.is_empty());
+    for m in meshes {
+        if curve && !out.positions.is_empty() {
+            out.positions.extend_from_slice(&[f32::NAN; 3]);
+        }
+        let base = (out.positions.len() / 3) as u32;
+        let count = m.positions.len() / 3;
+        // 格子線用の座標・複素数の値が無いメッシュは、頂点座標・0 で埋めてそろえる
+        if grid {
+            if m.grid_coords.is_empty() {
+                out.grid_coords.extend_from_slice(&m.positions);
+            } else {
+                out.grid_coords.extend_from_slice(&m.grid_coords);
+            }
+        }
+        if complex {
+            if m.complex.is_empty() {
+                out.complex.extend(std::iter::repeat_n(0.0, count * 3));
+            } else {
+                out.complex.extend_from_slice(&m.complex);
+            }
+        }
+        out.positions.extend_from_slice(&m.positions);
+        out.normals.extend_from_slice(&m.normals);
+        out.indices.extend(m.indices.iter().map(|k| k + base));
+    }
+    out
+}
+
+/// n 次元の点の集まりを1つにまとめる。点の並べ方（次元・格子・立体か）が同じでなければ None
+pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
+    let first = shapes.first()?;
+    let (dims, solid, m) = (first.dims, first.solid, first.grid.as_ref().map(|g| g.0));
+    if shapes.iter().any(|s| s.dims != dims || s.solid != solid || s.grid.as_ref().map(|g| g.0) != m) {
+        return None;
+    }
+    let mut out = NdShape { dims, points: Vec::new(), grid: m.map(|m| (m, Vec::new())), solid };
+    for s in shapes {
+        if m.is_none() && !out.points.is_empty() {
+            out.points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
+        }
+        out.points.extend_from_slice(&s.points);
+        if let (Some((_, g)), Some((_, sg))) = (out.grid.as_mut(), s.grid) {
+            g.extend_from_slice(&sg);
+        }
+    }
+    Some(out)
+}
+
 // ---------------------------------------------------------------------------
 // 2D 表示（画面の縦の座標を 0 にして、横・奥の平面に描く）
 // ---------------------------------------------------------------------------

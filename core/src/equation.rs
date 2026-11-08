@@ -248,6 +248,8 @@ pub enum Plot {
     Volume { sets: Vec<Vec<Program>>, vars: Vec<String> },
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
+    /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
+    Multi(Vec<Plot>),
 }
 
 impl Plot {
@@ -264,6 +266,7 @@ impl Plot {
             Plot::Surface { .. } => "媒介変数表示の曲面".into(),
             Plot::Volume { .. } => "媒介変数表示の立体".into(),
             Plot::Param { .. } => "パラメータ".into(),
+            Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
         }
     }
 
@@ -271,6 +274,7 @@ impl Plot {
     pub fn param_vars(&self) -> Vec<String> {
         match self {
             Plot::Curve { vars, .. } | Plot::Surface { vars, .. } | Plot::Volume { vars, .. } => vars.clone(),
+            Plot::Multi(ps) => ps.first().map_or(Vec::new(), |p| p.param_vars()),
             _ => Vec::new(),
         }
     }
@@ -289,6 +293,15 @@ impl Plot {
                 sets.iter().flatten().collect()
             }
             Plot::Param { uses, .. } => return uses.clone(),
+            Plot::Multi(ps) => {
+                let mut out: Vec<String> = Vec::new();
+                for n in ps.iter().flat_map(|p| p.used_params()) {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+                return out;
+            }
         };
         let mut out: Vec<String> = Vec::new();
         for p in progs {
@@ -338,9 +351,6 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
-    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
-    let consts = space.with_hidden(params);
-    let rot = space.rotation_matrix();
 
     let parts: Vec<&str> = source.split('=').collect();
     let (l, r) = match parts.as_slice() {
@@ -373,6 +383,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
                 r.collect_vars(&mut rv);
                 let uses_coord = rv.iter().any(|v| coord_index(v).is_some());
                 if coord_index(name).is_none() && !uses_coord {
+                    if first_list(&r).is_some() {
+                        return Err(format!("{name} の値にリストは使えません"));
+                    }
                     if r.uses_var(name) {
                         return Err(format!("{name} の定義の右辺に {name} 自身は使えません"));
                     }
@@ -383,6 +396,29 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         }
         _ => return Err("= は1つだけにしてください".into()),
     };
+
+    // リストがあれば、要素ごと（組み合わせの数だけ）の式にして、それぞれを描く
+    if first_list(&l).is_some() || first_list(&r).is_some() {
+        let variants = expand_lists(&[l, r])?;
+        let plots = variants
+            .into_iter()
+            .map(|v| {
+                let mut it = v.into_iter();
+                let (l, r) = (it.next().unwrap_or(Expr::Num(0.0)), it.next().unwrap_or(Expr::Num(0.0)));
+                compile_pair(l, r, params, space)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Plot::Multi(plots));
+    }
+    compile_pair(l, r, params, space)
+}
+
+/// 左辺 = 右辺（リストを含まない）の式をコンパイルする（陽関数・陰関数・範囲で重ねた立体）
+fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot, String> {
+    let shown = space.shown();
+    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+    let consts = space.with_hidden(params);
+    let rot = space.rotation_matrix();
 
     // 陽関数で、回転が表示中の座標どうしだけなら、曲面をそのまま回せばよい（媒介変数表示と同じ扱い）
     if rot.is_some() && !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
@@ -894,8 +930,20 @@ mod tests {
         let mut o = [C::new(0.0, 0.0)];
         sets[1][1].eval_batch(&[&[0.0]], &mut o);
         assert_eq!(o[0], C::new(6.0, 0.0));
-        // 媒介変数表示の外では使えない
-        assert!(compile("z = [1, 2] x").is_err());
+        // 陽関数・陰関数でも使える: 要素の数だけ図形ができる
+        match compile("z = [1, 2] x").unwrap() {
+            Plot::Multi(ps) => {
+                assert_eq!(ps.len(), 2);
+                assert!(ps.iter().all(|p| p.kind_label() == "z = f(x, y)"));
+            }
+            _ => panic!(),
+        }
+        let p = compile("x^2 + y^2 + z^2 = [1, 4, 9]").unwrap();
+        assert_eq!(p.kind_label(), "陰関数 × 3");
+        // 2つのリストは組み合わせ（2 × 2 = 4 個）
+        assert_eq!(compile("z = [1, 2] x + [0, 1]").unwrap().kind_label(), "z = f(x, y) × 4");
+        // パラメータの値には使えない
+        assert!(compile("a = [1, 2]").is_err());
         assert!(compile_with("(t, [[1, 2], 3], 0)", &ps, &Space::standard()).is_err());
     }
 

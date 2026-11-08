@@ -118,6 +118,15 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     samples: [
       { label: '球 x² + y² + z² = 4', items: [{ latex: 'x^2+y^2+z^2=4' }] },
       {
+        label: 'リストで3つの球 x² + y² + z² = [1, 4, 9]',
+        items: [
+          {
+            latex: 'x^2+y^2+z^2=\\left[1,4,9\\right]',
+            options: { color: '#2d70b3', opacity: 0.45 },
+          },
+        ],
+      },
+      {
         label: '接するだけ (x² + y² − 4)²(z − 1)² = 0',
         items: [{ latex: '\\left(x^2+y^2-4\\right)^2\\left(z-1\\right)^2=0', options: { color: '#6042a6' } }],
       },
