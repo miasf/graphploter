@@ -457,36 +457,57 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
         }
     }
 
-    // 2. 曲面が通るセルに頂点を置く
+    // 1'. 符号は変わらないが F = 0 に接している所（例: (x² + y² + z² − 1)² = 0）を探す
+    let touch = if ranges.is_empty() { find_touches(prog, &f, dom, n) } else { Default::default() };
+
+    // 格子の辺 p → p + e_a の上で曲面と交わる位置 t（0〜1）と、F の符号（接するだけの所は None）
+    let crossing = |p: [usize; 3], a: usize| -> Option<(f64, Option<bool>)> {
+        let mut q = p;
+        q[a] += 1;
+        let (f0, f1) = (f[idx(p[0], p[1], p[2])], f[idx(q[0], q[1], q[2])]);
+        if !f0.is_finite() || !f1.is_finite() {
+            return None;
+        }
+        if (f0 < 0.0) != (f1 < 0.0) {
+            return Some(((f0 / (f0 - f1)) as f64, Some(f0 < 0.0)));
+        }
+        if touch.is_empty() {
+            return None;
+        }
+        touch.get(&(3 * idx(p[0], p[1], p[2]) + a)).map(|&t| (t as f64, None))
+    };
+
+    // 2. 曲面が通るセルに頂点を置く。位置は「辺の上で曲面と交わる点」の平均
     let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
     let mut vert = vec![NONE; n * n * n];
     let mut mesh = Mesh::default();
     for k in 0..n {
         for j in 0..n {
             for i in 0..n {
-                let mut v = [0.0f32; 8];
-                let mut neg = 0;
-                let mut ok = true;
-                for (c, d) in CORNERS.iter().enumerate() {
-                    v[c] = f[idx(i + d[0], j + d[1], k + d[2])];
-                    ok &= v[c].is_finite();
-                    neg += (v[c] < 0.0) as usize;
+                // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
+                if touch.is_empty() {
+                    let mut neg = 0;
+                    for d in CORNERS {
+                        neg += (f[idx(i + d[0], j + d[1], k + d[2])] < 0.0) as usize;
+                    }
+                    if neg == 0 || neg == 8 {
+                        continue;
+                    }
                 }
-                if !ok || neg == 0 || neg == 8 {
-                    continue;
-                }
-                // 符号が変わる辺の上で F = 0 になる点（直線で補間）の平均
                 let mut sum = [0.0f64; 3];
                 let mut cnt = 0.0;
-                for [a, b] in EDGES {
-                    if (v[a] < 0.0) != (v[b] < 0.0) {
-                        let t = (v[a] / (v[a] - v[b])) as f64;
-                        for ax in 0..3 {
-                            let (pa, pb) = (CORNERS[a][ax] as f64, CORNERS[b][ax] as f64);
-                            sum[ax] += pa + (pb - pa) * t;
+                for [ca, cb] in EDGES {
+                    let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
+                    let base = CORNERS[ca];
+                    if let Some((t, _)) = crossing([i + base[0], j + base[1], k + base[2]], a) {
+                        for (ax, s) in sum.iter_mut().enumerate() {
+                            *s += base[ax] as f64 + if ax == a { t } else { 0.0 };
                         }
                         cnt += 1.0;
                     }
+                }
+                if cnt == 0.0 {
+                    continue;
                 }
                 let g = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
                 vert[cell(i, j, k)] = mesh.push_vertex([dom.at(0, g[0], n), dom.at(1, g[1], n), dom.at(2, g[2], n)]);
@@ -494,7 +515,8 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
         }
     }
 
-    // 3. 符号が変わる格子の辺ごとに、周りの4セルの頂点を四角形でつなぐ
+    // 3. 曲面と交わる格子の辺ごとに、周りの4セルの頂点を四角形でつなぐ
+    let mut touch_tris: Vec<u32> = Vec::new();
     for a in 0..3 {
         let (b, c) = ((a + 1) % 3, (a + 2) % 3);
         for k in 0..m {
@@ -505,12 +527,7 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                     if p[a] >= n || p[b] == 0 || p[b] >= n || p[c] == 0 || p[c] >= n {
                         continue;
                     }
-                    let mut q = p;
-                    q[a] += 1;
-                    let (f0, f1) = (f[idx(p[0], p[1], p[2])], f[idx(q[0], q[1], q[2])]);
-                    if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) {
-                        continue;
-                    }
+                    let Some((_, sign)) = crossing(p, a) else { continue };
                     // 周りの4セル（b-c 平面で反時計回り）
                     let around = [(1, 1), (0, 1), (0, 0), (1, 0)].map(|(db, dc)| {
                         let mut s = p;
@@ -522,19 +539,199 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                         continue;
                     }
                     let [q0, q1, q2, q3] = around;
-                    // 法線が F の増える向きを向くように三角形の向きを決める
-                    if f0 < 0.0 {
-                        mesh.indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]);
-                    } else {
-                        mesh.indices.extend_from_slice(&[q0, q2, q1, q0, q3, q2]);
+                    match sign {
+                        // 法線が F の増える向きを向くように三角形の向きを決める
+                        Some(true) => mesh.indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]),
+                        Some(false) => mesh.indices.extend_from_slice(&[q0, q2, q1, q0, q3, q2]),
+                        // 接するだけの所は、後で向きをそろえる
+                        None => touch_tris.extend_from_slice(&[q0, q1, q2, q0, q2, q3]),
                     }
                 }
             }
         }
     }
+    if !touch_tris.is_empty() {
+        orient_consistently(&mesh.positions, &mut touch_tris);
+        mesh.indices.extend_from_slice(&touch_tris);
+    }
 
     compute_normals(&mut mesh);
     mesh
+}
+
+/// 符号が変わらずに F = 0 に接している所を、格子の辺ごとに探す。
+/// 戻り値は 辺の番号（3 × 始点の番号 + 向き）→ 辺の上の位置 t（0〜1）。
+///
+/// 辺 p → q（= p + e）について、|F| が p−e から p へ減り、q から q+e へ増えていて、
+/// 内側の2点の |F| が外側の2点よりずっと小さければ、その間に |F| の極小がある。
+/// 三分探索で極小の位置を求め、その値がほぼ 0 なら「接している」とみなす。
+fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collections::HashMap<usize, f32> {
+    const ROUNDS: usize = 16;
+    let m = n + 1;
+    let idx = |p: [usize; 3]| p[0] + m * (p[1] + m * p[2]);
+    // 候補: (辺の番号, 始点 p, 向き a, F の符号, 外側の |F| の平均)
+    let mut cands: Vec<(usize, [usize; 3], usize, f64, f64)> = Vec::new();
+    for a in 0..3 {
+        let stride = [1, m, m * m][a];
+        for k in 0..m {
+            for j in 0..m {
+                for i in 0..m {
+                    let p = [i, j, k];
+                    if p[a] < 1 || p[a] + 2 > n {
+                        continue;
+                    }
+                    let c = idx(p);
+                    let v = [f[c - stride], f[c], f[c + stride], f[c + 2 * stride]];
+                    // まず安い判定: 内側の2点が外側より 0 に近い
+                    if !(v[1].abs() < v[0].abs() && v[2].abs() < v[3].abs()) {
+                        continue;
+                    }
+                    if v.iter().any(|x| !x.is_finite()) {
+                        continue;
+                    }
+                    // 4点とも同じ側（0 は内側の2点だけ許す）
+                    let s = v[0].signum();
+                    if v[0] == 0.0 || v[3] * s <= 0.0 || v[1] * s < 0.0 || v[2] * s < 0.0 {
+                        continue;
+                    }
+                    let g = v.map(|x| x.abs() as f64);
+                    if g[1] + g[2] < 0.25 * (g[0] + g[3]) {
+                        cands.push((3 * c + a, p, a, s as f64, 0.5 * (g[0] + g[3])));
+                    }
+                }
+            }
+        }
+    }
+    if cands.is_empty() {
+        return Default::default();
+    }
+    // 三分探索（すべての候補をまとめて計算する）。区間は辺の前後1マスずつを含めた [−1, 2]
+    let mut lo = vec![-1.0f64; cands.len()];
+    let mut hi = vec![2.0f64; cands.len()];
+    let len = 2 * cands.len();
+    let mut cols: [Vec<f64>; 3] = [vec![0.0; len], vec![0.0; len], vec![0.0; len]];
+    let mut out = vec![C::new(0.0, 0.0); len];
+    let fill = |cols: &mut [Vec<f64>; 3], ts: &dyn Fn(usize) -> [f64; 2]| {
+        for (c, &(_, p, a, _, _)) in cands.iter().enumerate() {
+            let t2 = ts(c);
+            for (h, t) in t2.iter().enumerate() {
+                for ax in 0..3 {
+                    let g = if ax == a { p[ax] as f64 + t } else { p[ax] as f64 };
+                    cols[ax][2 * c + h] = dom.at(ax, g, n);
+                }
+            }
+        }
+    };
+    for _ in 0..ROUNDS {
+        fill(&mut cols, &|c| {
+            let d = (hi[c] - lo[c]) / 3.0;
+            [lo[c] + d, hi[c] - d]
+        });
+        prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+        for c in 0..cands.len() {
+            // 符号をそろえた s F の極小を探す（定義されない点は大きい値とみなす）
+            let s = cands[c].3;
+            let val = |z: C| {
+                let v = s * as_real(z);
+                if v.is_nan() { f64::INFINITY } else { v }
+            };
+            let (g1, g2) = (val(out[2 * c]), val(out[2 * c + 1]));
+            let d = (hi[c] - lo[c]) / 3.0;
+            if g1 > g2 {
+                lo[c] += d;
+            } else {
+                hi[c] -= d;
+            }
+        }
+    }
+    fill(&mut cols, &|c| {
+        let t = 0.5 * (lo[c] + hi[c]);
+        [t, t]
+    });
+    prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    let mut touch = std::collections::HashMap::new();
+    for (c, &(id, _, _, s, outer)) in cands.iter().enumerate() {
+        let t = 0.5 * (lo[c] + hi[c]);
+        let g = s * as_real(out[2 * c]);
+        // 極小がほぼ 0 なら接している。はっきり負なら、マスの中で2回交わっているだけ（接していない）。
+        // 隣の辺と同じ極小を2回数えないよう、t が [0, 1) に入る辺だけに付ける
+        if (0.0..1.0).contains(&t) && g.abs() <= 1e-3 * outer {
+            touch.insert(id, t as f32);
+        }
+    }
+    touch
+}
+
+/// 三角形の向き（表裏）をそろえる。辺を共有する三角形どうしが、その辺を逆向きにたどるように裏返していく。
+/// つながった部分ごとに、重心から見て囲む体積（向き付き）が負なら全体を裏返す（閉じた曲面なら外向きになる）
+fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
+    use std::collections::HashMap;
+    let count = tris.len() / 3;
+    // 辺（小さい番号, 大きい番号）→ その辺を持つ三角形
+    let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for t in 0..count {
+        for e in 0..3 {
+            let (u, v) = (tris[3 * t + e], tris[3 * t + (e + 1) % 3]);
+            edges.entry((u.min(v), u.max(v))).or_default().push(t);
+        }
+    }
+    // 三角形 t が辺 u → v をこの向きにたどるか
+    let has = |tris: &[u32], t: usize, u: u32, v: u32| (0..3).any(|e| tris[3 * t + e] == u && tris[3 * t + (e + 1) % 3] == v);
+    let mut done = vec![false; count];
+    for start in 0..count {
+        if done[start] {
+            continue;
+        }
+        done[start] = true;
+        let mut comp = vec![start];
+        let mut stack = vec![start];
+        while let Some(t) = stack.pop() {
+            for e in 0..3 {
+                let (u, v) = (tris[3 * t + e], tris[3 * t + (e + 1) % 3]);
+                let Some(list) = edges.get(&(u.min(v), u.max(v))) else { continue };
+                if list.len() != 2 {
+                    continue; // 3つ以上の三角形が集まる辺では、向きを決められない
+                }
+                for &o in list {
+                    if o == t || done[o] {
+                        continue;
+                    }
+                    // 隣は同じ辺を逆向き (v → u) にたどるべき
+                    if has(tris, o, u, v) {
+                        tris.swap(3 * o + 1, 3 * o + 2);
+                    }
+                    done[o] = true;
+                    comp.push(o);
+                    stack.push(o);
+                }
+            }
+        }
+        // 囲む体積（向き付き）が負なら裏返す
+        let p = |k: u32| {
+            let k = k as usize * 3;
+            [positions[k] as f64, positions[k + 1] as f64, positions[k + 2] as f64]
+        };
+        // 基準点は部分の頂点の重心（開いた曲面でも、筒なら外向きになるように）
+        let mut o = [0.0; 3];
+        for &t in &comp {
+            for e in 0..3 {
+                let q = p(tris[3 * t + e]);
+                for x in 0..3 {
+                    o[x] += q[x] / (3 * comp.len()) as f64;
+                }
+            }
+        }
+        let mut vol = 0.0;
+        for &t in &comp {
+            let [a, b, c] = [p(tris[3 * t]), p(tris[3 * t + 1]), p(tris[3 * t + 2])].map(|q| [q[0] - o[0], q[1] - o[1], q[2] - o[2]]);
+            vol += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        }
+        if vol < 0.0 {
+            for &t in &comp {
+                tris.swap(3 * t + 1, 3 * t + 2);
+            }
+        }
+    }
 }
 
 /// 点 (xs, ys, zs) での F の値。範囲で重ねる立体なら G = max(min F, −max F)（[`implicit_solid`] を参照）。
@@ -1458,6 +1655,28 @@ mod tests {
         assert!((view.apply(&[1.0, 0.0, 0.0, 2.0])[0] - 2.0).abs() < 1e-12); // 手前（w = 2）は大きく
         assert!((view.apply(&[1.0, 0.0, 0.0, -4.0])[0] - 0.5).abs() < 1e-12); // 奥（w = −4）は小さく
         assert!(view.apply(&[1.0, 0.0, 0.0, 5.0])[0].is_nan()); // 視点より後ろは描かない
+    }
+
+    #[test]
+    fn touching_surface() {
+        // (x² + y² + z² − 0.49)² = 0 は符号が変わらないが、半径 0.7 の球に接している
+        let p = prog("(x^2 + y^2 + z^2 - 0.49)^2", &AXES);
+        let m = implicit_surface(&p, dom(), 30);
+        assert!(m.indices.len() > 1000, "三角形 {}", m.indices.len() / 3);
+        for (q, nv) in m.positions.chunks_exact(3).zip(m.normals.chunks_exact(3)) {
+            let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            assert!((len - 0.7).abs() < 0.03, "len = {len}");
+            // 向きがそろって外向き
+            assert!(q[0] * nv[0] + q[1] * nv[1] + q[2] * nv[2] > 0.0);
+        }
+        // 0 にならない (…)² + 0.1 は何も描かない
+        let p = prog("(x^2 + y^2 + z^2 - 0.49)^2 + 0.1", &AXES);
+        assert!(implicit_surface(&p, dom(), 30).indices.is_empty());
+        // 符号が変わる面と、接するだけの面が混ざっていても描ける: x y² = 0 は平面 x = 0 と y = 0
+        let p = prog("x y^2", &AXES);
+        let m = implicit_surface(&p, dom(), 21);
+        let on_y0 = m.positions.chunks_exact(3).filter(|q| q[1].abs() < 0.02 && q[0].abs() > 0.2).count();
+        assert!(on_y0 > 50, "y = 0 の面の頂点 {on_y0}");
     }
 
     #[test]
