@@ -20,9 +20,17 @@ export interface GridStyle {
   /** 媒介変数表示の曲面で、u, v の範囲をそれぞれ何等分する線を引くか（0 なら描かない） */
   u: number
   v: number
+  /** 媒介変数表示の立体で、3つ目の媒介変数の範囲を何等分するか（古い保存データには無い） */
+  w?: number
   /** 線の太さ（画素） */
   width: number
 }
+
+/**
+ * 複素数の値をとる陽関数の表し方（色は偏角 arg f）。
+ * off: 色分けしない（実数にならない点は描かない）/ abs: 高さ |f| / re: 高さ Re f / im: 高さ Im f
+ */
+export type ComplexMode = 'off' | 'abs' | 're' | 'im'
 
 /** 曲面の見た目 */
 export interface PlotStyle {
@@ -37,6 +45,13 @@ export interface PlotStyle {
 
 /** 媒介変数の範囲。媒介変数の名前（t, u, v, t1, …）→ [最小, 最大]（入力欄の LaTeX のまま。2π などの式も書ける） */
 export type ParamRanges = Record<string, [string, string]>
+
+/** 媒介変数の範囲の長さ。u, v は1つ目・2つ目、w は3つ目（立体のときだけ） */
+export interface ParamSpan {
+  u: number
+  v: number
+  w?: number
+}
 
 /** 座標空間の設定（4次元以上のとき、どの座標を表示し、残りをどの値で固定するか） */
 export interface Space {
@@ -94,8 +109,8 @@ export interface PlotItem extends PlotStyle {
   ranges: ParamRanges
   /** 最後に描けたときの媒介変数の名前（範囲の入力欄を出すのに使う）。例: ['t'], ['u', 'v'] */
   params: string[]
-  /** 媒介変数 u, v の範囲の長さ（格子線の分割に使う） */
-  paramSpan: { u: number; v: number }
+  /** 媒介変数 u, v（立体なら3つ目の w も）の範囲の長さ（格子線の分割に使う） */
+  paramSpan: ParamSpan
   /** この行がパラメータの定義（a = 1 など）なら、その名前と値 */
   param?: { name: string } & ParamValue
   slider: SliderStyle
@@ -107,6 +122,32 @@ export interface PlotItem extends PlotStyle {
   autofocus?: boolean
   /** 範囲で重ねた立体として描いたことがあるか（最初の1回だけ半透明にするため） */
   solidSeen?: boolean
+  /** 複素数の色分け（陽関数だけ。古い保存データには無い） */
+  complexMode?: ComplexMode
+  /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
+  walls?: boolean
+  /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
+  kind?: string
+}
+
+/** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */
+export interface CutStyle {
+  enabled: boolean
+  axis: 0 | 1 | 2
+  /** 切る位置（その軸の座標） */
+  pos: number
+  /** false なら座標が pos 以下の側を残す。true なら pos 以上の側を残す */
+  flip: boolean
+}
+
+/** 計算担当に渡す切り口の指定（切らないなら null） */
+export type CutRequest = { axis: number; pos: number; keepBelow: boolean } | null
+
+/** 切り口のふた（陰関数・範囲で重ねた立体の中身を、切り口の平面で切った部分） */
+export interface CapData {
+  positions: Float32Array
+  normals: Float32Array
+  indices: Uint32Array
 }
 
 /** Rust 側で作ったメッシュ */
@@ -116,12 +157,18 @@ export interface MeshData {
   indices: Uint32Array
   /** 格子線用の座標（空なら positions を使う） */
   gridCoords: Float32Array
+  /** 複素数の色分け: 頂点ごとの (Re w / |w|, Im w / |w|, log₂|w|)。空なら単色 */
+  complexValues: Float32Array
   /** 曲線なら true（positions は点の列で、途切れる所に NaN） */
   curve: boolean
+  /** 媒介変数表示の立体（閉じた面で外向き）なら true。切り口のふたは描画側で作る */
+  solid: boolean
+  /** 2D 表示の z = f(x, y) の塗り分け（格子線用の座標の3つ目が値。値で色の濃さを変える） */
+  heat: boolean
   /** 媒介変数の名前 */
   params: string[]
-  /** 媒介変数 u, v の範囲の長さ */
-  paramSpan: { u: number; v: number }
+  /** 媒介変数の範囲の長さ */
+  paramSpan: ParamSpan
 }
 
 // ---- Web Worker とのやりとり ----
@@ -154,7 +201,27 @@ export interface PlotRequest {
   }
   /** 範囲で重ねるパラメータ → [最小, 最大] */
   stacks: Record<string, [number, number]>
+  /** 切り口（陰関数・範囲で重ねた立体のふたを作る） */
+  cut: CutRequest
+  /** 陽関数の複素数の色分け */
+  complexMode: ComplexMode
+  /** 2D 表示（縦の座標を 0 にして平面に描く） */
+  flat: boolean
+  /** 陽関数の段差の壁 */
+  walls: boolean
 }
+
+/** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
+export interface CapRequest {
+  type: 'cap'
+  requestId: number
+  itemId: number
+  cut: CutRequest
+  /** ふたの格子の1辺のマス数 */
+  resolution: number
+}
+
+export type CapResponse = { requestId: number; cap: CapData | null }
 
 export type PlotResponse =
   | {
@@ -166,5 +233,7 @@ export type PlotResponse =
       usedParams: string[]
       /** パラメータの定義だったときの名前と値 */
       param: ({ name: string } & ParamValue) | null
+      /** 切り口のふた（陰関数・範囲で重ねた立体を切っているときだけ） */
+      cap: CapData | null
     }
   | { requestId: number; ok: false; error: string }

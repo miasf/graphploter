@@ -49,6 +49,15 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
       },
       { label: '鞍形 z = (x² − y²)/4', items: [{ latex: 'z=\\frac{x^2-y^2}{4}' }] },
       {
+        label: '階段 z = ⌊x⌋/2 + ⌊y⌋/4（段差の壁つき）',
+        items: [
+          {
+            latex: 'z=\\frac{\\lfloor x\\rfloor}{2}+\\frac{\\lfloor y\\rfloor}{4}',
+            options: { color: '#1a9ea0', walls: true },
+          },
+        ],
+      },
+      {
         label: 'らせん（曲線）',
         items: [
           {
@@ -80,6 +89,20 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         ],
       },
       {
+        label: '中身の詰まったトーラス（媒介変数3つの立体）',
+        items: [
+          {
+            latex:
+              '\\left(\\left(3+t\\cos v\\right)\\cos u,\\left(3+t\\cos v\\right)\\sin u,t\\sin v\\right)',
+            options: {
+              color: '#fa7e19',
+              ranges: { t: ['0', '1.5'], u: ['\\frac{\\pi}{6}', '\\frac{5\\pi}{3}'], v: TWO_PI },
+              grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 12, w: 3, width: 1 },
+            },
+          },
+        ],
+      },
+      {
         label: 'トーラス（媒介変数の曲面）',
         items: [
           {
@@ -95,6 +118,19 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     samples: [
       { label: '球 x² + y² + z² = 4', items: [{ latex: 'x^2+y^2+z^2=4' }] },
       {
+        label: 'リストで3つの球 x² + y² + z² = [1, 4, 9]',
+        items: [
+          {
+            latex: 'x^2+y^2+z^2=\\left[1,4,9\\right]',
+            options: { color: '#2d70b3', opacity: 0.45 },
+          },
+        ],
+      },
+      {
+        label: '接するだけ (x² + y² − 4)²(z − 1)² = 0',
+        items: [{ latex: '\\left(x^2+y^2-4\\right)^2\\left(z-1\\right)^2=0', options: { color: '#6042a6' } }],
+      },
+      {
         label: 'ジャイロイド',
         items: [{ latex: '\\sin x\\cos y+\\sin y\\cos z+\\sin z\\cos x=0', options: { color: '#c74440' } }],
       },
@@ -104,6 +140,10 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '複素数・特殊関数',
     samples: [
       { label: '|Γ(x + iy)|', items: [{ latex: 'z=\\left|\\Gamma\\left(x+iy\\right)\\right|', options: { color: '#fa7e19' } }] },
+      {
+        label: 'Γ(x + iy) の色分け（高さ |Γ|、色は偏角）',
+        items: [{ latex: 'z=\\Gamma\\left(x+iy\\right)', options: { complexMode: 'abs' } }],
+      },
       { label: '|ζ(x + iy)|', items: [{ latex: 'z=\\left|\\zeta\\left(x+iy\\right)\\right|', options: { color: '#2d70b3' } }] },
       {
         label: 'ベッセル関数 J₀ の膜',

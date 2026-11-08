@@ -5,7 +5,7 @@
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
   import { missingParam, prettyName } from './params'
-  import type { Domain, GridStyle, PlotItem, SliderStyle } from './types'
+  import type { ComplexMode, Domain, GridStyle, PlotItem, SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -19,6 +19,8 @@
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
+    onComplexMode: (mode: ComplexMode) => void
+    onWalls: (on: boolean) => void
     onLineWidth: (width: number) => void
     onRange: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
@@ -49,6 +51,8 @@
     onColor,
     onGrid,
     onOpacity,
+    onComplexMode,
+    onWalls,
     onLineWidth,
     onRange,
     onToggle,
@@ -90,7 +94,19 @@
   /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
   const isCurve = $derived(item.params.length === 1)
-  const isSurface = $derived(item.params.length === 2)
+  /** 媒介変数表示の曲面・立体（格子線を媒介変数に沿って引く） */
+  const isSurface = $derived(item.params.length === 2 || item.params.length === 3)
+  /** 媒介変数ごとの格子線の分割数の設定の名前（立体なら3つ目は w） */
+  const divAxes = $derived(item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const))
+
+  /** 陽関数（z = f(x, y) など）か。複素数の色分けができる */
+  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? ''))
+  const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
+    { mode: 'off', label: 'しない' },
+    { mode: 'abs', label: '高さ |f|' },
+    { mode: 're', label: '高さ Re f' },
+    { mode: 'im', label: '高さ Im f' },
+  ]
 
   // 格子線の方向（grid.x, grid.y, grid.z は、画面の横・奥・縦の軸の方向）
   const gridAxes = $derived([
@@ -246,6 +262,31 @@
             <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
           </div>
 
+          {#if isExplicit && !/塗り分け/.test(item.kind ?? '')}
+            <label class="check">
+              <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
+              値が飛ぶ所（floor の段差など）に壁を描く
+            </label>
+          {/if}
+          {#if isExplicit}
+            <div class="complex-mode">
+              <span class="label">複素数の色分け</span>
+              <select
+                value={item.complexMode ?? 'off'}
+                onchange={(e) => onComplexMode(e.currentTarget.value as ComplexMode)}
+              >
+                {#each COMPLEX_MODES as { mode, label } (mode)}
+                  <option value={mode}>{label}</option>
+                {/each}
+              </select>
+            </div>
+            {#if (item.complexMode ?? 'off') !== 'off'}
+              <p class="hint">
+                色は偏角 arg f（赤: 正の実数、水色: 負の実数、黄緑: +i の向き、紫: −i の向き）。|f| が 2 倍になるごとに明るさの縞が1本
+              </p>
+            {/if}
+          {/if}
+
           <label class="check">
             <input
               type="checkbox"
@@ -256,9 +297,9 @@
           </label>
           <div class="sliders" class:disabled={!item.grid.enabled}>
             {#if isSurface}
-              <!-- 媒介変数表示の曲面: 2つの媒介変数（u, v など）の範囲を何等分するか -->
-              {#each ['u', 'v'] as const as axis, n (axis)}
-                {@const k = divIndex(item.grid[axis])}
+              <!-- 媒介変数表示の曲面・立体: 媒介変数（u, v など）の範囲を何等分するか -->
+              {#each divAxes as axis, n (axis)}
+                {@const k = divIndex(item.grid[axis] ?? item.grid.v)}
                 <span class="label">{prettyName(item.params[n])} 方向</span>
                 <input
                   type="range"
@@ -272,7 +313,7 @@
                 <span class="value">{k === 0 ? 'なし' : `${DIVISIONS[k]} 等分`}</span>
               {/each}
             {/if}
-            {#each isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
+            {#each item.params.length === 3 ? [] : isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
               {@const options = spacingOptions(ranges[axis])}
               {@const index = spacingToIndex(item.grid[axis], options)}
               <span class="label">{label}</span>
@@ -420,6 +461,19 @@
   }
   .label {
     color: var(--muted);
+  }
+  .complex-mode {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .complex-mode select {
+    font: inherit;
+    padding: 2px 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
   }
   .check {
     display: flex;

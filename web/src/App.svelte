@@ -8,8 +8,19 @@
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
-  import { requestPlot } from './lib/plotClient'
-  import type { Domain, GridStyle, ParamRanges, ParamValue, PlotItem, SliderStyle, Space } from './lib/types'
+  import { requestCap, requestPlot } from './lib/plotClient'
+  import type {
+    ComplexMode,
+    CutRequest,
+    CutStyle,
+    Domain,
+    GridStyle,
+    ParamRanges,
+    ParamValue,
+    PlotItem,
+    SliderStyle,
+    Space,
+  } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -24,7 +35,7 @@
       color: PALETTE[(id - 1) % PALETTE.length],
       visible: true,
       opacity: 1,
-      grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 24, width: 1 },
+      grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 24, w: 24, width: 1 },
       lineWidth: 3,
       showSettings: false,
       vertical: true,
@@ -46,6 +57,14 @@
   let domainError = $state('')
   /** 遠近感（0: 平行投影 〜 100: 強い透視投影） */
   let perspective = $state(41)
+  /** 2D 表示（縦の座標を 0 にして、横・奥の平面に描く） */
+  let flat = $state(false)
+  /** 立体の切り口 */
+  let cut = $state<CutStyle>({ enabled: false, axis: 0, pos: 0, flip: false })
+  /** 計算担当・描画に渡す切り口の指定 */
+  function cutRequest(): CutRequest {
+    return cut.enabled && !flat ? { axis: cut.axis, pos: cut.pos, keepBelow: !cut.flip } : null
+  }
   /** 暗い配色にするか（最初は OS の設定に合わせる） */
   let dark = $state(window.matchMedia('(prefers-color-scheme: dark)').matches)
 
@@ -65,8 +84,10 @@
       const saved = await loadInitial()
       if (saved) restore(saved)
       viewer?.setDark(dark)
-      viewer?.setPerspective(perspective / 100)
+      viewer?.setPerspective(flat ? 0 : perspective / 100)
+      viewer?.setFlat(flat)
       viewer?.setDomain(domain, true)
+      viewer?.setCut(cutRequest())
       loaded = true
       items.forEach(replot)
     })()
@@ -89,6 +110,8 @@
         opacity: it.opacity,
         grid: it.grid,
         lineWidth: it.lineWidth,
+        complexMode: it.complexMode,
+        walls: it.walls,
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
@@ -99,6 +122,8 @@
       perspective,
       dark,
       space,
+      cut,
+      flat,
     })
   }
 
@@ -111,6 +136,8 @@
     perspective = s.perspective
     dark = s.dark
     space = s.space
+    if (s.cut) cut = s.cut
+    flat = s.flat ?? false
   }
 
   // 変わるたびに（少し待ってから）ブラウザに保存する
@@ -362,6 +389,10 @@
       currentParams(),
       space,
       currentStacks(),
+      cutRequest(),
+      item.complexMode ?? 'off',
+      flat,
+      item.walls ?? false,
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -399,19 +430,27 @@
 
     dropParam(item)
     // 範囲で重ねた立体は、内側の境界面（穴など）が外から見えないので、最初は半透明にする
-    if (res.kind === '範囲で重ねた立体' && !item.solidSeen) {
+    if (res.kind.startsWith('範囲で重ねた立体') && !item.solidSeen) {
       item.solidSeen = true
       if (item.opacity === 1) item.opacity = 0.45
     }
     item.params = res.mesh.params
     // 初めて使う媒介変数（t₁ など）の範囲の入力欄を用意する（計算エンジン側も 0〜2π を使っている）
-    for (const n of item.params) if (!(n in item.ranges)) item.ranges[n] = ['0', '2\\pi']
+    // 範囲で重ねるパラメータは、スライダーの範囲を使うので入力欄を作らない
+    const stacked = currentStacks()
+    for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
+    item.kind = res.kind
     viewer.setPlot(item.id, res.mesh, item)
+    viewer.setCap(item.id, res.cap, item)
     const size = res.mesh.curve
       ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
     item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
+    // 陽関数の値がどこでも実数にならない（複素数の関数）なら、色分けで描けることを知らせる
+    if (!res.mesh.curve && res.mesh.indices.length === 0 && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
+      item.info += ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます'
+    }
   }
 
   function replotAll(delay = 200) {
@@ -511,6 +550,16 @@
   function setRange(item: PlotItem, name: string, side: 0 | 1, value: string) {
     item.ranges[name][side] = value
     schedule(item, 300)
+  }
+
+  function setWalls(item: PlotItem, on: boolean) {
+    item.walls = on
+    schedule(item, 0)
+  }
+
+  function setComplexMode(item: PlotItem, mode: ComplexMode) {
+    item.complexMode = mode
+    schedule(item, 0)
   }
 
   function setGrid(item: PlotItem, grid: GridStyle) {
@@ -725,6 +774,53 @@
     paramsChanged([coordName(k)])
   }
 
+  // ---- 2D 表示 ----
+
+  function setFlat(on: boolean) {
+    flat = on
+    viewer?.setFlat(on)
+    viewer?.setCut(cutRequest())
+    // 2D は真上からほぼ平行に見る。3D に戻したら元の遠近感にする
+    viewer?.setPerspective(on ? 0 : perspective / 100)
+    viewer?.resetCamera()
+    replotAll(0)
+  }
+
+  // ---- 立体の切り口 ----
+
+  /** 陰関数・範囲で重ねた立体の式（切り口のふたを計算担当が作る） */
+  const capKinds = ['陰関数', '範囲で重ねた立体']
+  /** 切り口のふたの細かさ（陰関数の格子の2倍） */
+  const capResolution = () => (isCoarse() ? implicitResolution : implicitResolution * 2)
+  /** ふたの依頼の番号（古い結果を捨てるため） */
+  const capToken = new Map<number, number>()
+
+  /** 切り口を変えたとき: 描画側の切り落としを変え、陰関数などのふただけを作り直す（式は計算し直さない） */
+  async function setCut(next: Partial<CutStyle>) {
+    Object.assign(cut, next)
+    const req = cutRequest()
+    viewer?.setCut(req)
+    await Promise.all(
+      items
+        .filter((it) => it.visible && !it.error && it.info && capKinds.some((k) => it.info!.startsWith(k)))
+        .map(async (it) => {
+          const token = (capToken.get(it.id) ?? 0) + 1
+          capToken.set(it.id, token)
+          const res = await requestCap(it.id, req, capResolution())
+          if (capToken.get(it.id) === token) viewer?.setCap(it.id, res.cap, it)
+        }),
+    )
+  }
+
+  /** 切り口の軸の範囲（表示範囲） */
+  const cutRange = $derived(
+    [
+      [domain.xmin, domain.xmax],
+      [domain.ymin, domain.ymax],
+      [domain.zmin, domain.zmax],
+    ][cut.axis],
+  )
+
   function setBound(key: keyof Domain, value: number) {
     if (!Number.isFinite(value)) return
     domain[key] = value
@@ -777,6 +873,8 @@
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
+            onComplexMode={(m) => setComplexMode(item, m)}
+            onWalls={(on) => setWalls(item, on)}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}
             onToggle={() => toggle(item)}
@@ -893,9 +991,53 @@
             max="100"
             step="1"
             bind:value={perspective}
-            oninput={() => viewer?.setPerspective(perspective / 100)}
+            oninput={() => !flat && viewer?.setPerspective(perspective / 100)}
           />
         </label>
+        <h2>切り口</h2>
+        {#if flat}<p class="note">2D 表示では使えません</p>{/if}
+        <label class="check-row" class:disabled={flat}>
+          <input type="checkbox" checked={cut.enabled} onchange={(e) => setCut({ enabled: e.currentTarget.checked })} />
+          立体を平面で切って、切り口を見る
+        </label>
+        {#if cut.enabled}
+          <div class="cut-axes" role="group" aria-label="切る向き">
+            {#each [0, 1, 2] as const as k (k)}
+              <button
+                class="secondary"
+                class:selected={cut.axis === k}
+                onclick={() => {
+                  const [lo, hi] = [
+                    [domain.xmin, domain.xmax],
+                    [domain.ymin, domain.ymax],
+                    [domain.zmin, domain.zmax],
+                  ][k]
+                  setCut({ axis: k, pos: Math.min(hi, Math.max(lo, cut.pos)) })
+                }}>{prettyName(axisNames[k])} = 一定</button
+              >
+            {/each}
+          </div>
+          <label class="slider">
+            <span>位置: {prettyName(axisNames[cut.axis])} = {Number(cut.pos.toPrecision(4))}</span>
+            <input
+              type="range"
+              min={cutRange[0]}
+              max={cutRange[1]}
+              step={(cutRange[1] - cutRange[0]) / 200}
+              value={cut.pos}
+              oninput={(e) => setCut({ pos: e.currentTarget.valueAsNumber })}
+            />
+          </label>
+          <div class="buttons">
+            <button class="secondary" onclick={() => setCut({ flip: !cut.flip })}>
+              {cut.flip ? `${prettyName(axisNames[cut.axis])} ≥ ${Number(cut.pos.toPrecision(4))} を表示中` : `${prettyName(axisNames[cut.axis])} ≤ ${Number(cut.pos.toPrecision(4))} を表示中`}（反対側にする）
+            </button>
+          </div>
+          <p class="note">
+            立体（陰関数・範囲で重ねた立体・媒介変数3つの立体）の切り口はふたをして塗ります。陰関数は、式の両側のうち表示範囲の中で狭いほうを中身とします
+          </p>
+        {/if}
+
         <h2>保存・共有</h2>
         <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
         <div class="buttons">
@@ -955,7 +1097,12 @@
           回転: 中心の点と、座標の組（xy, xw など）ごとの角度で図形を回せます。▶ で回し続けます。
           「4次元の遠近感」を上げると、w の奥にある部分ほど小さく描きます
         </li>
-        <li>リスト: <code>(t, [-1,1], [-1,1], [-1,1])</code> のように書くと、組み合わせの数だけまとめて描きます</li>
+        <li>
+          リスト: <code>(t, [-1,1], [-1,1], [-1,1])</code> や <code>x^2 + y^2 + z^2 = [1, 4, 9]</code>
+          のように書くと、組み合わせの数だけまとめて描きます
+        </li>
+        <li>立体: <code>((3 + t cos v) cos u, (3 + t cos v) sin u, t sin v)</code>（u, v, t の3つを使う）</li>
+        <li>2D 表示: グラフ右上の「2D」で、真上から見た平面に描きます（z = f(x, y) は値の塗り分け）</li>
         <li>媒介変数は t（曲線）、u と v（曲面）、または t₁ と t₂。組 (…) の外では t, u, v もパラメータにできます</li>
         <li>
           パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
@@ -970,6 +1117,13 @@
   </aside>
 
   <main class="viewer" bind:this={viewerEl}></main>
+  <button
+    class="mode-toggle"
+    onclick={() => setFlat(!flat)}
+    title={flat ? '3D 表示に切り替える' : '2D 表示に切り替える（真上から見た平面に描く）'}
+  >
+    {flat ? '3D' : '2D'}
+  </button>
 </div>
 
 <style>
@@ -1126,6 +1280,23 @@
     font-size: 12px;
     margin: 6px 0 0;
   }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    margin: 8px 0;
+  }
+  .cut-axes {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .secondary.selected {
+    border-color: var(--accent, #2d70b3);
+    background: var(--hover);
+    font-weight: 600;
+  }
   .help {
     padding: 0 16px 16px;
     font-size: 13px;
@@ -1150,6 +1321,23 @@
     position: relative;
     overflow: hidden;
     min-height: 0;
+  }
+  /* 2D / 3D の切り替え（グラフの右上） */
+  .mode-toggle {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 5;
+    min-width: 44px;
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
   }
 
   /* スマホなど幅が狭いときは、グラフを全画面にして、式の一覧を下から引き出すシートにする */

@@ -2,7 +2,7 @@
 // - ブラウザ（localStorage）に自動で保存し、次に開いたときに元に戻す
 // - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）
 
-import type { Domain, GridStyle, ParamRanges, SliderStyle, Space } from './types'
+import type { ComplexMode, CutStyle, Domain, GridStyle, ParamRanges, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
 export interface SavedItem {
@@ -15,6 +15,8 @@ export interface SavedItem {
   ranges: ParamRanges
   vertical: boolean
   slider: SliderStyle
+  complexMode?: ComplexMode
+  walls?: boolean
 }
 
 /** 保存する状態全体 */
@@ -28,6 +30,10 @@ export interface SavedState {
   perspective: number
   dark: boolean
   space: Space
+  /** 立体の切り口（古い保存データには無い） */
+  cut?: CutStyle
+  /** 2D 表示（古い保存データには無い） */
+  flat?: boolean
 }
 
 const STORAGE_KEY = 'graphploter:state'

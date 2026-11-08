@@ -9,7 +9,8 @@
 //! - それ以外の `左辺 = 右辺`                                 → 陰関数 左辺 − 右辺 = 0
 //! - `(x(t), y(t), z(t), …)`                                  → 媒介変数表示の曲線
 //! - `(x(u,v), y(u,v), z(u,v), …)`                            → 媒介変数表示の曲面
-//!   （媒介変数は t / u, v / t₁, t₂。成分が次元より少なければ残りは 0）
+//! - `(x(u,v,t), y(u,v,t), z(u,v,t), …)`                      → 媒介変数表示の立体（媒介変数の直方体の6つの面を描く）
+//!   （媒介変数は t / u, v / u, v, t / t₁, t₂, t₃。成分が次元より少なければ残りは 0）
 //! - `a = 1`（座標以外の名前 = 数）                            → パラメータ（スライダー）の定義
 //!
 //! 表示していない座標と、パラメータは、式の中では定数として扱う。
@@ -242,8 +243,13 @@ pub enum Plot {
     Curve { sets: Vec<Vec<Program>>, vars: Vec<String> },
     /// 媒介変数表示の曲面。`sets` の1つ1つが1枚の曲面。変数は `vars`（2つ）。
     Surface { sets: Vec<Vec<Program>>, vars: Vec<String> },
+    /// 媒介変数表示の立体。`sets` の1つ1つが1つの立体。変数は `vars`（3つ）。
+    /// 媒介変数の範囲の直方体を写した形として、直方体の6つの面の像を描く
+    Volume { sets: Vec<Vec<Program>>, vars: Vec<String> },
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
+    /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
+    Multi(Vec<Plot>),
 }
 
 impl Plot {
@@ -258,14 +264,17 @@ impl Plot {
             Plot::Solid { .. } => "範囲で重ねた立体".into(),
             Plot::Curve { .. } => "媒介変数表示の曲線".into(),
             Plot::Surface { .. } => "媒介変数表示の曲面".into(),
+            Plot::Volume { .. } => "媒介変数表示の立体".into(),
             Plot::Param { .. } => "パラメータ".into(),
+            Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
         }
     }
 
     /// 媒介変数の名前（媒介変数表示でなければ空）
     pub fn param_vars(&self) -> Vec<String> {
         match self {
-            Plot::Curve { vars, .. } | Plot::Surface { vars, .. } => vars.clone(),
+            Plot::Curve { vars, .. } | Plot::Surface { vars, .. } | Plot::Volume { vars, .. } => vars.clone(),
+            Plot::Multi(ps) => ps.first().map_or(Vec::new(), |p| p.param_vars()),
             _ => Vec::new(),
         }
     }
@@ -280,8 +289,19 @@ impl Plot {
                 out.extend(prog.used_params().iter().filter(|n| !names.contains(n)).cloned());
                 return out;
             }
-            Plot::Curve { sets, .. } | Plot::Surface { sets, .. } => sets.iter().flatten().collect(),
+            Plot::Curve { sets, .. } | Plot::Surface { sets, .. } | Plot::Volume { sets, .. } => {
+                sets.iter().flatten().collect()
+            }
             Plot::Param { uses, .. } => return uses.clone(),
+            Plot::Multi(ps) => {
+                let mut out: Vec<String> = Vec::new();
+                for n in ps.iter().flat_map(|p| p.used_params()) {
+                    if !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+                return out;
+            }
         };
         let mut out: Vec<String> = Vec::new();
         for p in progs {
@@ -331,9 +351,6 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
-    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
-    let consts = space.with_hidden(params);
-    let rot = space.rotation_matrix();
 
     let parts: Vec<&str> = source.split('=').collect();
     let (l, r) = match parts.as_slice() {
@@ -366,6 +383,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
                 r.collect_vars(&mut rv);
                 let uses_coord = rv.iter().any(|v| coord_index(v).is_some());
                 if coord_index(name).is_none() && !uses_coord {
+                    if first_list(&r).is_some() {
+                        return Err(format!("{name} の値にリストは使えません"));
+                    }
                     if r.uses_var(name) {
                         return Err(format!("{name} の定義の右辺に {name} 自身は使えません"));
                     }
@@ -376,6 +396,29 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         }
         _ => return Err("= は1つだけにしてください".into()),
     };
+
+    // リストがあれば、要素ごと（組み合わせの数だけ）の式にして、それぞれを描く
+    if first_list(&l).is_some() || first_list(&r).is_some() {
+        let variants = expand_lists(&[l, r])?;
+        let plots = variants
+            .into_iter()
+            .map(|v| {
+                let mut it = v.into_iter();
+                let (l, r) = (it.next().unwrap_or(Expr::Num(0.0)), it.next().unwrap_or(Expr::Num(0.0)));
+                compile_pair(l, r, params, space)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Plot::Multi(plots));
+    }
+    compile_pair(l, r, params, space)
+}
+
+/// 左辺 = 右辺（リストを含まない）の式をコンパイルする（陽関数・陰関数・範囲で重ねた立体）
+fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot, String> {
+    let shown = space.shown();
+    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+    let consts = space.with_hidden(params);
+    let rot = space.rotation_matrix();
 
     // 陽関数で、回転が表示中の座標どうしだけなら、曲面をそのまま回せばよい（媒介変数表示と同じ扱い）
     if rot.is_some() && !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
@@ -491,20 +534,23 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
     });
     let named = vars.iter().filter(|v| matches!(v.as_str(), "t" | "u" | "v")).count();
     if named > 0 && named < vars.len() {
-        return Err("媒介変数は t / u, v / t₁, t₂ のどれか1組だけを使ってください".into());
+        return Err("媒介変数は t / u, v / u, v, t / t₁, t₂, t₃ のどれか1組だけを使ってください".into());
     }
-    if vars.iter().any(|v| v == "t") && vars.len() > 1 {
-        return Err("曲線は t だけ、曲面は u と v を使ってください".into());
-    }
-    // u だけ・v だけでも曲面として扱う
-    if vars.iter().any(|v| v == "u" || v == "v") {
-        vars = vec!["u".into(), "v".into()];
+    if named > 0 {
+        // t だけなら曲線、u・v だけなら曲面（u だけ・v だけでも曲面）、t と u・v を両方使えば立体
+        let has_t = vars.iter().any(|v| v == "t");
+        let has_uv = vars.iter().any(|v| v == "u" || v == "v");
+        vars = match (has_t, has_uv) {
+            (true, true) => vec!["u".into(), "v".into(), "t".into()],
+            (false, true) => vec!["u".into(), "v".into()],
+            _ => vec!["t".into()],
+        };
     }
     if vars.is_empty() {
         vars.push("t".into()); // 媒介変数を使っていない（点）
     }
-    if vars.len() > 2 {
-        return Err("媒介変数が3つ以上の図形（立体）はまだ描けません".into());
+    if vars.len() > 3 {
+        return Err("媒介変数は3つまでにしてください（4つ以上の図形は3次元の画面に描けません）".into());
     }
 
     // 範囲で重ねるパラメータを使っていれば、それも媒介変数として動かす（曲線 → 曲面）
@@ -514,8 +560,8 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
         .map(|(n, _, _)| n.clone())
         .filter(|n| !vars.contains(n) && items.iter().any(|e| e.uses_var(n)))
         .collect();
-    if vars.len() + ranged.len() > 2 {
-        return Err("曲面を範囲で重ねた立体はまだ描けません".into());
+    if vars.len() + ranged.len() > 3 {
+        return Err("媒介変数と、範囲で重ねるパラメータは、合わせて3つまでにしてください".into());
     }
     vars.extend(ranged);
     let mut consts = params.clone();
@@ -534,10 +580,10 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
         sets.push(progs);
     }
     // 回転・射影は点を計算した後で行う（Space::view）
-    Ok(if vars.len() == 2 {
-        Plot::Surface { sets, vars }
-    } else {
-        Plot::Curve { sets, vars }
+    Ok(match vars.len() {
+        3 => Plot::Volume { sets, vars },
+        2 => Plot::Surface { sets, vars },
+        _ => Plot::Curve { sets, vars },
     })
 }
 
@@ -669,7 +715,9 @@ mod tests {
         assert_eq!(kind("(cos t, sin t)"), "媒介変数表示の曲線");
         assert_eq!(kind("(u, v, u v)"), "媒介変数表示の曲面");
         assert_eq!(kind("(1, 2, 3)"), "媒介変数表示の曲線");
-        assert!(kind("(u, t, 0)").starts_with("error"));
+        assert_eq!(kind("(u, v, t)"), "媒介変数表示の立体");
+        assert_eq!(compile("(u, t, 0)").unwrap().param_vars(), vec!["u", "v", "t"]);
+        assert!(kind("(u, t_1, 0)").starts_with("error"));
         assert!(kind("(t, x, 0)").starts_with("error"));
         assert!(kind("(1, 2, 3, 4)").starts_with("error"));
         // 括弧の掛け算は組ではない
@@ -741,7 +789,8 @@ mod tests {
             "媒介変数表示の曲面"
         );
         assert_eq!(compile_with("(t_1, t_2, 0, t_1 t_2)", &ps, &sp).unwrap().param_vars(), vec!["t1", "t2"]);
-        assert!(compile_with("(t_1, t_2, t_3, 0)", &ps, &sp).err().unwrap().contains("3つ以上"));
+        assert_eq!(compile_with("(t_1, t_2, t_3, 0)", &ps, &sp).unwrap().kind_label(), "媒介変数表示の立体");
+        assert!(compile_with("(t_1, t_2, t_3, t_4)", &ps, &sp).err().unwrap().contains("3つまで"));
         assert!(compile_with("(1, 2, 3, 4, 5)", &ps, &sp).err().unwrap().contains("次元を 5"));
         // 5次元目は w₂
         let sp5 = Space::basic(5, [0, 3, 4], vec![0.5; 5]);
@@ -765,7 +814,12 @@ mod tests {
         let p = compile_with("(cos t, sin t, a)", &ps, &sp).unwrap();
         assert_eq!(p.kind_label(), "媒介変数表示の曲面");
         assert_eq!(p.param_vars(), vec!["t", "a"]);
-        assert!(compile_with("(u, v, a)", &ps, &sp).err().unwrap().contains("まだ"));
+        // 曲面を範囲で重ねると立体
+        let p = compile_with("(u, v, a)", &ps, &sp).unwrap();
+        assert_eq!(p.kind_label(), "媒介変数表示の立体");
+        assert_eq!(p.param_vars(), vec!["u", "v", "a"]);
+        sp.param_ranges.push(("b".into(), 0.0, 1.0));
+        assert!(compile_with("(u, v, a b)", &ps, &sp).err().unwrap().contains("3つまで"));
     }
 
     #[test]
@@ -876,8 +930,20 @@ mod tests {
         let mut o = [C::new(0.0, 0.0)];
         sets[1][1].eval_batch(&[&[0.0]], &mut o);
         assert_eq!(o[0], C::new(6.0, 0.0));
-        // 媒介変数表示の外では使えない
-        assert!(compile("z = [1, 2] x").is_err());
+        // 陽関数・陰関数でも使える: 要素の数だけ図形ができる
+        match compile("z = [1, 2] x").unwrap() {
+            Plot::Multi(ps) => {
+                assert_eq!(ps.len(), 2);
+                assert!(ps.iter().all(|p| p.kind_label() == "z = f(x, y)"));
+            }
+            _ => panic!(),
+        }
+        let p = compile("x^2 + y^2 + z^2 = [1, 4, 9]").unwrap();
+        assert_eq!(p.kind_label(), "陰関数 × 3");
+        // 2つのリストは組み合わせ（2 × 2 = 4 個）
+        assert_eq!(compile("z = [1, 2] x + [0, 1]").unwrap().kind_label(), "z = f(x, y) × 4");
+        // パラメータの値には使えない
+        assert!(compile("a = [1, 2]").is_err());
         assert!(compile_with("(t, [[1, 2], 3], 0)", &ps, &Space::standard()).is_err());
     }
 

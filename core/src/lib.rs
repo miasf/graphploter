@@ -32,6 +32,12 @@ pub struct MeshResult {
     shape: Option<mesh::NdShape>,
     /// 回転した陽関数なら、式が使っている名前（回転が条件を満たすか確かめるため）
     explicit_used: Option<Vec<String>>,
+    /// 陰関数・範囲で重ねた立体なら、その中身（切り口のふたを作るため。リストなら複数）
+    field: Option<(Vec<mesh::Field>, mesh::Domain)>,
+    /// 媒介変数表示の立体（閉じた面）なら true。切り口のふたは描画側で作る
+    solid: bool,
+    /// 2D 表示で作ったもの（射影し直すときも平らにする）
+    flat: bool,
 }
 
 #[wasm_bindgen]
@@ -87,12 +93,27 @@ impl MeshResult {
         let inner = self.shape.take()?;
         Some(Shape {
             inner,
+            flat: self.flat,
             explicit_used: self.explicit_used.clone(),
             kind: self.kind.clone(),
             params: self.params.clone(),
             curve: self.curve,
             used_params: self.used_params.clone(),
         })
+    }
+    /// 媒介変数表示の立体（閉じた面で、外向きにそろっている）なら true
+    #[wasm_bindgen(getter)]
+    pub fn solid(&self) -> bool {
+        self.solid
+    }
+    /// 陰関数・範囲で重ねた立体なら、切り口のふたを作るための中身を取り出す（取り出せるのは1回だけ）
+    pub fn take_field(&mut self) -> Option<CapSource> {
+        self.field.take().map(|(inner, dom)| CapSource { inner, dom })
+    }
+    /// 複素数の色分け: 頂点ごとの (Re w / |w|, Im w / |w|, log₂|w|)（Float32Array、空なら単色）
+    #[wasm_bindgen(getter)]
+    pub fn complex_values(&self) -> Vec<f32> {
+        self.inner.complex.clone()
     }
     /// 三角形の頂点番号（Uint32Array）
     #[wasm_bindgen(getter)]
@@ -155,6 +176,10 @@ pub fn last_used_params() -> String {
 /// - `samples`: 範囲を何等分して重ねるか
 /// - `rotation`: 回転角（ラジアン、座標の組 (0,1), (0,2), …, (1,2), … の順）、`center`: 回転の中心
 /// - `perspective`: 4次元の遠近法の視点までの距離（0 なら遠近法なし）。射影で描く図形（媒介変数表示・回した陽関数）だけに効く
+/// - `complex_mode`: 陽関数の複素数の色分け（0: しない, 1: 高さ |f|, 2: 高さ Re f, 3: 高さ Im f。色は偏角）
+/// - `walls`: 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか
+/// - `flat`: 2D 表示。縦の軸の座標を 0 にして、横・奥の平面に描く。
+///   縦の座標 = f(横, 奥) は平面の塗り分け、陰関数・ほかの陽関数は曲線、範囲で重ねた立体は塗った領域になる
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -176,8 +201,12 @@ pub fn plot(
     rotation: &[f64],
     center: &[f64],
     perspective: f64,
+    complex_mode: u32,
+    walls: bool,
+    flat: bool,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
+    let complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
     if domain.len() != 6
         || axes.len() != 3
@@ -221,81 +250,51 @@ pub fn plot(
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
-    // 媒介変数の範囲（範囲で重ねるパラメータならその範囲。指定が無ければ 0〜2π）
+    // 媒介変数の範囲（範囲で重ねるパラメータならスライダーの範囲。指定が無ければ 0〜2π）
     let range = |name: &str| {
-        range_of
+        space
+            .param_ranges
             .iter()
-            .chain(space.param_ranges.iter())
+            .chain(range_of.iter())
             .find(|(n, _, _)| n == name)
             .map(|(_, a, b)| (*a, *b))
             .unwrap_or((0.0, std::f64::consts::TAU))
     };
-    let inner = match &plot {
-        equation::Plot::Explicit { rotated: true, .. } => mesh::Mesh::default(), // 下で作る
-        equation::Plot::Explicit { axis, prog, .. } => {
-            mesh::explicit_surface(prog, dom, resolution.clamp(2, 1000) as usize, *axis)
-        }
-        equation::Plot::Implicit { prog } => {
-            mesh::implicit_surface(prog, dom, implicit_resolution.clamp(2, 300) as usize)
-        }
-        equation::Plot::Solid { prog, ranges, .. } => mesh::implicit_solid(
-            prog,
-            dom,
-            implicit_resolution.clamp(2, 300) as usize,
-            ranges,
-            space.samples,
-        ),
-        equation::Plot::Surface { .. } | equation::Plot::Curve { .. } => mesh::Mesh::default(), // 下で作る
-        equation::Plot::Param { .. } => mesh::Mesh::default(),
+    let ctx = Ctx {
+        space: &space,
+        dom,
+        size,
+        resolution: resolution.clamp(2, 1000) as usize,
+        implicit_resolution: implicit_resolution.clamp(2, 300) as usize,
+        complex_mode,
+        walls,
+        flat,
+        range: &range,
+        view: space.view(perspective),
     };
-    // 媒介変数表示: n 次元の点を計算してから、回転・射影する
-    let shape = match &plot {
-        equation::Plot::Surface { sets, vars } => Some(mesh::parametric_surface_nd(
-            sets,
-            range(&vars[0]),
-            range(&vars[1]),
-            resolution.clamp(2, 1000) as usize,
-        )),
-        equation::Plot::Curve { sets, vars } => {
-            Some(mesh::parametric_curve_nd(sets, range(&vars[0]), 400, size * 2e-4))
+    let built = build(&plot, &ctx).map_err(|e| JsError::new(&e))?;
+    let inner = match &built.shape {
+        Some(sh) => {
+            let mut m = mesh::project(sh, &ctx.view, dom);
+            if flat {
+                mesh::flatten(&mut m, built.curve);
+            }
+            m
         }
-        // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
-        // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）
-        equation::Plot::Explicit { axis, prog, rotated: true, .. } => {
-            let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
-            let rho = (0..3)
-                .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            let (ua, va) = equation::others(*axis);
-            Some(mesh::explicit_nd(
-                prog,
-                *axis,
-                space.axes,
-                &space.slice,
-                (c[ua] - rho, c[ua] + rho),
-                (c[va] - rho, c[va] + rho),
-                resolution.clamp(2, 1000) as usize,
-            ))
-        }
-        _ => None,
+        None => built.inner,
     };
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
-    let explicit_used = match &plot {
-        equation::Plot::Explicit { rotated: true, .. } => Some(plot.used_params()),
-        _ => None,
-    };
-    let inner = match &shape {
-        Some(sh) => mesh::project(sh, &space.view(perspective), dom),
-        None => inner,
-    };
+    let explicit_used = (built.shape.is_some() && built.rotated_explicit).then(|| plot.used_params());
     Ok(MeshResult {
         inner,
-        shape,
+        flat,
+        solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
+        shape: built.shape,
+        field: (!built.fields.is_empty()).then_some((built.fields, dom)),
         explicit_used,
-        kind: plot.kind_label(),
+        kind: built.kind,
         params: plot.param_vars(),
-        curve: matches!(plot, equation::Plot::Curve { .. }),
+        curve: built.curve,
         used_params: plot.used_params(),
         param: match &plot {
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
@@ -304,10 +303,186 @@ pub fn plot(
     })
 }
 
+/// 図形を作るのに使う設定
+struct Ctx<'a> {
+    space: &'a equation::Space,
+    dom: mesh::Domain,
+    /// 表示範囲の対角線の長さ
+    size: f64,
+    resolution: usize,
+    implicit_resolution: usize,
+    complex_mode: mesh::ComplexMode,
+    walls: bool,
+    /// 2D 表示（[`plot`] の `flat` を参照）
+    flat: bool,
+    range: &'a dyn Fn(&str) -> (f64, f64),
+    /// 回転・射影（4次元の遠近法を含む）
+    view: mesh::View,
+}
+
+/// 作った図形。媒介変数表示などは、回転・射影する前の n 次元の点（`shape`）で持つ
+#[derive(Default)]
+struct Built {
+    inner: mesh::Mesh,
+    shape: Option<mesh::NdShape>,
+    /// 陰関数・範囲で重ねた立体の中身（切り口のふた用）
+    fields: Vec<mesh::Field>,
+    curve: bool,
+    kind: String,
+    /// 回転した陽関数を点で計算したもの（表示する軸などが変わると使い回せない）
+    rotated_explicit: bool,
+}
+
+/// 式の種類ごとに図形を作る。リストで複数の図形になったもの（[`equation::Plot::Multi`]）は、まとめて1つにする
+fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
+    use equation::Plot as P;
+    if let P::Multi(ps) = plot {
+        let parts = ps.iter().map(|p| build(p, ctx)).collect::<Result<Vec<_>, _>>()?;
+        let curve = parts.first().is_some_and(|b| b.curve);
+        if parts.iter().any(|b| b.curve != curve) {
+            return Err("リストで、曲線と曲面が混ざる式はまとめて描けません".into());
+        }
+        let kind = format!("{} × {}", parts.first().map_or(String::new(), |b| b.kind.clone()), parts.len());
+        let rotated_explicit = parts.iter().any(|b| b.rotated_explicit);
+        let fields = parts.iter().flat_map(|b| b.fields.iter().cloned()).collect();
+        // 全部が n 次元の点なら、点のままつなげる（回転だけ変わったとき使い回せる）
+        if parts.iter().all(|b| b.shape.is_some()) {
+            let shapes: Vec<mesh::NdShape> = parts.into_iter().filter_map(|b| b.shape).collect();
+            if let Some(shape) = mesh::merge_shapes(shapes.clone()) {
+                return Ok(Built { shape: Some(shape), fields, curve, kind, rotated_explicit, ..Default::default() });
+            }
+            // つなげられない（点の並べ方が違う）ときは、射影してからつなげる
+            let meshes = shapes
+                .iter()
+                .map(|sh| {
+                    let mut m = mesh::project(sh, &ctx.view, ctx.dom);
+                    if ctx.flat {
+                        mesh::flatten(&mut m, curve);
+                    }
+                    m
+                })
+                .collect();
+            return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
+        }
+        let meshes = parts
+            .into_iter()
+            .map(|b| match &b.shape {
+                Some(sh) => {
+                    let mut m = mesh::project(sh, &ctx.view, ctx.dom);
+                    if ctx.flat {
+                        mesh::flatten(&mut m, curve);
+                    }
+                    m
+                }
+                None => b.inner,
+            })
+            .collect();
+        return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
+    }
+    if ctx.flat {
+        return Ok(build_2d(plot, ctx));
+    }
+    let (space, dom) = (ctx.space, ctx.dom);
+    let mut b = Built { kind: plot.kind_label(), curve: matches!(plot, P::Curve { .. }), ..Default::default() };
+    match plot {
+        // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
+        // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）。
+        // 複素数の色分けをするときは回さない形で描く
+        P::Explicit { axis, prog, rotated: true, .. } if ctx.complex_mode == mesh::ComplexMode::Off => {
+            let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
+            let rho = (0..3)
+                .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let (ua, va) = equation::others(*axis);
+            b.shape = Some(mesh::explicit_nd(
+                prog,
+                *axis,
+                space.axes,
+                &space.slice,
+                (c[ua] - rho, c[ua] + rho),
+                (c[va] - rho, c[va] + rho),
+                ctx.resolution,
+            ));
+            b.rotated_explicit = true;
+        }
+        P::Explicit { axis, prog, .. } => {
+            b.inner = mesh::explicit_surface_full(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls);
+        }
+        P::Implicit { prog } => {
+            b.inner = mesh::implicit_surface(prog, dom, ctx.implicit_resolution);
+            b.fields.push(mesh::Field::new(prog, &[], 0, dom));
+        }
+        P::Solid { prog, ranges, .. } => {
+            b.inner = mesh::implicit_solid(prog, dom, ctx.implicit_resolution, ranges, space.samples);
+            b.fields.push(mesh::Field::new(prog, ranges, space.samples, dom));
+        }
+        // 媒介変数表示: n 次元の点を計算してから、回転・射影する
+        P::Surface { sets, vars } => {
+            b.shape = Some(mesh::parametric_surface_nd(sets, (ctx.range)(&vars[0]), (ctx.range)(&vars[1]), ctx.resolution));
+        }
+        // 立体は面が6枚になるので、1枚あたりを少し粗くする
+        P::Volume { sets, vars } => {
+            let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
+            b.shape = Some(mesh::parametric_solid_nd(sets, r, (ctx.resolution * 2 / 3).max(2)));
+        }
+        P::Curve { sets, vars } => {
+            b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
+        }
+        P::Param { .. } | P::Multi(_) => {}
+    }
+    Ok(b)
+}
+
+/// 2D 表示の図形を作る（[`plot`] の `flat` を参照）
+fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Built {
+    use equation::Plot as P;
+    let (space, dom) = (ctx.space, ctx.dom);
+    // 平面の曲線は、立体の格子よりずっと細かくしても軽い
+    let res2 = (ctx.implicit_resolution * 4).clamp(8, 1200);
+    let mut b = Built { kind: plot.kind_label(), ..Default::default() };
+    match plot {
+        P::Explicit { axis: 2, prog, names, .. } => {
+            b.kind = format!("{} の値で塗り分け", names[2]);
+            b.inner = mesh::flat_map(prog, dom, ctx.resolution, ctx.complex_mode);
+        }
+        P::Explicit { axis, prog, names, .. } => {
+            b.curve = true;
+            let other = if *axis == 0 { &names[1] } else { &names[0] };
+            b.kind = format!("{} = f({})", names[*axis], other);
+            b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
+        }
+        P::Implicit { prog } => {
+            b.curve = true;
+            b.kind = "陰関数の曲線".into();
+            b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+        }
+        P::Solid { prog, ranges, .. } => {
+            b.kind = "範囲で重ねた領域".into();
+            b.inner = mesh::Field::new(prog, ranges, space.samples, dom).cap(dom, 2, 0.0, true, res2 / 2);
+        }
+        P::Surface { sets, vars } => {
+            b.shape = Some(mesh::parametric_surface_nd(sets, (ctx.range)(&vars[0]), (ctx.range)(&vars[1]), ctx.resolution));
+        }
+        P::Volume { sets, vars } => {
+            let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
+            b.shape = Some(mesh::parametric_solid_nd(sets, r, (ctx.resolution * 2 / 3).max(2)));
+        }
+        P::Curve { sets, vars } => {
+            b.curve = true;
+            b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
+        }
+        P::Param { .. } | P::Multi(_) => {}
+    }
+    b
+}
+
 /// 媒介変数表示の、回転・射影する前の形（n 次元の点）。Worker が式ごとに持っておく
 #[wasm_bindgen]
 pub struct Shape {
     inner: mesh::NdShape,
+    /// 2D 表示（射影した後で縦の座標を 0 にする）
+    flat: bool,
     explicit_used: Option<Vec<String>>,
     kind: String,
     params: Vec<String>,
@@ -350,8 +525,15 @@ impl Shape {
             }
         }
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
+        let mut inner = mesh::project(&self.inner, &space.view(perspective), dom);
+        if self.flat {
+            mesh::flatten(&mut inner, self.curve);
+        }
         Ok(MeshResult {
-            inner: mesh::project(&self.inner, &space.view(perspective), dom),
+            inner,
+            flat: self.flat,
+            solid: self.inner.solid && !self.flat,
+            field: None,
             shape: None,
             explicit_used: None,
             kind: self.kind.clone(),
@@ -359,6 +541,43 @@ impl Shape {
             curve: self.curve,
             used_params: self.used_params.clone(),
             param: None,
+        })
+    }
+}
+
+/// 陰関数・範囲で重ねた立体の中身。切り口の位置だけが変わったときは、これで切り口のふただけを作り直す
+#[wasm_bindgen]
+pub struct CapSource {
+    inner: Vec<mesh::Field>,
+    dom: mesh::Domain,
+}
+
+#[wasm_bindgen]
+impl CapSource {
+    /// 平面「画面の `axis` 番目（0: 横, 1: 奥, 2: 縦）の座標 = `pos`」での切り口のふた。
+    /// `keep_below` なら座標が `pos` 以下の側を残す（ふたは反対側を向く）。`n` は格子の1辺のマス数
+    pub fn cap(&self, axis: u32, pos: f64, keep_below: bool, n: u32) -> Result<MeshResult, JsError> {
+        if axis > 2 {
+            return Err(JsError::new("内部エラー: 切り口の軸の番号が違います"));
+        }
+        Ok(MeshResult {
+            inner: mesh::merge(
+                self.inner
+                    .iter()
+                    .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
+                    .collect(),
+                false,
+            ),
+            kind: String::new(),
+            params: Vec::new(),
+            curve: false,
+            used_params: Vec::new(),
+            param: None,
+            shape: None,
+            explicit_used: None,
+            field: None,
+            solid: false,
+            flat: false,
         })
     }
 }
