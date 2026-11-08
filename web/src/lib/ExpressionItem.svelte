@@ -90,7 +90,10 @@
   /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
   const isCurve = $derived(item.params.length === 1)
-  const isSurface = $derived(item.params.length === 2)
+  /** 媒介変数表示の曲面・立体（格子線を媒介変数に沿って引く） */
+  const isSurface = $derived(item.params.length === 2 || item.params.length === 3)
+  /** 媒介変数ごとの格子線の分割数の設定の名前（立体なら3つ目は w） */
+  const divAxes = $derived(item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const))
 
   // 格子線の方向（grid.x, grid.y, grid.z は、画面の横・奥・縦の軸の方向）
   const gridAxes = $derived([
@@ -256,9 +259,9 @@
           </label>
           <div class="sliders" class:disabled={!item.grid.enabled}>
             {#if isSurface}
-              <!-- 媒介変数表示の曲面: 2つの媒介変数（u, v など）の範囲を何等分するか -->
-              {#each ['u', 'v'] as const as axis, n (axis)}
-                {@const k = divIndex(item.grid[axis])}
+              <!-- 媒介変数表示の曲面・立体: 媒介変数（u, v など）の範囲を何等分するか -->
+              {#each divAxes as axis, n (axis)}
+                {@const k = divIndex(item.grid[axis] ?? item.grid.v)}
                 <span class="label">{prettyName(item.params[n])} 方向</span>
                 <input
                   type="range"
@@ -272,7 +275,7 @@
                 <span class="value">{k === 0 ? 'なし' : `${DIVISIONS[k]} 等分`}</span>
               {/each}
             {/if}
-            {#each isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
+            {#each item.params.length === 3 ? [] : isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
               {@const options = spacingOptions(ranges[axis])}
               {@const index = spacingToIndex(item.grid[axis], options)}
               <span class="label">{label}</span>

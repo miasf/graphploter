@@ -347,7 +347,13 @@ pub struct NdShape {
     /// 曲面なら、格子の1辺の点の数 m と、各点の媒介変数 (u − u₀, v − v₀)。
     /// 曲面が何枚あってもよい（m × m 個ずつの点が続けて並ぶ）
     pub grid: Option<(usize, Vec<f32>)>,
+    /// 媒介変数表示の立体なら true。曲面は6枚ずつで1つの立体（媒介変数の直方体の面）になっていて、
+    /// `grid` には点ごとに3つの媒介変数の値 (u − u₀, v − v₀, t − t₀) が入る（その面で固定した媒介変数は [`NO_GRID`]）
+    pub solid: bool,
 }
+
+/// 格子線を引かない成分の印（シェーダーはこれより小さい値の成分には線を引かない）
+pub const NO_GRID: f32 = -1e30;
 
 /// 各成分をまとめて計算し、n 次元の点を並べたもの（点ごとに d 個）にする。
 /// どれかの成分が実数にならない点は NaN
@@ -394,7 +400,49 @@ pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64)
         points.extend(eval_nd(progs, &[&us, &vs], m * m));
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)) }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false }
+}
+
+/// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
+///
+/// 面の向きは、写像がそのまま（向きを変えない）なら外向きになるように並べる。
+/// 媒介変数 k を固定した面では、残りの2つを (k+1, k+2)（3 で割った余り）の順に動かすと、
+/// ∂p/∂a × ∂p/∂b が +k の向きになる。最小値の側の面は外向きが −k なので、2つの順を入れ替える。
+/// 射影した後の向きは [`project`] で立体ごとに確かめて、裏返っていれば直す。
+pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) -> NdShape {
+    let n = n.max(2);
+    let m = n + 1;
+    let at = |k: usize, i: usize| r[k].0 + (r[k].1 - r[k].0) * i as f64 / n as f64;
+    // 6つの面の媒介変数の値と、格子線用の値
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    let mut grid1 = Vec::with_capacity(6 * m * m * 3);
+    for k in 0..3 {
+        for side in [0, 1] {
+            let (a, b) = if side == 1 { ((k + 1) % 3, (k + 2) % 3) } else { ((k + 2) % 3, (k + 1) % 3) };
+            let fixed = if side == 1 { r[k].1 } else { r[k].0 };
+            for j in 0..m {
+                for i in 0..m {
+                    let mut p = [0.0; 3];
+                    p[k] = fixed;
+                    p[a] = at(a, i);
+                    p[b] = at(b, j);
+                    for c in 0..3 {
+                        cols[c].push(p[c]);
+                        grid1.push(if c == k { NO_GRID } else { (p[c] - r[c].0) as f32 });
+                    }
+                }
+            }
+        }
+    }
+    let dims = sets.first().map_or(0, |p| p.len());
+    let count = 6 * m * m;
+    let mut points = Vec::with_capacity(sets.len() * count * dims);
+    let mut grid = Vec::with_capacity(sets.len() * grid1.len());
+    for progs in sets {
+        points.extend(eval_nd(progs, &[&cols[0], &cols[1], &cols[2]], count));
+        grid.extend_from_slice(&grid1);
+    }
+    NdShape { dims, points, grid: Some((m, grid)), solid: true }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -440,7 +488,7 @@ pub fn explicit_nd(
         p[axes[axis]] = as_real(vals[k]);
         points.extend_from_slice(&p);
     }
-    NdShape { dims: d, points, grid: Some((m, grid)) }
+    NdShape { dims: d, points, grid: Some((m, grid)), solid: false }
 }
 
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
@@ -457,7 +505,7 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         }
         points.extend(curve_nd(progs, t, n, tol));
     }
-    NdShape { dims, points, grid: None }
+    NdShape { dims, points, grid: None, solid: false }
 }
 
 /// 1本の曲線の点（適応サンプリング）
@@ -597,33 +645,63 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     };
     let m = *m;
     let n = m - 1;
+    let gd = if shape.solid { 3 } else { 2 };
     let mut index_of = vec![NONE; count];
     let mut mesh = Mesh::default();
     for (k, slot) in index_of.iter_mut().enumerate() {
         let p = to3(k);
         if ok(&p) {
             *slot = mesh.push_vertex(p);
-            mesh.grid_coords.extend_from_slice(&[grid[2 * k], grid[2 * k + 1], p[2] as f32]);
+            let g = &grid[gd * k..gd * k + gd];
+            mesh.grid_coords.extend_from_slice(&[g[0], g[1], if shape.solid { g[2] } else { p[2] as f32 }]);
         }
     }
-    // 曲面ごとに m × m 個の点が並んでいる
-    for base in (0..count).step_by(m * m) {
-        for j in 0..n {
-            for i in 0..n {
-                let a = index_of[base + j * m + i];
-                let b = index_of[base + j * m + i + 1];
-                let c = index_of[base + (j + 1) * m + i];
-                let e = index_of[base + (j + 1) * m + i + 1];
-                for tri in [[a, b, e], [a, e, c]] {
-                    if !tri.contains(&NONE) {
-                        mesh.indices.extend_from_slice(&tri);
+    // 曲面ごとに m × m 個の点が並んでいる。立体は6枚ずつ
+    let per = if shape.solid { 6 * m * m } else { m * m };
+    for start in (0..count).step_by(per) {
+        let first = mesh.indices.len();
+        for base in (start..start + per).step_by(m * m) {
+            for j in 0..n {
+                for i in 0..n {
+                    let a = index_of[base + j * m + i];
+                    let b = index_of[base + j * m + i + 1];
+                    let c = index_of[base + (j + 1) * m + i];
+                    let e = index_of[base + (j + 1) * m + i + 1];
+                    for tri in [[a, b, e], [a, e, c]] {
+                        if !tri.contains(&NONE) {
+                            mesh.indices.extend_from_slice(&tri);
+                        }
                     }
                 }
+            }
+        }
+        // 立体: 面で囲まれた体積（向き付き）が負なら裏返っている（写像や射影が向きを変えた）ので、三角形の向きを直す
+        if shape.solid && signed_volume(&mesh, first) < 0.0 {
+            for t in mesh.indices[first..].chunks_exact_mut(3) {
+                t.swap(1, 2);
             }
         }
     }
     compute_normals(&mut mesh);
     mesh
+}
+
+/// `first` 番目以降の三角形で囲まれた体積（向き付き。面が外向きなら正）。Σ a · (b × c) / 6
+fn signed_volume(mesh: &Mesh, first: usize) -> f64 {
+    let p = &mesh.positions;
+    let v = |k: u32| {
+        let k = k as usize * 3;
+        [p[k] as f64, p[k + 1] as f64, p[k + 2] as f64]
+    };
+    // 原点の代わりに最初の頂点を基準にする（桁落ちを防ぐ）
+    let Some(&k0) = mesh.indices.get(first) else { return 0.0 };
+    let o = v(k0);
+    let mut sum = 0.0;
+    for t in mesh.indices[first..].chunks_exact(3) {
+        let [a, b, c] = [v(t[0]), v(t[1]), v(t[2])].map(|q| [q[0] - o[0], q[1] - o[1], q[2] - o[2]]);
+        sum += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+    sum / 6.0
 }
 
 /// 回転なしで、最初の3つの成分をそのまま画面の軸にする射影
@@ -746,6 +824,34 @@ mod tests {
         assert_eq!(m.grid_coords.len(), m.positions.len());
         // 円柱の法線は横向き（z 成分がほぼ 0）
         assert!(m.normals.chunks_exact(3).all(|n| n[2].abs() < 1e-3));
+    }
+
+    #[test]
+    fn param_solid_ball() {
+        // 球の極座標 (r sin v cos u, r sin v sin u, r cos v)、0 ≤ r ≤ 1 は半径 1 の球（立体）
+        let vars = ["u", "v", "t"];
+        let p = progs3(["t sin(v) cos(u)", "t sin(v) sin(u)", "t cos(v)"], &vars);
+        let pi = std::f64::consts::PI;
+        let shape = parametric_solid_nd(&[p], [(0.0, 2.0 * pi), (0.0, pi), (0.0, 1.0)], 24);
+        let m = project(&shape, &View::identity(3), Domain { lo: [-2.0; 3], hi: [2.0; 3] });
+        assert_eq!(m.grid_coords.len(), m.positions.len());
+        // 体積はおよそ 4π/3（多面体で近似するので少し小さい）、外側の面（t = 1）の法線は外向き
+        assert!((signed_volume(&m, 0) - 4.0 * pi / 3.0).abs() < 0.1, "{}", signed_volume(&m, 0));
+        let mut outer = 0;
+        for ((q, nv), g) in m.positions.chunks_exact(3).zip(m.normals.chunks_exact(3)).zip(m.grid_coords.chunks_exact(3)) {
+            let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            // t を固定した面（格子線用の t 成分が NO_GRID）のうち、t = 1 の面
+            if g[2] == NO_GRID && len > 0.5 && q[2].abs() < 0.9 {
+                outer += 1;
+                assert!(q[0] * nv[0] + q[1] * nv[1] + q[2] * nv[2] > 0.0);
+            }
+        }
+        assert!(outer > 0);
+        // 向きを変える写像 (−u, v, t) でも、面は外向きに直る
+        let p = progs3(["-u", "v", "t"], &vars);
+        let shape = parametric_solid_nd(&[p], [(0.0, 1.0); 3], 4);
+        let m = project(&shape, &View::identity(3), dom());
+        assert!((signed_volume(&m, 0) - 1.0).abs() < 1e-6);
     }
 
     #[test]

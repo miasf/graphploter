@@ -115,7 +115,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
     const span = (k: number) => {
       const v = vars[k]
       if (v === undefined) return 2 * Math.PI
-      const rg = v in ranges ? rangeValues[rangeNames.indexOf(v)] : (stacks[v] ?? [0, 2 * Math.PI])
+      const rg = stacks[v] ?? (v in ranges ? rangeValues[rangeNames.indexOf(v)] : [0, 2 * Math.PI])
       return rg[1] - rg[0]
     }
     const mesh = {
@@ -125,7 +125,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest>) => {
       gridCoords: r.grid_coords,
       curve: r.curve,
       params: vars,
-      paramSpan: { u: span(0), v: span(1) },
+      paramSpan: vars.length === 3 ? { u: span(0), v: span(1), w: span(2) } : { u: span(0), v: span(1) },
     }
     const kind = r.kind
     const usedParams = [...new Set([...r.used_params.split(',').filter((s) => s !== ''), ...rangeUsed])]

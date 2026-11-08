@@ -5,6 +5,7 @@
 // そのため、どんな形の曲面にも同じように線が引ける。
 // - 陽関数・陰関数: gridCoord = (x, y, z)。z 方向の線は z = f(x, y) では等高線になる
 // - 媒介変数表示の曲面: gridCoord = (u − u0, v − v0, z)。曲面に沿った u, v の格子になる
+// - 媒介変数表示の立体: gridCoord = (u − u0, v − v0, t − t0)。その面で固定した媒介変数の成分は −1e30（線を引かない）
 
 import * as THREE from 'three'
 
@@ -41,7 +42,7 @@ uniform float uFillOpacity;
 
 // 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（太さ uGridWidth 画素）
 float gridLine(float coord, float spacing) {
-  if (spacing <= 0.0) return 0.0;
+  if (spacing <= 0.0 || coord < -1e29) return 0.0;
   float c = coord / spacing;
   float w = fwidth(c);                      // 1画素で c がどれだけ変わるか
   float d = abs(fract(c - 0.5) - 0.5) / w;  // 一番近い線までの距離（画素）

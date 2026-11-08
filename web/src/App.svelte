@@ -24,7 +24,7 @@
       color: PALETTE[(id - 1) % PALETTE.length],
       visible: true,
       opacity: 1,
-      grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 24, width: 1 },
+      grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 24, w: 24, width: 1 },
       lineWidth: 3,
       showSettings: false,
       vertical: true,
@@ -405,7 +405,9 @@
     }
     item.params = res.mesh.params
     // 初めて使う媒介変数（t₁ など）の範囲の入力欄を用意する（計算エンジン側も 0〜2π を使っている）
-    for (const n of item.params) if (!(n in item.ranges)) item.ranges[n] = ['0', '2\\pi']
+    // 範囲で重ねるパラメータは、スライダーの範囲を使うので入力欄を作らない
+    const stacked = currentStacks()
+    for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
     viewer.setPlot(item.id, res.mesh, item)
     const size = res.mesh.curve

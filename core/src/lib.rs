@@ -221,11 +221,12 @@ pub fn plot(
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
-    // 媒介変数の範囲（範囲で重ねるパラメータならその範囲。指定が無ければ 0〜2π）
+    // 媒介変数の範囲（範囲で重ねるパラメータならスライダーの範囲。指定が無ければ 0〜2π）
     let range = |name: &str| {
-        range_of
+        space
+            .param_ranges
             .iter()
-            .chain(space.param_ranges.iter())
+            .chain(range_of.iter())
             .find(|(n, _, _)| n == name)
             .map(|(_, a, b)| (*a, *b))
             .unwrap_or((0.0, std::f64::consts::TAU))
@@ -245,7 +246,9 @@ pub fn plot(
             ranges,
             space.samples,
         ),
-        equation::Plot::Surface { .. } | equation::Plot::Curve { .. } => mesh::Mesh::default(), // 下で作る
+        equation::Plot::Surface { .. } | equation::Plot::Curve { .. } | equation::Plot::Volume { .. } => {
+            mesh::Mesh::default() // 下で作る
+        }
         equation::Plot::Param { .. } => mesh::Mesh::default(),
     };
     // 媒介変数表示: n 次元の点を計算してから、回転・射影する
@@ -255,6 +258,12 @@ pub fn plot(
             range(&vars[0]),
             range(&vars[1]),
             resolution.clamp(2, 1000) as usize,
+        )),
+        // 立体は面が6枚になるので、1枚あたりを少し粗くする
+        equation::Plot::Volume { sets, vars } => Some(mesh::parametric_solid_nd(
+            sets,
+            [range(&vars[0]), range(&vars[1]), range(&vars[2])],
+            (resolution * 2 / 3).clamp(2, 600) as usize,
         )),
         equation::Plot::Curve { sets, vars } => {
             Some(mesh::parametric_curve_nd(sets, range(&vars[0]), 400, size * 2e-4))

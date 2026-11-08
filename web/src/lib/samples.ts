@@ -80,6 +80,20 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         ],
       },
       {
+        label: '中身の詰まったトーラス（媒介変数3つの立体）',
+        items: [
+          {
+            latex:
+              '\\left(\\left(3+t\\cos v\\right)\\cos u,\\left(3+t\\cos v\\right)\\sin u,t\\sin v\\right)',
+            options: {
+              color: '#fa7e19',
+              ranges: { t: ['0', '1.5'], u: ['0', '\\frac{3\\pi}{2}'], v: TWO_PI },
+              grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 12, w: 3, width: 1 },
+            },
+          },
+        ],
+      },
+      {
         label: 'トーラス（媒介変数の曲面）',
         items: [
           {

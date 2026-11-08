@@ -20,6 +20,8 @@ export interface GridStyle {
   /** 媒介変数表示の曲面で、u, v の範囲をそれぞれ何等分する線を引くか（0 なら描かない） */
   u: number
   v: number
+  /** 媒介変数表示の立体で、3つ目の媒介変数の範囲を何等分するか（古い保存データには無い） */
+  w?: number
   /** 線の太さ（画素） */
   width: number
 }
@@ -37,6 +39,13 @@ export interface PlotStyle {
 
 /** 媒介変数の範囲。媒介変数の名前（t, u, v, t1, …）→ [最小, 最大]（入力欄の LaTeX のまま。2π などの式も書ける） */
 export type ParamRanges = Record<string, [string, string]>
+
+/** 媒介変数の範囲の長さ。u, v は1つ目・2つ目、w は3つ目（立体のときだけ） */
+export interface ParamSpan {
+  u: number
+  v: number
+  w?: number
+}
 
 /** 座標空間の設定（4次元以上のとき、どの座標を表示し、残りをどの値で固定するか） */
 export interface Space {
@@ -94,8 +103,8 @@ export interface PlotItem extends PlotStyle {
   ranges: ParamRanges
   /** 最後に描けたときの媒介変数の名前（範囲の入力欄を出すのに使う）。例: ['t'], ['u', 'v'] */
   params: string[]
-  /** 媒介変数 u, v の範囲の長さ（格子線の分割に使う） */
-  paramSpan: { u: number; v: number }
+  /** 媒介変数 u, v（立体なら3つ目の w も）の範囲の長さ（格子線の分割に使う） */
+  paramSpan: ParamSpan
   /** この行がパラメータの定義（a = 1 など）なら、その名前と値 */
   param?: { name: string } & ParamValue
   slider: SliderStyle
@@ -120,8 +129,8 @@ export interface MeshData {
   curve: boolean
   /** 媒介変数の名前 */
   params: string[]
-  /** 媒介変数 u, v の範囲の長さ */
-  paramSpan: { u: number; v: number }
+  /** 媒介変数の範囲の長さ */
+  paramSpan: ParamSpan
 }
 
 // ---- Web Worker とのやりとり ----

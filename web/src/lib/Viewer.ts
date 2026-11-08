@@ -8,7 +8,7 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
-import type { Domain, MeshData, PlotStyle } from './types'
+import type { Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
 /** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
 function niceStep(range: number, target = 8): number {
@@ -79,8 +79,8 @@ type PlotObject =
       kind: 'surface'
       group: THREE.Group // 表面用と裏面用の2つのメッシュ
       grid: GridUniforms
-      /** 媒介変数表示なら u, v の範囲の長さ（格子線を u, v に沿って引く） */
-      uvSpan: { u: number; v: number } | null
+      /** 媒介変数表示なら u, v（立体なら3つ目も）の範囲の長さ（格子線を媒介変数に沿って引く） */
+      uvSpan: ParamSpan | null
     }
   | { kind: 'curve'; line: LineSegments2 }
 
@@ -442,7 +442,7 @@ export class Viewer {
         const m = old.group.children[0] as THREE.Mesh
         m.geometry.dispose()
         m.geometry = this.surfaceGeometry(mesh)
-        old.uvSpan = mesh.params.length === 2 ? mesh.paramSpan : null
+        old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
       }
     } else {
       this.removePlot(id)
@@ -467,7 +467,7 @@ export class Viewer {
     const grid = createGridUniforms()
     const group = new THREE.Group()
     group.add(new THREE.Mesh(this.surfaceGeometry(mesh), createSurfaceMaterial(grid, this.clipPlanes)))
-    const uvSpan = mesh.params.length === 2 ? mesh.paramSpan : null
+    const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
     this.plots.set(id, { kind: 'surface', group, grid, uvSpan })
     this.scene.add(group)
   }
@@ -540,7 +540,9 @@ export class Viewer {
     if (p.uvSpan) {
       // 媒介変数表示: u, v の範囲をそれぞれ g.u, g.v 等分する線
       const div = (span: number, n: number) => (n > 0 ? span / n : 0)
-      p.grid.uGridSpacing.value.set(sp(div(p.uvSpan.u, g.u)), sp(div(p.uvSpan.v, g.v)), sp(g.z))
+      // 立体なら、3つ目の媒介変数の線を z の成分に入れている（等高線の代わり）
+      const third = p.uvSpan.w !== undefined ? div(p.uvSpan.w, g.w ?? g.v) : g.z
+      p.grid.uGridSpacing.value.set(sp(div(p.uvSpan.u, g.u)), sp(div(p.uvSpan.v, g.v)), sp(third))
     } else {
       p.grid.uGridSpacing.value.set(sp(g.x), sp(g.y), sp(g.z))
     }
