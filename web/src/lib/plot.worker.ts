@@ -54,7 +54,7 @@ const shapes = new Map<number, { key: string; shape: Shape }>()
  */
 function shapeKey(req: PlotRequest, view: boolean): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode]
   return JSON.stringify(view ? [...base, space.axes, space.slice, space.center] : base)
 }
 
@@ -138,6 +138,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         new Float64Array(space.rotation),
         new Float64Array(space.center),
         space.perspective,
+        ['off', 'abs', 're', 'im'].indexOf(req.complexMode),
       )
       forget(itemId)
       const shape = r.take_shape()
@@ -160,6 +161,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       normals: r.normals,
       indices: r.indices,
       gridCoords: r.grid_coords,
+      complexValues: r.complex_values,
       curve: r.curve,
       solid: r.solid,
       params: vars,
@@ -183,6 +185,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         res.mesh.normals.buffer,
         res.mesh.indices.buffer,
         res.mesh.gridCoords.buffer,
+        res.mesh.complexValues.buffer,
         ...capTransfer(res.cap),
       ]
     : []

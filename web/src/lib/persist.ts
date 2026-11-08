@@ -2,7 +2,7 @@
 // - ブラウザ（localStorage）に自動で保存し、次に開いたときに元に戻す
 // - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）
 
-import type { CutStyle, Domain, GridStyle, ParamRanges, SliderStyle, Space } from './types'
+import type { ComplexMode, CutStyle, Domain, GridStyle, ParamRanges, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
 export interface SavedItem {
@@ -15,6 +15,7 @@ export interface SavedItem {
   ranges: ParamRanges
   vertical: boolean
   slider: SliderStyle
+  complexMode?: ComplexMode
 }
 
 /** 保存する状態全体 */

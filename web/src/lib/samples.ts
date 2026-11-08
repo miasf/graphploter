@@ -118,6 +118,10 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '複素数・特殊関数',
     samples: [
       { label: '|Γ(x + iy)|', items: [{ latex: 'z=\\left|\\Gamma\\left(x+iy\\right)\\right|', options: { color: '#fa7e19' } }] },
+      {
+        label: 'Γ(x + iy) の色分け（高さ |Γ|、色は偏角）',
+        items: [{ latex: 'z=\\Gamma\\left(x+iy\\right)', options: { complexMode: 'abs' } }],
+      },
       { label: '|ζ(x + iy)|', items: [{ latex: 'z=\\left|\\zeta\\left(x+iy\\right)\\right|', options: { color: '#2d70b3' } }] },
       {
         label: 'ベッセル関数 J₀ の膜',

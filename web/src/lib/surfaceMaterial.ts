@@ -20,6 +20,8 @@ export interface GridUniforms {
   uGridWidth: { value: number }
   /** 面の不透明度（0 なら格子線だけが見える） */
   uFillOpacity: { value: number }
+  /** 1 なら複素数の偏角で色を付ける（頂点の complexValue を使う） */
+  uComplex: { value: number }
 }
 
 export function createGridUniforms(): GridUniforms {
@@ -29,11 +31,14 @@ export function createGridUniforms(): GridUniforms {
     uGridStrength: { value: 0.75 },
     uGridWidth: { value: 1 },
     uFillOpacity: { value: 1 },
+    uComplex: { value: 0 },
   }
 }
 
 const FRAGMENT_HEADER = /* glsl */ `
 varying vec3 vGridPos;
+varying vec3 vComplex;
+uniform float uComplex;
 uniform vec3 uGridSpacing;
 uniform vec3 uGridColor;
 uniform float uGridStrength;
@@ -59,6 +64,15 @@ float gridLine(float coord, float spacing) {
 
 const FRAGMENT_APPLY = /* glsl */ `
 {
+  if (uComplex > 0.5) {
+    // 複素数の色分け: 色相 = 偏角（0 で赤、π/2 で黄緑、π で水色、−π/2 で紫）、
+    // |w| が 2 倍になるごとに明るさが少しずつ変わる縞（大きさの等高線の代わり）
+    float hue = atan(vComplex.y, vComplex.x) / 6.28318530718;
+    vec3 rgb = clamp(abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+    rgb = mix(vec3(1.0), rgb, 0.85);
+    float band = fract(vComplex.z);
+    diffuseColor.rgb = rgb * (0.72 + 0.28 * band);
+  }
   // 裏面は暗くして、どちら側を見ているか分かるようにする（表と裏を1回で描けるので、メッシュが1つで済む）
   if (!gl_FrontFacing) diffuseColor.rgb *= 0.55;
   float g = max(max(gridLine(vGridPos.x, uGridSpacing.x),
@@ -83,11 +97,11 @@ export function createSurfaceMaterial(grid: GridUniforms, clippingPlanes: THREE.
   m.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, grid)
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec3 gridCoord;\nvarying vec3 vGridPos;')
       .replace(
-        '#include <begin_vertex>',
-        '#include <begin_vertex>\nvGridPos = gridCoord;',
+        '#include <common>',
+        '#include <common>\nattribute vec3 gridCoord;\nattribute vec3 complexValue;\nvarying vec3 vGridPos;\nvarying vec3 vComplex;',
       )
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGridPos = gridCoord;\nvComplex = complexValue;')
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)
       .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_APPLY)

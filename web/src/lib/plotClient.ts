@@ -3,6 +3,7 @@
 import type {
   CapRequest,
   CapResponse,
+  ComplexMode,
   CutRequest,
   Domain,
   ParamRanges,
@@ -52,6 +53,7 @@ export function requestPlot(
   space: Space,
   stacks: Record<string, [number, number]>,
   cut: CutRequest,
+  complexMode: ComplexMode = 'off',
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -76,6 +78,7 @@ export function requestPlot(
     },
     stacks: Object.fromEntries(Object.entries(stacks).map(([k, [a, b]]) => [k, [a, b]])),
     cut: cut && { ...cut },
+    complexMode,
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)

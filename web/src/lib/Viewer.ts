@@ -471,6 +471,7 @@ export class Viewer {
         m.geometry = this.surfaceGeometry(mesh)
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
         old.solid = mesh.solid
+        old.grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = m.geometry
       }
     } else {
@@ -541,6 +542,7 @@ export class Viewer {
     geo.setAttribute('position', pos)
     geo.setAttribute('normal', new THREE.BufferAttribute(cap.normals, 3))
     geo.setAttribute('gridCoord', pos)
+    geo.setAttribute('complexValue', pos)
     geo.setIndex(new THREE.BufferAttribute(cap.indices, 1))
     if (p.cap) {
       p.cap.geometry = geo
@@ -666,6 +668,8 @@ export class Viewer {
     geo.setAttribute('position', pos)
     geo.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3))
     geo.setAttribute('gridCoord', mesh.gridCoords.length > 0 ? new THREE.BufferAttribute(mesh.gridCoords, 3) : pos)
+    // 複素数の色分けをしないときも、シェーダーが読む属性は用意しておく（使わないので位置で代用）
+    geo.setAttribute('complexValue', mesh.complexValues.length > 0 ? new THREE.BufferAttribute(mesh.complexValues, 3) : pos)
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
     return geo
   }
@@ -676,6 +680,7 @@ export class Viewer {
     const group = new THREE.Group()
     group.add(new THREE.Mesh(this.surfaceGeometry(mesh), createSurfaceMaterial(grid, this.clipPlanes)))
     const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
+    grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
     this.plots.set(id, {
       kind: 'surface',
       group,

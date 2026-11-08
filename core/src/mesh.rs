@@ -30,6 +30,32 @@ pub struct Mesh {
     /// 格子線を引くための座標（頂点ごとに3つ）。空なら頂点座標 (x, y, z) を使う。
     /// 媒介変数表示の曲面では (u − u0, v − v0, z) を入れて、u, v に沿った格子線にする。
     pub grid_coords: Vec<f32>,
+    /// 複素数の色分けをするなら、頂点ごとの関数の値 w の (Re w / |w|, Im w / |w|, log₂|w|)。空なら単色
+    pub complex: Vec<f32>,
+}
+
+/// 複素数の値をとる陽関数の表し方。色は偏角 arg f で付け、高さは次のどれか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComplexMode {
+    /// 色分けしない（実数にならない点は描かない）
+    Off,
+    /// 高さ = |f|
+    Abs,
+    /// 高さ = Re f
+    Re,
+    /// 高さ = Im f
+    Im,
+}
+
+impl ComplexMode {
+    pub fn from_u32(k: u32) -> ComplexMode {
+        match k {
+            1 => ComplexMode::Abs,
+            2 => ComplexMode::Re,
+            3 => ComplexMode::Im,
+            _ => ComplexMode::Off,
+        }
+    }
 }
 
 impl Mesh {
@@ -52,6 +78,11 @@ const NONE: u32 = u32::MAX;
 /// `prog` の変数は残り2つの座標を x, y, z の順に並べたもの。
 /// 値が定義されない点（NaN・無限大）や、表示範囲から大きく外れた点は省く。
 pub fn explicit_surface(prog: &Program, dom: Domain, n: usize, axis: usize) -> Mesh {
+    explicit_surface_with(prog, dom, n, axis, ComplexMode::Off)
+}
+
+/// [`explicit_surface`] で、複素数の値を `mode` の高さと偏角の色で表すもの
+pub fn explicit_surface_with(prog: &Program, dom: Domain, n: usize, axis: usize, mode: ComplexMode) -> Mesh {
     let n = n.max(2);
     let m = n + 1; // 1辺の頂点数
     let (ua, va) = others(axis);
@@ -79,13 +110,24 @@ pub fn explicit_surface(prog: &Program, dom: Domain, n: usize, axis: usize) -> M
     let mut index_of = vec![NONE; m * m];
     let mut mesh = Mesh::default();
     for k in 0..m * m {
-        let w = as_real(vals[k]);
-        if w.is_finite() && w >= wlo && w <= whi {
+        let z = vals[k];
+        let w = match mode {
+            ComplexMode::Off => as_real(z),
+            ComplexMode::Abs => z.norm(),
+            ComplexMode::Re => z.re,
+            ComplexMode::Im => z.im,
+        };
+        if w.is_finite() && w >= wlo && w <= whi && z.re.is_finite() && z.im.is_finite() {
             let mut p = [0.0; 3];
             p[ua] = us[k];
             p[va] = vs[k];
             p[axis] = w;
             index_of[k] = mesh.push_vertex(p);
+            if mode != ComplexMode::Off {
+                let r = z.norm();
+                let (c, s) = if r > 0.0 { (z.re / r, z.im / r) } else { (0.0, 0.0) };
+                mesh.complex.extend_from_slice(&[c as f32, s as f32, r.log2().max(-1e6) as f32]);
+            }
         }
     }
 
@@ -880,6 +922,26 @@ mod tests {
         assert!((m.normals[1] - 1.0).abs() < 1e-6);
         let m = explicit_surface(&prog("0", &["y", "z"]), dom(), 4, 0);
         assert!((m.normals[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn complex_coloring() {
+        // f = x + iy: 高さ |f| は円錐、色は偏角。y < 0 でも描かれる（Off なら実数の y = 0 の所だけ）
+        let p = prog("x + i y", &["x", "y"]);
+        let m = explicit_surface_with(&p, dom(), 10, 2, ComplexMode::Abs);
+        assert_eq!(m.positions.len(), 121 * 3);
+        assert_eq!(m.complex.len(), m.positions.len());
+        for (q, c) in m.positions.chunks_exact(3).zip(m.complex.chunks_exact(3)) {
+            let r = (q[0] * q[0] + q[1] * q[1]).sqrt();
+            assert!((q[2] - r).abs() < 1e-5);
+            if r > 0.0 {
+                assert!((c[0] - q[0] / r).abs() < 1e-5 && (c[1] - q[1] / r).abs() < 1e-5);
+            }
+        }
+        assert!(explicit_surface(&p, dom(), 10, 2).indices.is_empty());
+        // 高さ = Im f = y
+        let m = explicit_surface_with(&p, dom(), 4, 2, ComplexMode::Im);
+        assert!(m.positions.chunks_exact(3).all(|q| (q[2] - q[1]).abs() < 1e-6));
     }
 
     #[test]

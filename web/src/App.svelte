@@ -10,6 +10,7 @@
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
   import type {
+    ComplexMode,
     CutRequest,
     CutStyle,
     Domain,
@@ -106,6 +107,7 @@
         opacity: it.opacity,
         grid: it.grid,
         lineWidth: it.lineWidth,
+        complexMode: it.complexMode,
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
@@ -382,6 +384,7 @@
       space,
       currentStacks(),
       cutRequest(),
+      item.complexMode ?? 'off',
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -429,12 +432,17 @@
     const stacked = currentStacks()
     for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
+    item.kind = res.kind
     viewer.setPlot(item.id, res.mesh, item)
     viewer.setCap(item.id, res.cap, item)
     const size = res.mesh.curve
       ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
     item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
+    // 陽関数の値がどこでも実数にならない（複素数の関数）なら、色分けで描けることを知らせる
+    if (!res.mesh.curve && res.mesh.indices.length === 0 && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
+      item.info += ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます'
+    }
   }
 
   function replotAll(delay = 200) {
@@ -534,6 +542,11 @@
   function setRange(item: PlotItem, name: string, side: 0 | 1, value: string) {
     item.ranges[name][side] = value
     schedule(item, 300)
+  }
+
+  function setComplexMode(item: PlotItem, mode: ComplexMode) {
+    item.complexMode = mode
+    schedule(item, 0)
   }
 
   function setGrid(item: PlotItem, grid: GridStyle) {
@@ -835,6 +848,7 @@
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
+            onComplexMode={(m) => setComplexMode(item, m)}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}
             onToggle={() => toggle(item)}

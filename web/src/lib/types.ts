@@ -26,6 +26,12 @@ export interface GridStyle {
   width: number
 }
 
+/**
+ * 複素数の値をとる陽関数の表し方（色は偏角 arg f）。
+ * off: 色分けしない（実数にならない点は描かない）/ abs: 高さ |f| / re: 高さ Re f / im: 高さ Im f
+ */
+export type ComplexMode = 'off' | 'abs' | 're' | 'im'
+
 /** 曲面の見た目 */
 export interface PlotStyle {
   color: string
@@ -116,6 +122,10 @@ export interface PlotItem extends PlotStyle {
   autofocus?: boolean
   /** 範囲で重ねた立体として描いたことがあるか（最初の1回だけ半透明にするため） */
   solidSeen?: boolean
+  /** 複素数の色分け（陽関数だけ。古い保存データには無い） */
+  complexMode?: ComplexMode
+  /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
+  kind?: string
 }
 
 /** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */
@@ -145,6 +155,8 @@ export interface MeshData {
   indices: Uint32Array
   /** 格子線用の座標（空なら positions を使う） */
   gridCoords: Float32Array
+  /** 複素数の色分け: 頂点ごとの (Re w / |w|, Im w / |w|, log₂|w|)。空なら単色 */
+  complexValues: Float32Array
   /** 曲線なら true（positions は点の列で、途切れる所に NaN） */
   curve: boolean
   /** 媒介変数表示の立体（閉じた面で外向き）なら true。切り口のふたは描画側で作る */
@@ -187,6 +199,8 @@ export interface PlotRequest {
   stacks: Record<string, [number, number]>
   /** 切り口（陰関数・範囲で重ねた立体のふたを作る） */
   cut: CutRequest
+  /** 陽関数の複素数の色分け */
+  complexMode: ComplexMode
 }
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */

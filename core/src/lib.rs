@@ -107,6 +107,11 @@ impl MeshResult {
     pub fn take_field(&mut self) -> Option<CapSource> {
         self.field.take().map(|(inner, dom)| CapSource { inner, dom })
     }
+    /// 複素数の色分け: 頂点ごとの (Re w / |w|, Im w / |w|, log₂|w|)（Float32Array、空なら単色）
+    #[wasm_bindgen(getter)]
+    pub fn complex_values(&self) -> Vec<f32> {
+        self.inner.complex.clone()
+    }
     /// 三角形の頂点番号（Uint32Array）
     #[wasm_bindgen(getter)]
     pub fn indices(&self) -> Vec<u32> {
@@ -168,6 +173,7 @@ pub fn last_used_params() -> String {
 /// - `samples`: 範囲を何等分して重ねるか
 /// - `rotation`: 回転角（ラジアン、座標の組 (0,1), (0,2), …, (1,2), … の順）、`center`: 回転の中心
 /// - `perspective`: 4次元の遠近法の視点までの距離（0 なら遠近法なし）。射影で描く図形（媒介変数表示・回した陽関数）だけに効く
+/// - `complex_mode`: 陽関数の複素数の色分け（0: しない, 1: 高さ |f|, 2: 高さ Re f, 3: 高さ Im f。色は偏角）
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -189,8 +195,10 @@ pub fn plot(
     rotation: &[f64],
     center: &[f64],
     perspective: f64,
+    complex_mode: u32,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
+    let complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
     if domain.len() != 6
         || axes.len() != 3
@@ -250,9 +258,12 @@ pub fn plot(
         _ => None,
     };
     let inner = match &plot {
-        equation::Plot::Explicit { rotated: true, .. } => mesh::Mesh::default(), // 下で作る
+        // 回転した陽関数は下で作る（複素数の色分けをするときは回さない形で描く）
+        equation::Plot::Explicit { rotated: true, .. } if complex_mode == mesh::ComplexMode::Off => {
+            mesh::Mesh::default()
+        }
         equation::Plot::Explicit { axis, prog, .. } => {
-            mesh::explicit_surface(prog, dom, resolution.clamp(2, 1000) as usize, *axis)
+            mesh::explicit_surface_with(prog, dom, resolution.clamp(2, 1000) as usize, *axis, complex_mode)
         }
         equation::Plot::Implicit { prog } => {
             mesh::implicit_surface(prog, dom, implicit_resolution.clamp(2, 300) as usize)
@@ -288,7 +299,7 @@ pub fn plot(
         }
         // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
         // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）
-        equation::Plot::Explicit { axis, prog, rotated: true, .. } => {
+        equation::Plot::Explicit { axis, prog, rotated: true, .. } if complex_mode == mesh::ComplexMode::Off => {
             let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
             let rho = (0..3)
                 .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
@@ -309,7 +320,7 @@ pub fn plot(
     };
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
     let explicit_used = match &plot {
-        equation::Plot::Explicit { rotated: true, .. } => Some(plot.used_params()),
+        equation::Plot::Explicit { rotated: true, .. } if shape.is_some() => Some(plot.used_params()),
         _ => None,
     };
     let inner = match &shape {
