@@ -26,13 +26,25 @@ export function resizeSpace(space: Space, n: number): Space {
   const slice = Array.from({ length: n }, (_, k) => space.slice[k] ?? 0)
   const ranges = Array.from({ length: n }, (_, k) => space.ranges[k] ?? null)
   // 回転は max(次元, 5) 次元で行う
-  const center = Array.from({ length: rotDims(n) }, (_, k) => space.center[k] ?? 0)
-  const oldAngle = new Map<string, number>()
-  pairs(rotDims(space.dims)).forEach(([i, j], k) => oldAngle.set(`${i},${j}`, space.rotation[k] ?? 0))
-  const rotation = pairs(rotDims(n)).map(([i, j]) => oldAngle.get(`${i},${j}`) ?? 0)
+  const { rotation, center } = resizeRotation(space.rotation, space.center, space.dims, n)
   // 表示中の座標が無くなる場合は、x, y, z の表示に戻す
   const axes = space.axes.every((a) => a < n) ? space.axes : ([0, 1, 2] as [number, number, number])
   return { ...space, dims: n, axes: [...axes] as [number, number, number], slice, ranges, center, rotation }
+}
+
+/** 次元を from から to に変えたときの回転角と中心。同じ座標（の組）のものを引き継ぐ */
+export function resizeRotation(
+  rotation: number[],
+  center: number[],
+  from: number,
+  to: number,
+): { rotation: number[]; center: number[] } {
+  const oldAngle = new Map<string, number>()
+  pairs(rotDims(from)).forEach(([i, j], k) => oldAngle.set(`${i},${j}`, rotation[k] ?? 0))
+  return {
+    rotation: pairs(rotDims(to)).map(([i, j]) => oldAngle.get(`${i},${j}`) ?? 0),
+    center: Array.from({ length: rotDims(to) }, (_, k) => center[k] ?? 0),
+  }
 }
 
 /** 回転に使う次元。次元が5未満でも、w, w₂ を使った5次元の回転ができる */
