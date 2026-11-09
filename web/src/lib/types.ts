@@ -94,6 +94,10 @@ export interface SliderStyle {
   /** 範囲を式（LaTeX）で決めるときの [最小, 最大]。ほかのパラメータも使える（a ≤ c ≤ 2b など）。
    *  あれば min, max はこの式の値（古い保存データや、数値だけのときは無い） */
   bounds?: [string, string]
+  /** 刻み（Desmos の Step）の式（LaTeX）。空または無ければ自動（範囲のおよそ 1/200 のきりの良い値） */
+  stepExpr?: string
+  /** stepExpr の値。値はこの刻みで最小値からそろえる */
+  step?: number
 }
 
 /** 式の一覧の1行 */

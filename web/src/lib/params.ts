@@ -83,3 +83,16 @@ export function missingParam(error: string | undefined): string | null {
   const m = error?.match(/変数 '([a-zA-Z]\d*)' はここでは使えません/)
   return m && !isReserved(m[1]) ? m[1] : null
 }
+
+/** スライダーの刻み。刻み（Step）を決めていれば、その値。無ければ範囲のおよそ 1/200 のきりの良い値 */
+export function sliderStep(slider: { min: number; max: number; step?: number }): number {
+  if (slider.step && slider.step > 0) return slider.step
+  return slider.max > slider.min ? niceStep(slider.max - slider.min, 200) : 0.01
+}
+
+/** 刻みを決めたスライダーの値を、最小値から刻みの整数倍の所にそろえる（刻みが自動ならそのまま） */
+export function snapToStep(v: number, slider: { min: number; step?: number }): number {
+  if (!slider.step || !(slider.step > 0)) return v
+  const k = Math.round((v - slider.min) / slider.step)
+  return Number((slider.min + k * slider.step).toPrecision(12))
+}

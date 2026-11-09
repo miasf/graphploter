@@ -3,11 +3,11 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
-  import { evalBounds, exprError } from './lib/evalExpr'
+  import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, latexName, niceStep, prettyName, resizeSpace } from './lib/params'
+  import { complexLatex, coordName, latexName, prettyName, resizeSpace, sliderStep, snapToStep } from './lib/params'
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
@@ -351,20 +351,30 @@
     const all = currentParams()
     const changed: string[] = []
     for (const it of items) {
-      if (!it.slider.bounds) {
-        it.sliderError = undefined
-        continue
-      }
       // 自分自身は使えない（c の範囲を c で決めることはできない）
       const params = { ...all }
       if (it.param) delete params[it.param.name]
+      // 刻み（Step）
+      const stepExpr = it.slider.stepExpr?.trim() ?? ''
+      let stepError: string | undefined
+      if (stepExpr === '') it.slider.step = undefined
+      else {
+        const s = evalValue(stepExpr, params, updateSliderBounds)
+        if (s && 'error' in s) stepError = `刻み: ${s.error}`
+        else if (s && !(s.value > 0)) stepError = '刻み: 0 より大きい値にしてください'
+        else if (s) it.slider.step = s.value
+      }
+      if (!it.slider.bounds) {
+        it.sliderError = stepError
+        continue
+      }
       const r = evalBounds(it.slider.bounds, params, updateSliderBounds)
       if (!r) continue // 計算エンジンの準備待ち
       if ('error' in r) {
         it.sliderError = r.error
         continue
       }
-      it.sliderError = undefined
+      it.sliderError = stepError
       if (r.min !== it.slider.min || r.max !== it.slider.max) {
         it.slider.min = r.min
         it.slider.max = r.max
@@ -585,9 +595,13 @@
   }
 
   /** スライダー・複素平面でパラメータの値を変えたとき */
-  function setParam(item: PlotItem, re: number, im: number) {
+  function setParam(item: PlotItem, re: number, im: number, fromPlay = false) {
     if (!item.param) return
-    const step = niceStep(item.slider.max - item.slider.min, 200)
+    if (!fromPlay) playPos.delete(item.id) // 手で動かしたら、再生はその値から続ける
+    const step = sliderStep(item.slider)
+    // 刻みを決めているなら、最小値から刻みの整数倍の所にそろえる（Desmos の Step と同じ）
+    re = snapToStep(re, item.slider)
+    if (im !== 0) im = snapToStep(im, item.slider) // 実数のときの虚部 0 はそのまま
     item.param.re = re
     item.param.im = im
     item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step)}`
@@ -698,7 +712,11 @@
   /** パラメータの再生: 最小値から最大値まで 4 秒で動かし、最大値に来たら最小値に戻る */
   const PARAM_PLAY_SECONDS = 4
 
+  /** 再生中のパラメータの、刻みにそろえる前の値（行の id → 値） */
+  const playPos = new Map<number, number>()
+
   function togglePlayParam(item: PlotItem) {
+    playPos.delete(item.id)
     playingParams = playingParams.includes(item.id)
       ? playingParams.filter((id) => id !== item.id)
       : [...playingParams, item.id]
@@ -743,9 +761,11 @@
       if (!it.param) continue // まだ計算が終わっていない
       const { min, max } = it.slider
       if (!(min < max)) continue
-      let v = it.param.re + ((max - min) / PARAM_PLAY_SECONDS) * dt
+      // 刻みにそろえる前の値で進める（刻みが粗いと、そろえた値からでは1コマで次の刻みまで進めない）
+      let v = (playPos.get(id) ?? it.param.re) + ((max - min) / PARAM_PLAY_SECONDS) * dt
       if (v > max) v = min // 最後まで行ったら最初から
-      setParam(it, v, 0)
+      playPos.set(id, v)
+      setParam(it, v, 0, true)
     }
     requestAnimationFrame(playFrame)
   }
@@ -833,8 +853,8 @@
   function setSlider(item: PlotItem, next: SliderStyle) {
     const prev = item.slider
     item.slider = next
-    // 範囲の式が変わったなら計算し直す（範囲で重ねているなら、それを使う式も計算し直す）
-    if (next.bounds) updateSliderBounds()
+    // 範囲・刻みの式が変わったなら計算し直す（範囲で重ねているなら、それを使う式も計算し直す）
+    if (next.bounds || next.stepExpr !== undefined) updateSliderBounds()
     else item.sliderError = undefined
     next = item.slider
     const stackChanged = prev.stack !== next.stack || (next.stack && (prev.min !== next.min || prev.max !== next.max))
@@ -1011,47 +1031,65 @@
         </div>
         {#if domainError}<p class="error">{domainError}</p>{/if}
 
-        <label class="slider">
-          <span>曲面の細かさ: {resolution} × {resolution}</span>
+        <div class="slider">
+          <span>
+            曲面の細かさ:
+            <EditableValue value={resolution} label="曲面の細かさ" suffix=" × {resolution}" min={10} max={600} integer
+              onChange={(v) => { resolution = v; replotAll(0) }} />
+          </span>
           <input
             type="range"
+            aria-label="曲面の細かさ"
             min="20"
             max="400"
             step="10"
             bind:value={resolution}
             onchange={() => replotAll(0)}
           />
-        </label>
-        <label class="slider">
-          <span>範囲で重ねる枚数: {space.samples}</span>
+        </div>
+        <div class="slider">
+          <span>
+            範囲で重ねる枚数:
+            <EditableValue value={space.samples} label="範囲で重ねる枚数" min={2} max={200} integer
+              onChange={(v) => { space.samples = v; replotAll(0) }} />
+          </span>
           <input
             type="range"
+            aria-label="範囲で重ねる枚数"
             min="4"
             max="64"
             step="2"
             bind:value={space.samples}
             onchange={() => replotAll(0)}
           />
-        </label>
-        <label class="slider">
-          <span>陰関数・立体の細かさ: {implicitResolution}³（重いので注意）</span>
+        </div>
+        <div class="slider">
+          <span>
+            陰関数・立体の細かさ:
+            <EditableValue value={implicitResolution} label="陰関数・立体の細かさ" suffix="³（重いので注意）" min={10} max={300} integer
+              onChange={(v) => { implicitResolution = v; replotAll(0) }} />
+          </span>
           <input
             type="range"
+            aria-label="陰関数・立体の細かさ"
             min="20"
             max="200"
             step="10"
             bind:value={implicitResolution}
             onchange={() => replotAll(0)}
           />
-        </label>
+        </div>
 
         <h2>見え方</h2>
-        <label class="slider">
+        <div class="slider">
           <span>
-            4次元の遠近感: {space.perspective === 0 ? 'なし（平行な射影）' : `${space.perspective}%`}
+            4次元の遠近感:
+            <EditableValue value={space.perspective} label="4次元の遠近感" suffix={space.perspective === 0 ? '%（なし: 平行な射影）' : '%'}
+              min={0} max={100} onChange={(v) => { space.perspective = v; replotAll(0) }} />
           </span>
           <input
             type="range"
+            aria-label="4次元の遠近感"
             min="0"
             max="100"
             step="1"
@@ -1059,18 +1097,23 @@
             oninput={() => replotAll(0)}
           />
           <span class="note">w などの奥にある部分ほど小さく描く（媒介変数表示・回した陽関数に効く）</span>
-        </label>
-        <label class="slider">
-          <span>遠近感: {perspective === 0 ? '平行投影' : `${perspective}%`}</span>
+        </div>
+        <div class="slider">
+          <span>
+            遠近感:
+            <EditableValue value={perspective} label="遠近感" suffix={perspective === 0 ? '%（平行投影）' : '%'} min={0} max={100}
+              onChange={(v) => { perspective = v; if (!flat) viewer?.setPerspective(v / 100) }} />
+          </span>
           <input
             type="range"
+            aria-label="遠近感"
             min="0"
             max="100"
             step="1"
             bind:value={perspective}
             oninput={() => !flat && viewer?.setPerspective(perspective / 100)}
           />
-        </label>
+        </div>
         <h2>切り口</h2>
         {#if flat}<p class="note">2D 表示では使えません</p>{/if}
         <label class="check-row" class:disabled={flat}>

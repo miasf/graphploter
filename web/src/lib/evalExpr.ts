@@ -76,3 +76,19 @@ export function exprError(latex: string, params: Record<string, ParamValue>, onR
     return e instanceof Error ? e.message : String(e)
   }
 }
+
+/** パラメータを使ってよい式の値。結果: 数値 / 誤りの説明 / WASM の準備待ち（null） */
+export function evalValue(
+  latex: string,
+  params: Record<string, ParamValue>,
+  onReady: () => void,
+): { value: number } | { error: string } | null {
+  try {
+    const value = evaluate(latex, params, onReady)
+    if (value === null) return null
+    if (!Number.isFinite(value)) return { error: '値が有限ではありません' }
+    return { value }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  }
+}

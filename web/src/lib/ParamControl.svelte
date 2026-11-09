@@ -3,7 +3,7 @@
   // 実数モード: スライダー / 複素数モード: 複素平面の上で点を動かす
   import ComplexPad from './ComplexPad.svelte'
   import MathInput from './MathInput.svelte'
-  import { formatNumber, missingParam, niceStep, prettyName } from './params'
+  import { formatNumber, missingParam, prettyName, sliderStep } from './params'
   import type { ParamValue, SliderStyle } from './types'
 
   interface Props {
@@ -23,7 +23,7 @@
   let { name, value, slider, error, onAddSlider, onChange, onSlider, playing, onPlay }: Props = $props()
 
   /** 値を丸める刻み（範囲のおよそ 1/200） */
-  const step = $derived(slider.max > slider.min ? niceStep(slider.max - slider.min, 200) : 0.01)
+  const step = $derived(sliderStep(slider))
 
   /** 範囲の式（入力欄の中身）。式が無い古い設定なら、今の数値 */
   const bounds: [string, string] = $derived(slider.bounds ?? [String(slider.min), String(slider.max)])
@@ -90,6 +90,18 @@
       複素数
     </button>
   </div>
+  {#if !slider.stack}
+    <div class="step-row">
+      <span>刻み</span>
+      <MathInput
+        small
+        value={slider.stepExpr ?? ''}
+        placeholder="自動"
+        label="{name} の刻み"
+        onInput={(v) => onSlider({ ...slider, stepExpr: v })}
+      />
+    </div>
+  {/if}
   {#if error}
     {@const missing = missingParam(error)}
     <p class="error">
@@ -152,6 +164,16 @@
     margin: 0;
     font-size: 12px;
     color: #c74440;
+  }
+  .step-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .step-row :global(.wrap) {
+    width: 7em;
   }
   .dots {
     font-family: var(--mono);
