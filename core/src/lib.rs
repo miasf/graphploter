@@ -242,6 +242,12 @@ pub fn plot(
         samples: samples.clamp(2, 200) as usize,
         rotation: rotation.to_vec(),
         center: center.to_vec(),
+        complex_height: match complex_mode {
+            mesh::ComplexMode::Off => None,
+            mesh::ComplexMode::Abs => Some(functions::Func::Abs),
+            mesh::ComplexMode::Re => Some(functions::Func::Re),
+            mesh::ComplexMode::Im => Some(functions::Func::Im),
+        },
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
@@ -387,8 +393,8 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     match plot {
         // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
         // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）。
-        // 複素数の色分けをするときは回さない形で描く
-        P::Explicit { axis, prog, rotated: true, .. } if ctx.complex_mode == mesh::ComplexMode::Off => {
+        // 複素数の色分けをするときは、高さを |f|・Re f・Im f にして回す（色は偏角）
+        P::Explicit { axis, prog, rotated: true, .. } => {
             let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
             let rho = (0..3)
                 .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
@@ -403,13 +409,14 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 (c[ua] - rho, c[ua] + rho),
                 (c[va] - rho, c[va] + rho),
                 ctx.resolution,
+                ctx.complex_mode,
             ));
             b.rotated_explicit = true;
         }
         P::Explicit { axis, prog, .. } => {
             b.inner = mesh::explicit_surface_full(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls);
         }
-        P::Implicit { prog } => {
+        P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_surface(prog, dom, ctx.implicit_resolution);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
         }
@@ -452,7 +459,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Built {
             b.kind = format!("{} = f({})", names[*axis], other);
             b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
         }
-        P::Implicit { prog } => {
+        P::Implicit { prog, .. } => {
             b.curve = true;
             b.kind = "陰関数の曲線".into();
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);

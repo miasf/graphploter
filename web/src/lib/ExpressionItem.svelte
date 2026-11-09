@@ -100,7 +100,11 @@
   const divAxes = $derived(item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const))
 
   /** 陽関数（z = f(x, y) など）か。複素数の色分けができる */
-  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? ''))
+  // 回して陰関数として計算し直した陽関数（「陰関数（z = f(x, y) を回したもの）」）も含む。
+  // 色分けをしている間は、計算できなかったときも選べるようにしておく（元に戻せるように）
+  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off')
+  /** 段差の壁を描けるか（陽関数をそのまま描くときだけ） */
+  const canWall = $derived(isExplicit && /^[^陰]* = f\(/.test(item.kind ?? '') && !/塗り分け/.test(item.kind ?? ''))
   const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
     { mode: 'off', label: 'しない' },
     { mode: 'abs', label: '高さ |f|' },
@@ -280,7 +284,7 @@
             </span>
           </div>
 
-          {#if isExplicit && !/塗り分け/.test(item.kind ?? '')}
+          {#if canWall}
             <label class="check">
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
               値が飛ぶ所（floor の段差など）に壁を描く

@@ -46,6 +46,9 @@ pub struct Space {
     pub rotation: Vec<f64>,
     /// 回転の中心（m 個）
     pub center: Vec<f64>,
+    /// 陽関数の複素数の色分けで、高さにするもの（|f| なら Abs、Re f なら Re、Im f なら Im。しないなら None）。
+    /// 表示していない座標（w など）が絡む回転で陽関数を陰関数として計算し直すとき、f の代わりにこれを使う
+    pub complex_height: Option<crate::functions::Func>,
 }
 
 impl Space {
@@ -65,6 +68,7 @@ impl Space {
             samples: 24,
             rotation: vec![0.0; rot_dims(dims) * (rot_dims(dims) - 1) / 2],
             center: vec![0.0; rot_dims(dims)],
+            complex_height: None,
         }
     }
 
@@ -234,7 +238,8 @@ pub enum Plot {
     /// 媒介変数表示 (u, v, f(u, v)) と同じように点を計算してから回転・射影する（[`Space::view_rows`]）。
     Explicit { axis: usize, names: [String; 3], prog: Program, rotated: bool },
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
-    Implicit { prog: Program },
+    /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
+    Implicit { prog: Program, from: Option<String> },
     /// 範囲で重ねた立体。`prog` の変数は表示中の3つの座標と、範囲で動かす名前（`ranges` の順）。
     Solid { prog: Program, ranges: Vec<(f64, f64)>, names: Vec<String> },
     /// 媒介変数表示の曲線。`sets` の1つ1つが1本の曲線で、すべての座標の成分（次元の数）の式。
@@ -260,6 +265,7 @@ impl Plot {
                 let (a, b) = others(*axis);
                 format!("{} = f({}, {})", names[*axis], names[a], names[b])
             }
+            Plot::Implicit { from: Some(f), .. } => format!("陰関数（{f} を回したもの）"),
             Plot::Implicit { .. } => "陰関数".into(),
             Plot::Solid { .. } => "範囲で重ねた立体".into(),
             Plot::Curve { .. } => "媒介変数表示の曲線".into(),
@@ -282,7 +288,7 @@ impl Plot {
     /// 使われたパラメータ（と、断面で値を固定した座標）の名前
     pub fn used_params(&self) -> Vec<String> {
         let progs: Vec<&Program> = match self {
-            Plot::Explicit { prog, .. } | Plot::Implicit { prog } => vec![prog],
+            Plot::Explicit { prog, .. } | Plot::Implicit { prog, .. } => vec![prog],
             Plot::Solid { prog, names, .. } => {
                 // 範囲で重ねている名前も「使ったもの」に含める（範囲が変わったら計算し直すため）
                 let mut out = names.clone();
@@ -435,6 +441,24 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         }
     }
 
+    // 陽関数（z = f(x, y) など）を回して陰関数として計算し直すときは、その形を覚えておく。
+    // 複素数の色分けをしているなら、f の代わりに高さ（|f|・Re f・Im f）を使う（f のままだと実数にならない）
+    let mut from = None;
+    let (l, r) = if rot.is_some() {
+        match find_explicit(&l, &r, &shown, &consts)? {
+            Some(p @ Plot::Explicit { .. }) => {
+                from = Some(p.kind_label());
+                match space.complex_height {
+                    Some(h) => wrap_explicit_side(l, r, &shown, h),
+                    None => (l, r),
+                }
+            }
+            _ => (l, r),
+        }
+    } else {
+        (l, r)
+    };
+
     // 回転していれば、元の座標 p を回転後の座標 q の式に置き換える
     let (l, r) = match &rot {
         Some(m) => (rotate_coords(&l, m, space), rotate_coords(&r, m, space)),
@@ -464,7 +488,19 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         return Err(format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")));
     }
     let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
-    Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)? })
+    Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)?, from })
+}
+
+/// 陽関数 `座標 = f` の f の側を h(f) にする（h は abs・Re・Im）
+fn wrap_explicit_side(l: Expr, r: Expr, shown: &[String; 3], h: crate::functions::Func) -> (Expr, Expr) {
+    let is_axis = |e: &Expr, other: &Expr| matches!(e, Expr::Var(v) if shown.contains(v) && !other.uses_var(v));
+    if is_axis(&l, &r) {
+        (l, Expr::Call(h, vec![r]))
+    } else if is_axis(&r, &l) {
+        (Expr::Call(h, vec![l]), r)
+    } else {
+        (l, r)
+    }
 }
 
 /// 1次式 c₀ + Σ cⱼ·eⱼ を作る（係数がほぼ 0 の項は省く）
@@ -839,7 +875,7 @@ mod tests {
         // 平面 x − 1 = 0 は、回すと平面 y = 1 になる（陽関数の形でないので、陰関数として式に代入して回す）
         let p = compile_with("x - 1 = 0", &ps, &sp).unwrap();
         let prog: &Program = match &p {
-            Plot::Implicit { prog } => prog,
+            Plot::Implicit { prog, .. } => prog,
             _ => panic!("回転すると陰関数になる"),
         };
         let mut out = [C::new(0.0, 0.0); 2];
@@ -849,7 +885,7 @@ mod tests {
         // 中心 (1, 0, 0) の周りで 90° 回すと、平面 x = 1 は中心を通るので y = 0 になる
         sp.center = vec![1.0, 0.0, 0.0, 0.0, 0.0];
         let p = compile_with("x - 1 = 0", &ps, &sp).unwrap();
-        if let Plot::Implicit { prog } = &p {
+        if let Plot::Implicit { prog, .. } = &p {
             prog.eval_batch(&[&[7.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]], &mut out);
             assert!(out[0].norm() < 1e-12);
         }
@@ -867,7 +903,7 @@ mod tests {
         sp.rotation[2] = std::f64::consts::FRAC_PI_3; // 組 (0,3) = xw は3番目
         assert!((view(&sp, &[2.0, 0.0, 0.0])[0] - 1.0).abs() < 1e-12);
         // 陰関数 x = 1 は w 方向に伸びた形なので、xw で 60° 回して w = 0 で見ると x = 1/cos60° = 2
-        if let Plot::Implicit { prog } = compile_with("x = 1", &ps, &sp).unwrap() {
+        if let Plot::Implicit { prog, .. } = compile_with("x = 1", &ps, &sp).unwrap() {
             let mut o = [C::new(0.0, 0.0)];
             prog.eval_batch(&[&[2.0], &[0.0], &[0.0]], &mut o);
             assert!(o[0].norm() < 1e-12);
@@ -886,7 +922,7 @@ mod tests {
         let Plot::Explicit { axis, prog, rotated: true, .. } = compile_with("z = 1", &ps, &sp).unwrap() else {
             panic!("陽関数のまま回す")
         };
-        let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, (-3.0, 3.0), (-3.0, 3.0), 6);
+        let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, (-3.0, 3.0), (-3.0, 3.0), 6, crate::mesh::ComplexMode::Off);
         let m = project(&shape, &sp.view(0.0), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
         assert!(!m.positions.is_empty());
         for q in m.positions.chunks_exact(3) {
@@ -912,6 +948,22 @@ mod tests {
         let mut sp = space4([0, 1, 2], 1.0);
         sp.rotation[7] = 0.2; // 組 (2,3) = zw
         assert!(!sp.rotation_keeps_shown(&["z".into(), "w".into()]));
+    }
+
+    #[test]
+    fn rotated_complex_explicit() {
+        // xw で回すと陽関数は陰関数として計算し直す。複素数の色分けをしているなら f の代わりに |f| を使うので、
+        // F = z − |(x + iy)²| は実数になる（f のままだと複素数になり、曲面が描けない）
+        let ps = Params::new();
+        let mut sp = space4([0, 1, 2], 0.0);
+        sp.rotation[2] = 0.3; // xw
+        sp.complex_height = Some(crate::functions::Func::Abs);
+        let p = compile_with("z = (x + i y)^2", &ps, &sp).unwrap();
+        assert_eq!(p.kind_label(), "陰関数（z = f(x, y) を回したもの）");
+        let Plot::Implicit { prog, .. } = p else { panic!() };
+        let mut out = [C::new(0.0, 0.0); 3];
+        prog.eval_batch(&[&[0.3, -0.7, 1.1], &[0.5, 0.2, -0.4], &[0.1, 0.9, 0.0]], &mut out);
+        assert!(out.iter().all(|z| z.im.abs() < 1e-12));
     }
 
     #[test]

@@ -483,7 +483,8 @@ export class Viewer {
     // 目盛りの数字（x, y は床の手前の辺、z は左奥の縦の辺）
     const ticks = (min: number, max: number, s: number) => {
       const out: number[] = []
-      for (let v = Math.ceil(min / s) * s; v <= max + 1e-9; v += s) out.push(v)
+      // 足していくと誤差がたまる（0 が -5.55e-17 になるなど）ので、刻みの整数倍として計算して丸める
+      for (let k = Math.ceil(min / s - 1e-9); k * s <= max + 1e-9; k++) out.push(Number((k * s).toPrecision(12)))
       return out
     }
     const pad = step * 0.35
