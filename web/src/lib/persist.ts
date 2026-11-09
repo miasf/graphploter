@@ -38,6 +38,8 @@ export interface SavedState {
   flat?: boolean
   /** 回転のグループ（古い保存データには無い） */
   groups?: RotationGroup[]
+  /** マウスの操作モード（古い保存データには無い） */
+  controlMode?: 'A' | 'B'
 }
 
 const STORAGE_KEY = 'graphploter:state'
