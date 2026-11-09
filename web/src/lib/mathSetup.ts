@@ -51,7 +51,9 @@ export function setupKeyboard() {
       label: '123',
       tooltip: '数字と記号',
       rows: [
-        ['x', 'y', 'z', 'w', 't', 'u', 'v', '[separator-5]', '7', '8', '9', { latex: '\\frac{#@}{#?}', label: '÷' }],
+        // 一文字消すボタン（⌫）は、ふつうのキーボードと同じく右上に置く（÷ は左の3段目に回す）。
+        // キーの数は1段あたり 11.5 個分まで（それより多いと、幅の狭いスマホで右端がはみ出す）
+        ['x', 'y', 'z', 'w', 't', 'u', 'v', '[separator-5]', '7', '8', '9', { label: '[backspace]', width: 1 }],
         [
           '(',
           ')',
@@ -73,13 +75,14 @@ export function setupKeyboard() {
           { latex: '\\left|#0\\right|', label: '|x|' },
           '!',
           '=',
+          { latex: '\\frac{#@}{#?}', label: '÷' },
           '[separator-5]',
           '1',
           '2',
           '3',
           '-',
         ],
-        ['[left]', '[right]', '[backspace]', '[hide-keyboard]', '[separator-5]', '0', '.', '+', '[return]'],
+        ['[left]', '[right]', '[hide-keyboard]', '[separator-5]', '0', '.', '+', '[return]'],
       ],
     },
     {
@@ -109,8 +112,8 @@ export function setupKeyboard() {
           fn('Im', { operator: true }),
           fn('conj', { operator: true }),
           fn('arg', { operator: true }),
-          '[left]',
-          '[right]',
+          { label: '[left]', width: 1 },
+          { label: '[right]', width: 1 },
           '[backspace]',
         ],
       ],
@@ -144,7 +147,7 @@ export function setupKeyboard() {
           { latex: '\\operatorname{hyp2F1}\\left(#?,#?,#?,#?\\right)', label: '₂F₁', class: 'small', tooltip: 'hyp2F1' },
         ],
         [fn('sec'), fn('csc'), fn('cot'), fn('arcsinh', { operator: true }), fn('arccosh', { operator: true }), fn('arctanh', { operator: true })],
-        ['[left]', '[right]', '[backspace]', '[return]'],
+        ['[left]', '[right]', '[return]', '[backspace]'],
       ],
     },
     'alphabetic',
