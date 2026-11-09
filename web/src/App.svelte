@@ -70,6 +70,11 @@
   function cutRequest(): CutRequest {
     return cut.enabled && !flat ? { axis: cut.axis, pos: cut.pos, keepBelow: !cut.flip } : null
   }
+  /** マウスの操作モード（A: 標準 / B: Google Earth に近い操作） */
+  let controlMode = $state<'A' | 'B'>('B')
+  $effect(() => {
+    viewer?.setControlMode(controlMode)
+  })
   /** 暗い配色にするか（最初は OS の設定に合わせる） */
   let dark = $state(window.matchMedia('(prefers-color-scheme: dark)').matches)
 
@@ -132,6 +137,7 @@
       space,
       cut,
       flat,
+      controlMode,
     })
   }
 
@@ -147,6 +153,7 @@
     if (s.cut) cut = s.cut
     flat = s.flat ?? false
     groups = s.groups ?? []
+    if (s.controlMode) controlMode = s.controlMode
     nextGroupId = Math.max(0, ...groups.map((g) => g.id)) + 1
   }
 
@@ -262,13 +269,14 @@
 
   // ---- 設定（ボタンで項目の一覧を出し、選んだ項目だけを表示する）----
 
-  type SettingsCat = 'dims' | 'rotate' | 'range' | 'detail' | 'look' | 'cut' | 'save' | 'help'
+  type SettingsCat = 'dims' | 'rotate' | 'range' | 'detail' | 'look' | 'control' | 'cut' | 'save' | 'help'
   const SETTINGS_CATS: { id: SettingsCat; icon: string; label: string; desc: string }[] = [
     { id: 'rotate', icon: '⟳', label: '回転', desc: '全体・グループごとの回転と再生' },
     { id: 'dims', icon: '⧉', label: '次元', desc: '4次元以上、表示する座標と断面' },
     { id: 'range', icon: '⬚', label: '表示範囲', desc: 'x, y, z の最小値・最大値' },
     { id: 'detail', icon: '▦', label: '細かさ', desc: '曲面・陰関数の細かさ、重ねる枚数' },
     { id: 'look', icon: '◎', label: '見え方', desc: '遠近感、視点のリセット、背景' },
+    { id: 'control', icon: '✥', label: 'マウス操作', desc: '操作モード A / B の切り替え' },
     { id: 'cut', icon: '✂', label: '切り口', desc: '立体を平面で切る' },
     { id: 'save', icon: '⇪', label: '保存・共有', desc: '共有リンク、最初の状態に戻す' },
     { id: 'help', icon: '?', label: '書き方のヒント', desc: '式の書き方と操作' },
@@ -1162,13 +1170,17 @@
     style:--half="{snapHeights.half}px"
     style:--keyboard-h="{keyboardHeight}px"
   >
-    <button
-      class="settings-toggle"
-      class:on={settingsOpen}
-      onclick={() => (settingsOpen ? closeSettings() : (settingsOpen = true))}
-      aria-expanded={settingsOpen}
-      title="設定"
-    >⚙ 設定</button>
+    <div class="tool-row">
+      <button class="settings-toggle" onclick={() => viewer?.resetCamera()} title="視点を最初の位置に戻す"
+        aria-label="視点を最初の位置に戻す">⟲ 視点</button>
+      <button
+        class="settings-toggle"
+        class:on={settingsOpen}
+        onclick={() => (settingsOpen ? closeSettings() : (settingsOpen = true))}
+        aria-expanded={settingsOpen}
+        title="設定"
+      >⚙ 設定</button>
+    </div>
     {#if settingsOpen}
       <div class="settings-card" role="dialog" aria-label="設定">
         <div class="card-head">
@@ -1363,6 +1375,36 @@
               <button class="secondary" onclick={() => (dark = !dark)}>{dark ? '明るい背景' : '暗い背景'}</button>
             </div>
 
+          {:else if settingsCat === 'control'}
+            {#snippet modeCard(mode: 'A' | 'B', title: string, rows: [string, string][])}
+              <label class="mode-card" class:selected={controlMode === mode}>
+                <span class="mode-head">
+                  <input type="radio" name="control-mode" checked={controlMode === mode} onchange={() => (controlMode = mode)} />
+                  {title}
+                </span>
+                <span class="mode-rows">
+                  {#each rows as [k, v] (k)}
+                    <span class="mode-key">{k}</span><span>{v}</span>
+                  {/each}
+                </span>
+              </label>
+            {/snippet}
+            {@render modeCard('A', '操作 A（標準）', [
+              ['左ドラッグ', '回転'],
+              ['右ドラッグ', '平行移動'],
+              ['Shift + 左ドラッグ', '平行移動'],
+              ['ホイール・中ドラッグ', '拡大縮小'],
+            ])}
+            {@render modeCard('B', '操作 B（Google Earth 風）', [
+              ['左ドラッグ', '離れているときは回転、近づくと平行移動'],
+              ['右ドラッグ', '押した位置を中心に、上下で縮小・拡大、左右で回転'],
+              ['左ダブルクリック', 'その位置を回転の中心にする'],
+              ['Shift + 左クリック', 'その位置を回転の中心にする'],
+              ['Ctrl（⌘）+ 左ドラッグ', 'その場から見回す'],
+              ['ホイール', '拡大縮小'],
+              ['中ドラッグ', '平行移動'],
+            ])}
+            <p class="note">パソコンのマウスの操作だけが変わります（スマホの指の操作は同じ）。</p>
           {:else if settingsCat === 'cut'}
             {#if flat}<p class="note">2D 表示では使えません</p>{/if}
             <label class="check-row" class:disabled={flat}>
@@ -1484,7 +1526,7 @@
               </li>
               <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
               <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は「グループ」を選ぶと、同じグループの式が一緒に回ります（同期）</li>
-                <li>操作: 左ドラッグで回転、右ドラッグで拡大縮小（上で縮小・下で拡大）、Shift + 左ドラッグ（または中ドラッグ）で移動、Ctrl（Mac は ⌘）+ 左ドラッグでその場から見回す、ホイールでも拡大縮小</li>
+                <li>マウスの操作は「⚙ 設定」→「マウス操作」で、操作 A（標準: 左ドラッグで回転、右ドラッグで移動）と操作 B（Google Earth 風）を切り替えられます。右上の「⟲ 視点」で最初の視点に戻ります</li>
               </ul>
 
             </div>
@@ -1570,6 +1612,10 @@
     display: flex;
     flex-direction: column;
     align-items: flex-end;
+  }
+  .tool-row {
+    display: flex;
+    gap: 8px;
   }
   .settings-toggle {
     height: 36px;
@@ -1705,6 +1751,37 @@
   .secondary.small {
     padding: 4px 10px;
     font-size: 12px;
+  }
+  .mode-card {
+    display: grid;
+    gap: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .mode-card.selected {
+    border-color: #2d70b3;
+    background: var(--hover);
+  }
+  .mode-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .mode-rows {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .mode-key {
+    color: var(--text);
+    white-space: nowrap;
   }
   .members {
     display: grid;

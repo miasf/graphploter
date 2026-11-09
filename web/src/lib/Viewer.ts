@@ -167,13 +167,13 @@ export class Viewer {
     this.theme = LIGHT
     this.scene.background = new THREE.Color(this.theme.background)
 
-    // カメラとマウス操作（Google Earth に近い操作）
-    // 左ドラッグ: 回転 / 右ドラッグ: 上で縮小・下で拡大 / Shift + 左ドラッグ・中ドラッグ: 移動 /
-    // Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置はそのままで見る向きを変える / ホイール: 拡大縮小
+    // カメラとマウス操作。操作モード（setControlMode）で切り替える
+    // A: 左ドラッグ: 回転 / 右ドラッグ・Shift + 左ドラッグ: 移動 / ホイール・中ドラッグ: 拡大縮小
+    // B: setupMouse を参照（Google Earth に近い操作）
     this.camera.up.set(0, 0, 1)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
-    this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.DOLLY } // 右は下の setupLookAround で受け取る
-    this.setupLookAround()
+    this.setupMouse()
+    this.applyButtons()
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.1 // 指を離した後の慣性の回転を、少し早めに止める
     // グラフを動かし始めたら画素密度を下げ、止まったら元に戻す（動いている間は細部が見えにくいので、軽さを優先）
@@ -197,25 +197,76 @@ export class Viewer {
     this.loop()
   }
 
+  /** マウスの操作モード（A: 標準 / B: Google Earth に近い操作） */
+  private controlMode: 'A' | 'B' = 'B'
+
+  /** マウスの操作モードを変える */
+  setControlMode(mode: 'A' | 'B') {
+    this.controlMode = mode
+    this.applyButtons()
+  }
+
+  /** OrbitControls に任せるボタンの割り当て（操作モードと 2D 表示で変わる） */
+  private applyButtons() {
+    const a = this.controlMode === 'A'
+    this.controls.mouseButtons = {
+      LEFT: this.flat ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
+      MIDDLE: a ? THREE.MOUSE.DOLLY : THREE.MOUSE.PAN,
+      RIGHT: a ? THREE.MOUSE.PAN : THREE.MOUSE.DOLLY, // B の右ドラッグは setupMouse で受け取る
+    }
+    // B は回転の感度を下げる（1 では敏感すぎて操作しにくい）
+    this.controls.rotateSpeed = a ? 1 : 0.5
+  }
+
+  /** 画面に見えている高さの半分（注視点の位置で）。近づいているかの判定に使う */
+  private viewHalfHeight(): number {
+    return this.camera.position.distanceTo(this.controls.target) * this.perspective
+  }
+
   /**
-   * Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）。
-   * OrbitControls より先に受け取り、注視点をカメラの周りに回す
+   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る。
+   * - 左ドラッグ: 離れているときは回転。近づくと、つかんだ点が指についてくる平行移動になる
+   * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
+   * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
+   * - 左ダブルクリック・Shift + 左クリック: その位置を回転の中心にする（その点が画面の中央に来るよう、視点を平行に動かす）
    */
-  private setupLookAround() {
+  private setupMouse() {
     const el = this.renderer.domElement
-    let last: { x: number; y: number; id: number; mode: 'look' | 'zoom' } | null = null
+    type Drag = {
+      x: number
+      y: number
+      id: number
+      mode: 'look' | 'right' | 'grab'
+      pivot: THREE.Vector3
+      plane: THREE.Plane | null
+    }
+    let last: Drag | null = null
+    let lastPointerType = 'mouse'
     el.addEventListener(
       'pointerdown',
       (e) => {
-        if (e.pointerType === 'touch') return
-        let mode: 'look' | 'zoom'
-        if (e.button === 2) mode = 'zoom' // 右ドラッグ: 上で縮小・下で拡大（OrbitControls の向きとは逆）
+        lastPointerType = e.pointerType
+        if (e.pointerType === 'touch' || this.controlMode !== 'B') return
+        // Shift + 左クリック: ダブルクリックと同じく、その位置を回転の中心にする
+        if (e.button === 0 && e.shiftKey) {
+          e.stopImmediatePropagation()
+          e.preventDefault()
+          const p = this.pick(e.clientX, e.clientY)
+          if (p) this.animatePivot(p)
+          return
+        }
+        let mode: Drag['mode']
+        if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
+        // 近づいているとき（見えている範囲が表示範囲の約 1/4 より狭い）は、回転ではなく平行移動
+        else if (e.button === 0 && !this.flat && this.viewHalfHeight() < this.sceneSize() * 0.25) mode = 'grab'
         else return
-        e.stopImmediatePropagation() // OrbitControls には渡さない（渡すと平行移動になる）
+        e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
+        this.stopPivotAnimation()
         el.setPointerCapture(e.pointerId)
-        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode }
+        const pivot = mode === 'look' ? new THREE.Vector3() : (this.pick(e.clientX, e.clientY) ?? this.controls.target.clone())
+        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: mode === 'grab' ? this.grabPlane(pivot) : null }
         this.interacting = true
         this.setLowRes(true)
       },
@@ -226,8 +277,17 @@ export class Viewer {
       const dx = e.clientX - last.x
       const dy = e.clientY - last.y
       last = { ...last, x: e.clientX, y: e.clientY }
-      if (last.mode === 'look') this.look(dx, dy)
-      else this.zoomBy(Math.pow(0.995, dy)) // 100 px で約 1.6 倍
+      if (last.mode === 'look') {
+        this.look(dx, dy)
+        return
+      }
+      if (last.mode === 'grab') {
+        this.grab(last.pivot, last.plane!, e.clientX, e.clientY)
+        return
+      }
+      // 右ドラッグ: 上下は拡大縮小（100 px で約 1.6 倍）、左右は回転（2D 表示では回さない）
+      this.zoomAround(last.pivot, Math.pow(0.995, dy))
+      if (!this.flat) this.rotateAround(last.pivot, (-dx * Math.PI) / (this.container.clientWidth || 1))
     })
     const end = (e: PointerEvent) => {
       if (!last || e.pointerId !== last.id) return
@@ -236,23 +296,92 @@ export class Viewer {
     }
     el.addEventListener('pointerup', end)
     el.addEventListener('pointercancel', end)
+    el.addEventListener('dblclick', (e) => {
+      if (lastPointerType !== 'mouse' || e.button !== 0 || this.controlMode !== 'B') return
+      const p = this.pick(e.clientX, e.clientY)
+      if (p) this.animatePivot(p)
+    })
   }
 
-  /** 注視点までの距離を factor 倍にする（1 より小さいと近づいて拡大） */
-  private zoomBy(factor: number) {
+  /** 画面上の点 (clientX, clientY) にある曲面の点（表示範囲の外で切り落とした部分は除く）。
+   *  曲面が無ければ、注視点を通る水平な面との交点 */
+  private pick(clientX: number, clientY: number): THREE.Vector3 | null {
+    const ray = this.rayAt(clientX, clientY)
+    const meshes: THREE.Object3D[] = []
+    for (const p of this.plots.values()) {
+      if (p.kind === 'surface' && p.group.visible && p.group.children[0]) meshes.push(p.group.children[0])
+    }
+    const inside = (pt: THREE.Vector3) => this.clipPlanes.every((pl) => pl.distanceToPoint(pt) >= -1e-6)
+    for (const hit of ray.intersectObjects(meshes, false)) {
+      if (inside(hit.point)) return hit.point.clone()
+    }
+    const up = this.camera.up.clone().normalize()
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(up, this.controls.target)
+    return ray.ray.intersectPlane(plane, new THREE.Vector3())
+  }
+
+  /** つかんで動かす面: 上から見下ろしているなら点 p を通る水平な面、横から見ているなら画面に平行な面 */
+  private grabPlane(p: THREE.Vector3): THREE.Plane {
+    const up = this.camera.up.clone().normalize()
+    const dir = this.controls.target.clone().sub(this.camera.position).normalize()
+    const normal = Math.abs(dir.dot(up)) > 0.25 ? up : dir
+    return new THREE.Plane().setFromNormalAndCoplanarPoint(normal, p)
+  }
+
+  /** つかんだ点 p が、カーソルの位置 (clientX, clientY) の下に来るように視点を平行に動かす */
+  private grab(p: THREE.Vector3, plane: THREE.Plane, clientX: number, clientY: number) {
+    const q = this.rayAt(clientX, clientY).ray.intersectPlane(plane, new THREE.Vector3())
+    if (!q) return
+    const delta = p.clone().sub(q)
+    // 地平線の近くでは、少しのカーソルの動きで遠くまで飛ぶので、1回で動かす量を抑える
+    const max = this.sceneSize() * 0.2
+    if (delta.length() > max) delta.setLength(max)
+    this.camera.position.add(delta)
+    this.controls.target.add(delta)
+    this.dirty = true
+  }
+
+  /** 画面上の点 (clientX, clientY) を通る視線 */
+  private rayAt(clientX: number, clientY: number): THREE.Raycaster {
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    )
+    this.camera.updateMatrixWorld()
+    const ray = new THREE.Raycaster()
+    ray.setFromCamera(ndc, this.camera)
+    return ray
+  }
+
+  /** 点 pivot に向かって、カメラと注視点を factor 倍の距離にする（1 より小さいと近づいて拡大） */
+  private zoomAround(pivot: THREE.Vector3, factor: number) {
     const target = this.controls.target
-    const offset = this.camera.position.clone().sub(target)
+    const dist = this.camera.position.distanceTo(target)
     const size = this.sceneSize()
-    offset.setLength(THREE.MathUtils.clamp(offset.length() * factor, size * 1e-3, (size * 200) / this.perspective))
-    this.camera.position.copy(target).add(offset)
+    // 近づきすぎ・遠ざかりすぎないようにする
+    const next = THREE.MathUtils.clamp(dist * factor, size * 1e-3, (size * 200) / this.perspective)
+    const f = next / dist
+    this.camera.position.sub(pivot).multiplyScalar(f).add(pivot)
+    target.sub(pivot).multiplyScalar(f).add(pivot)
+    this.dirty = true
+  }
+
+  /** 点 pivot を通る縦の軸の周りに、カメラと注視点を angle（ラジアン）回す */
+  private rotateAround(pivot: THREE.Vector3, angle: number) {
+    const up = this.camera.up.clone().normalize()
+    const target = this.controls.target
+    this.camera.position.sub(pivot).applyAxisAngle(up, angle).add(pivot)
+    target.sub(pivot).applyAxisAngle(up, angle).add(pivot)
+    this.camera.lookAt(target)
     this.dirty = true
   }
 
   /** 見る向きを、画面上で (dx, dy) px ドラッグした分だけ変える（カメラの位置は動かさない） */
   private look(dx: number, dy: number) {
     const h = this.container.clientHeight || 1
-    // 画面の高さ分のドラッグで、視野角の 1.5 倍くらい向きが変わる
-    const k = (THREE.MathUtils.degToRad(this.camera.fov) * 1.5) / h
+    // 画面の高さ分のドラッグで、視野角の半分くらい向きが変わる（大きいと動きすぎて操作しにくい）
+    const k = (THREE.MathUtils.degToRad(this.camera.fov) * 0.5) / h
     const eye = this.camera.position
     const dir = this.controls.target.clone().sub(eye)
     const up = this.camera.up.clone().normalize()
@@ -267,6 +396,37 @@ export class Viewer {
     this.controls.target.copy(eye).add(dir)
     this.camera.lookAt(this.controls.target)
     this.dirty = true
+  }
+
+  /** ダブルクリックした点を回転の中心にする動き */
+  private pivotAnim: { from: THREE.Vector3; delta: THREE.Vector3; start: number; done: THREE.Vector3 } | null = null
+
+  /** 視点を平行に動かして、点 p を注視点（回転の中心）にする（0.3 秒かけて動かす） */
+  private animatePivot(p: THREE.Vector3) {
+    const from = this.controls.target.clone()
+    this.pivotAnim = { from, delta: p.clone().sub(from), start: performance.now(), done: new THREE.Vector3() }
+    this.interacting = true
+    this.setLowRes(true)
+  }
+
+  private stopPivotAnimation() {
+    if (this.pivotAnim) this.interacting = false
+    this.pivotAnim = null
+  }
+
+  /** 毎フレーム: ダブルクリックの動きを進める */
+  private stepPivotAnimation() {
+    const a = this.pivotAnim
+    if (!a) return
+    const t = Math.min(1, (performance.now() - a.start) / 300)
+    const ease = 1 - (1 - t) ** 3
+    const want = a.delta.clone().multiplyScalar(ease)
+    const step = want.clone().sub(a.done) // 前のフレームから動かす分
+    a.done.copy(want)
+    this.controls.target.add(step)
+    this.camera.position.add(step)
+    this.dirty = true
+    if (t >= 1) this.stopPivotAnimation()
   }
 
   dispose() {
@@ -338,6 +498,7 @@ export class Viewer {
     if (this.stopped) return
     requestAnimationFrame(this.loop)
     // カメラが動いたか（慣性で動き続けている間も true）
+    this.stepPivotAnimation()
     if (this.controls.update()) this.dirty = true
     // 目に見えるほど動いたか。慣性の終わりのごくわずかな動きは「止まった」とみなす
     const dist = this.camera.position.distanceTo(this.controls.target)
@@ -457,7 +618,7 @@ export class Viewer {
     if (this.flat === on) return
     this.flat = on
     this.controls.enableRotate = !on
-    this.controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE
+    this.applyButtons()
     this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
     this.camera.up.set(0, on ? 1 : 0, on ? 0 : 1)
     for (const p of this.plots.values()) if (p.kind === 'surface') p.grid.uNoBackShade.value = on ? 1 : 0
@@ -466,6 +627,7 @@ export class Viewer {
 
   /** カメラを斜め上からの見やすい位置に戻す（2D 表示なら真上から） */
   resetCamera() {
+    this.stopPivotAnimation()
     this.dirty = true
     const d = this.domain
     if (!d) return
