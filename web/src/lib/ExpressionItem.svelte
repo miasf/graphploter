@@ -100,7 +100,11 @@
   const divAxes = $derived(item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const))
 
   /** 陽関数（z = f(x, y) など）か。複素数の色分けができる */
-  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? ''))
+  // 回して陰関数として計算し直した陽関数（「陰関数（z = f(x, y) を回したもの）」）も含む。
+  // 色分けをしている間は、計算できなかったときも選べるようにしておく（元に戻せるように）
+  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off')
+  /** 段差の壁を描けるか（陽関数をそのまま描くときだけ） */
+  const canWall = $derived(isExplicit && /^[^陰]* = f\(/.test(item.kind ?? '') && !/塗り分け/.test(item.kind ?? ''))
   const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
     { mode: 'off', label: 'しない' },
     { mode: 'abs', label: '高さ |f|' },
@@ -250,7 +254,8 @@
               oninput={(e) => onLineWidth(e.currentTarget.valueAsNumber)}
             />
             <span class="value">
-              <EditableValue value={item.lineWidth} label="線の太さ" suffix=" px" min={0.5} max={20} onChange={onLineWidth} />
+              <EditableValue
+                chars={5} value={item.lineWidth} label="線の太さ" suffix=" px" min={0.5} max={20} onChange={onLineWidth} />
             </span>
           </div>
         {:else}
@@ -267,9 +272,10 @@
             />
             <span class="value">
               <EditableValue
+                chars={5}
                 value={item.opacity * 100}
                 label="面の濃さ（%）"
-                suffix={item.opacity === 0 ? '%（格子のみ）' : '%'}
+                suffix="%"
                 format={(v) => String(Math.round(v))}
                 min={0}
                 max={100}
@@ -278,7 +284,7 @@
             </span>
           </div>
 
-          {#if isExplicit && !/塗り分け/.test(item.kind ?? '')}
+          {#if canWall}
             <label class="check">
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
               値が飛ぶ所（floor の段差など）に壁を描く
@@ -329,9 +335,10 @@
                 />
                 <span class="value">
                   <EditableValue
+                chars={5}
                     value={item.grid[axis] ?? item.grid.v}
                     label="{item.params[n]} 方向の分割数"
-                    suffix={(item.grid[axis] ?? item.grid.v) === 0 ? ' 等分（なし）' : ' 等分'}
+                    suffix=" 等分"
                     min={0}
                     max={200}
                     integer
@@ -358,9 +365,9 @@
               <span class="value">
                 間隔
                 <EditableValue
+                chars={5}
                   value={item.grid[axis]}
                   label="{label}の格子線の間隔"
-                  suffix={item.grid[axis] > 0 ? '' : '（なし）'}
                   min={0}
                   onChange={(v) =>
                     // 0 以下は線なし。細かすぎると線が多くなりすぎるので、範囲の 1/400 までにする
@@ -380,11 +387,12 @@
               oninput={(e) => onGrid({ ...item.grid, width: e.currentTarget.valueAsNumber })}
             />
             <span class="value">
-              <EditableValue value={item.grid.width} label="格子線の太さ" suffix=" px" min={0.25} max={10}
+              <EditableValue
+                chars={5} value={item.grid.width} label="格子線の太さ" suffix=" px" min={0.25} max={10}
                 onChange={(v) => onGrid({ ...item.grid, width: v })} />
             </span>
           </div>
-          <p class="hint">スライダーを右にするほど線が細かくなります。左端で線なし。</p>
+          <p class="hint">スライダーを右にするほど線が細かくなります。左端（間隔・分割数 0）で線なし。面の濃さ 0% で格子線だけになります。</p>
         {/if}
       </div>
     {/if}

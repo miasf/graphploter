@@ -86,6 +86,13 @@ pub fn explicit_surface_with(prog: &Program, dom: Domain, n: usize, axis: usize,
     explicit_surface_full(prog, dom, n, axis, mode, false)
 }
 
+/// 複素数の色分けで頂点に持たせる値 (Re z/|z|, Im z/|z|, log₂|z|)（色相は偏角、明るさの縞は |z|）
+fn complex_attr(z: C) -> [f32; 3] {
+    let r = z.norm();
+    let (c, s) = if r > 0.0 { (z.re / r, z.im / r) } else { (0.0, 0.0) };
+    [c as f32, s as f32, r.log2().max(-1e6) as f32]
+}
+
 /// 複素数の値 z を、`mode` の表し方での高さにする
 fn height(z: C, mode: ComplexMode) -> f64 {
     let w = match mode {
@@ -143,9 +150,14 @@ pub fn explicit_surface_full(
 
     // 表示範囲の上下に、範囲の高さ1つ分の余裕を持たせる。
     // はみ出た部分は描画側（Three.js のクリッピング）で切り落とす。
+    // 範囲の外の値は、範囲の少し外（wlo, whi）にそろえて描く（極の近くで頂点を捨てると、その周りの三角形が
+    // 抜けて穴が空くため）。はみ出た部分は描画側で切り落とされるので見えない
     let h = dom.hi[axis] - dom.lo[axis];
     let (wlo, whi) = (dom.lo[axis] - h, dom.hi[axis] + h);
-    let usable = |w: f64| w.is_finite() && w >= wlo && w <= whi;
+    let usable = |w: f64| w.is_finite();
+    let clamped = |z: C| height(z, mode).clamp(wlo, whi);
+    // 段差を探すのは、範囲にそろえた高さで（両側とも +∞ に向かう極は段差ではない。+∞ から −∞ に飛ぶ極は段差）
+    let hs_clamped: Vec<f64> = hs.iter().map(|&w| w.clamp(wlo, whi)).collect();
 
     // 格子の辺: 0 = 右 (i, j)–(i+1, j)、1 = 上 (i, j)–(i, j+1)、2 = 斜め (i, j)–(i+1, j+1)
     let edge_end = |k: usize, e: usize| match e {
@@ -154,7 +166,7 @@ pub fn explicit_surface_full(
         _ => k + m + 1,
     };
     let edge_id = |k: usize, e: usize| 3 * k + e;
-    let jumps = find_jumps(prog, &us, &vs, &vals, &hs, m, mode, h * 0.03, &usable);
+    let jumps = find_jumps(prog, &us, &vs, &vals, &hs_clamped, m, &clamped, h * 0.03, &usable);
 
     let mut mesh = Mesh::default();
     let complex = mode != ComplexMode::Off;
@@ -164,9 +176,7 @@ pub fn explicit_surface_full(
         p[va] = v;
         p[axis] = height(z, mode).clamp(wlo, whi);
         if complex {
-            let r = z.norm();
-            let (c, s) = if r > 0.0 { (z.re / r, z.im / r) } else { (0.0, 0.0) };
-            mesh.complex.extend_from_slice(&[c as f32, s as f32, r.log2().max(-1e6) as f32]);
+            mesh.complex.extend_from_slice(&complex_attr(z));
         }
         mesh.push_vertex(p)
     };
@@ -253,7 +263,20 @@ pub fn explicit_surface_full(
                             wall_quads.push([info(e_out), info(e_in)]);
                         }
                     }
-                    _ => {} // 段差の線が三角形の中で終わる・3辺とも飛ぶ: 描かない
+                    1 => {
+                        // 段差の線が三角形の中で終わる（極のそばの急な所など）: 飛ぶ辺の上の点と向かいの頂点を結ぶ線で
+                        // 2つに分け、それぞれの側の値で描く（段差は向かいの頂点に向かって細くなる）。
+                        // 描かないと、そこだけ穴が空く
+                        let e = jumped[0];
+                        let (id, forward) = edges[e];
+                        let (start, end) = jump_vertex[&id];
+                        // 三角形の辺 e は 頂点 e → e+1。格子の辺と同じ向きなら、頂点 e の側が始点の側
+                        let (near_p, near_q) = if forward { (start, end) } else { (end, start) };
+                        let (p, q, w) = (vtx[e], vtx[(e + 1) % 3], vtx[(e + 2) % 3]);
+                        emit(&mut mesh, [index_of[p], near_p, index_of[w]]);
+                        emit(&mut mesh, [near_q, index_of[q], index_of[w]]);
+                    }
+                    _ => {} // 3辺とも飛ぶ: 描かない
                 }
             }
         }
@@ -296,7 +319,7 @@ fn find_jumps(
     vals: &[C],
     hs: &[f64],
     m: usize,
-    mode: ComplexMode,
+    height: &dyn Fn(C) -> f64,
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
 ) -> std::collections::HashMap<usize, Jump> {
@@ -348,7 +371,7 @@ fn find_jumps(
         prog.eval_batch(&[&mu, &mv], &mut out);
         for (c, &z) in cands.iter_mut().zip(&out) {
             let t = 0.5 * (c.ta + c.tb);
-            let (ha, hb, hm) = (height(c.fa, mode), height(c.fb, mode), height(z, mode));
+            let (ha, hb, hm) = (height(c.fa), height(c.fb), height(z));
             // 差の大きいほうの半分に狭める（真ん中が定義されなければ、始点の側に寄せる）
             if !hm.is_finite() || (hm - ha).abs() >= (hb - hm).abs() {
                 c.tb = t;
@@ -361,7 +384,7 @@ fn find_jumps(
     }
     let mut jumps = std::collections::HashMap::new();
     for c in cands {
-        let d = (height(c.fb, mode) - height(c.fa, mode)).abs();
+        let d = (height(c.fb) - height(c.fa)).abs();
         // 区間を 1/4096 にしても差が半分以上残っていれば、値が飛んでいる
         // （どちらかの側が定義されない所は段差とはみなさない）
         if d.is_finite() && d > 0.5 * c.first {
@@ -477,48 +500,121 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
         touch.get(&(3 * idx(p[0], p[1], p[2]) + a)).map(|&t| (t as f64, None))
     };
 
-    // 2. 曲面が通るセルに頂点を置く。位置は「辺の上で曲面と交わる点」の平均
+    // 2. 曲面が通るセルに頂点を置く。位置は「辺の上で曲面と交わる点」の平均。
+    //    1つのセルを2枚以上の曲面が通るとき（近い曲面どうし）は、1つの頂点にまとめると曲面がくっつくので、
+    //    曲面ごとに頂点を分ける: 角のうち少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分け、
+    //    交わる辺はその少ないほうの符号の端の角の組に属させる（組ごとに曲面が1枚）。
+    //    接するだけの辺（符号が変わらない）は、まとめて1つの組にする。
+    //    cell_slots[vert[セル]][辺の番号] が、その辺に属する頂点
     let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
     let mut vert = vec![NONE; n * n * n];
+    let mut cell_slots: Vec<[u32; 12]> = Vec::new();
     let mut mesh = Mesh::default();
     for k in 0..n {
         for j in 0..n {
             for i in 0..n {
+                let corner_neg = CORNERS.map(|d| f[idx(i + d[0], j + d[1], k + d[2])] < 0.0);
                 // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
-                if touch.is_empty() {
-                    let mut neg = 0;
-                    for d in CORNERS {
-                        neg += (f[idx(i + d[0], j + d[1], k + d[2])] < 0.0) as usize;
-                    }
-                    if neg == 0 || neg == 8 {
-                        continue;
-                    }
-                }
-                let mut sum = [0.0f64; 3];
-                let mut cnt = 0.0;
-                for [ca, cb] in EDGES {
-                    let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
-                    let base = CORNERS[ca];
-                    if let Some((t, _)) = crossing([i + base[0], j + base[1], k + base[2]], a) {
-                        for (ax, s) in sum.iter_mut().enumerate() {
-                            *s += base[ax] as f64 + if ax == a { t } else { 0.0 };
-                        }
-                        cnt += 1.0;
-                    }
-                }
-                if cnt == 0.0 {
+                let neg = corner_neg.iter().filter(|&&b| b).count();
+                if touch.is_empty() && (neg == 0 || neg == 8) {
                     continue;
                 }
-                let g = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
-                vert[cell(i, j, k)] = mesh.push_vertex([dom.at(0, g[0], n), dom.at(1, g[1], n), dom.at(2, g[2], n)]);
+                // 少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分ける
+                let minority = neg <= 4;
+                let mut group = [usize::MAX; 8];
+                let mut groups = 0;
+                for c in 0..8 {
+                    if corner_neg[c] != minority || group[c] != usize::MAX {
+                        continue;
+                    }
+                    let mut stack = vec![c];
+                    group[c] = groups;
+                    while let Some(x) = stack.pop() {
+                        for [ca, cb] in EDGES {
+                            let y = if ca == x { cb } else if cb == x { ca } else { continue };
+                            if corner_neg[y] == minority && group[y] == usize::MAX {
+                                group[y] = groups;
+                                stack.push(y);
+                            }
+                        }
+                    }
+                    groups += 1;
+                }
+                // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
+                // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
+                let has_touch = !touch.is_empty()
+                    && EDGES.iter().any(|&[ca, cb]| {
+                        let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
+                        let base = CORNERS[ca];
+                        matches!(crossing([i + base[0], j + base[1], k + base[2]], a), Some((_, None)))
+                    });
+                if has_touch && groups > 0 {
+                    for g in group.iter_mut().filter(|g| **g != usize::MAX) {
+                        *g = 0;
+                    }
+                    groups = 1;
+                }
+                let touch_group = if groups > 0 { 0 } else { groups }; // 接するだけの辺の組
+                // 交わる辺ごとの組と、交わる点（セルの中の位置）
+                let mut hits: Vec<(usize, usize, [f64; 3])> = Vec::with_capacity(12);
+                for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
+                    let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
+                    let base = CORNERS[ca];
+                    if let Some((t, sign)) = crossing([i + base[0], j + base[1], k + base[2]], a) {
+                        let g = match sign {
+                            Some(_) => group[if corner_neg[ca] == minority { ca } else { cb }],
+                            None => touch_group,
+                        };
+                        let mut q = [base[0] as f64, base[1] as f64, base[2] as f64];
+                        q[a] += t;
+                        hits.push((e, g, q));
+                    }
+                }
+                let mut sums = vec![([0.0f64; 3], 0.0f64); groups + 1];
+                let mut edge_group = [usize::MAX; 12];
+                for &(e, g, q) in &hits {
+                    edge_group[e] = g;
+                    let (sum, cnt) = &mut sums[g];
+                    for ax in 0..3 {
+                        sum[ax] += q[ax];
+                    }
+                    *cnt += 1.0;
+                }
+                let mut ids = vec![NONE; groups + 1];
+                for (g, (sum, cnt)) in sums.iter().enumerate() {
+                    if *cnt > 0.0 {
+                        let p = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
+                        ids[g] = mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
+                    }
+                }
+                if ids.iter().all(|&v| v == NONE) {
+                    continue;
+                }
+                vert[cell(i, j, k)] = cell_slots.len() as u32;
+                cell_slots.push(edge_group.map(|g| if g == usize::MAX { NONE } else { ids[g] }));
             }
         }
     }
 
-    // 3. 曲面と交わる格子の辺ごとに、周りの4セルの頂点を四角形でつなぐ
+    // セルの中の辺の番号: 向き a、セルの角 (0/1) から見た始点の位置 base
+    let local_edge = |a: usize, base: [usize; 3]| -> usize {
+        EDGES
+            .iter()
+            .position(|&[ca, cb]| CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a)))
+            .unwrap_or(0)
+    };
+
+    // 3. 曲面と交わる格子の辺ごとに、周りの4セルの（その辺に属する）頂点を四角形でつなぐ
     let mut touch_tris: Vec<u32> = Vec::new();
     for a in 0..3 {
         let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        // 周りの4セル（b-c 平面で反時計回り）から見た、この辺の番号
+        let locals = [(1, 1), (0, 1), (0, 0), (1, 0)].map(|(db, dc)| {
+            let mut base = [0; 3];
+            base[b] = db;
+            base[c] = dc;
+            local_edge(a, base)
+        });
         for k in 0..m {
             for j in 0..m {
                 for i in 0..m {
@@ -528,13 +624,16 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                         continue;
                     }
                     let Some((_, sign)) = crossing(p, a) else { continue };
-                    // 周りの4セル（b-c 平面で反時計回り）
-                    let around = [(1, 1), (0, 1), (0, 0), (1, 0)].map(|(db, dc)| {
+                    let mut around = [NONE; 4];
+                    for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)].iter().zip(locals).enumerate() {
                         let mut s = p;
                         s[b] -= db;
                         s[c] -= dc;
-                        vert[cell(s[0], s[1], s[2])]
-                    });
+                        let slot = vert[cell(s[0], s[1], s[2])];
+                        if slot != NONE {
+                            around[q] = cell_slots[slot as usize][le];
+                        }
+                    }
                     if around.contains(&NONE) {
                         continue;
                     }
@@ -909,6 +1008,8 @@ pub struct NdShape {
     /// 媒介変数表示の立体なら true。曲面は6枚ずつで1つの立体（媒介変数の直方体の面）になっていて、
     /// `grid` には点ごとに3つの媒介変数の値 (u − u₀, v − v₀, t − t₀) が入る（その面で固定した媒介変数は [`NO_GRID`]）
     pub solid: bool,
+    /// 複素数の色分けをするなら、点ごとの (Re w/|w|, Im w/|w|, log₂|w|)（[`Mesh::complex`] と同じ）。しないなら空
+    pub complex: Vec<f32>,
 }
 
 /// 格子線を引かない成分の印（シェーダーはこれより小さい値の成分には線を引かない）
@@ -959,7 +1060,7 @@ pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64)
         points.extend(eval_nd(progs, &[&us, &vs], m * m));
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: false }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new() }
 }
 
 /// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
@@ -1001,7 +1102,7 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
         points.extend(eval_nd(progs, &[&cols[0], &cols[1], &cols[2]], count));
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: true }
+    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new() }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -1021,6 +1122,7 @@ pub fn explicit_nd(
     u: (f64, f64),
     v: (f64, f64),
     n: usize,
+    mode: ComplexMode,
 ) -> NdShape {
     let n = n.max(2);
     let m = n + 1;
@@ -1040,14 +1142,19 @@ pub fn explicit_nd(
     let mut vals = vec![C::new(0.0, 0.0); m * m];
     prog.eval_batch(&[&us, &vs], &mut vals);
     let mut points = Vec::with_capacity(m * m * d);
+    let mut complex = Vec::new();
     for k in 0..m * m {
         let mut p = base.to_vec();
         p[axes[ua]] = us[k];
         p[axes[va]] = vs[k];
-        p[axes[axis]] = as_real(vals[k]);
+        // 複素数の色分けをするなら、高さは |f|・Re f・Im f（色は偏角）
+        p[axes[axis]] = height(vals[k], mode);
         points.extend_from_slice(&p);
+        if mode != ComplexMode::Off {
+            complex.extend_from_slice(&complex_attr(vals[k]));
+        }
     }
-    NdShape { dims: d, points, grid: Some((m, grid)), solid: false }
+    NdShape { dims: d, points, grid: Some((m, grid)), solid: false, complex }
 }
 
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
@@ -1064,7 +1171,7 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         }
         points.extend(curve_nd(&|ts: &[f64]| eval_nd(progs, &[ts], ts.len()), progs.len(), t, n, tol));
     }
-    NdShape { dims, points, grid: None, solid: false }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new() }
 }
 
 /// 1本の曲線の点（適応サンプリング）。`eval` は媒介変数の値の列から、d 次元の点を並べたものを計算する
@@ -1178,12 +1285,13 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
     if shapes.iter().any(|s| s.dims != dims || s.solid != solid || s.grid.as_ref().map(|g| g.0) != m) {
         return None;
     }
-    let mut out = NdShape { dims, points: Vec::new(), grid: m.map(|m| (m, Vec::new())), solid };
+    let mut out = NdShape { dims, points: Vec::new(), grid: m.map(|m| (m, Vec::new())), solid, complex: Vec::new() };
     for s in shapes {
         if m.is_none() && !out.points.is_empty() {
             out.points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
         }
         out.points.extend_from_slice(&s.points);
+        out.complex.extend_from_slice(&s.complex);
         if let (Some((_, g)), Some((_, sg))) = (out.grid.as_mut(), s.grid) {
             g.extend_from_slice(&sg);
         }
@@ -1414,6 +1522,9 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
         let p = to3(k);
         if ok(&p) {
             *slot = mesh.push_vertex(p);
+            if !shape.complex.is_empty() {
+                mesh.complex.extend_from_slice(&shape.complex[3 * k..3 * k + 3]);
+            }
             let g = &grid[gd * k..gd * k + gd];
             mesh.grid_coords.extend_from_slice(&[g[0], g[1], if shape.solid { g[2] } else { p[2] as f32 }]);
         }
@@ -1592,6 +1703,70 @@ mod tests {
         let p = prog("20 x", &["x", "y"]);
         let full = explicit_surface(&p, Domain { lo: [-1.0, -1.0, -30.0], hi: [1.0, 1.0, 30.0] }, 10, 2);
         assert_eq!(full.positions.len(), 11 * 11 * 3);
+    }
+
+    /// 三角形でつながった部分（曲面）の数
+    fn pieces(m: &Mesh) -> usize {
+        let n = m.positions.len() / 3;
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn root(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                r = p[r];
+            }
+            p[x] = r;
+            r
+        }
+        for t in m.indices.chunks_exact(3) {
+            for e in [(t[0], t[1]), (t[1], t[2])] {
+                let (a, b) = (root(&mut parent, e.0 as usize), root(&mut parent, e.1 as usize));
+                parent[a] = b;
+            }
+        }
+        let used: std::collections::HashSet<usize> = m.indices.iter().map(|&k| k as usize).collect();
+        used.iter().map(|&k| root(&mut parent, k)).collect::<std::collections::HashSet<_>>().len()
+    }
+
+    #[test]
+    fn close_surfaces_stay_apart() {
+        // 半径 1 と 1.15 の2つの球（間は 0.15 = 格子の間隔の 1.5 倍）。1つのセルを両方の球が通る所があるが、くっつかずに2枚になる
+        let p = prog("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", &AXES);
+        let m = implicit_surface(&p, Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40);
+        assert_eq!(pieces(&m), 2);
+        // 頂点はどれも、どちらかの球の上にある（2つの球の間の、くっついた所に頂点が無い）
+        for q in m.positions.chunks_exact(3) {
+            let r = ((q[0] * q[0] + q[1] * q[1] + q[2] * q[2]) as f64).sqrt();
+            assert!((r - 1.0).abs() < 0.02 || (r - 1.15).abs() < 0.02, "r = {r}");
+        }
+    }
+
+    #[test]
+    fn complex_pole_has_no_holes() {
+        // Re(1/(x + iy)) は原点の極で +∞ から −∞ に飛ぶ。範囲の外の値は範囲の少し外にそろえて描くので、
+        // 極の周りに穴が空かない（平面に落とした面積が、表示範囲の面積 4 にほぼ等しい）
+        let d = Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 3.0] };
+        let p = prog("1 / (x + i y)", &["x", "y"]);
+        let m = explicit_surface_full(&p, d, 40, 2, ComplexMode::Re, false);
+        let mut area = 0.0;
+        for t in m.indices.chunks_exact(3) {
+            let v = |k: u32| [m.positions[k as usize * 3] as f64, m.positions[k as usize * 3 + 1] as f64];
+            let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+            area += ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.0;
+        }
+        assert!((area - 4.0).abs() < 0.02, "面積 {area}");
+        // 色分け用の値は頂点ごとに3つ
+        assert_eq!(m.complex.len(), m.positions.len());
+    }
+
+    #[test]
+    fn rotated_explicit_keeps_complex_colors() {
+        // 回した陽関数（表示中の座標どうしの回転）でも、高さを |f| にして色分けの値を持つ
+        let p = prog("(x + i y)^2", &["x", "y"]);
+        let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], (-1.0, 1.0), (-1.0, 1.0), 4, ComplexMode::Abs);
+        assert_eq!(shape.complex.len(), shape.points.len()); // 3次元の点1つにつき3つ
+        for q in shape.points.chunks_exact(3) {
+            assert!((q[2] - (q[0] * q[0] + q[1] * q[1])).abs() < 1e-9); // |(x+iy)²| = x² + y²
+        }
     }
 
     #[test]
@@ -1836,3 +2011,5 @@ mod tests {
         }
     }
 }
+
+
