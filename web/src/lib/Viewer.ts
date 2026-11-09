@@ -381,6 +381,9 @@ export class Viewer {
   /** これから動かす拡大縮小の量（距離の対数。正なら遠ざかる） */
   private wheelPending = 0
   private wheelLastTime = 0
+  /** ホイールを回している間は、この時刻まで画素密度を下げたままにする
+   *  （目盛りの合間に元の密度に戻ると、描き直しが重くなり、くっきり ⇔ ぼやけが切り替わってカクつく） */
+  private wheelHoldUntil = 0
 
   private setupWheel() {
     this.renderer.domElement.addEventListener(
@@ -395,6 +398,7 @@ export class Viewer {
         // 1目盛り（約 100 px）で約 1.07 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
         this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * 0.0007, -3, 3)
         if (this.wheelLastTime === 0) this.wheelLastTime = performance.now()
+        this.wheelHoldUntil = performance.now() + 350
         this.setLowRes(true)
         this.dirty = true
       },
@@ -402,7 +406,7 @@ export class Viewer {
     )
   }
 
-  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.08 秒ほどで大部分を動かす） */
+  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.5 秒ほどで大部分を動かす） */
   private stepWheelZoom() {
     if (this.wheelPending === 0) {
       this.wheelLastTime = 0
@@ -411,8 +415,11 @@ export class Viewer {
     const now = performance.now()
     const dt = Math.min(0.1, (now - this.wheelLastTime) / 1000)
     this.wheelLastTime = now
-    let step = this.wheelPending * (1 - Math.exp(-dt / 0.08))
-    if (Math.abs(this.wheelPending) < 1e-4) step = this.wheelPending
+    // ならす時間 0.22 秒。短いと、目盛りごとに「急に動いて止まる」をくり返して波打って見える
+    // （目盛りの間隔 0.08 秒なら、速さの揺れが 0.1 秒では約 2.2 倍、0.22 秒では約 1.4 倍）
+    let step = this.wheelPending * (1 - Math.exp(-dt / 0.22))
+    // 残りがごくわずかになったら、最後まで動かして終える（いつまでも微小に動き続けないように）
+    if (Math.abs(this.wheelPending) < 2e-3) step = this.wheelPending
     this.wheelPending -= step
     this.zoomAround(this.controls.target.clone(), Math.exp(step))
   }
@@ -541,7 +548,13 @@ export class Viewer {
     this.lastCamQuat.copy(this.camera.quaternion)
     if (visible) {
       this.stillFrames = 0
-    } else if (++this.stillFrames > 4 && !this.interacting && !this.busy) {
+    } else if (
+      ++this.stillFrames > 4 &&
+      !this.interacting &&
+      !this.busy &&
+      this.wheelPending === 0 &&
+      performance.now() > this.wheelHoldUntil
+    ) {
       this.setLowRes(false) // 止まったら、元の画素密度で描き直す
     }
     // 何も変わっていなければ描かない（止まっているときに電池を使わない）
