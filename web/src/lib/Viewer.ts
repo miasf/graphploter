@@ -219,14 +219,9 @@ export class Viewer {
     this.controls.rotateSpeed = a ? 1 : 0.5
   }
 
-  /** 画面に見えている高さの半分（注視点の位置で）。近づいているかの判定に使う */
-  private viewHalfHeight(): number {
-    return this.camera.position.distanceTo(this.controls.target) * this.perspective
-  }
-
   /**
    * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る。
-   * - 左ドラッグ: 離れているときは回転。近づくと、つかんだ点が指についてくる平行移動になる
+   * - 左ドラッグ: 平行移動（つかんだ点がカーソルについてくる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
    * - 左ボタンを2回押して、2回目を押したままドラッグ・Shift + 左ドラッグ: 押した位置を中心に回転する
@@ -259,8 +254,8 @@ export class Viewer {
         if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
-        // 近づいているとき（見えている範囲が表示範囲の約 0.4 倍より狭い）は、回転ではなく平行移動
-        else if (e.button === 0 && !this.flat && this.viewHalfHeight() < this.sceneSize() * 0.4) mode = 'grab'
+        // 左ドラッグ: どの距離でも平行移動（つかんだ点がカーソルについてくる）
+        else if (e.button === 0 && !this.flat) mode = 'grab'
         else return
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
@@ -353,7 +348,7 @@ export class Viewer {
     if (!q) return
     const delta = p.clone().sub(q)
     // 地平線の近くでは、少しのカーソルの動きで遠くまで飛ぶので、1回で動かす量を抑える
-    const max = this.sceneSize() * 0.2
+    const max = this.camera.position.distanceTo(this.controls.target) * 0.3 // 遠くから見ているときは大きく動けるように
     if (delta.length() > max) delta.setLength(max)
     this.camera.position.add(delta)
     this.controls.target.add(delta)
