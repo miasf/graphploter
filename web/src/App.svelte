@@ -1108,7 +1108,7 @@
           floor ceil round sign Re Im conj arg、2つの引数: mod min max nCr nPr、階乗: <code>n!</code>
         </li>
         <li>
-          特殊関数（すべて複素数で使えます。よく使うものは数式キーボードの「特殊」タブにあります）
+          特殊関数（すべて複素数で使えます。数式キーボードの「特殊」タブに全部あり、◀ ▶ でページをめくれます）
           <ul>
             <li>ガンマ系: gamma(z)（Γ）, gamma(a, z)（上側不完全）, gammaP(a, z), gammaQ(a, z), loggamma, beta(a, b), beta(z, a, b), betaRegularized(z, a, b), digamma（psi, ψ）, polygamma(n, z), pochhammer(a, n), binomial(n, k)</li>
             <li>ゼータ系: zeta(s)（ζ）, zeta(s, a)（フルヴィッツ）, polylog(s, z)（Li）, dirichletEta(s)</li>
@@ -1125,7 +1125,7 @@
           入力欄は数式の見た目のまま編集できます。<code>/</code> で分数、<code>^</code> でべき乗、<code>pi</code> →
           π、<code>sqrt</code> → √ に自動で変わります
         </li>
-        <li>スマホでは数式用のキーボードが出ます（123 / f(x) / abc のタブで切り替え）</li>
+        <li>入力欄に入ると数式用のキーボードが出ます（123 / f(x) / 特殊 / abc のタブで切り替え）。キーにカーソルを当てる（スマホでは長押しする）と、そのキーの名前が出ます</li>
         <li>
           4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（<code>w2</code> と打つと w₂）。
           表示する3つの座標を選び、残りはスライダーで固定した断面を描きます
