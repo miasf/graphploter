@@ -208,6 +208,7 @@
         name={item.param.name}
         value={item.param}
         slider={item.slider}
+        error={item.sliderError}
         onChange={onParam}
         {onSlider}
         playing={paramPlaying}

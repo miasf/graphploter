@@ -91,6 +91,9 @@ export interface SliderStyle {
   complex: boolean
   /** 範囲で重ねる（min〜max で動かしたときに図形が通る領域を描く） */
   stack: boolean
+  /** 範囲を式（LaTeX）で決めるときの [最小, 最大]。ほかのパラメータも使える（a ≤ c ≤ 2b など）。
+   *  あれば min, max はこの式の値（古い保存データや、数値だけのときは無い） */
+  bounds?: [string, string]
 }
 
 /** 式の一覧の1行 */
@@ -115,6 +118,8 @@ export interface PlotItem extends PlotStyle {
   /** この行がパラメータの定義（a = 1 など）なら、その名前と値 */
   param?: { name: string } & ParamValue
   slider: SliderStyle
+  /** スライダーの範囲の式の誤りの説明（無ければ undefined） */
+  sliderError?: string
   /** この式で使われているパラメータの名前（値が変わったら計算し直す） */
   usedParams: string[]
   /** 非表示の間に計算し直す必要が生じた（表示したときに計算する） */
