@@ -39,3 +39,26 @@ body {
   color: var(--text);
   font: 15px/1.5 var(--sans);
 }
+
+/* ---- 数式キーボードのキーの名前（mathSetup.ts の吹き出し） ---- */
+/* MathLive 自身の吹き出しはキーの外が切り取られることがあるので使わず、こちらで出す */
+.ML__keyboard .MLK__row > [data-tooltip]::after {
+  display: none;
+}
+.key-tip {
+  position: fixed;
+  z-index: 1000; /* キーボード（z-index: 105）より上 */
+  max-width: min(280px, calc(100vw - 8px));
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #3a3a40;
+  color: #fff;
+  font: 13px/1.45 var(--sans);
+  text-align: center;
+  white-space: pre-line; /* 名前と書き方の2行 */
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+}
+.key-tip[hidden] {
+  display: none;
+}
