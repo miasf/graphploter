@@ -54,7 +54,7 @@
   // ---- 画面の状態 ----
   // 最初は空の式が1つだけ。例は「サンプル」からタップして追加する
   let items = $state<PlotItem[]>([newItem('')])
-  let domain = $state<Domain>({ xmin: -5, xmax: 5, ymin: -5, ymax: 5, zmin: -3, zmax: 3 })
+  let domain = $state<Domain>({ xmin: -10, xmax: 10, ymin: -10, ymax: 10, zmin: -6, zmax: 6 })
   let resolution = $state(150)
   let implicitResolution = $state(80)
   let domainError = $state('')
