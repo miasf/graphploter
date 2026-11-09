@@ -1162,13 +1162,17 @@
     style:--half="{snapHeights.half}px"
     style:--keyboard-h="{keyboardHeight}px"
   >
-    <button
-      class="settings-toggle"
-      class:on={settingsOpen}
-      onclick={() => (settingsOpen ? closeSettings() : (settingsOpen = true))}
-      aria-expanded={settingsOpen}
-      title="設定"
-    >⚙ 設定</button>
+    <div class="tool-row">
+      <button class="settings-toggle" onclick={() => viewer?.resetCamera()} title="視点を最初の位置に戻す"
+        aria-label="視点を最初の位置に戻す">⟲ 視点</button>
+      <button
+        class="settings-toggle"
+        class:on={settingsOpen}
+        onclick={() => (settingsOpen ? closeSettings() : (settingsOpen = true))}
+        aria-expanded={settingsOpen}
+        title="設定"
+      >⚙ 設定</button>
+    </div>
     {#if settingsOpen}
       <div class="settings-card" role="dialog" aria-label="設定">
         <div class="card-head">
@@ -1484,7 +1488,7 @@
               </li>
               <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
               <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は「グループ」を選ぶと、同じグループの式が一緒に回ります（同期）</li>
-                <li>操作: 左ドラッグで回転、右ドラッグで拡大縮小（上で縮小・下で拡大）、Shift + 左ドラッグ（または中ドラッグ）で移動、Ctrl（Mac は ⌘）+ 左ドラッグでその場から見回す、ホイールでも拡大縮小</li>
+                <li>操作（パソコン）: 左ドラッグで回転、右ドラッグで押した位置を中心に拡大縮小（上で縮小・下で拡大）と回転（左右）、Shift + 左ドラッグ（または中ドラッグ）で移動、Ctrl（Mac は ⌘）+ 左ドラッグでその場から見回す、左ダブルクリックでその位置を回転の中心にする、ホイールでも拡大縮小。右上の「⟲ 視点」で最初の視点に戻ります</li>
               </ul>
 
             </div>
@@ -1570,6 +1574,10 @@
     display: flex;
     flex-direction: column;
     align-items: flex-end;
+  }
+  .tool-row {
+    display: flex;
+    gap: 8px;
   }
   .settings-toggle {
     height: 36px;
