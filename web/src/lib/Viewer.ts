@@ -173,6 +173,7 @@ export class Viewer {
     this.camera.up.set(0, 0, 1)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.setupMouse()
+    this.setupWheel()
     this.applyButtons()
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.1 // 指を離した後の慣性の回転を、少し早めに止める
@@ -228,7 +229,8 @@ export class Viewer {
    * - 左ドラッグ: 離れているときは回転。近づくと、つかんだ点が指についてくる平行移動になる
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
-   * - 左ダブルクリック・Shift + 左クリック: その位置を回転の中心にする（その点が画面の中央に来るよう、視点を平行に動かす）
+   * - 左ボタンを2回押して、2回目を押したままドラッグ・Shift + 左ドラッグ: 押した位置を中心に回転する
+   *   （視点を動かして中心を画面の中央に持ってくることはしない。押した点はその場にとどまる）
    */
   private setupMouse() {
     const el = this.renderer.domElement
@@ -236,34 +238,32 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'grab'
+      mode: 'look' | 'right' | 'grab' | 'orbit'
       pivot: THREE.Vector3
       plane: THREE.Plane | null
     }
     let last: Drag | null = null
-    let lastPointerType = 'mouse'
+    /** 前に左ボタンを押した時刻と位置（2回押しの判定に使う） */
+    let prevLeft = { t: -1e9, x: 0, y: 0 }
     el.addEventListener(
       'pointerdown',
       (e) => {
-        lastPointerType = e.pointerType
         if (e.pointerType === 'touch' || this.controlMode !== 'B') return
-        // Shift + 左クリック: ダブルクリックと同じく、その位置を回転の中心にする
-        if (e.button === 0 && e.shiftKey) {
-          e.stopImmediatePropagation()
-          e.preventDefault()
-          const p = this.pick(e.clientX, e.clientY)
-          if (p) this.animatePivot(p)
-          return
-        }
+        // 左ボタンの2回押し（0.35 秒以内・ほぼ同じ位置）
+        const double =
+          e.button === 0 &&
+          e.timeStamp - prevLeft.t < 350 &&
+          Math.hypot(e.clientX - prevLeft.x, e.clientY - prevLeft.y) < 8
+        if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
         if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
-        // 近づいているとき（見えている範囲が表示範囲の約 1/4 より狭い）は、回転ではなく平行移動
-        else if (e.button === 0 && !this.flat && this.viewHalfHeight() < this.sceneSize() * 0.25) mode = 'grab'
+        else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
+        // 近づいているとき（見えている範囲が表示範囲の約 0.4 倍より狭い）は、回転ではなく平行移動
+        else if (e.button === 0 && !this.flat && this.viewHalfHeight() < this.sceneSize() * 0.4) mode = 'grab'
         else return
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
-        this.stopPivotAnimation()
         el.setPointerCapture(e.pointerId)
         const pivot = mode === 'look' ? new THREE.Vector3() : (this.pick(e.clientX, e.clientY) ?? this.controls.target.clone())
         last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: mode === 'grab' ? this.grabPlane(pivot) : null }
@@ -285,6 +285,13 @@ export class Viewer {
         this.grab(last.pivot, last.plane!, e.clientX, e.clientY)
         return
       }
+      if (last.mode === 'orbit') {
+        // 左ドラッグの回転と同じ感度（画面の高さ分で半回転）
+        const k = Math.PI / (this.container.clientHeight || 1)
+        this.rotateAround(last.pivot, -dx * k)
+        this.tiltAround(last.pivot, -dy * k)
+        return
+      }
       // 右ドラッグ: 上下は拡大縮小（100 px で約 1.6 倍）、左右は回転（2D 表示では回さない）
       this.zoomAround(last.pivot, Math.pow(0.995, dy))
       if (!this.flat) this.rotateAround(last.pivot, (-dx * Math.PI) / (this.container.clientWidth || 1))
@@ -296,11 +303,23 @@ export class Viewer {
     }
     el.addEventListener('pointerup', end)
     el.addEventListener('pointercancel', end)
-    el.addEventListener('dblclick', (e) => {
-      if (lastPointerType !== 'mouse' || e.button !== 0 || this.controlMode !== 'B') return
-      const p = this.pick(e.clientX, e.clientY)
-      if (p) this.animatePivot(p)
-    })
+  }
+
+  /** 点 pivot を通る、カメラの右向きの軸の周りに、カメラと注視点を angle（ラジアン）回す（見下ろす角度を変える）。
+   *  真上・真下を越えないようにする */
+  private tiltAround(pivot: THREE.Vector3, angle: number) {
+    const up = this.camera.up.clone().normalize()
+    const target = this.controls.target
+    const dir = target.clone().sub(this.camera.position).normalize()
+    const right = new THREE.Vector3().crossVectors(dir, up).normalize()
+    const pitch = Math.asin(THREE.MathUtils.clamp(dir.dot(up), -1, 1))
+    const limit = THREE.MathUtils.degToRad(88)
+    const next = THREE.MathUtils.clamp(pitch + angle, -limit, limit)
+    const a = next - pitch
+    this.camera.position.sub(pivot).applyAxisAngle(right, a).add(pivot)
+    target.sub(pivot).applyAxisAngle(right, a).add(pivot)
+    this.camera.lookAt(target)
+    this.dirty = true
   }
 
   /** 画面上の点 (clientX, clientY) にある曲面の点（表示範囲の外で切り落とした部分は除く）。
@@ -354,6 +373,57 @@ export class Viewer {
     return ray
   }
 
+  // ---- ホイールの拡大縮小（滑らかに動かす）----
+  //
+  // OrbitControls はホイールの1目盛りごとに一気に拡大縮小するので、ふつうのマウス（1目盛りが大きい）ではカクカクする。
+  // 目盛りの分を「これから動かす量」としてため、毎フレーム少しずつ（指数的に近づけて）動かす
+
+  /** これから動かす拡大縮小の量（距離の対数。正なら遠ざかる） */
+  private wheelPending = 0
+  private wheelLastTime = 0
+  /** ホイールを回している間は、この時刻まで画素密度を下げたままにする
+   *  （目盛りの合間に元の密度に戻ると、描き直しが重くなり、くっきり ⇔ ぼやけが切り替わってカクつく） */
+  private wheelHoldUntil = 0
+
+  private setupWheel() {
+    this.renderer.domElement.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault()
+        e.stopImmediatePropagation() // OrbitControls には渡さない
+        // 行・ページ単位のホイールは画素に直す
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.container.clientHeight || 800 : 1
+        let d = e.deltaY * unit
+        if (e.ctrlKey) d *= 4 // トラックパッドのピンチ（値が小さい）
+        // 1目盛り（約 100 px）で約 1.07 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
+        this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * 0.0007, -3, 3)
+        if (this.wheelLastTime === 0) this.wheelLastTime = performance.now()
+        this.wheelHoldUntil = performance.now() + 350
+        this.setLowRes(true)
+        this.dirty = true
+      },
+      { capture: true, passive: false },
+    )
+  }
+
+  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.5 秒ほどで大部分を動かす） */
+  private stepWheelZoom() {
+    if (this.wheelPending === 0) {
+      this.wheelLastTime = 0
+      return
+    }
+    const now = performance.now()
+    const dt = Math.min(0.1, (now - this.wheelLastTime) / 1000)
+    this.wheelLastTime = now
+    // ならす時間 0.22 秒。短いと、目盛りごとに「急に動いて止まる」をくり返して波打って見える
+    // （目盛りの間隔 0.08 秒なら、速さの揺れが 0.1 秒では約 2.2 倍、0.22 秒では約 1.4 倍）
+    let step = this.wheelPending * (1 - Math.exp(-dt / 0.22))
+    // 残りがごくわずかになったら、最後まで動かして終える（いつまでも微小に動き続けないように）
+    if (Math.abs(this.wheelPending) < 2e-3) step = this.wheelPending
+    this.wheelPending -= step
+    this.zoomAround(this.controls.target.clone(), Math.exp(step))
+  }
+
   /** 点 pivot に向かって、カメラと注視点を factor 倍の距離にする（1 より小さいと近づいて拡大） */
   private zoomAround(pivot: THREE.Vector3, factor: number) {
     const target = this.controls.target
@@ -380,8 +450,8 @@ export class Viewer {
   /** 見る向きを、画面上で (dx, dy) px ドラッグした分だけ変える（カメラの位置は動かさない） */
   private look(dx: number, dy: number) {
     const h = this.container.clientHeight || 1
-    // 画面の高さ分のドラッグで、視野角の半分くらい向きが変わる（大きいと動きすぎて操作しにくい）
-    const k = (THREE.MathUtils.degToRad(this.camera.fov) * 0.5) / h
+    // 画面の高さ分のドラッグで、視野角と同じくらい向きが変わる
+    const k = (THREE.MathUtils.degToRad(this.camera.fov) * 1.0) / h
     const eye = this.camera.position
     const dir = this.controls.target.clone().sub(eye)
     const up = this.camera.up.clone().normalize()
@@ -391,42 +461,12 @@ export class Viewer {
     const right = new THREE.Vector3().crossVectors(dir, up).normalize()
     const pitch = Math.asin(THREE.MathUtils.clamp(dir.clone().normalize().dot(up), -1, 1))
     const limit = THREE.MathUtils.degToRad(85)
-    const next = THREE.MathUtils.clamp(pitch - dy * k, -limit, limit)
+    // マウスを上に動かすと下を向き、下に動かすと上を向く
+    const next = THREE.MathUtils.clamp(pitch + dy * k, -limit, limit)
     dir.applyAxisAngle(right, next - pitch)
     this.controls.target.copy(eye).add(dir)
     this.camera.lookAt(this.controls.target)
     this.dirty = true
-  }
-
-  /** ダブルクリックした点を回転の中心にする動き */
-  private pivotAnim: { from: THREE.Vector3; delta: THREE.Vector3; start: number; done: THREE.Vector3 } | null = null
-
-  /** 視点を平行に動かして、点 p を注視点（回転の中心）にする（0.3 秒かけて動かす） */
-  private animatePivot(p: THREE.Vector3) {
-    const from = this.controls.target.clone()
-    this.pivotAnim = { from, delta: p.clone().sub(from), start: performance.now(), done: new THREE.Vector3() }
-    this.interacting = true
-    this.setLowRes(true)
-  }
-
-  private stopPivotAnimation() {
-    if (this.pivotAnim) this.interacting = false
-    this.pivotAnim = null
-  }
-
-  /** 毎フレーム: ダブルクリックの動きを進める */
-  private stepPivotAnimation() {
-    const a = this.pivotAnim
-    if (!a) return
-    const t = Math.min(1, (performance.now() - a.start) / 300)
-    const ease = 1 - (1 - t) ** 3
-    const want = a.delta.clone().multiplyScalar(ease)
-    const step = want.clone().sub(a.done) // 前のフレームから動かす分
-    a.done.copy(want)
-    this.controls.target.add(step)
-    this.camera.position.add(step)
-    this.dirty = true
-    if (t >= 1) this.stopPivotAnimation()
   }
 
   dispose() {
@@ -497,8 +537,8 @@ export class Viewer {
   private loop = () => {
     if (this.stopped) return
     requestAnimationFrame(this.loop)
+    this.stepWheelZoom()
     // カメラが動いたか（慣性で動き続けている間も true）
-    this.stepPivotAnimation()
     if (this.controls.update()) this.dirty = true
     // 目に見えるほど動いたか。慣性の終わりのごくわずかな動きは「止まった」とみなす
     const dist = this.camera.position.distanceTo(this.controls.target)
@@ -509,7 +549,13 @@ export class Viewer {
     this.lastCamQuat.copy(this.camera.quaternion)
     if (visible) {
       this.stillFrames = 0
-    } else if (++this.stillFrames > 4 && !this.interacting && !this.busy) {
+    } else if (
+      ++this.stillFrames > 4 &&
+      !this.interacting &&
+      !this.busy &&
+      this.wheelPending === 0 &&
+      performance.now() > this.wheelHoldUntil
+    ) {
       this.setLowRes(false) // 止まったら、元の画素密度で描き直す
     }
     // 何も変わっていなければ描かない（止まっているときに電池を使わない）
@@ -627,7 +673,7 @@ export class Viewer {
 
   /** カメラを斜め上からの見やすい位置に戻す（2D 表示なら真上から） */
   resetCamera() {
-    this.stopPivotAnimation()
+    this.wheelPending = 0
     this.dirty = true
     const d = this.domain
     if (!d) return
