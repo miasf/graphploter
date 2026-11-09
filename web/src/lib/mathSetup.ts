@@ -150,3 +150,60 @@ export function setupKeyboard() {
     'alphabetic',
   ]
 }
+
+// ---- PC でも画面上の数式キーボードを出す ----
+// MathLive の自動（auto）では、キーボードが出るのはスマホなど指で操作する画面だけ。
+// PC では手動（manual）にして、入力欄に入ったときにこちらで出す。
+// キーボードの「隠す」ボタンで閉じたら、その設定を覚えて、次からは自動で出さない
+// （入力欄のキーボードのボタンで開き直すと、また自動で出す）。
+
+/** 指で操作する画面か（MathLive に任せる） */
+const touch = window.matchMedia('(pointer: coarse)').matches
+const PC_KEYBOARD_KEY = 'graphploter:pcKeyboard'
+
+function loadAutoShow(): boolean {
+  try {
+    return localStorage.getItem(PC_KEYBOARD_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+
+let autoShow = loadAutoShow()
+let watching = false
+
+const mathFieldFocused = () => document.activeElement?.tagName === 'MATH-FIELD'
+
+/** 入力欄に設定するキーボードの出し方 */
+export function keyboardPolicy(): 'auto' | 'manual' {
+  return touch ? 'auto' : 'manual'
+}
+
+/** 入力欄に入ったとき（PC では、閉じられていなければキーボードを出す） */
+export function keyboardOnFocus() {
+  if (touch) return
+  const kb = window.mathVirtualKeyboard
+  if (!watching) {
+    watching = true
+    // 入力欄に入ったまま開閉された = 利用者がボタンで開閉した。その状態を覚える
+    kb.addEventListener('virtual-keyboard-toggle', () => {
+      if (!mathFieldFocused()) return // 入力欄から出たので閉じた
+      autoShow = kb.visible
+      try {
+        localStorage.setItem(PC_KEYBOARD_KEY, autoShow ? 'on' : 'off')
+      } catch {
+        // 保存できない環境では、このページを開いている間だけ覚える
+      }
+    })
+  }
+  if (autoShow && !kb.visible) kb.show()
+}
+
+/** 入力欄から出たとき（PC では、ほかの入力欄に移ったのでなければキーボードを閉じる） */
+export function keyboardOnBlur() {
+  if (touch) return
+  setTimeout(() => {
+    const kb = window.mathVirtualKeyboard
+    if (!mathFieldFocused() && kb.visible) kb.hide()
+  }, 0)
+}
