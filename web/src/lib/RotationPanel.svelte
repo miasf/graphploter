@@ -69,6 +69,7 @@
     <EditableValue
       value={space.rotation[p.k]}
       suffix="°"
+      chars={6}
       format={(v) => String(Number(v.toFixed(1)))}
       label="{coordName(p.i)}{coordName(p.j)} 平面の回転角（度）"
       onChange={(v) => setAngle(p.k, v)}

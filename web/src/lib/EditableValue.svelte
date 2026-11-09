@@ -19,8 +19,11 @@
     max?: number
     /** 整数に丸める */
     integer?: boolean
+    /** 欄の幅（文字数）を固定する。スライダーと同じ行に置くときに使う
+     *  （値の桁数で幅が変わるとスライダーの幅も変わり、指の下の値が変わって数値が揺れ続けるため） */
+    chars?: number
   }
-  let { value, label, onChange, format, prefix = '', suffix = '', min = -Infinity, max = Infinity, integer = false }: Props =
+  let { value, label, onChange, format, prefix = '', suffix = '', min = -Infinity, max = Infinity, integer = false, chars }: Props =
     $props()
 
   function change(v: number) {
@@ -31,7 +34,7 @@
 
 <span class="ev" title="タップして値を入力">
   {#if prefix}<span class="fix">{prefix}</span>{/if}
-  <span class="field" style:--chars={String(format ? format(value) : Number(value.toPrecision(6))).length}><NumberInput plain {value} {label} {format} onChange={change} /></span>
+  <span class="field" style:--chars={chars ?? String(format ? format(value) : Number(value.toPrecision(6))).length}><NumberInput plain {value} {label} {format} onChange={change} /></span>
   {#if suffix}<span class="fix">{suffix}</span>{/if}
 </span>
 

@@ -125,6 +125,7 @@
           <EditableValue
             value={space.slice[k]}
             prefix="= "
+            chars={6}
             format={(v) => formatNumber(v, step)}
             label="{coordName(k)} の値"
             onChange={(v) => onSlice(k, v)}

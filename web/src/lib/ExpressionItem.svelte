@@ -250,7 +250,8 @@
               oninput={(e) => onLineWidth(e.currentTarget.valueAsNumber)}
             />
             <span class="value">
-              <EditableValue value={item.lineWidth} label="線の太さ" suffix=" px" min={0.5} max={20} onChange={onLineWidth} />
+              <EditableValue
+                chars={5} value={item.lineWidth} label="線の太さ" suffix=" px" min={0.5} max={20} onChange={onLineWidth} />
             </span>
           </div>
         {:else}
@@ -267,9 +268,10 @@
             />
             <span class="value">
               <EditableValue
+                chars={5}
                 value={item.opacity * 100}
                 label="面の濃さ（%）"
-                suffix={item.opacity === 0 ? '%（格子のみ）' : '%'}
+                suffix="%"
                 format={(v) => String(Math.round(v))}
                 min={0}
                 max={100}
@@ -329,9 +331,10 @@
                 />
                 <span class="value">
                   <EditableValue
+                chars={5}
                     value={item.grid[axis] ?? item.grid.v}
                     label="{item.params[n]} 方向の分割数"
-                    suffix={(item.grid[axis] ?? item.grid.v) === 0 ? ' 等分（なし）' : ' 等分'}
+                    suffix=" 等分"
                     min={0}
                     max={200}
                     integer
@@ -358,9 +361,9 @@
               <span class="value">
                 間隔
                 <EditableValue
+                chars={5}
                   value={item.grid[axis]}
                   label="{label}の格子線の間隔"
-                  suffix={item.grid[axis] > 0 ? '' : '（なし）'}
                   min={0}
                   onChange={(v) =>
                     // 0 以下は線なし。細かすぎると線が多くなりすぎるので、範囲の 1/400 までにする
@@ -380,11 +383,12 @@
               oninput={(e) => onGrid({ ...item.grid, width: e.currentTarget.valueAsNumber })}
             />
             <span class="value">
-              <EditableValue value={item.grid.width} label="格子線の太さ" suffix=" px" min={0.25} max={10}
+              <EditableValue
+                chars={5} value={item.grid.width} label="格子線の太さ" suffix=" px" min={0.25} max={10}
                 onChange={(v) => onGrid({ ...item.grid, width: v })} />
             </span>
           </div>
-          <p class="hint">スライダーを右にするほど線が細かくなります。左端で線なし。</p>
+          <p class="hint">スライダーを右にするほど線が細かくなります。左端（間隔・分割数 0）で線なし。面の濃さ 0% で格子線だけになります。</p>
         {/if}
       </div>
     {/if}
