@@ -2,7 +2,7 @@
   // 数式の入力欄（MathLive の <math-field>）。値は LaTeX でやりとりする。
   import type { MathfieldElement } from 'mathlive'
   import { onMount } from 'svelte'
-  import { SHORTCUTS } from './mathSetup'
+  import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SHORTCUTS } from './mathSetup'
 
   interface Props {
     /** 入力欄の中身（LaTeX） */
@@ -43,7 +43,7 @@
   onMount(() => {
     el.inlineShortcuts = SHORTCUTS
     el.smartFence = true // ( を打つと ) も自動で入る
-    el.mathVirtualKeyboardPolicy = 'auto' // スマホでは画面上の数式キーボードを出す
+    el.mathVirtualKeyboardPolicy = keyboardPolicy() // 画面上の数式キーボードを出す（PC では入力欄に入ったときに出す）
     if (autofocus) startEditing()
   })
 
@@ -113,10 +113,12 @@
   oninput={handleInput}
   onfocus={() => {
     focused = true
+    keyboardOnFocus()
     onFocusChange?.(true)
   }}
   onblur={() => {
     focused = false
+    keyboardOnBlur()
     onFocusChange?.(false)
   }}
 ></math-field>

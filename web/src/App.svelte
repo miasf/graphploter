@@ -199,7 +199,7 @@
   let isNarrow = $state(narrow.matches)
   narrow.addEventListener('change', () => (isNarrow = narrow.matches))
   $effect(() => {
-    viewer?.setBottomInset(isNarrow ? Math.min(sheetHeight, snapHeights.half) + keyboardHeight : 0)
+    viewer?.setBottomInset(isNarrow ? Math.min(sheetHeight, snapHeights.half) + keyboardHeight : keyboardHeight)
   })
 
   let drag: { startY: number; startH: number; lastY: number; lastT: number; v: number; moved: boolean } | null =
@@ -1184,6 +1184,8 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    /* PC: 画面上の数式キーボードに隠れる分、下まで送れるようにする */
+    padding-bottom: var(--keyboard-h);
   }
   .title {
     display: flex;
@@ -1394,6 +1396,9 @@
         height 0.25s ease,
         bottom 0.25s ease;
       overflow: hidden;
+    }
+.panel-body {
+      padding-bottom: 0; /* シートごとキーボードの上に乗せている */
     }
     .panel.dragging {
       transition: none;
