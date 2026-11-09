@@ -1,6 +1,7 @@
 <script lang="ts">
   // 回転の設定: 中心の点と、座標の組 (i, j) ごとの回転角（m = max(次元, 5) として mC2 個）
   // 次元が5未満でも、w, w₂ を使った5次元の回転ができる（次元より先の座標は回転のときだけ使う）
+  import NumberInput from './NumberInput.svelte'
   import { coordName, prettyName, rotDims } from './params'
   import type { Space } from './types'
 
@@ -81,10 +82,10 @@
   <div class="center">
     <span class="label">中心</span>
     {#each space.center as c, k (k)}
-      <label class:extra={k >= space.dims}>
+      <div class="c" class:extra={k >= space.dims}>
         <span class="cname">{prettyName(coordName(k))}</span>
-        <input type="number" step="any" value={c} onchange={(e) => setCenter(k, e.currentTarget.valueAsNumber)} />
-      </label>
+        <NumberInput value={c} label="回転の中心の {coordName(k)} 座標" onChange={(v) => setCenter(k, v)} />
+      </div>
     {/each}
   </div>
 
@@ -134,19 +135,13 @@
     gap: 6px;
     margin: 6px 0;
   }
-  .center label {
+  .center .c {
     display: flex;
     align-items: center;
     gap: 3px;
   }
-  .center input {
-    width: 4em;
-    padding: 2px 4px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font: 12px var(--mono);
+  .center .c :global(.num) {
+    width: 4.5em;
   }
   .extra {
     opacity: 0.6;

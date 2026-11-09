@@ -3,7 +3,8 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
-  import { evalBounds } from './lib/sliderBounds'
+  import { evalBounds } from './lib/evalExpr'
+  import NumberInput from './lib/NumberInput.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
   import { complexLatex, coordName, latexName, niceStep, prettyName, resizeSpace } from './lib/params'
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
@@ -957,21 +958,19 @@
         <h2>表示範囲</h2>
         <div class="ranges">
           {#each axes as a (a)}
-            <label class="range-row">
-              <input
-                type="number"
-                step="any"
+            <div class="range-row">
+              <NumberInput
                 value={domain[`${a}min`]}
-                onchange={(e) => setBound(`${a}min`, e.currentTarget.valueAsNumber)}
+                label="{axisNames[axes.indexOf(a)]} の最小値"
+                onChange={(v) => setBound(`${a}min`, v)}
               />
               <span class="axis">≤ {prettyName(axisNames[axes.indexOf(a)])} ≤</span>
-              <input
-                type="number"
-                step="any"
+              <NumberInput
                 value={domain[`${a}max`]}
-                onchange={(e) => setBound(`${a}max`, e.currentTarget.valueAsNumber)}
+                label="{axisNames[axes.indexOf(a)]} の最大値"
+                onChange={(v) => setBound(`${a}max`, v)}
               />
-            </label>
+            </div>
           {/each}
         </div>
         {#if domainError}<p class="error">{domainError}</p>{/if}
@@ -1245,16 +1244,6 @@
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
     gap: 8px;
-  }
-  .range-row input {
-    width: 100%;
-    min-width: 0;
-    padding: 5px 8px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font: 14px var(--mono);
   }
   .axis {
     font: 14px var(--mono);

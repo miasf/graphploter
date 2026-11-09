@@ -1,5 +1,5 @@
-// スライダーの最小値・最大値を式で決める（Desmos のように 0 ≤ c ≤ b、a ≤ c ≤ 2b など）。
-// 式の値は画面側で計算する。ただの数値なら JS で読み、式なら WASM の計算エンジンを使う
+// 画面側で式の値を計算する: スライダーの最小値・最大値（Desmos のように 0 ≤ c ≤ b、a ≤ c ≤ 2b など）や、
+// 表示範囲・回転の中心の数値の欄（2π なども書ける）。ただの数値なら JS で読み、式なら WASM の計算エンジンを使う
 // （WASM は式が初めて出てきたときに読み込む）。
 
 import init, { eval_range } from '../wasm-core/graph_core.js'
@@ -46,5 +46,20 @@ export function evalBounds(
     return { min, max }
   } catch (e) {
     return { error: `スライダーの範囲: ${e instanceof Error ? e.message : String(e)}` }
+  }
+}
+
+/**
+ * 数値の欄に入れた式（パラメータは使わない。2π, 1/3 など）の値。
+ * 結果: 数値 / 誤りの説明 / WASM の準備待ち（null）
+ */
+export function evalNumber(latex: string, onReady: () => void): { value: number } | { error: string } | null {
+  try {
+    const value = evaluate(latex, {}, onReady)
+    if (value === null) return null
+    if (!Number.isFinite(value)) return { error: '値が有限ではありません' }
+    return { value }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
   }
 }
