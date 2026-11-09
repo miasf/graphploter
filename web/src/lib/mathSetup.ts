@@ -1,6 +1,6 @@
 // 数式入力欄（MathLive）の共通設定: フォントの場所、自動変換の一覧、画面上の数式キーボード。
 
-import { MathfieldElement } from 'mathlive'
+import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
 // 相対パスだとスクリプトの場所が基準になってしまうので、ページの URL を基準にした絶対 URL にする
@@ -43,6 +43,156 @@ function fn(name: string, opts: { operator?: boolean; args?: number } = {}) {
   return { label: name, latex: head, insert: `${head}\\left(${args}\\right)`, class: 'small' }
 }
 
+/** 特殊関数のキー。label はキーの表示、name は計算エンジンでの関数名、args は引数の数 */
+function sp(label: string, name: string, args: number, head?: string) {
+  const h = head ?? `\\operatorname{${name}}`
+  const a = Array.from({ length: args }, () => '#?').join(',')
+  return {
+    label,
+    insert: `${h}\\left(${a}\\right)`,
+    class: 'small',
+    width: 2 as const, // 名前が長いので2個分の幅にする
+    tooltip: `${name}(${'□, '.repeat(args - 1)}□)`,
+  }
+}
+
+/**
+ * 特殊関数のページ。計算エンジンで使えるものをすべて入れる（書き方のヒントの一覧と同じ）。
+ * 1ページは5個 × 3段まで（キーは2個分の幅。幅の狭いスマホでもはみ出さない数）
+ */
+const SPECIAL_PAGES: { title: string; keys: ReturnType<typeof sp>[] }[] = [
+  {
+    title: 'ガンマ',
+    keys: [
+      sp('Γ(z)', 'gamma', 1, '\\Gamma'),
+      sp('Γ(a,z)', 'gamma', 2, '\\Gamma'),
+      sp('P(a,z)', 'gammaP', 2),
+      sp('Q(a,z)', 'gammaQ', 2),
+      sp('lnΓ(z)', 'loggamma', 1),
+      sp('ψ(z)', 'digamma', 1, '\\psi'),
+      sp('ψ⁽ⁿ⁾(z)', 'polygamma', 2),
+      sp('B(a,b)', 'beta', 2),
+      sp('B(z;a,b)', 'beta', 3),
+      sp('I(z;a,b)', 'betaRegularized', 3),
+      sp('(a)ₙ', 'pochhammer', 2),
+      sp('(n k)', 'binomial', 2),
+    ],
+  },
+  {
+    title: 'ゼータ・erf',
+    keys: [
+      sp('ζ(s)', 'zeta', 1, '\\zeta'),
+      sp('ζ(s,a)', 'zeta', 2, '\\zeta'),
+      sp('Liₛ(z)', 'polylog', 2),
+      sp('η(s)', 'dirichletEta', 1),
+      sp('erf', 'erf', 1),
+      sp('erfc', 'erfc', 1),
+      sp('erfi', 'erfi', 1),
+      sp('dawson', 'dawson', 1),
+      sp('S(z)', 'fresnelS', 1),
+      sp('C(z)', 'fresnelC', 1),
+    ],
+  },
+  {
+    title: '積分',
+    keys: [
+      sp('Ei(z)', 'Ei', 1),
+      sp('Eₙ(z)', 'En', 2),
+      sp('li(z)', 'li', 1),
+      sp('Si(z)', 'Si', 1),
+      sp('Ci(z)', 'Ci', 1),
+      sp('Shi(z)', 'Shi', 1),
+      sp('Chi(z)', 'Chi', 1),
+      sp('sinc', 'sinc', 1),
+    ],
+  },
+  {
+    title: 'ベッセル',
+    keys: [
+      sp('J_ν(z)', 'besselJ', 2),
+      sp('Y_ν(z)', 'besselY', 2),
+      sp('I_ν(z)', 'besselI', 2),
+      sp('K_ν(z)', 'besselK', 2),
+      sp('H⁽¹⁾_ν(z)', 'hankelH1', 2),
+      sp('H⁽²⁾_ν(z)', 'hankelH2', 2),
+      sp('jₙ(z)', 'sphericalJ', 2),
+      sp('yₙ(z)', 'sphericalY', 2),
+      sp('Ai(z)', 'airyAi', 1),
+      sp('Bi(z)', 'airyBi', 1),
+      sp("Ai'(z)", 'airyAiPrime', 1),
+      sp("Bi'(z)", 'airyBiPrime', 1),
+    ],
+  },
+  {
+    title: '多項式',
+    keys: [
+      sp('Pₙ(x)', 'legendreP', 2),
+      sp('Pₙᵐ(x)', 'legendreP', 3),
+      sp('Hₙ(x)', 'hermiteH', 2),
+      sp('Lₙ(x)', 'laguerreL', 2),
+      sp('Lₙᵃ(x)', 'laguerreL', 3),
+      sp('Tₙ(x)', 'chebyshevT', 2),
+      sp('Uₙ(x)', 'chebyshevU', 2),
+      sp('Cₙᵃ(x)', 'gegenbauerC', 3),
+      sp('Pₙ⁽ᵃᵇ⁾(x)', 'jacobiP', 4),
+      sp('Yₗᵐ(θ,φ)', 'sphericalHarmonicY', 4),
+    ],
+  },
+  {
+    title: '超幾何・楕円',
+    keys: [
+      sp('₀F₁', 'hyp0F1', 2),
+      sp('₁F₁', 'hyp1F1', 3),
+      sp('₂F₁', 'hyp2F1', 4),
+      sp('U(a,b,z)', 'hypU', 3),
+      sp('K(m)', 'ellipticK', 1),
+      sp('E(m)', 'ellipticE', 1),
+      sp('E(φ,m)', 'ellipticE', 2),
+      sp('F(φ,m)', 'ellipticF', 2),
+      sp('Π(n,m)', 'ellipticPi', 2),
+      sp('Π(n,φ,m)', 'ellipticPi', 3),
+      sp('sn(u,m)', 'jacobiSN', 2),
+      sp('cn(u,m)', 'jacobiCN', 2),
+      sp('dn(u,m)', 'jacobiDN', 2),
+    ],
+  },
+  {
+    title: 'その他',
+    keys: [
+      sp('W(z)', 'lambertW', 1),
+      sp('W_k(z)', 'lambertW', 2),
+      sp('sec', 'sec', 1, '\\sec'),
+      sp('csc', 'csc', 1, '\\csc'),
+      sp('cot', 'cot', 1, '\\cot'),
+      sp('arcsinh', 'arcsinh', 1),
+      sp('arccosh', 'arccosh', 1),
+      sp('arctanh', 'arctanh', 1),
+    ],
+  },
+]
+
+/** 特殊関数のタブ: ページごとに層（layer）を分け、下の段の ◀ ▶ でページをめくる */
+const SPECIAL_LAYOUT = {
+  label: '特殊',
+  tooltip: '特殊関数（◀ ▶ でページをめくる）',
+  layers: SPECIAL_PAGES.map((page, k) => {
+    const n = SPECIAL_PAGES.length
+    const id = (j: number) => `special-${(j + n) % n}`
+    const rows: Partial<VirtualKeyboardKeycap>[][] = []
+    for (let r = 0; r < page.keys.length; r += 5) rows.push(page.keys.slice(r, r + 5))
+    while (rows.length < 3) rows.push([]) // ページによって高さが変わらないように
+    rows.push([
+      { label: '◀', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k - 1)], tooltip: '前のページ' },
+      { label: `${page.title} ${k + 1}/${n}`, class: 'action small', width: 5, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
+      { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
+      { label: '[left]', width: 1 },
+      { label: '[right]', width: 1 },
+      { label: '[backspace]', width: 1 },
+    ])
+    return { id: id(k), rows }
+  }),
+}
+
 /** 画面上の数式キーボード（スマホでは入力欄を押すと自動で出る） */
 export function setupKeyboard() {
   const kb = window.mathVirtualKeyboard
@@ -51,9 +201,7 @@ export function setupKeyboard() {
       label: '123',
       tooltip: '数字と記号',
       rows: [
-        // 一文字消すボタン（⌫）は、ふつうのキーボードと同じく右上に置く（÷ は左の3段目に回す）。
-        // キーの数は1段あたり 11.5 個分まで（それより多いと、幅の狭いスマホで右端がはみ出す）
-        ['x', 'y', 'z', 'w', 't', 'u', 'v', '[separator-5]', '7', '8', '9', { label: '[backspace]', width: 1 }],
+        ['x', 'y', 'z', 'w', 't', 'u', 'v', '[separator-5]', '7', '8', '9', { latex: '\\frac{#@}{#?}', label: '÷' }],
         [
           '(',
           ')',
@@ -75,14 +223,24 @@ export function setupKeyboard() {
           { latex: '\\left|#0\\right|', label: '|x|' },
           '!',
           '=',
-          { latex: '\\frac{#@}{#?}', label: '÷' },
           '[separator-5]',
           '1',
           '2',
           '3',
           '-',
         ],
-        ['[left]', '[right]', '[hide-keyboard]', '[separator-5]', '0', '.', '+', '[return]'],
+        // 一文字消すボタン（⌫）は、ふつうのキーボードと同じく右下に置く（⏎ は左下の矢印の隣）
+        [
+          { label: '[left]', width: 1 },
+          { label: '[right]', width: 1 },
+          '[hide-keyboard]',
+          { label: '[return]', width: 1 },
+          '[separator-5]',
+          '0',
+          '.',
+          '+',
+          { label: '[backspace]', width: 1 },
+        ],
       ],
     },
     {
@@ -118,38 +276,7 @@ export function setupKeyboard() {
         ],
       ],
     },
-    {
-      label: '特殊',
-      tooltip: '特殊関数',
-      rows: [
-        [
-          { latex: '\\Gamma\\left(#0\\right)', label: 'Γ(z)', class: 'small' },
-          { latex: '\\operatorname{beta}\\left(#?,#?\\right)', label: 'B(a,b)', class: 'small', tooltip: 'beta' },
-          { latex: '\\psi\\left(#0\\right)', label: 'ψ(z)', class: 'small' },
-          { latex: '\\zeta\\left(#0\\right)', label: 'ζ(s)', class: 'small' },
-          fn('erf', { operator: true }),
-          { latex: '\\operatorname{polylog}\\left(#?,#?\\right)', label: 'Liₛ(z)', class: 'small', tooltip: 'polylog' },
-        ],
-        [
-          { latex: '\\operatorname{besselJ}\\left(#?,#?\\right)', label: 'J_ν(z)', class: 'small', tooltip: 'besselJ' },
-          { latex: '\\operatorname{besselY}\\left(#?,#?\\right)', label: 'Y_ν(z)', class: 'small', tooltip: 'besselY' },
-          { latex: '\\operatorname{besselI}\\left(#?,#?\\right)', label: 'I_ν(z)', class: 'small', tooltip: 'besselI' },
-          { latex: '\\operatorname{besselK}\\left(#?,#?\\right)', label: 'K_ν(z)', class: 'small', tooltip: 'besselK' },
-          { latex: '\\operatorname{airyAi}\\left(#?\\right)', label: 'Ai(z)', class: 'small', tooltip: 'airyAi' },
-          { latex: '\\operatorname{airyBi}\\left(#?\\right)', label: 'Bi(z)', class: 'small', tooltip: 'airyBi' },
-        ],
-        [
-          { latex: '\\operatorname{legendreP}\\left(#?,#?\\right)', label: 'Pₙ(x)', class: 'small', tooltip: 'legendreP' },
-          { latex: '\\operatorname{hermiteH}\\left(#?,#?\\right)', label: 'Hₙ(x)', class: 'small', tooltip: 'hermiteH' },
-          { latex: '\\operatorname{ellipticK}\\left(#?\\right)', label: 'K(m)', class: 'small', tooltip: 'ellipticK' },
-          { latex: '\\operatorname{ellipticE}\\left(#?\\right)', label: 'E(m)', class: 'small', tooltip: 'ellipticE' },
-          { latex: '\\operatorname{lambertW}\\left(#?\\right)', label: 'W(z)', class: 'small', tooltip: 'lambertW' },
-          { latex: '\\operatorname{hyp2F1}\\left(#?,#?,#?,#?\\right)', label: '₂F₁', class: 'small', tooltip: 'hyp2F1' },
-        ],
-        [fn('sec'), fn('csc'), fn('cot'), fn('arcsinh', { operator: true }), fn('arccosh', { operator: true }), fn('arctanh', { operator: true })],
-        ['[left]', '[right]', '[return]', '[backspace]'],
-      ],
-    },
+    SPECIAL_LAYOUT,
     'alphabetic',
   ]
 }
