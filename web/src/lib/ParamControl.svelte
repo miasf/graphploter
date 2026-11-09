@@ -3,7 +3,7 @@
   // 実数モード: スライダー / 複素数モード: 複素平面の上で点を動かす
   import ComplexPad from './ComplexPad.svelte'
   import MathInput from './MathInput.svelte'
-  import { formatNumber, niceStep, prettyName } from './params'
+  import { formatNumber, missingParam, niceStep, prettyName } from './params'
   import type { ParamValue, SliderStyle } from './types'
 
   interface Props {
@@ -12,13 +12,15 @@
     slider: SliderStyle
     /** 範囲の式の誤りの説明 */
     error?: string
+    /** 「a のスライダーを追加」を押したとき（範囲の式に未定義の文字があるとき） */
+    onAddSlider?: (name: string) => void
     onChange: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
     /** 値を自動で動かしているか */
     playing: boolean
     onPlay: () => void
   }
-  let { name, value, slider, error, onChange, onSlider, playing, onPlay }: Props = $props()
+  let { name, value, slider, error, onAddSlider, onChange, onSlider, playing, onPlay }: Props = $props()
 
   /** 値を丸める刻み（範囲のおよそ 1/200） */
   const step = $derived(slider.max > slider.min ? niceStep(slider.max - slider.min, 200) : 0.01)
@@ -89,7 +91,13 @@
     </button>
   </div>
   {#if error}
-    <p class="error">{error}</p>
+    {@const missing = missingParam(error)}
+    <p class="error">
+      {error}
+      {#if missing && onAddSlider}
+        <button class="mode" onclick={() => onAddSlider(missing)}>{prettyName(missing)} のスライダーを追加</button>
+      {/if}
+    </p>
   {/if}
   <button class="mode stack" class:on={slider.stack} onclick={toggleStack} title="範囲で動かしたときに図形が通る領域を描く">
     範囲で重ねる

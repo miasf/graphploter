@@ -3,8 +3,9 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
-  import { evalBounds } from './lib/evalExpr'
+  import { evalBounds, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
+  import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
   import { complexLatex, coordName, latexName, niceStep, prettyName, resizeSpace } from './lib/params'
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
@@ -91,6 +92,7 @@
       viewer?.setDomain(domain, true)
       viewer?.setCut(cutRequest())
       loaded = true
+      updateSpaceRangeErrors()
       items.forEach(replot)
     })()
     return () => viewer?.dispose()
@@ -333,6 +335,7 @@
    */
   function paramsChanged(names: string[], except?: PlotItem) {
     updateSliderBounds()
+    updateSpaceRangeErrors()
     for (const it of items) {
       if (it === except) continue
       const uses = it.usedParams.some((n) => names.includes(n)) || it.params.some((n) => names.includes(n))
@@ -369,6 +372,32 @@
       }
     }
     if (changed.length > 0) paramsChanged(changed)
+  }
+
+  /** 座標の「範囲で重ねる」範囲の式の誤り（座標の番号 → 説明）。次元の設定の欄に出す */
+  let spaceRangeErrors = $state<Record<number, string>>({})
+
+  function updateSpaceRangeErrors() {
+    const params = currentParams()
+    const out: Record<number, string> = {}
+    space.ranges.forEach((r, k) => {
+      if (!r || space.axes.includes(k)) return
+      for (const side of r) {
+        const e = exprError(side, params, updateSpaceRangeErrors)
+        if (e === undefined) return // 計算エンジンの準備待ち
+        if (e) {
+          out[k] = e
+          return
+        }
+      }
+    })
+    spaceRangeErrors = out
+  }
+
+  /** 「a のスライダーを追加」（次元の設定の欄から）: 一覧の一番上に a = 1 の行を足す */
+  function addSliderTop(name: string) {
+    items.unshift(newItem(`${name}=1`))
+    schedule(items[0], 0)
   }
 
   /** この行がパラメータでなくなったときの後始末 */
@@ -639,6 +668,7 @@
 
   function setLayout(next: Space) {
     space = next
+    updateSpaceRangeErrors()
     replotAll(0)
   }
 
@@ -952,7 +982,13 @@
 
       <section class="settings">
         <h2>次元</h2>
-        <SpacePanel {space} onLayout={setLayout} onSlice={setSlice} />
+        <SpacePanel
+          {space}
+          rangeErrors={spaceRangeErrors}
+          onLayout={setLayout}
+          onSlice={setSlice}
+          onAddSlider={addSliderTop}
+        />
         <RotationPanel {space} onRotate={setRotation} {playing} onPlay={togglePlay} />
 
         <h2>表示範囲</h2>
@@ -1058,17 +1094,27 @@
               >
             {/each}
           </div>
-          <label class="slider">
-            <span>位置: {prettyName(axisNames[cut.axis])} = {Number(cut.pos.toPrecision(4))}</span>
+          <div class="slider">
+            <span>
+              位置: {prettyName(axisNames[cut.axis])}
+              <EditableValue
+                value={cut.pos}
+                prefix="= "
+                format={(v) => String(Number(v.toPrecision(4)))}
+                label="切り口の位置"
+                onChange={(v) => setCut({ pos: v })}
+              />
+            </span>
             <input
               type="range"
               min={cutRange[0]}
               max={cutRange[1]}
               step={(cutRange[1] - cutRange[0]) / 200}
               value={cut.pos}
+              aria-label="切り口の位置"
               oninput={(e) => setCut({ pos: e.currentTarget.valueAsNumber })}
             />
-          </label>
+          </div>
           <div class="buttons">
             <button class="secondary" onclick={() => setCut({ flip: !cut.flip })}>
               {cut.flip ? `${prettyName(axisNames[cut.axis])} ≥ ${Number(cut.pos.toPrecision(4))} を表示中` : `${prettyName(axisNames[cut.axis])} ≤ ${Number(cut.pos.toPrecision(4))} を表示中`}（反対側にする）

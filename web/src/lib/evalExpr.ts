@@ -63,3 +63,16 @@ export function evalNumber(latex: string, onReady: () => void): { value: number 
     return { error: e instanceof Error ? e.message : String(e) }
   }
 }
+
+/**
+ * 式（パラメータを使ってよい）が計算できるか。誤りの説明 / 計算できるなら null / WASM の準備待ちなら undefined
+ */
+export function exprError(latex: string, params: Record<string, ParamValue>, onReady: () => void): string | null | undefined {
+  try {
+    const v = evaluate(latex, params, onReady)
+    if (v === null) return undefined
+    return Number.isFinite(v) ? null : '値が有限ではありません'
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e)
+  }
+}
