@@ -1,7 +1,8 @@
 <script lang="ts">
   // 次元の設定: 次元の数、画面の横・奥・縦に表示する座標、表示しない座標の断面の値
+  import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
-  import { coordName, formatNumber, niceStep, prettyName, resizeSpace } from './params'
+  import { coordName, formatNumber, missingParam, niceStep, prettyName, resizeSpace } from './params'
   import type { Space } from './types'
 
   interface Props {
@@ -10,8 +11,12 @@
     onLayout: (space: Space) => void
     /** 表示しない座標 k の断面の値が変わったとき */
     onSlice: (k: number, value: number) => void
+    /** 「範囲」の式の誤り（座標の番号 → 説明） */
+    rangeErrors: Record<number, string>
+    /** 「a のスライダーを追加」を押したとき */
+    onAddSlider: (name: string) => void
   }
-  let { space, onLayout, onSlice }: Props = $props()
+  let { space, onLayout, onSlice, rangeErrors, onAddSlider }: Props = $props()
 
   const ROLES = ['横', '奥', '縦'] as const
   const step = $derived(niceStep(space.sliceMax - space.sliceMin, 200))
@@ -97,6 +102,15 @@
           <MathInput small value={rg[1]} label="{coordName(k)} の最大値" onInput={(v) => setRange(k, 1, v)} />
         </div>
         <span class="value">で重ねる</span>
+        {#if rangeErrors[k]}
+          {@const missing = missingParam(rangeErrors[k])}
+          <div class="range-error">
+            <span>{prettyName(coordName(k))} の範囲: {rangeErrors[k]}</span>
+            {#if missing}
+              <button onclick={() => onAddSlider(missing)}>{prettyName(missing)} のスライダーを追加</button>
+            {/if}
+          </div>
+        {/if}
       {:else if role === FIXED}
         <input
           type="range"
@@ -107,7 +121,15 @@
           aria-label="{coordName(k)} の値"
           oninput={(e) => onSlice(k, e.currentTarget.valueAsNumber)}
         />
-        <span class="value">= {formatNumber(space.slice[k], step)}</span>
+        <span class="value">
+          <EditableValue
+            value={space.slice[k]}
+            prefix="= "
+            format={(v) => formatNumber(v, step)}
+            label="{coordName(k)} の値"
+            onChange={(v) => onSlice(k, v)}
+          />
+        </span>
       {/if}
     </div>
   {/each}
@@ -186,6 +208,24 @@
     font: 12px var(--mono);
     color: var(--muted);
     min-width: 4em;
+  }
+  .range-error {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--error);
+  }
+  .range-error button {
+    padding: 2px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
   }
   .hint {
     margin: 2px 0 0;

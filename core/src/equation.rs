@@ -655,8 +655,13 @@ pub fn eval_constant(source: &str) -> Result<f64, String> {
 /// 値と、使ったパラメータの名前を返す
 pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<String>), String> {
     let e = parse_at(source, 0)?;
-    let prog = Program::compile_with(&e, &[], params)
-        .map_err(|_| "数値と、pi などの定数・パラメータだけで書いてください".to_string())?;
+    let prog = Program::compile_with(&e, &[], params).map_err(|err| {
+        // 未定義の文字なら、その名前を残す（画面側で「a のスライダーを追加」ボタンを出すのに使う）
+        match err.strip_prefix("変数 '").and_then(|r| r.split_once('\'')) {
+            Some((name, _)) => format!("変数 '{name}' はここでは使えません（パラメータとして定義してください）"),
+            None => "数値と、pi などの定数・パラメータだけで書いてください".to_string(),
+        }
+    })?;
     let mut out = [C::new(0.0, 0.0)];
     prog.eval_batch(&[], &mut out);
     let v = crate::eval::as_real(out[0]);
@@ -952,7 +957,10 @@ mod tests {
         let mut ps = Params::new();
         ps.insert("b".into(), C::new(3.0, 0.0));
         assert_eq!(eval_constant_with("2b", &ps).unwrap(), (6.0, vec!["b".to_string()]));
-        assert!(eval_constant_with("2c", &ps).is_err());
+        assert_eq!(
+            eval_constant_with("2c", &ps).unwrap_err(),
+            "変数 'c' はここでは使えません（パラメータとして定義してください）"
+        );
     }
 
     #[test]

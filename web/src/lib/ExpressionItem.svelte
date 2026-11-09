@@ -2,6 +2,7 @@
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
   import { joinTuple, splitTuple } from './latex'
+  import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
   import { coordName, missingParam, prettyName } from './params'
@@ -209,6 +210,7 @@
         value={item.param}
         slider={item.slider}
         error={item.sliderError}
+        {onAddSlider}
         onChange={onParam}
         {onSlider}
         playing={paramPlaying}
@@ -244,9 +246,12 @@
               max="10"
               step="0.5"
               value={item.lineWidth}
+              aria-label="線の太さ"
               oninput={(e) => onLineWidth(e.currentTarget.valueAsNumber)}
             />
-            <span class="value">{item.lineWidth} px</span>
+            <span class="value">
+              <EditableValue value={item.lineWidth} label="線の太さ" suffix=" px" min={0.5} max={20} onChange={onLineWidth} />
+            </span>
           </div>
         {:else}
           <div class="sliders">
@@ -257,9 +262,20 @@
               max="1"
               step="0.05"
               value={item.opacity}
+              aria-label="面の濃さ"
               oninput={(e) => onOpacity(e.currentTarget.valueAsNumber)}
             />
-            <span class="value">{item.opacity === 0 ? '格子のみ' : `${Math.round(item.opacity * 100)}%`}</span>
+            <span class="value">
+              <EditableValue
+                value={item.opacity * 100}
+                label="面の濃さ（%）"
+                suffix={item.opacity === 0 ? '%（格子のみ）' : '%'}
+                format={(v) => String(Math.round(v))}
+                min={0}
+                max={100}
+                onChange={(v) => onOpacity(v / 100)}
+              />
+            </span>
           </div>
 
           {#if isExplicit && !/塗り分け/.test(item.kind ?? '')}
@@ -308,9 +324,20 @@
                   step="1"
                   value={k}
                   disabled={!item.grid.enabled}
+                  aria-label="{item.params[n]} 方向の分割数"
                   oninput={(e) => onGrid({ ...item.grid, [axis]: DIVISIONS[e.currentTarget.valueAsNumber] })}
                 />
-                <span class="value">{k === 0 ? 'なし' : `${DIVISIONS[k]} 等分`}</span>
+                <span class="value">
+                  <EditableValue
+                    value={item.grid[axis] ?? item.grid.v}
+                    label="{item.params[n]} 方向の分割数"
+                    suffix={(item.grid[axis] ?? item.grid.v) === 0 ? ' 等分（なし）' : ' 等分'}
+                    min={0}
+                    max={200}
+                    integer
+                    onChange={(v) => onGrid({ ...item.grid, [axis]: v })}
+                  />
+                </span>
               {/each}
             {/if}
             {#each item.params.length === 3 ? [] : isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
@@ -324,10 +351,22 @@
                 step="1"
                 value={index}
                 disabled={!item.grid.enabled}
+                aria-label="{label}の格子線"
                 oninput={(e) =>
                   onGrid({ ...item.grid, [axis]: indexToSpacing(e.currentTarget.valueAsNumber, options) })}
               />
-              <span class="value">{index === 0 ? 'なし' : `間隔 ${indexToSpacing(index, options)}`}</span>
+              <span class="value">
+                間隔
+                <EditableValue
+                  value={item.grid[axis]}
+                  label="{label}の格子線の間隔"
+                  suffix={item.grid[axis] > 0 ? '' : '（なし）'}
+                  min={0}
+                  onChange={(v) =>
+                    // 0 以下は線なし。細かすぎると線が多くなりすぎるので、範囲の 1/400 までにする
+                    onGrid({ ...item.grid, [axis]: v <= 0 ? 0 : Math.max(v, ranges[axis] / 400) })}
+                />
+              </span>
             {/each}
             <span class="label">線の太さ</span>
             <input
@@ -337,9 +376,13 @@
               step="0.25"
               value={item.grid.width}
               disabled={!item.grid.enabled}
+              aria-label="格子線の太さ"
               oninput={(e) => onGrid({ ...item.grid, width: e.currentTarget.valueAsNumber })}
             />
-            <span class="value">{item.grid.width} px</span>
+            <span class="value">
+              <EditableValue value={item.grid.width} label="格子線の太さ" suffix=" px" min={0.25} max={10}
+                onChange={(v) => onGrid({ ...item.grid, width: v })} />
+            </span>
           </div>
           <p class="hint">スライダーを右にするほど線が細かくなります。左端で線なし。</p>
         {/if}

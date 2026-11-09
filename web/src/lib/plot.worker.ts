@@ -9,7 +9,7 @@ import init, {
   type MeshResult,
   type Shape,
 } from '../wasm-core/graph_core.js'
-import { coordName, prettyName } from './params'
+import { coordName, isReserved, prettyName } from './params'
 import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -88,6 +88,12 @@ function coordRanges(
   return { ranges, slice }
 }
 
+/** パラメータの定義（a = 1 など）かもしれない式か。左辺が座標でない名前1つ */
+function looksLikeDefinition(source: string): boolean {
+  const m = source.match(/^\s*([A-Za-z]\w*)\s*=/)
+  return !!m && !isReserved(m[1])
+}
+
 function forget(itemId: number) {
   shapes.get(itemId)?.shape.free()
   shapes.delete(itemId)
@@ -131,7 +137,17 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const rangeNames = Object.keys(ranges)
     const rangeUsed = new Set<string>()
     const rangeValues = rangeNames.map((n) => range(n, ranges[n], params, rangeUsed))
-    const coord = coordRanges(space, params, rangeUsed)
+    // 座標の範囲（0 〜 a など）が計算できなくても、パラメータの定義（a = 1）は計算する
+    // （そうしないと、範囲で使う a を定義する行まで同じエラーになり、a がいつまでも定義されない）
+    let coord: { ranges: number[]; slice: number[] }
+    let coordError: unknown = null
+    try {
+      coord = coordRanges(space, params, rangeUsed)
+    } catch (e) {
+      if (!looksLikeDefinition(source)) throw e
+      coordError = e
+      coord = { ranges: space.ranges.flatMap(() => [NaN, NaN]), slice: [...space.slice] }
+    }
     const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
     const cached = shapes.get(itemId)
     let r: MeshResult | null = null
@@ -174,6 +190,10 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.walls,
         req.flat,
       )
+      if (coordError && !r.param_name) {
+        r.free()
+        throw coordError // パラメータの定義ではなかった
+      }
       forget(itemId)
       const shape = r.take_shape()
       if (shape) shapes.set(itemId, { key: key(shape.view_dependent), shape })

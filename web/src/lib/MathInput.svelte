@@ -114,6 +114,10 @@
   onfocus={() => {
     focused = true
     keyboardOnFocus()
+    // 画面上のキーボードが出て一覧の見える部分が狭くなるので、出終わってから入力欄が見える所まで送る
+    setTimeout(() => {
+      if (focused) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }, 350)
     onFocusChange?.(true)
   }}
   onblur={() => {

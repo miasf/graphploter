@@ -3,7 +3,7 @@
   // 実数モード: スライダー / 複素数モード: 複素平面の上で点を動かす
   import ComplexPad from './ComplexPad.svelte'
   import MathInput from './MathInput.svelte'
-  import { formatNumber, niceStep, prettyName } from './params'
+  import { formatNumber, missingParam, prettyName, sliderStep } from './params'
   import type { ParamValue, SliderStyle } from './types'
 
   interface Props {
@@ -12,16 +12,18 @@
     slider: SliderStyle
     /** 範囲の式の誤りの説明 */
     error?: string
+    /** 「a のスライダーを追加」を押したとき（範囲の式に未定義の文字があるとき） */
+    onAddSlider?: (name: string) => void
     onChange: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
     /** 値を自動で動かしているか */
     playing: boolean
     onPlay: () => void
   }
-  let { name, value, slider, error, onChange, onSlider, playing, onPlay }: Props = $props()
+  let { name, value, slider, error, onAddSlider, onChange, onSlider, playing, onPlay }: Props = $props()
 
   /** 値を丸める刻み（範囲のおよそ 1/200） */
-  const step = $derived(slider.max > slider.min ? niceStep(slider.max - slider.min, 200) : 0.01)
+  const step = $derived(sliderStep(slider))
 
   /** 範囲の式（入力欄の中身）。式が無い古い設定なら、今の数値 */
   const bounds: [string, string] = $derived(slider.bounds ?? [String(slider.min), String(slider.max)])
@@ -88,8 +90,26 @@
       複素数
     </button>
   </div>
+  {#if !slider.stack}
+    <div class="step-row">
+      <span>刻み</span>
+      <MathInput
+        small
+        value={slider.stepExpr ?? ''}
+        placeholder="自動"
+        label="{name} の刻み"
+        onInput={(v) => onSlider({ ...slider, stepExpr: v })}
+      />
+    </div>
+  {/if}
   {#if error}
-    <p class="error">{error}</p>
+    {@const missing = missingParam(error)}
+    <p class="error">
+      {error}
+      {#if missing && onAddSlider}
+        <button class="mode" onclick={() => onAddSlider(missing)}>{prettyName(missing)} のスライダーを追加</button>
+      {/if}
+    </p>
   {/if}
   <button class="mode stack" class:on={slider.stack} onclick={toggleStack} title="範囲で動かしたときに図形が通る領域を描く">
     範囲で重ねる
@@ -144,6 +164,16 @@
     margin: 0;
     font-size: 12px;
     color: #c74440;
+  }
+  .step-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .step-row :global(.wrap) {
+    width: 7em;
   }
   .dots {
     font-family: var(--mono);

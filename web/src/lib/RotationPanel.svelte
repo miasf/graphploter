@@ -1,6 +1,7 @@
 <script lang="ts">
   // 回転の設定: 中心の点と、座標の組 (i, j) ごとの回転角（m = max(次元, 5) として mC2 個）
   // 次元が5未満でも、w, w₂ を使った5次元の回転ができる（次元より先の座標は回転のときだけ使う）
+  import EditableValue from './EditableValue.svelte'
   import NumberInput from './NumberInput.svelte'
   import { coordName, prettyName, rotDims } from './params'
   import type { Space } from './types'
@@ -64,7 +65,15 @@
     aria-label="{coordName(p.i)}{coordName(p.j)} 平面の回転角"
     oninput={(e) => setAngle(p.k, e.currentTarget.valueAsNumber)}
   />
-  <span class="value">{Math.round(space.rotation[p.k])}°</span>
+  <span class="value">
+    <EditableValue
+      value={space.rotation[p.k]}
+      suffix="°"
+      format={(v) => String(Number(v.toFixed(1)))}
+      label="{coordName(p.i)}{coordName(p.j)} 平面の回転角（度）"
+      onChange={(v) => setAngle(p.k, v)}
+    />
+  </span>
   <button
     class="play"
     class:on={playing.includes(p.k)}
@@ -156,7 +165,7 @@
   }
   .planes {
     display: grid;
-    grid-template-columns: 2.6em 1fr 3em 1.8em;
+    grid-template-columns: 2.6em 1fr auto 1.8em;
     align-items: center;
     gap: 4px 8px;
   }
