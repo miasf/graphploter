@@ -2,6 +2,7 @@
   // パラメータ（a = 1 など）の値を決める部品。
   // 実数モード: スライダー / 複素数モード: 複素平面の上で点を動かす
   import ComplexPad from './ComplexPad.svelte'
+  import MathInput from './MathInput.svelte'
   import { formatNumber, niceStep, prettyName } from './params'
   import type { ParamValue, SliderStyle } from './types'
 
@@ -9,21 +10,28 @@
     name: string
     value: ParamValue
     slider: SliderStyle
+    /** 範囲の式の誤りの説明 */
+    error?: string
     onChange: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
     /** 値を自動で動かしているか */
     playing: boolean
     onPlay: () => void
   }
-  let { name, value, slider, onChange, onSlider, playing, onPlay }: Props = $props()
+  let { name, value, slider, error, onChange, onSlider, playing, onPlay }: Props = $props()
 
   /** 値を丸める刻み（範囲のおよそ 1/200） */
-  const step = $derived(niceStep(slider.max - slider.min, 200))
+  const step = $derived(slider.max > slider.min ? niceStep(slider.max - slider.min, 200) : 0.01)
 
-  function setBound(key: 'min' | 'max', v: number) {
-    if (!Number.isFinite(v)) return
-    const next = { ...slider, [key]: v }
-    if (next.min < next.max) onSlider(next)
+  /** 範囲の式（入力欄の中身）。式が無い古い設定なら、今の数値 */
+  const bounds: [string, string] = $derived(slider.bounds ?? [String(slider.min), String(slider.max)])
+
+  /** 範囲の端を式で決める。数値でも、ほかのパラメータを使った式（b, 2b, a+1 など）でもよい */
+  function setBound(side: 0 | 1, latex: string) {
+    if (bounds[side] === latex) return
+    const next: [string, string] = [bounds[0], bounds[1]]
+    next[side] = latex
+    onSlider({ ...slider, bounds: next })
   }
 
   function toggleComplex() {
@@ -42,7 +50,7 @@
 
 <div class="param">
   {#if slider.stack}
-    <p class="value">{name} を {slider.min} 〜 {slider.max} で動かして重ねています</p>
+    <p class="value">{name} を {formatNumber(slider.min, step)} 〜 {formatNumber(slider.max, step)} で動かして重ねています</p>
   {:else if slider.complex}
     <ComplexPad re={value.re} im={value.im} min={slider.min} max={slider.max} {step} {onChange} />
     <p class="value">
@@ -73,25 +81,16 @@
   {/if}
 
   <div class="bounds">
-    <input
-      type="number"
-      step="any"
-      value={slider.min}
-      aria-label="{name} の最小値"
-      onchange={(e) => setBound('min', e.currentTarget.valueAsNumber)}
-    />
+    <MathInput small value={bounds[0]} label="{name} の最小値" onInput={(v) => setBound(0, v)} />
     <span class="dots">{slider.complex ? '≤ Re, Im ≤' : `≤ ${prettyName(name)} ≤`}</span>
-    <input
-      type="number"
-      step="any"
-      value={slider.max}
-      aria-label="{name} の最大値"
-      onchange={(e) => setBound('max', e.currentTarget.valueAsNumber)}
-    />
+    <MathInput small value={bounds[1]} label="{name} の最大値" onInput={(v) => setBound(1, v)} />
     <button class="mode" class:on={slider.complex} onclick={toggleComplex} title="複素数の値にする">
       複素数
     </button>
   </div>
+  {#if error}
+    <p class="error">{error}</p>
+  {/if}
   <button class="mode stack" class:on={slider.stack} onclick={toggleStack} title="範囲で動かしたときに図形が通る領域を描く">
     範囲で重ねる
   </button>
@@ -141,15 +140,10 @@
     font-size: 12px;
     color: var(--muted);
   }
-  .bounds input {
-    width: 100%;
-    min-width: 0;
-    padding: 3px 6px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font: 13px var(--mono);
+  .error {
+    margin: 0;
+    font-size: 12px;
+    color: #c74440;
   }
   .dots {
     font-family: var(--mono);

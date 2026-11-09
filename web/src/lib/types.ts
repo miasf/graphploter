@@ -64,8 +64,9 @@ export interface Space {
   /** 断面のスライダーの範囲 */
   sliceMin: number
   sliceMax: number
-  /** 各座標を「範囲で重ねる」なら [最小, 最大]、断面なら null（表示していない座標だけが使われる） */
-  ranges: ([number, number] | null)[]
+  /** 各座標を「範囲で重ねる」なら [最小, 最大]（LaTeX の式。パラメータも使える）、断面なら null
+   *  （表示していない座標だけが使われる） */
+  ranges: ([string, string] | null)[]
   /** 範囲を何等分して重ねるか */
   samples: number
   /** 回転角（度）。座標の組 (0,1), (0,2), …, (0,n−1), (1,2), … の順に nC2 個 */
@@ -90,6 +91,9 @@ export interface SliderStyle {
   complex: boolean
   /** 範囲で重ねる（min〜max で動かしたときに図形が通る領域を描く） */
   stack: boolean
+  /** 範囲を式（LaTeX）で決めるときの [最小, 最大]。ほかのパラメータも使える（a ≤ c ≤ 2b など）。
+   *  あれば min, max はこの式の値（古い保存データや、数値だけのときは無い） */
+  bounds?: [string, string]
 }
 
 /** 式の一覧の1行 */
@@ -114,6 +118,8 @@ export interface PlotItem extends PlotStyle {
   /** この行がパラメータの定義（a = 1 など）なら、その名前と値 */
   param?: { name: string } & ParamValue
   slider: SliderStyle
+  /** スライダーの範囲の式の誤りの説明（無ければ undefined） */
+  sliderError?: string
   /** この式で使われているパラメータの名前（値が変わったら計算し直す） */
   usedParams: string[]
   /** 非表示の間に計算し直す必要が生じた（表示したときに計算する） */
@@ -190,8 +196,8 @@ export interface PlotRequest {
     dims: number
     axes: number[]
     slice: number[]
-    /** 各座標の範囲 [最小, 最大, …]（重ねない座標は NaN） */
-    ranges: number[]
+    /** 各座標の範囲の式 [最小, 最大]（計算エンジン用の式。重ねない座標は null） */
+    ranges: ([string, string] | null)[]
     samples: number
     /** 回転角（ラジアン） */
     rotation: number[]

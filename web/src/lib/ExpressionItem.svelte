@@ -4,7 +4,7 @@
   import { joinTuple, splitTuple } from './latex'
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
-  import { missingParam, prettyName } from './params'
+  import { coordName, missingParam, prettyName } from './params'
   import type { ComplexMode, Domain, GridStyle, PlotItem, SliderStyle } from './types'
 
   interface Props {
@@ -77,7 +77,6 @@
   /** 式が組 (a, b, c) なら成分の配列 */
   const parts = $derived(splitTuple(item.latex))
   const showVertical = $derived(item.vertical && parts !== null && !editingLine)
-  const COMPONENT_NAMES = ['x', 'y', 'z']
 
   function setPart(k: number, value: string) {
     if (!parts) return
@@ -160,10 +159,10 @@
       <div class="components">
         {#each parts as part, k (k)}
           <div class="component">
-            <span class="name">{COMPONENT_NAMES[k] ?? '?'} =</span>
+            <span class="name">{prettyName(coordName(k))} =</span>
             <MathInput
               value={part}
-              label="{COMPONENT_NAMES[k] ?? '?'} 成分"
+              label="{prettyName(coordName(k))} 成分"
               keyboardToggle={k === 0}
               autofocus={item.autofocus && k === 0}
               onInput={(v) => setPart(k, v)}
@@ -209,6 +208,7 @@
         name={item.param.name}
         value={item.param}
         slider={item.slider}
+        error={item.sliderError}
         onChange={onParam}
         {onSlider}
         playing={paramPlaying}

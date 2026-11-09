@@ -64,7 +64,12 @@ async function decompress(bytes: Uint8Array): Promise<string> {
 
 function isState(x: unknown): x is SavedState {
   const s = x as SavedState
-  return !!s && s.version === 1 && Array.isArray(s.items) && !!s.domain && !!s.space
+  const ok = !!s && s.version === 1 && Array.isArray(s.items) && !!s.domain && !!s.space
+  // 古い保存データでは、座標の範囲が数値 [最小, 最大] だった。式（文字列）にそろえる
+  if (ok && Array.isArray(s.space.ranges)) {
+    s.space.ranges = s.space.ranges.map((r) => (r ? [String(r[0]), String(r[1])] : null))
+  }
+  return ok
 }
 
 /** ブラウザに保存する */

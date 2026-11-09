@@ -9,6 +9,7 @@ import init, {
   type MeshResult,
   type Shape,
 } from '../wasm-core/graph_core.js'
+import { coordName, prettyName } from './params'
 import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -23,6 +24,8 @@ function range(
   [lo, hi]: [string, string],
   params: PlotRequest['params'],
   used: Set<string>,
+  /** 最小 > 最大でもよい（呼び出し側で入れ替える） */
+  anyOrder = false,
 ): [number, number] {
   const names = Object.keys(params).join(',')
   const values = new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im]))
@@ -34,7 +37,8 @@ function range(
   try {
     const a = value(lo)
     const b = value(hi)
-    if (!(a < b)) throw new Error('左の値を右の値より小さくしてください')
+    if (!Number.isFinite(a) || !Number.isFinite(b)) throw new Error('値が有限ではありません')
+    if (!anyOrder && !(a < b)) throw new Error('左の値を右の値より小さくしてください')
     return [a, b]
   } catch (e) {
     throw new Error(`${name} の範囲: ${e instanceof Error ? e.message : e}`)
@@ -52,10 +56,36 @@ const shapes = new Map<number, { key: string; shape: Shape }>()
  * 点の計算に関わる入力（回転は含めない）。
  * 回転した陽関数から作った点（view が true）は、表示する軸・断面の値・回転の中心にもよる
  */
-function shapeKey(req: PlotRequest, view: boolean): string {
+function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[]): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
   const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.walls]
-  return JSON.stringify(view ? [...base, space.axes, space.slice, space.center] : base)
+  return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
+}
+
+/**
+ * 座標の「範囲で重ねる」範囲の式（0 〜 a など）を数値にする。
+ * 返すのは計算エンジンに渡す [x の最小, x の最大, y の最小, …]（重ねない座標は NaN）と、断面の値。
+ * 最小と最大が逆なら入れ替え、同じ値なら、その値での断面（固定）にする
+ */
+function coordRanges(
+  space: PlotRequest['space'],
+  params: PlotRequest['params'],
+  used: Set<string>,
+): { ranges: number[]; slice: number[] } {
+  const slice = [...space.slice]
+  const ranges: number[] = []
+  space.ranges.forEach((r, k) => {
+    if (!r || space.axes.includes(k)) {
+      ranges.push(NaN, NaN)
+      return
+    }
+    const [a, b] = range(prettyName(coordName(k)), r, params, used, true)
+    if (a === b) {
+      slice[k] = a
+      ranges.push(NaN, NaN)
+    } else ranges.push(Math.min(a, b), Math.max(a, b))
+  })
+  return { ranges, slice }
 }
 
 function forget(itemId: number) {
@@ -101,9 +131,11 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const rangeNames = Object.keys(ranges)
     const rangeUsed = new Set<string>()
     const rangeValues = rangeNames.map((n) => range(n, ranges[n], params, rangeUsed))
+    const coord = coordRanges(space, params, rangeUsed)
+    const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
     const cached = shapes.get(itemId)
     let r: MeshResult | null = null
-    if (cached && cached.key === shapeKey(req, cached.shape.view_dependent)) {
+    if (cached && cached.key === key(cached.shape.view_dependent)) {
       // 点は計算済み: 回転・射影だけし直す
       try {
         r = cached.shape.project(
@@ -130,8 +162,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
         space.dims,
         new Uint32Array(space.axes),
-        new Float64Array(space.slice),
-        new Float64Array(space.ranges),
+        new Float64Array(coord.slice),
+        new Float64Array(coord.ranges),
         Object.keys(stacks).join(','),
         new Float64Array(Object.values(stacks).flat()),
         space.samples,
@@ -144,7 +176,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       )
       forget(itemId)
       const shape = r.take_shape()
-      if (shape) shapes.set(itemId, { key: shapeKey(req, shape.view_dependent), shape })
+      if (shape) shapes.set(itemId, { key: key(shape.view_dependent), shape })
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
     }

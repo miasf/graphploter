@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { latexToText } from './lib/latex'
+  import { evalBounds } from './lib/sliderBounds'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
   import { complexLatex, coordName, latexName, niceStep, prettyName, resizeSpace } from './lib/params'
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
@@ -330,11 +331,43 @@
    * エラーの式（未定義だった文字が定義されたかもしれない）と、計算中の式（古い値で計算している）も含める
    */
   function paramsChanged(names: string[], except?: PlotItem) {
+    updateSliderBounds()
     for (const it of items) {
       if (it === except) continue
       const uses = it.usedParams.some((n) => names.includes(n)) || it.params.some((n) => names.includes(n))
       if (uses || it.error || running.has(it.id)) schedule(it, 0)
     }
+  }
+
+  /**
+   * スライダーの範囲を式（0 ≤ c ≤ b など）で決めている行の、範囲を計算し直す。
+   * 範囲で重ねているパラメータの範囲が変わったら、それを使う式も計算し直す
+   */
+  function updateSliderBounds() {
+    const all = currentParams()
+    const changed: string[] = []
+    for (const it of items) {
+      if (!it.slider.bounds) {
+        it.sliderError = undefined
+        continue
+      }
+      // 自分自身は使えない（c の範囲を c で決めることはできない）
+      const params = { ...all }
+      if (it.param) delete params[it.param.name]
+      const r = evalBounds(it.slider.bounds, params, updateSliderBounds)
+      if (!r) continue // 計算エンジンの準備待ち
+      if ('error' in r) {
+        it.sliderError = r.error
+        continue
+      }
+      it.sliderError = undefined
+      if (r.min !== it.slider.min || r.max !== it.slider.max) {
+        it.slider.min = r.min
+        it.slider.max = r.max
+        if (it.slider.stack && it.param) changed.push(it.param.name)
+      }
+    }
+    if (changed.length > 0) paramsChanged(changed)
   }
 
   /** この行がパラメータでなくなったときの後始末 */
@@ -357,11 +390,14 @@
     // 数式入力欄の LaTeX を、計算エンジン用の式に変換する
     let source: string
     let ranges: ParamRanges
+    let spaceRanges: Space['ranges']
     try {
       source = latexToText(item.latex)
       ranges = Object.fromEntries(
         Object.entries(item.ranges).map(([k, [a, b]]) => [k, [latexToText(a), latexToText(b)] as [string, string]]),
       )
+      // 座標の「範囲で重ねる」範囲（0 〜 a など）も同じように変換する
+      spaceRanges = space.ranges.map((r) => (r ? [latexToText(r[0]), latexToText(r[1])] : null))
     } catch (e) {
       viewer.removePlot(item.id)
       item.error = e instanceof Error ? e.message : String(e)
@@ -387,7 +423,7 @@
       coarse ? Math.max(16, Math.round(implicitResolution / 2)) : implicitResolution,
       ranges,
       currentParams(),
-      space,
+      { ...space, ranges: spaceRanges },
       currentStacks(),
       cutRequest(),
       item.complexMode ?? 'off',
@@ -417,7 +453,8 @@
       // 値がスライダーの範囲の外なら、範囲を広げる（範囲の中なら、そのまま）
       const { re, im } = res.param
       const outside = (v: number) => v < item.slider.min || v > item.slider.max
-      if (outside(re) || (im !== 0 && outside(im))) {
+      // 範囲を式で決めているときは広げない
+      if (!item.slider.bounds && (outside(re) || (im !== 0 && outside(im)))) {
         const r = Math.max(1, 2 ** Math.ceil(Math.log2(Math.max(Math.abs(re), Math.abs(im)))))
         item.slider.min = Math.min(item.slider.min, -r)
         item.slider.max = Math.max(item.slider.max, r)
@@ -674,6 +711,7 @@
       }
       if (!it.param) continue // まだ計算が終わっていない
       const { min, max } = it.slider
+      if (!(min < max)) continue
       let v = it.param.re + ((max - min) / PARAM_PLAY_SECONDS) * dt
       if (v > max) v = min // 最後まで行ったら最初から
       setParam(it, v, 0)
@@ -764,6 +802,10 @@
   function setSlider(item: PlotItem, next: SliderStyle) {
     const prev = item.slider
     item.slider = next
+    // 範囲の式が変わったなら計算し直す（範囲で重ねているなら、それを使う式も計算し直す）
+    if (next.bounds) updateSliderBounds()
+    else item.sliderError = undefined
+    next = item.slider
     const stackChanged = prev.stack !== next.stack || (next.stack && (prev.min !== next.min || prev.max !== next.max))
     if (item.param && stackChanged) paramsChanged([item.param.name], item)
   }
