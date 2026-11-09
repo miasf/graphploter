@@ -206,7 +206,14 @@
   const narrow = window.matchMedia('(max-width: 720px)')
   let isNarrow = $state(narrow.matches)
   narrow.addEventListener('change', () => (isNarrow = narrow.matches))
-  const bottomInset = $derived(isNarrow ? Math.min(sheetHeight, snapHeights.half) + keyboardHeight : keyboardHeight)
+  /** 設定を開いているか */
+  let settingsOpen = $state(false)
+  // スマホで設定を開いている間は、設定が下半分を覆うので、グラフはその上に収める
+  const bottomInset = $derived(
+    isNarrow
+      ? (settingsOpen ? snapHeights.half : Math.min(sheetHeight, snapHeights.half)) + keyboardHeight
+      : keyboardHeight,
+  )
   $effect(() => {
     viewer?.setBottomInset(bottomInset)
   })
@@ -266,7 +273,6 @@
     { id: 'save', icon: '⇪', label: '保存・共有', desc: '共有リンク、最初の状態に戻す' },
     { id: 'help', icon: '?', label: '書き方のヒント', desc: '式の書き方と操作' },
   ]
-  let settingsOpen = $state(false)
   let settingsCat = $state<SettingsCat | null>(null)
   /** 回転の設定で表示しているグループ */
   let rotTab = $state(GLOBAL_GROUP)
@@ -1150,7 +1156,12 @@
   <main class="viewer" bind:this={viewerEl}></main>
 
   <!-- 設定: ボタンで項目の一覧を出し、選んだ項目だけを表示する（下までスクロールしなくてよいように） -->
-  <div class="settings-anchor" style:--inset="{bottomInset}px">
+  <div
+    class="settings-anchor"
+    style:--inset="{bottomInset}px"
+    style:--half="{snapHeights.half}px"
+    style:--keyboard-h="{keyboardHeight}px"
+  >
     <button
       class="settings-toggle"
       class:on={settingsOpen}
@@ -1473,7 +1484,7 @@
               </li>
               <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
               <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は「グループ」を選ぶと、同じグループの式が一緒に回ります（同期）</li>
-                <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
+                <li>操作: 左ドラッグで回転、右ドラッグで拡大縮小（上で縮小・下で拡大）、Shift + 左ドラッグ（または中ドラッグ）で移動、Ctrl（Mac は ⌘）+ 左ドラッグでその場から見回す、ホイールでも拡大縮小</li>
               </ul>
 
             </div>
@@ -1850,6 +1861,19 @@
 
   /* スマホなど幅が狭いときは、グラフを全画面にして、式の一覧を下から引き出すシートにする */
   @media (max-width: 720px) {
+    /* スマホ: 設定はグラフを隠さないよう、下から出るシートにする（式の一覧の上に重ねる） */
+    .settings-card {
+      position: fixed;
+      top: auto;
+      left: 0;
+      right: 0;
+      bottom: var(--keyboard-h);
+      width: auto;
+      height: var(--half);
+      max-height: none;
+      border-radius: 14px 14px 0 0;
+      box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
+    }
     .app {
       display: block;
     }
