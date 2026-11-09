@@ -455,8 +455,8 @@ export class Viewer {
     const eye = this.camera.position
     const dir = this.controls.target.clone().sub(eye)
     const up = this.camera.up.clone().normalize()
-    // 左右: 上向きの軸の周りに回す
-    dir.applyAxisAngle(up, -dx * k)
+    // 左右: 上向きの軸の周りに回す（マウスを右に動かすと左を向き、左に動かすと右を向く）
+    dir.applyAxisAngle(up, dx * k)
     // 上下: カメラの右向きの軸の周りに回す。真上・真下を越えないようにする
     const right = new THREE.Vector3().crossVectors(dir, up).normalize()
     const pitch = Math.asin(THREE.MathUtils.clamp(dir.clone().normalize().dot(up), -1, 1))
