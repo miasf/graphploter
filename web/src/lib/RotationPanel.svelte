@@ -4,16 +4,22 @@
   import EditableValue from './EditableValue.svelte'
   import NumberInput from './NumberInput.svelte'
   import { coordName, prettyName, rotDims } from './params'
-  import type { Space } from './types'
 
   interface Props {
-    space: Space
+    /** 次元 */
+    dims: number
+    /** 画面の横・奥・縦の軸に表示している座標の番号 */
+    axes: number[]
+    /** 回転角（度） */
+    rotation: number[]
+    /** 回転の中心 */
+    center: number[]
     onRotate: (rotation: number[], center: number[]) => void
     /** 再生中（角度を自動で動かしている）回転の番号 */
     playing: number[]
     onPlay: (k: number) => void
   }
-  let { space, onRotate, playing, onPlay }: Props = $props()
+  let { dims, axes, rotation, center, onRotate, playing, onPlay }: Props = $props()
 
   /** 最初から見せる回転の数。これより多い分は折りたたむ */
   const SHOW = 6
@@ -22,34 +28,34 @@
   const planes = $derived.by(() => {
     const out: { i: number; j: number; k: number; order: number }[] = []
     let k = 0
-    const n = rotDims(space.dims)
+    const n = rotDims(dims)
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
-        const shown = Number(space.axes.includes(i)) + Number(space.axes.includes(j))
+        const shown = Number(axes.includes(i)) + Number(axes.includes(j))
         out.push({ i, j, k: k++, order: 2 - shown })
       }
     }
     return out.sort((a, b) => a.order - b.order || a.k - b.k)
   })
-  const nonzero = $derived(space.rotation.filter((a) => a !== 0).length)
+  const nonzero = $derived(rotation.filter((a) => a !== 0).length)
 
   function setAngle(k: number, deg: number) {
-    const rotation = [...space.rotation]
-    rotation[k] = deg
-    onRotate(rotation, space.center)
+    const next = [...rotation]
+    next[k] = deg
+    onRotate(next, center)
   }
 
   function setCenter(k: number, v: number) {
     if (!Number.isFinite(v)) return
-    const center = [...space.center]
-    center[k] = v
-    onRotate(space.rotation, center)
+    const next = [...center]
+    next[k] = v
+    onRotate(rotation, next)
   }
 
   function reset() {
     onRotate(
-      space.rotation.map(() => 0),
-      space.center.map(() => 0),
+      rotation.map(() => 0),
+      center.map(() => 0),
     )
   }
 </script>
@@ -61,13 +67,13 @@
     min="-180"
     max="180"
     step="1"
-    value={space.rotation[p.k]}
+    value={rotation[p.k]}
     aria-label="{coordName(p.i)}{coordName(p.j)} 平面の回転角"
     oninput={(e) => setAngle(p.k, e.currentTarget.valueAsNumber)}
   />
   <span class="value">
     <EditableValue
-      value={space.rotation[p.k]}
+      value={rotation[p.k]}
       suffix="°"
       chars={6}
       format={(v) => String(Number(v.toFixed(1)))}
@@ -84,15 +90,13 @@
   >
 {/snippet}
 
-<details class="rotation">
-  <summary>
-    回転（{planes.length} 通り{nonzero > 0 ? `、${nonzero} 個を回転中` : ''}）
-  </summary>
+<div class="rotation">
+  <p class="status">{planes.length} 通りの回転{nonzero > 0 ? `（${nonzero} 個を回転中）` : ''}</p>
 
   <div class="center">
     <span class="label">中心</span>
-    {#each space.center as c, k (k)}
-      <div class="c" class:extra={k >= space.dims}>
+    {#each center as c, k (k)}
+      <div class="c" class:extra={k >= dims}>
         <span class="cname">{prettyName(coordName(k))}</span>
         <NumberInput value={c} label="回転の中心の {coordName(k)} 座標" onChange={(v) => setCenter(k, v)} />
       </div>
@@ -114,9 +118,9 @@
       </div>
     </details>
   {/if}
-  {#if space.dims < 5}
+  {#if dims < 5}
     <p class="hint">
-      {space.dims === 3 ? 'w と w₂' : 'w₂'} は回転のときだけ使う座標です。
+      {dims === 3 ? 'w と w₂' : 'w₂'} は回転のときだけ使う座標です。
       陰関数・陽関数はその方向にまっすぐ伸びた形、媒介変数表示はその成分が 0 の形として回します。
     </p>
   {/if}
@@ -125,16 +129,16 @@
     座標の番号順に回します（回転の順番で結果が変わるため）。
   </p>
   <button class="reset" onclick={reset}>回転をリセット</button>
-</details>
+</div>
 
 <style>
-  .rotation {
-    margin-top: 10px;
+  .status {
+    margin: 0 0 4px;
+    font-size: 12px;
+    color: var(--muted);
   }
-  summary {
+  .more summary {
     cursor: pointer;
-    font-size: 13px;
-    font-weight: 600;
     color: var(--muted);
     padding: 4px 0;
   }

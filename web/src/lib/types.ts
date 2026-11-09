@@ -77,6 +77,22 @@ export interface Space {
   perspective: number
 }
 
+/**
+ * 回転のグループ。同じグループの式は、同じ回転（角度・中心）で描く（同期する）。
+ * グループに入っていない式は、全体の回転（Space の rotation, center）を使う
+ */
+export interface RotationGroup {
+  id: number
+  name: string
+  /** 回転角（度）。Space の rotation と同じ並び */
+  rotation: number[]
+  /** 回転の中心 */
+  center: number[]
+}
+
+/** 全体の回転を表すグループの番号 */
+export const GLOBAL_GROUP = 0
+
 /** パラメータ（スライダーで値を決める文字）の値。複素数も扱えるよう実部と虚部を持つ */
 export interface ParamValue {
   re: number
@@ -136,6 +152,8 @@ export interface PlotItem extends PlotStyle {
   complexMode?: ComplexMode
   /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
   walls?: boolean
+  /** 回転のグループの番号（無い・0 なら全体の回転を使う） */
+  rotGroup?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
 }

@@ -2,7 +2,7 @@
 // - ブラウザ（localStorage）に自動で保存し、次に開いたときに元に戻す
 // - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）
 
-import type { ComplexMode, CutStyle, Domain, GridStyle, ParamRanges, SliderStyle, Space } from './types'
+import type { ComplexMode, CutStyle, Domain, GridStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
 export interface SavedItem {
@@ -17,6 +17,8 @@ export interface SavedItem {
   slider: SliderStyle
   complexMode?: ComplexMode
   walls?: boolean
+  /** 回転のグループの番号（古い保存データには無い） */
+  rotGroup?: number
 }
 
 /** 保存する状態全体 */
@@ -34,6 +36,8 @@ export interface SavedState {
   cut?: CutStyle
   /** 2D 表示（古い保存データには無い） */
   flat?: boolean
+  /** 回転のグループ（古い保存データには無い） */
+  groups?: RotationGroup[]
 }
 
 const STORAGE_KEY = 'graphploter:state'

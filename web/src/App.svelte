@@ -7,7 +7,7 @@
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, latexName, prettyName, resizeSpace, sliderStep, snapToStep } from './lib/params'
+  import { complexLatex, coordName, latexName, prettyName, resizeRotation, resizeSpace, sliderStep, snapToStep } from './lib/params'
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
@@ -21,9 +21,11 @@
     ParamRanges,
     ParamValue,
     PlotItem,
+    RotationGroup,
     SliderStyle,
     Space,
   } from './lib/types'
+  import { GLOBAL_GROUP } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -119,7 +121,9 @@
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
+        rotGroup: it.rotGroup,
       })),
+      groups,
       domain,
       resolution,
       implicitResolution,
@@ -142,6 +146,8 @@
     space = s.space
     if (s.cut) cut = s.cut
     flat = s.flat ?? false
+    groups = s.groups ?? []
+    nextGroupId = Math.max(0, ...groups.map((g) => g.id)) + 1
   }
 
   // 変わるたびに（少し待ってから）ブラウザに保存する
@@ -200,8 +206,9 @@
   const narrow = window.matchMedia('(max-width: 720px)')
   let isNarrow = $state(narrow.matches)
   narrow.addEventListener('change', () => (isNarrow = narrow.matches))
+  const bottomInset = $derived(isNarrow ? Math.min(sheetHeight, snapHeights.half) + keyboardHeight : keyboardHeight)
   $effect(() => {
-    viewer?.setBottomInset(isNarrow ? Math.min(sheetHeight, snapHeights.half) + keyboardHeight : keyboardHeight)
+    viewer?.setBottomInset(bottomInset)
   })
 
   let drag: { startY: number; startH: number; lastY: number; lastT: number; v: number; moved: boolean } | null =
@@ -246,6 +253,36 @@
     dragHeight = null
   }
 
+  // ---- 設定（ボタンで項目の一覧を出し、選んだ項目だけを表示する）----
+
+  type SettingsCat = 'dims' | 'rotate' | 'range' | 'detail' | 'look' | 'cut' | 'save' | 'help'
+  const SETTINGS_CATS: { id: SettingsCat; icon: string; label: string; desc: string }[] = [
+    { id: 'rotate', icon: '⟳', label: '回転', desc: '全体・グループごとの回転と再生' },
+    { id: 'dims', icon: '⧉', label: '次元', desc: '4次元以上、表示する座標と断面' },
+    { id: 'range', icon: '⬚', label: '表示範囲', desc: 'x, y, z の最小値・最大値' },
+    { id: 'detail', icon: '▦', label: '細かさ', desc: '曲面・陰関数の細かさ、重ねる枚数' },
+    { id: 'look', icon: '◎', label: '見え方', desc: '遠近感、視点のリセット、背景' },
+    { id: 'cut', icon: '✂', label: '切り口', desc: '立体を平面で切る' },
+    { id: 'save', icon: '⇪', label: '保存・共有', desc: '共有リンク、最初の状態に戻す' },
+    { id: 'help', icon: '?', label: '書き方のヒント', desc: '式の書き方と操作' },
+  ]
+  let settingsOpen = $state(false)
+  let settingsCat = $state<SettingsCat | null>(null)
+  /** 回転の設定で表示しているグループ */
+  let rotTab = $state(GLOBAL_GROUP)
+
+  function closeSettings() {
+    settingsOpen = false
+    settingsCat = null
+  }
+
+  /** 式の ⚙ の「回転」から、そのグループの回転の設定を開く */
+  function openRotation(gid: number) {
+    rotTab = gid
+    settingsCat = 'rotate'
+    settingsOpen = true
+  }
+
   // ---- 計算の依頼 ----
 
   // 式ごとの「最新の依頼番号」。古い依頼の結果が後から届いても無視するため。
@@ -267,7 +304,7 @@
   // （陰関数は 1/8 の計算量）。指を離したら、粗く計算した式だけを細かく計算し直す。
   let pointerOnControl = false
   const coarseItems = new Set<number>()
-  const isCoarse = () => pointerOnControl || playing.length > 0 || playingParams.length > 0
+  const isCoarse = () => pointerOnControl || anyRotPlaying() || playingParams.length > 0
 
   function refine() {
     viewer?.setBusy(isCoarse())
@@ -463,7 +500,7 @@
       coarse ? Math.max(16, Math.round(implicitResolution / 2)) : implicitResolution,
       ranges,
       currentParams(),
-      { ...space, ranges: spaceRanges },
+      { ...space, ranges: spaceRanges, ...rotationOf(item) },
       currentStacks(),
       cutRequest(),
       item.complexMode ?? 'off',
@@ -681,27 +718,115 @@
   })
 
   function setLayout(next: Space) {
+    // 次元が変わったら、グループの回転も同じ座標の組の角度を引き継いで作り直す
+    if (next.dims !== space.dims) {
+      groups = groups.map((g) => ({ ...g, ...resizeRotation(g.rotation, g.center, space.dims, next.dims) }))
+    }
     space = next
     updateSpaceRangeErrors()
     replotAll(0)
   }
 
-  function setRotation(rotation: number[], center: number[]) {
-    space.rotation = rotation
-    space.center = center
-    replotAll(0)
+  // ---- 回転のグループ（式ごとの回転・複数の式の同期）----
+  //
+  // グループに入っていない式は全体の回転（space.rotation, space.center）で描く。
+  // 同じグループの式は、そのグループの回転で描く（角度を変えると、まとめて回る）
+
+  let groups = $state<RotationGroup[]>([])
+  let nextGroupId = 1
+
+  /** 式が使うグループの番号（グループが無くなっていれば全体） */
+  function groupIdOf(item: PlotItem): number {
+    const g = item.rotGroup
+    return g && groups.some((x) => x.id === g) ? g : GLOBAL_GROUP
   }
+
+  /** グループ gid の回転角と中心 */
+  function rotationIn(gid: number): { rotation: number[]; center: number[] } {
+    const g = groups.find((x) => x.id === gid)
+    return g ? { rotation: g.rotation, center: g.center } : { rotation: space.rotation, center: space.center }
+  }
+
+  /** 式を描くときの回転角と中心 */
+  function rotationOf(item: PlotItem) {
+    return rotationIn(groupIdOf(item))
+  }
+
+  /** グループ gid の回転を変える。そのグループの式だけを計算し直す */
+  function setRotation(gid: number, rotation: number[], center: number[]) {
+    const g = groups.find((x) => x.id === gid)
+    if (g) {
+      g.rotation = rotation
+      g.center = center
+    } else {
+      space.rotation = rotation
+      space.center = center
+    }
+    for (const it of items) if (!it.param && groupIdOf(it) === (g ? gid : GLOBAL_GROUP)) schedule(it, 0)
+  }
+
+  /** 新しいグループを作る。回転は from（グループの番号）の今の回転を引き継ぐ */
+  function createGroup(from: number): number {
+    const { rotation, center } = rotationIn(from)
+    const used = new Set(groups.map((g) => g.name))
+    let n = 1
+    while (used.has(`グループ ${n}`)) n++
+    const g: RotationGroup = { id: nextGroupId++, name: `グループ ${n}`, rotation: [...rotation], center: [...center] }
+    groups.push(g)
+    return g.id
+  }
+
+  /** 式をグループ gid に入れる（'new' なら、この式だけの新しいグループを作る） */
+  function setItemGroup(item: PlotItem, gid: number | 'new') {
+    const from = groupIdOf(item)
+    const to = gid === 'new' ? createGroup(from) : gid
+    if (to === from) return
+    item.rotGroup = to === GLOBAL_GROUP ? undefined : to
+    schedule(item, 0)
+  }
+
+  function renameGroup(gid: number, name: string) {
+    const g = groups.find((x) => x.id === gid)
+    if (g && name.trim()) g.name = name.trim()
+  }
+
+  /** グループを解散する（入っていた式は全体の回転に戻る） */
+  function removeGroup(gid: number) {
+    for (const it of items) {
+      if (it.rotGroup === gid) {
+        it.rotGroup = undefined
+        schedule(it, 0)
+      }
+    }
+    groups = groups.filter((g) => g.id !== gid)
+    delete playing[gid]
+    if (rotTab === gid) rotTab = GLOBAL_GROUP
+    animationChanged()
+  }
+
+  /** グループごとの式の数 */
+  const groupSizes = $derived.by(() => {
+    const out: Record<number, number> = {}
+    for (const it of items) if (it.rotGroup) out[it.rotGroup] = (out[it.rotGroup] ?? 0) + 1
+    return out
+  })
+
+  /** グラフを描く式（パラメータの行でないもの） */
+  const plotItems = $derived(items.filter((it) => !it.param))
 
   // ---- 回転の再生（角度を自動で動かす）----
 
-  /** 再生中の回転（回転角の番号） */
-  let playing = $state<number[]>([])
+  /** 再生中の回転（グループの番号 → 回転角の番号） */
+  let playing = $state<Record<number, number[]>>({})
   /** 再生の速さ（度 / 秒） */
   const PLAY_SPEED = 30
   let lastFrame = 0
 
-  function togglePlay(k: number) {
-    playing = playing.includes(k) ? playing.filter((j) => j !== k) : [...playing, k]
+  const anyRotPlaying = () => Object.values(playing).some((ks) => ks.length > 0)
+
+  function togglePlay(gid: number, k: number) {
+    const cur = playing[gid] ?? []
+    playing[gid] = cur.includes(k) ? cur.filter((j) => j !== k) : [...cur, k]
     animationChanged()
   }
 
@@ -725,7 +850,7 @@
 
   let animating = false
   function animationChanged() {
-    const any = playing.length > 0 || playingParams.length > 0
+    const any = anyRotPlaying() || playingParams.length > 0
     if (any && !animating) {
       animating = true
       viewer?.setBusy(true)
@@ -737,20 +862,23 @@
   }
 
   function playFrame(now: number) {
-    if (playing.length === 0 && playingParams.length === 0) {
+    if (!anyRotPlaying() && playingParams.length === 0) {
       animating = false
       return
     }
     const dt = Math.min(0.1, (now - lastFrame) / 1000)
     lastFrame = now
-    if (playing.length > 0) {
-      const rotation = [...space.rotation]
-      for (const k of playing) {
+    for (const [key, ks] of Object.entries(playing)) {
+      if (ks.length === 0) continue
+      const gid = Number(key)
+      const cur = rotationIn(gid)
+      const rotation = [...cur.rotation]
+      for (const k of ks) {
         // −180〜180 の範囲で回り続ける（小数第1位まで）
         const a = rotation[k] + PLAY_SPEED * dt
         rotation[k] = Math.round((((a + 180) % 360) - 180) * 10) / 10
       }
-      setRotation(rotation, space.center)
+      setRotation(gid, rotation, cur.center)
     }
     for (const id of playingParams) {
       const it = items.find((x) => x.id === id)
@@ -846,7 +974,7 @@
     domainError = ''
     viewer?.setDomain(domain, true)
     replotAll(0)
-    if (!playing.includes(2)) togglePlay(2) // xw の回転を再生
+    if (!(playing[GLOBAL_GROUP] ?? []).includes(2)) togglePlay(GLOBAL_GROUP, 2) // xw の回転を再生
   }
 
   /** パラメータのスライダーの設定を変えたとき。範囲で重ねる設定が変われば、それを使う式を計算し直す */
@@ -927,7 +1055,10 @@
   }
 </script>
 
-<svelte:window bind:innerHeight={windowHeight} />
+<svelte:window
+  bind:innerHeight={windowHeight}
+  onkeydown={(e) => e.key === 'Escape' && settingsOpen && closeSettings()}
+/>
 
 <div class="app">
   <aside
@@ -982,6 +1113,18 @@
             onEnter={() => insertAfter(item)}
             onDrag={(phase, e) => dragItem(item, phase, e)}
             dragging={dragId === item.id}
+            dims={space.dims}
+            viewAxes={space.axes}
+            {groups}
+            groupId={groupIdOf(item)}
+            {groupSizes}
+            rotation={rotationOf(item).rotation}
+            center={rotationOf(item).center}
+            rotPlaying={playing[groupIdOf(item)] ?? []}
+            onRotate={(r, c) => setRotation(groupIdOf(item), r, c)}
+            onPlayRot={(k) => togglePlay(groupIdOf(item), k)}
+            onGroup={(g) => setItemGroup(item, g)}
+            onOpenRotation={() => openRotation(groupIdOf(item))}
           />
         {/each}
       </ul>
@@ -1000,253 +1143,345 @@
         {/each}
       </details>
 
-      <section class="settings">
-        <h2>次元</h2>
-        <SpacePanel
-          {space}
-          rangeErrors={spaceRangeErrors}
-          onLayout={setLayout}
-          onSlice={setSlice}
-          onAddSlider={addSliderTop}
-        />
-        <RotationPanel {space} onRotate={setRotation} {playing} onPlay={togglePlay} />
 
-        <h2>表示範囲</h2>
-        <div class="ranges">
-          {#each axes as a (a)}
-            <div class="range-row">
-              <NumberInput
-                value={domain[`${a}min`]}
-                label="{axisNames[axes.indexOf(a)]} の最小値"
-                onChange={(v) => setBound(`${a}min`, v)}
-              />
-              <span class="axis">≤ {prettyName(axisNames[axes.indexOf(a)])} ≤</span>
-              <NumberInput
-                value={domain[`${a}max`]}
-                label="{axisNames[axes.indexOf(a)]} の最大値"
-                onChange={(v) => setBound(`${a}max`, v)}
-              />
-            </div>
-          {/each}
-        </div>
-        {#if domainError}<p class="error">{domainError}</p>{/if}
-
-        <div class="slider">
-          <span>
-            曲面の細かさ:
-            <EditableValue value={resolution} label="曲面の細かさ" suffix=" × {resolution}" min={10} max={600} integer
-              onChange={(v) => { resolution = v; replotAll(0) }} />
-          </span>
-          <input
-            type="range"
-            aria-label="曲面の細かさ"
-            min="20"
-            max="400"
-            step="10"
-            bind:value={resolution}
-            onchange={() => replotAll(0)}
-          />
-        </div>
-        <div class="slider">
-          <span>
-            範囲で重ねる枚数:
-            <EditableValue value={space.samples} label="範囲で重ねる枚数" min={2} max={200} integer
-              onChange={(v) => { space.samples = v; replotAll(0) }} />
-          </span>
-          <input
-            type="range"
-            aria-label="範囲で重ねる枚数"
-            min="4"
-            max="64"
-            step="2"
-            bind:value={space.samples}
-            onchange={() => replotAll(0)}
-          />
-        </div>
-        <div class="slider">
-          <span>
-            陰関数・立体の細かさ:
-            <EditableValue value={implicitResolution} label="陰関数・立体の細かさ" suffix="³（重いので注意）" min={10} max={300} integer
-              onChange={(v) => { implicitResolution = v; replotAll(0) }} />
-          </span>
-          <input
-            type="range"
-            aria-label="陰関数・立体の細かさ"
-            min="20"
-            max="200"
-            step="10"
-            bind:value={implicitResolution}
-            onchange={() => replotAll(0)}
-          />
-        </div>
-
-        <h2>見え方</h2>
-        <div class="slider">
-          <span>
-            4次元の遠近感:
-            <EditableValue value={space.perspective} label="4次元の遠近感" suffix={space.perspective === 0 ? '%（なし: 平行な射影）' : '%'}
-              min={0} max={100} onChange={(v) => { space.perspective = v; replotAll(0) }} />
-          </span>
-          <input
-            type="range"
-            aria-label="4次元の遠近感"
-            min="0"
-            max="100"
-            step="1"
-            bind:value={space.perspective}
-            oninput={() => replotAll(0)}
-          />
-          <span class="note">w などの奥にある部分ほど小さく描く（媒介変数表示・回した陽関数に効く）</span>
-        </div>
-        <div class="slider">
-          <span>
-            遠近感:
-            <EditableValue value={perspective} label="遠近感" suffix={perspective === 0 ? '%（平行投影）' : '%'} min={0} max={100}
-              onChange={(v) => { perspective = v; if (!flat) viewer?.setPerspective(v / 100) }} />
-          </span>
-          <input
-            type="range"
-            aria-label="遠近感"
-            min="0"
-            max="100"
-            step="1"
-            bind:value={perspective}
-            oninput={() => !flat && viewer?.setPerspective(perspective / 100)}
-          />
-        </div>
-        <h2>切り口</h2>
-        {#if flat}<p class="note">2D 表示では使えません</p>{/if}
-        <label class="check-row" class:disabled={flat}>
-          <input type="checkbox" checked={cut.enabled} onchange={(e) => setCut({ enabled: e.currentTarget.checked })} />
-          立体を平面で切って、切り口を見る
-        </label>
-        {#if cut.enabled}
-          <div class="cut-axes" role="group" aria-label="切る向き">
-            {#each [0, 1, 2] as const as k (k)}
-              <button
-                class="secondary"
-                class:selected={cut.axis === k}
-                onclick={() => {
-                  const [lo, hi] = [
-                    [domain.xmin, domain.xmax],
-                    [domain.ymin, domain.ymax],
-                    [domain.zmin, domain.zmax],
-                  ][k]
-                  setCut({ axis: k, pos: Math.min(hi, Math.max(lo, cut.pos)) })
-                }}>{prettyName(axisNames[k])} = 一定</button
-              >
-            {/each}
-          </div>
-          <div class="slider">
-            <span>
-              位置: {prettyName(axisNames[cut.axis])}
-              <EditableValue
-                value={cut.pos}
-                prefix="= "
-                format={(v) => String(Number(v.toPrecision(4)))}
-                label="切り口の位置"
-                onChange={(v) => setCut({ pos: v })}
-              />
-            </span>
-            <input
-              type="range"
-              min={cutRange[0]}
-              max={cutRange[1]}
-              step={(cutRange[1] - cutRange[0]) / 200}
-              value={cut.pos}
-              aria-label="切り口の位置"
-              oninput={(e) => setCut({ pos: e.currentTarget.valueAsNumber })}
-            />
-          </div>
-          <div class="buttons">
-            <button class="secondary" onclick={() => setCut({ flip: !cut.flip })}>
-              {cut.flip ? `${prettyName(axisNames[cut.axis])} ≥ ${Number(cut.pos.toPrecision(4))} を表示中` : `${prettyName(axisNames[cut.axis])} ≤ ${Number(cut.pos.toPrecision(4))} を表示中`}（反対側にする）
-            </button>
-          </div>
-          <p class="note">
-            立体（陰関数・範囲で重ねた立体・媒介変数3つの立体）の切り口はふたをして塗ります。陰関数は、式の両側のうち表示範囲の中で狭いほうを中身とします
-          </p>
-        {/if}
-
-        <h2>保存・共有</h2>
-        <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
-        <div class="buttons">
-          <button class="secondary" onclick={copyShareLink}>共有リンクをコピー</button>
-          <button class="secondary" onclick={resetAll}>最初の状態に戻す</button>
-        </div>
-        {#if shareMessage}<p class="note">{shareMessage}</p>{/if}
-
-        <h2>視点</h2>
-        <div class="buttons">
-          <button class="secondary" onclick={() => viewer?.resetCamera()}>視点をリセット</button>
-          <button class="secondary" onclick={() => (dark = !dark)}>{dark ? '明るい背景' : '暗い背景'}</button>
-        </div>
-      </section>
-
-      <details class="help">
-        <summary>書き方のヒント</summary>
-        <ul>
-          <li>陽関数: <code>z = x^2 - y^2</code>（<code>z =</code> は省略可）、<code>y = sin(x) z</code> なども可</li>
-          <li>陰関数: <code>x^2 + y^2 + z^2 = 4</code>、<code>sin x + sin y + sin z = 0</code></li>
-          <li>曲線: <code>(cos t, sin t, t/4)</code>（t を使う。範囲は式の下で指定）</li>
-          <li>曲面: <code>(u cos v, u sin v, u)</code>（u と v を使う）</li>
-          <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
-          <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>
-          <li>
-            関数: sin cos tan sec csc cot arcsin arccos arctan sinh cosh tanh arcsinh arccosh arctanh exp ln log sqrt abs
-          floor ceil round sign Re Im conj arg、2つの引数: mod min max nCr nPr、階乗: <code>n!</code>
-        </li>
-        <li>
-          特殊関数（すべて複素数で使えます。数式キーボードの「特殊」タブに全部あり、◀ ▶ でページをめくれます）
-          <ul>
-            <li>ガンマ系: gamma(z)（Γ）, gamma(a, z)（上側不完全）, gammaP(a, z), gammaQ(a, z), loggamma, beta(a, b), beta(z, a, b), betaRegularized(z, a, b), digamma（psi, ψ）, polygamma(n, z), pochhammer(a, n), binomial(n, k)</li>
-            <li>ゼータ系: zeta(s)（ζ）, zeta(s, a)（フルヴィッツ）, polylog(s, z)（Li）, dirichletEta(s)</li>
-            <li>誤差関数・積分: erf, erfc, erfi, dawson, fresnelS, fresnelC, Ei, En(n, z), li, Si, Ci, Shi, Chi, sinc</li>
-            <li>ベッセル系: besselJ(ν, z), besselY, besselI, besselK, hankelH1, hankelH2, sphericalJ(n, z), sphericalY, airyAi(z), airyBi, airyAiPrime, airyBiPrime</li>
-            <li>直交多項式: legendreP(n, x), legendreP(n, m, x), hermiteH(n, x), laguerreL(n, x), laguerreL(n, a, x), chebyshevT(n, x), chebyshevU, gegenbauerC(n, a, x), jacobiP(n, a, b, x), sphericalHarmonicY(l, m, θ, φ)</li>
-            <li>超幾何関数: hyp0F1(b, z), hyp1F1(a, b, z), hyp2F1(a, b, c, z), hypU(a, b, z)</li>
-            <li>楕円系（m = k²）: ellipticK(m), ellipticE(m), ellipticE(φ, m), ellipticF(φ, m), ellipticPi(n, m), ellipticPi(n, φ, m), jacobiSN(u, m), jacobiCN, jacobiDN</li>
-            <li>その他: lambertW(z)（productLog）, lambertW(k, z)（第 k 枝）</li>
-          </ul>
-        </li>
-          <li>複素数の結果が実数でない点は描かれません</li>
-          <li>
-          入力欄は数式の見た目のまま編集できます。<code>/</code> で分数、<code>^</code> でべき乗、<code>pi</code> →
-          π、<code>sqrt</code> → √ に自動で変わります
-        </li>
-        <li>入力欄に入ると数式用のキーボードが出ます（123 / f(x) / 特殊 / abc のタブで切り替え）。キーにカーソルを当てる（スマホでは長押しする）と、そのキーの名前が出ます</li>
-        <li>
-          4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（<code>w2</code> と打つと w₂）。
-          表示する3つの座標を選び、残りはスライダーで固定した断面を描きます
-        </li>
-        <li>
-          範囲で重ねる: 座標を「範囲」にするか、パラメータの「範囲で重ねる」を押すと、その範囲で動かしたときに
-          図形が通る領域（曲面 → 立体、曲線 → 曲面）を描きます
-        </li>
-        <li>
-          回転: 中心の点と、座標の組（xy, xw など）ごとの角度で図形を回せます。▶ で回し続けます。
-          「4次元の遠近感」を上げると、w の奥にある部分ほど小さく描きます
-        </li>
-        <li>
-          リスト: <code>(t, [-1,1], [-1,1], [-1,1])</code> や <code>x^2 + y^2 + z^2 = [1, 4, 9]</code>
-          のように書くと、組み合わせの数だけまとめて描きます
-        </li>
-        <li>立体: <code>((3 + t cos v) cos u, (3 + t cos v) sin u, t sin v)</code>（u, v, t の3つを使う）</li>
-        <li>2D 表示: グラフ右上の「2D」で、真上から見た平面に描きます（z = f(x, y) は値の塗り分け）</li>
-        <li>媒介変数は t（曲線）、u と v（曲面）、または t₁ と t₂。組 (…) の外では t, u, v もパラメータにできます</li>
-        <li>
-          パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
-          「複素数」を押すと、複素平面の上で点を動かして値を決められます
-        </li>
-        <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
-        <li>⚙ ボタンで色と格子線（方向ごとの間隔）を変えられます</li>
-          <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
-        </ul>
-      </details>
     </div>
   </aside>
 
   <main class="viewer" bind:this={viewerEl}></main>
+
+  <!-- 設定: ボタンで項目の一覧を出し、選んだ項目だけを表示する（下までスクロールしなくてよいように） -->
+  <div class="settings-anchor" style:--inset="{bottomInset}px">
+    <button
+      class="settings-toggle"
+      class:on={settingsOpen}
+      onclick={() => (settingsOpen ? closeSettings() : (settingsOpen = true))}
+      aria-expanded={settingsOpen}
+      title="設定"
+    >⚙ 設定</button>
+    {#if settingsOpen}
+      <div class="settings-card" role="dialog" aria-label="設定">
+        <div class="card-head">
+          {#if settingsCat}
+            <button class="back" onclick={() => (settingsCat = null)} aria-label="項目の一覧に戻る">‹</button>
+            <span class="card-title">{SETTINGS_CATS.find((c) => c.id === settingsCat)?.label}</span>
+          {:else}
+            <span class="card-title">設定</span>
+          {/if}
+          <button class="close" onclick={closeSettings} aria-label="設定を閉じる">×</button>
+        </div>
+        <div class="card-body">
+          {#if !settingsCat}
+            <div class="cat-list">
+              {#each SETTINGS_CATS as c (c.id)}
+                <button class="cat" onclick={() => (settingsCat = c.id)}>
+                  <span class="cat-icon">{c.icon}</span>
+                  <span class="cat-text">
+                    <span class="cat-label">{c.label}</span>
+                    <span class="cat-desc">{c.desc}</span>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {:else if settingsCat === 'dims'}
+            <SpacePanel
+              {space}
+              rangeErrors={spaceRangeErrors}
+              onLayout={setLayout}
+              onSlice={setSlice}
+              onAddSlider={addSliderTop}
+            />
+
+          {:else if settingsCat === 'rotate'}
+            <div class="group-tabs" role="tablist" aria-label="回転のグループ">
+              <button role="tab" class="chip" class:selected={rotTab === GLOBAL_GROUP} aria-selected={rotTab === GLOBAL_GROUP}
+                onclick={() => (rotTab = GLOBAL_GROUP)}>全体</button>
+              {#each groups as g (g.id)}
+                <button role="tab" class="chip" class:selected={rotTab === g.id} aria-selected={rotTab === g.id}
+                  onclick={() => (rotTab = g.id)}>{g.name}</button>
+              {/each}
+              <button class="chip" onclick={() => (rotTab = createGroup(rotTab))} title="新しいグループを作る（今のタブの回転を引き継ぐ）">＋ グループ</button>
+            </div>
+            {@const tabGroup = groups.find((g) => g.id === rotTab)}
+            {#if tabGroup}
+              <div class="group-head">
+                <input class="group-name" value={tabGroup.name} aria-label="グループの名前"
+                  onchange={(e) => renameGroup(tabGroup.id, e.currentTarget.value)} />
+                <button class="secondary small" onclick={() => { removeGroup(tabGroup.id); rotTab = GLOBAL_GROUP }}>解散</button>
+              </div>
+            {/if}
+            <p class="note">
+              {rotTab === GLOBAL_GROUP
+                ? 'グループに入っていない式は、この回転で描きます。'
+                : '同じグループの式は同じ回転で動きます（同期）。チェックした式がこのグループに入ります。'}
+            </p>
+            {#if tabGroup || groups.length > 0}
+              <div class="members">
+                {#each plotItems as it (it.id)}
+                  {@const k = items.indexOf(it)}
+                  <label class="member">
+                    <input type="checkbox" checked={groupIdOf(it) === rotTab}
+                      disabled={rotTab === GLOBAL_GROUP && groupIdOf(it) === GLOBAL_GROUP}
+                      onchange={(e) => setItemGroup(it, e.currentTarget.checked ? rotTab : GLOBAL_GROUP)} />
+                    <span class="dot" style:background={it.color}></span>
+                    <span class="member-name">式 {k + 1}</span>
+                    {#if groupIdOf(it) !== rotTab}
+                      <span class="member-group">（{groupIdOf(it) === GLOBAL_GROUP ? '全体' : groups.find((g) => g.id === groupIdOf(it))?.name}）</span>
+                    {/if}
+                  </label>
+                {/each}
+              </div>
+            {/if}
+            {@const rot = rotationIn(rotTab)}
+            <RotationPanel
+              dims={space.dims}
+              axes={space.axes}
+              rotation={rot.rotation}
+              center={rot.center}
+              onRotate={(r, c) => setRotation(rotTab, r, c)}
+              playing={playing[rotTab] ?? []}
+              onPlay={(k) => togglePlay(rotTab, k)}
+            />
+          {:else if settingsCat === 'range'}
+            <div class="ranges">
+              {#each axes as a (a)}
+                <div class="range-row">
+                  <NumberInput
+                    value={domain[`${a}min`]}
+                    label="{axisNames[axes.indexOf(a)]} の最小値"
+                    onChange={(v) => setBound(`${a}min`, v)}
+                  />
+                  <span class="axis">≤ {prettyName(axisNames[axes.indexOf(a)])} ≤</span>
+                  <NumberInput
+                    value={domain[`${a}max`]}
+                    label="{axisNames[axes.indexOf(a)]} の最大値"
+                    onChange={(v) => setBound(`${a}max`, v)}
+                  />
+                </div>
+              {/each}
+            </div>
+            {#if domainError}<p class="error">{domainError}</p>{/if}
+
+
+          {:else if settingsCat === 'detail'}
+            <div class="slider">
+              <span>
+                曲面の細かさ:
+                <EditableValue value={resolution} label="曲面の細かさ" suffix=" × {resolution}" min={10} max={600} integer
+                  onChange={(v) => { resolution = v; replotAll(0) }} />
+              </span>
+              <input
+                type="range"
+                aria-label="曲面の細かさ"
+                min="20"
+                max="400"
+                step="10"
+                bind:value={resolution}
+                onchange={() => replotAll(0)}
+              />
+            </div>
+            <div class="slider">
+              <span>
+                範囲で重ねる枚数:
+                <EditableValue value={space.samples} label="範囲で重ねる枚数" min={2} max={200} integer
+                  onChange={(v) => { space.samples = v; replotAll(0) }} />
+              </span>
+              <input
+                type="range"
+                aria-label="範囲で重ねる枚数"
+                min="4"
+                max="64"
+                step="2"
+                bind:value={space.samples}
+                onchange={() => replotAll(0)}
+              />
+            </div>
+            <div class="slider">
+              <span>
+                陰関数・立体の細かさ:
+                <EditableValue value={implicitResolution} label="陰関数・立体の細かさ" suffix="³（重いので注意）" min={10} max={300} integer
+                  onChange={(v) => { implicitResolution = v; replotAll(0) }} />
+              </span>
+              <input
+                type="range"
+                aria-label="陰関数・立体の細かさ"
+                min="20"
+                max="200"
+                step="10"
+                bind:value={implicitResolution}
+                onchange={() => replotAll(0)}
+              />
+            </div>
+
+
+          {:else if settingsCat === 'look'}
+            <div class="slider">
+              <span>
+                4次元の遠近感:
+                <EditableValue value={space.perspective} label="4次元の遠近感" suffix={space.perspective === 0 ? '%（なし: 平行な射影）' : '%'}
+                  min={0} max={100} onChange={(v) => { space.perspective = v; replotAll(0) }} />
+              </span>
+              <input
+                type="range"
+                aria-label="4次元の遠近感"
+                min="0"
+                max="100"
+                step="1"
+                bind:value={space.perspective}
+                oninput={() => replotAll(0)}
+              />
+              <span class="note">w などの奥にある部分ほど小さく描く（媒介変数表示・回した陽関数に効く）</span>
+            </div>
+            <div class="slider">
+              <span>
+                遠近感:
+                <EditableValue value={perspective} label="遠近感" suffix={perspective === 0 ? '%（平行投影）' : '%'} min={0} max={100}
+                  onChange={(v) => { perspective = v; if (!flat) viewer?.setPerspective(v / 100) }} />
+              </span>
+              <input
+                type="range"
+                aria-label="遠近感"
+                min="0"
+                max="100"
+                step="1"
+                bind:value={perspective}
+                oninput={() => !flat && viewer?.setPerspective(perspective / 100)}
+              />
+            </div>
+            <div class="buttons">
+              <button class="secondary" onclick={() => viewer?.resetCamera()}>視点をリセット</button>
+              <button class="secondary" onclick={() => (dark = !dark)}>{dark ? '明るい背景' : '暗い背景'}</button>
+            </div>
+
+          {:else if settingsCat === 'cut'}
+            {#if flat}<p class="note">2D 表示では使えません</p>{/if}
+            <label class="check-row" class:disabled={flat}>
+              <input type="checkbox" checked={cut.enabled} onchange={(e) => setCut({ enabled: e.currentTarget.checked })} />
+              立体を平面で切って、切り口を見る
+            </label>
+            {#if cut.enabled}
+              <div class="cut-axes" role="group" aria-label="切る向き">
+                {#each [0, 1, 2] as const as k (k)}
+                  <button
+                    class="secondary"
+                    class:selected={cut.axis === k}
+                    onclick={() => {
+                      const [lo, hi] = [
+                        [domain.xmin, domain.xmax],
+                        [domain.ymin, domain.ymax],
+                        [domain.zmin, domain.zmax],
+                      ][k]
+                      setCut({ axis: k, pos: Math.min(hi, Math.max(lo, cut.pos)) })
+                    }}>{prettyName(axisNames[k])} = 一定</button
+                  >
+                {/each}
+              </div>
+              <div class="slider">
+                <span>
+                  位置: {prettyName(axisNames[cut.axis])}
+                  <EditableValue
+                    value={cut.pos}
+                    prefix="= "
+                    format={(v) => String(Number(v.toPrecision(4)))}
+                    label="切り口の位置"
+                    onChange={(v) => setCut({ pos: v })}
+                  />
+                </span>
+                <input
+                  type="range"
+                  min={cutRange[0]}
+                  max={cutRange[1]}
+                  step={(cutRange[1] - cutRange[0]) / 200}
+                  value={cut.pos}
+                  aria-label="切り口の位置"
+                  oninput={(e) => setCut({ pos: e.currentTarget.valueAsNumber })}
+                />
+              </div>
+              <div class="buttons">
+                <button class="secondary" onclick={() => setCut({ flip: !cut.flip })}>
+                  {cut.flip ? `${prettyName(axisNames[cut.axis])} ≥ ${Number(cut.pos.toPrecision(4))} を表示中` : `${prettyName(axisNames[cut.axis])} ≤ ${Number(cut.pos.toPrecision(4))} を表示中`}（反対側にする）
+                </button>
+              </div>
+              <p class="note">
+                立体（陰関数・範囲で重ねた立体・媒介変数3つの立体）の切り口はふたをして塗ります。陰関数は、式の両側のうち表示範囲の中で狭いほうを中身とします
+              </p>
+            {/if}
+
+
+          {:else if settingsCat === 'save'}
+            <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
+            <div class="buttons">
+              <button class="secondary" onclick={copyShareLink}>共有リンクをコピー</button>
+              <button class="secondary" onclick={resetAll}>最初の状態に戻す</button>
+            </div>
+            {#if shareMessage}<p class="note">{shareMessage}</p>{/if}
+
+
+          {:else if settingsCat === 'help'}
+            <div class="help">
+              <ul>
+                <li>陽関数: <code>z = x^2 - y^2</code>（<code>z =</code> は省略可）、<code>y = sin(x) z</code> なども可</li>
+                <li>陰関数: <code>x^2 + y^2 + z^2 = 4</code>、<code>sin x + sin y + sin z = 0</code></li>
+                <li>曲線: <code>(cos t, sin t, t/4)</code>（t を使う。範囲は式の下で指定）</li>
+                <li>曲面: <code>(u cos v, u sin v, u)</code>（u と v を使う）</li>
+                <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
+                <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>
+                <li>
+                  関数: sin cos tan sec csc cot arcsin arccos arctan sinh cosh tanh arcsinh arccosh arctanh exp ln log sqrt abs
+                floor ceil round sign Re Im conj arg、2つの引数: mod min max nCr nPr、階乗: <code>n!</code>
+              </li>
+              <li>
+                特殊関数（すべて複素数で使えます。数式キーボードの「特殊」タブに全部あり、◀ ▶ でページをめくれます）
+                <ul>
+                  <li>ガンマ系: gamma(z)（Γ）, gamma(a, z)（上側不完全）, gammaP(a, z), gammaQ(a, z), loggamma, beta(a, b), beta(z, a, b), betaRegularized(z, a, b), digamma（psi, ψ）, polygamma(n, z), pochhammer(a, n), binomial(n, k)</li>
+                  <li>ゼータ系: zeta(s)（ζ）, zeta(s, a)（フルヴィッツ）, polylog(s, z)（Li）, dirichletEta(s)</li>
+                  <li>誤差関数・積分: erf, erfc, erfi, dawson, fresnelS, fresnelC, Ei, En(n, z), li, Si, Ci, Shi, Chi, sinc</li>
+                  <li>ベッセル系: besselJ(ν, z), besselY, besselI, besselK, hankelH1, hankelH2, sphericalJ(n, z), sphericalY, airyAi(z), airyBi, airyAiPrime, airyBiPrime</li>
+                  <li>直交多項式: legendreP(n, x), legendreP(n, m, x), hermiteH(n, x), laguerreL(n, x), laguerreL(n, a, x), chebyshevT(n, x), chebyshevU, gegenbauerC(n, a, x), jacobiP(n, a, b, x), sphericalHarmonicY(l, m, θ, φ)</li>
+                  <li>超幾何関数: hyp0F1(b, z), hyp1F1(a, b, z), hyp2F1(a, b, c, z), hypU(a, b, z)</li>
+                  <li>楕円系（m = k²）: ellipticK(m), ellipticE(m), ellipticE(φ, m), ellipticF(φ, m), ellipticPi(n, m), ellipticPi(n, φ, m), jacobiSN(u, m), jacobiCN, jacobiDN</li>
+                  <li>その他: lambertW(z)（productLog）, lambertW(k, z)（第 k 枝）</li>
+                </ul>
+              </li>
+                <li>複素数の結果が実数でない点は描かれません</li>
+                <li>
+                入力欄は数式の見た目のまま編集できます。<code>/</code> で分数、<code>^</code> でべき乗、<code>pi</code> →
+                π、<code>sqrt</code> → √ に自動で変わります
+              </li>
+              <li>入力欄に入ると数式用のキーボードが出ます（123 / f(x) / 特殊 / abc のタブで切り替え）。キーにカーソルを当てる（スマホでは長押しする）と、そのキーの名前が出ます</li>
+              <li>
+                4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（<code>w2</code> と打つと w₂）。
+                表示する3つの座標を選び、残りはスライダーで固定した断面を描きます
+              </li>
+              <li>
+                範囲で重ねる: 座標を「範囲」にするか、パラメータの「範囲で重ねる」を押すと、その範囲で動かしたときに
+                図形が通る領域（曲面 → 立体、曲線 → 曲面）を描きます
+              </li>
+              <li>
+                回転: 中心の点と、座標の組（xy, xw など）ごとの角度で図形を回せます。▶ で回し続けます。
+                「4次元の遠近感」を上げると、w の奥にある部分ほど小さく描きます
+              </li>
+              <li>
+                リスト: <code>(t, [-1,1], [-1,1], [-1,1])</code> や <code>x^2 + y^2 + z^2 = [1, 4, 9]</code>
+                のように書くと、組み合わせの数だけまとめて描きます
+              </li>
+              <li>立体: <code>((3 + t cos v) cos u, (3 + t cos v) sin u, t sin v)</code>（u, v, t の3つを使う）</li>
+              <li>2D 表示: グラフ右上の「2D」で、真上から見た平面に描きます（z = f(x, y) は値の塗り分け）</li>
+              <li>媒介変数は t（曲線）、u と v（曲面）、または t₁ と t₂。組 (…) の外では t, u, v もパラメータにできます</li>
+              <li>
+                パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
+                「複素数」を押すと、複素平面の上で点を動かして値を決められます
+              </li>
+              <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
+              <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は「グループ」を選ぶと、同じグループの式が一緒に回ります（同期）</li>
+                <li>操作: 左ドラッグで回転、右ドラッグで移動、ホイールで拡大縮小</li>
+              </ul>
+
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+  </div>
   <button
     class="mode-toggle"
     onclick={() => setFlat(!flat)}
@@ -1315,16 +1550,172 @@
   .add:hover {
     background: var(--hover);
   }
-  .settings {
-    padding: 8px 16px 16px;
-    border-top: 1px solid var(--border);
-    margin-top: 8px;
+  /* 設定（グラフの右上の ⚙ から開くカード） */
+  .settings-anchor {
+    position: fixed;
+    top: 12px;
+    right: 68px;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
   }
-  h2 {
-    font-size: 13px;
-    color: var(--muted);
+  .settings-toggle {
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
     font-weight: 600;
-    margin: 8px 0;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
+  }
+  .settings-toggle.on {
+    border-color: #2d70b3;
+    color: #2d70b3;
+  }
+  .settings-card {
+    position: absolute;
+    top: 44px;
+    right: -56px;
+    width: min(380px, calc(100vw - 24px));
+    max-height: calc(100dvh - 68px - var(--inset));
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+    box-shadow: 0 6px 28px rgb(0 0 0 / 0.2);
+    overflow: hidden;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 8px 8px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .card-title {
+    flex: 1;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .back,
+  .close {
+    width: 30px;
+    height: 30px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--muted);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .back {
+    margin-left: -8px;
+  }
+  .back:hover,
+  .close:hover {
+    background: var(--hover);
+  }
+  .card-body {
+    overflow-y: auto;
+    padding: 10px 14px 14px;
+  }
+  .cat-list {
+    display: grid;
+    gap: 4px;
+  }
+  .cat {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+  }
+  .cat:hover {
+    background: var(--hover);
+  }
+  .cat-icon {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 7px;
+    background: var(--hover);
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  .cat-text {
+    display: grid;
+  }
+  .cat-label {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .cat-desc {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .group-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .chip.selected {
+    border-color: #2d70b3;
+    background: var(--hover);
+    font-weight: 600;
+  }
+  .group-head {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .group-name {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .secondary.small {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  .members {
+    display: grid;
+    gap: 2px;
+    margin: 4px 0 10px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .member {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .member-group {
+    font-size: 11px;
+    color: var(--muted);
   }
   .ranges {
     display: grid;
@@ -1420,13 +1811,8 @@
     font-weight: 600;
   }
   .help {
-    padding: 0 16px 16px;
     font-size: 13px;
     color: var(--muted);
-  }
-  .help summary {
-    cursor: pointer;
-    padding: 8px 0;
   }
   .help ul {
     padding-left: 18px;

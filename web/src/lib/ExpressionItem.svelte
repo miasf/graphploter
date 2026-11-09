@@ -5,8 +5,9 @@
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
+  import RotationPanel from './RotationPanel.svelte'
   import { coordName, missingParam, prettyName } from './params'
-  import type { ComplexMode, Domain, GridStyle, PlotItem, SliderStyle } from './types'
+  import { GLOBAL_GROUP, type ComplexMode, type Domain, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -42,6 +43,25 @@
     onDrag: (phase: 'start' | 'move' | 'end', e: PointerEvent) => void
     /** ドラッグして動かしている最中か */
     dragging: boolean
+    /** 回転: 次元と表示中の座標 */
+    dims: number
+    viewAxes: number[]
+    /** 回転のグループの一覧と、この式が入っているグループ（GLOBAL_GROUP なら全体） */
+    groups: RotationGroup[]
+    groupId: number
+    /** グループごとの式の数（選択肢に出す） */
+    groupSizes: Record<number, number>
+    /** この式を描くときの回転角・中心 */
+    rotation: number[]
+    center: number[]
+    /** この式のグループで再生中の回転 */
+    rotPlaying: number[]
+    onRotate: (rotation: number[], center: number[]) => void
+    onPlayRot: (k: number) => void
+    /** グループを変える（'new' ならこの式だけの新しいグループ） */
+    onGroup: (gid: number | 'new') => void
+    /** 設定の「回転」でグループを開く */
+    onOpenRotation: () => void
   }
   let {
     item,
@@ -68,7 +88,20 @@
     onEnter,
     onDrag,
     dragging,
+    dims,
+    viewAxes,
+    groups,
+    groupId,
+    groupSizes,
+    rotation,
+    center,
+    rotPlaying,
+    onRotate,
+    onPlayRot,
+    onGroup,
+    onOpenRotation,
   }: Props = $props()
+
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
   const missing = $derived(missingParam(item.error))
@@ -124,6 +157,22 @@
     y: domain.ymax - domain.ymin,
     z: domain.zmax - domain.zmin,
   })
+
+  /** 設定欄のタブ */
+  type Tab = 'look' | 'grid' | 'rotate'
+  let tab = $state<Tab>('look')
+  const tabs = $derived(
+    [
+      { id: 'look' as const, label: '見た目' },
+      ...(isCurve ? [] : [{ id: 'grid' as const, label: '格子線' }]),
+      { id: 'rotate' as const, label: groupId === GLOBAL_GROUP ? '回転' : '回転 ●' },
+    ],
+  )
+  // 曲線になって格子線のタブが無くなったら、見た目のタブに戻す
+  $effect(() => {
+    if (!tabs.some((t) => t.id === tab)) tab = 'look'
+  })
+  const groupName = $derived(groups.find((g) => g.id === groupId)?.name)
 </script>
 
 <li class="item" class:has-error={!!item.error} class:dragging>
@@ -232,6 +281,13 @@
 
     {#if item.showSettings && !item.param}
       <div class="settings">
+        <div class="tabs" role="tablist" aria-label="設定の項目">
+          {#each tabs as t (t.id)}
+            <button role="tab" class="tab" class:selected={tab === t.id} aria-selected={tab === t.id}
+              onclick={() => (tab = t.id)}>{t.label}</button>
+          {/each}
+        </div>
+        {#if tab === 'look'}
         <label class="row">
           <span class="label">色</span>
           <input
@@ -241,7 +297,7 @@
             oninput={(e) => onColor(e.currentTarget.value)}
           />
         </label>
-        {#if isCurve}
+          {#if isCurve}
           <div class="sliders">
             <span class="label">線の太さ</span>
             <input
@@ -258,7 +314,7 @@
                 chars={5} value={item.lineWidth} label="線の太さ" suffix=" px" min={0.5} max={20} onChange={onLineWidth} />
             </span>
           </div>
-        {:else}
+          {:else}
           <div class="sliders">
             <span class="label">面の濃さ</span>
             <input
@@ -309,6 +365,8 @@
             {/if}
           {/if}
 
+          {/if}
+        {:else if tab === 'grid'}
           <label class="check">
             <input
               type="checkbox"
@@ -393,6 +451,31 @@
             </span>
           </div>
           <p class="hint">スライダーを右にするほど線が細かくなります。左端（間隔・分割数 0）で線なし。面の濃さ 0% で格子線だけになります。</p>
+        {:else if tab === 'rotate'}
+          <div class="group-row">
+            <span class="label">回転</span>
+            <select
+              value={groupId}
+              aria-label="この式の回転"
+              onchange={(e) => {
+                const v = e.currentTarget.value
+                onGroup(v === 'new' ? 'new' : Number(v))
+              }}
+            >
+              <option value={GLOBAL_GROUP}>全体と同じ</option>
+              {#each groups as g (g.id)}
+                <option value={g.id}>{g.name}（{groupSizes[g.id] ?? 0} 個の式）</option>
+              {/each}
+              <option value="new">＋ この式だけの回転にする</option>
+            </select>
+          </div>
+          <p class="hint">
+            {groupId === GLOBAL_GROUP
+              ? '全体の回転で描いています。ここで角度を変えると、全体と同じ式がまとめて回ります。'
+              : `「${groupName}」の回転で描いています。同じグループを選んだ式は一緒に回ります（同期）。`}
+            <button class="link" onclick={onOpenRotation}>まとめて設定</button>
+          </p>
+          <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} />
         {/if}
       </div>
     {/if}
@@ -403,8 +486,8 @@
       <button
       class="icon"
       class:active={item.showSettings}
-      title="見た目の設定"
-      aria-label="見た目の設定"
+      title="式の設定（見た目・格子線・回転）"
+      aria-label="式の設定"
       aria-expanded={item.showSettings}
       onclick={onToggleSettings}>⚙</button
     >
@@ -504,6 +587,50 @@
     font-size: 13px;
     display: grid;
     gap: 8px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    margin: -2px 0 2px;
+  }
+  .tab {
+    padding: 4px 10px 6px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tab.selected {
+    color: var(--text);
+    border-bottom-color: #2d70b3;
+    font-weight: 600;
+  }
+  .group-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .group-row select {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .link {
+    padding: 0;
+    border: none;
+    background: none;
+    color: #2d70b3;
+    font-size: inherit;
+    text-decoration: underline;
+    cursor: pointer;
   }
   .row {
     display: flex;
