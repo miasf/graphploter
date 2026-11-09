@@ -173,6 +173,7 @@ export class Viewer {
     this.camera.up.set(0, 0, 1)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.setupMouse()
+    this.setupWheel()
     this.applyButtons()
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.1 // 指を離した後の慣性の回転を、少し早めに止める
@@ -372,6 +373,50 @@ export class Viewer {
     return ray
   }
 
+  // ---- ホイールの拡大縮小（滑らかに動かす）----
+  //
+  // OrbitControls はホイールの1目盛りごとに一気に拡大縮小するので、ふつうのマウス（1目盛りが大きい）ではカクカクする。
+  // 目盛りの分を「これから動かす量」としてため、毎フレーム少しずつ（指数的に近づけて）動かす
+
+  /** これから動かす拡大縮小の量（距離の対数。正なら遠ざかる） */
+  private wheelPending = 0
+  private wheelLastTime = 0
+
+  private setupWheel() {
+    this.renderer.domElement.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault()
+        e.stopImmediatePropagation() // OrbitControls には渡さない
+        // 行・ページ単位のホイールは画素に直す
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.container.clientHeight || 800 : 1
+        let d = e.deltaY * unit
+        if (e.ctrlKey) d *= 4 // トラックパッドのピンチ（値が小さい）
+        // 1目盛り（約 100 px）で約 1.07 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
+        this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * 0.0007, -3, 3)
+        if (this.wheelLastTime === 0) this.wheelLastTime = performance.now()
+        this.setLowRes(true)
+        this.dirty = true
+      },
+      { capture: true, passive: false },
+    )
+  }
+
+  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.08 秒ほどで大部分を動かす） */
+  private stepWheelZoom() {
+    if (this.wheelPending === 0) {
+      this.wheelLastTime = 0
+      return
+    }
+    const now = performance.now()
+    const dt = Math.min(0.1, (now - this.wheelLastTime) / 1000)
+    this.wheelLastTime = now
+    let step = this.wheelPending * (1 - Math.exp(-dt / 0.08))
+    if (Math.abs(this.wheelPending) < 1e-4) step = this.wheelPending
+    this.wheelPending -= step
+    this.zoomAround(this.controls.target.clone(), Math.exp(step))
+  }
+
   /** 点 pivot に向かって、カメラと注視点を factor 倍の距離にする（1 より小さいと近づいて拡大） */
   private zoomAround(pivot: THREE.Vector3, factor: number) {
     const target = this.controls.target
@@ -484,6 +529,7 @@ export class Viewer {
   private loop = () => {
     if (this.stopped) return
     requestAnimationFrame(this.loop)
+    this.stepWheelZoom()
     // カメラが動いたか（慣性で動き続けている間も true）
     if (this.controls.update()) this.dirty = true
     // 目に見えるほど動いたか。慣性の終わりのごくわずかな動きは「止まった」とみなす
@@ -613,6 +659,7 @@ export class Viewer {
 
   /** カメラを斜め上からの見やすい位置に戻す（2D 表示なら真上から） */
   resetCamera() {
+    this.wheelPending = 0
     this.dirty = true
     const d = this.domain
     if (!d) return
