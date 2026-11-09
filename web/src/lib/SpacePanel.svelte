@@ -1,5 +1,6 @@
 <script lang="ts">
   // 次元の設定: 次元の数、画面の横・奥・縦に表示する座標、表示しない座標の断面の値
+  import MathInput from './MathInput.svelte'
   import { coordName, formatNumber, niceStep, prettyName, resizeSpace } from './params'
   import type { Space } from './types'
 
@@ -31,12 +32,12 @@
     onLayout(resizeSpace(space, n))
   }
 
-  function setRange(k: number, side: 0 | 1, v: number) {
+  /** 範囲の端を式（LaTeX）で決める。0 〜 a のようにパラメータも使える（a のスライダーで範囲が動く） */
+  function setRange(k: number, side: 0 | 1, v: string) {
     const cur = space.ranges[k]
-    if (!cur || !Number.isFinite(v)) return
-    const next: [number, number] = [...cur]
+    if (!cur || cur[side] === v) return
+    const next: [string, string] = [...cur]
     next[side] = v
-    if (!(next[0] < next[1])) return
     const ranges = [...space.ranges]
     ranges[k] = next
     onLayout({ ...space, ranges })
@@ -61,7 +62,7 @@
         axes[old] = free
         ranges[free] = null
       }
-      ranges[k] = role === RANGE ? [-1, 1] : null
+      ranges[k] = role === RANGE ? ['-1', '1'] : null
     }
     onLayout({ ...space, axes, ranges })
   }
@@ -91,11 +92,9 @@
       {#if role === RANGE && space.ranges[k]}
         {@const rg = space.ranges[k]!}
         <div class="range">
-          <input type="number" step="any" value={rg[0]} aria-label="{coordName(k)} の最小値"
-            onchange={(e) => setRange(k, 0, e.currentTarget.valueAsNumber)} />
+          <MathInput small value={rg[0]} label="{coordName(k)} の最小値" onInput={(v) => setRange(k, 0, v)} />
           <span>〜</span>
-          <input type="number" step="any" value={rg[1]} aria-label="{coordName(k)} の最大値"
-            onchange={(e) => setRange(k, 1, e.currentTarget.valueAsNumber)} />
+          <MathInput small value={rg[1]} label="{coordName(k)} の最大値" onInput={(v) => setRange(k, 1, v)} />
         </div>
         <span class="value">で重ねる</span>
       {:else if role === FIXED}
@@ -115,6 +114,7 @@
   {#if space.dims > 3}
     <p class="hint">
       「固定」はスライダーの値での断面、「範囲」はその範囲で動かしたときに図形が通る領域（立体）を描きます。
+      範囲には式やパラメータも書けます（例: 0 〜 a。a のスライダーで範囲を動かせる。両端が同じ値ならその値での断面）。
       媒介変数表示は、軸に選んだ3つの成分を描きます。
     </p>
   {/if}
@@ -181,16 +181,6 @@
     gap: 4px;
     font-size: 12px;
     color: var(--muted);
-  }
-  .range input {
-    width: 100%;
-    min-width: 0;
-    padding: 2px 4px;
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font: 12px var(--mono);
   }
   .value {
     font: 12px var(--mono);

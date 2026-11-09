@@ -72,7 +72,7 @@ export function requestPlot(
       dims: space.dims,
       axes: [...space.axes],
       slice: [...space.slice],
-      ranges: space.ranges.flatMap((r) => (r ? [r[0], r[1]] : [NaN, NaN])),
+      ranges: space.ranges.map((r) => (r ? [r[0], r[1]] : null)),
       samples: space.samples,
       rotation: space.rotation.map((deg) => (deg * Math.PI) / 180),
       center: [...space.center],

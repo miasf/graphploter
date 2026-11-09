@@ -64,8 +64,9 @@ export interface Space {
   /** 断面のスライダーの範囲 */
   sliceMin: number
   sliceMax: number
-  /** 各座標を「範囲で重ねる」なら [最小, 最大]、断面なら null（表示していない座標だけが使われる） */
-  ranges: ([number, number] | null)[]
+  /** 各座標を「範囲で重ねる」なら [最小, 最大]（LaTeX の式。パラメータも使える）、断面なら null
+   *  （表示していない座標だけが使われる） */
+  ranges: ([string, string] | null)[]
   /** 範囲を何等分して重ねるか */
   samples: number
   /** 回転角（度）。座標の組 (0,1), (0,2), …, (0,n−1), (1,2), … の順に nC2 個 */
@@ -190,8 +191,8 @@ export interface PlotRequest {
     dims: number
     axes: number[]
     slice: number[]
-    /** 各座標の範囲 [最小, 最大, …]（重ねない座標は NaN） */
-    ranges: number[]
+    /** 各座標の範囲の式 [最小, 最大]（計算エンジン用の式。重ねない座標は null） */
+    ranges: ([string, string] | null)[]
     samples: number
     /** 回転角（ラジアン） */
     rotation: number[]

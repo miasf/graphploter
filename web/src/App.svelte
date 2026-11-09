@@ -357,11 +357,14 @@
     // 数式入力欄の LaTeX を、計算エンジン用の式に変換する
     let source: string
     let ranges: ParamRanges
+    let spaceRanges: Space['ranges']
     try {
       source = latexToText(item.latex)
       ranges = Object.fromEntries(
         Object.entries(item.ranges).map(([k, [a, b]]) => [k, [latexToText(a), latexToText(b)] as [string, string]]),
       )
+      // 座標の「範囲で重ねる」範囲（0 〜 a など）も同じように変換する
+      spaceRanges = space.ranges.map((r) => (r ? [latexToText(r[0]), latexToText(r[1])] : null))
     } catch (e) {
       viewer.removePlot(item.id)
       item.error = e instanceof Error ? e.message : String(e)
@@ -387,7 +390,7 @@
       coarse ? Math.max(16, Math.round(implicitResolution / 2)) : implicitResolution,
       ranges,
       currentParams(),
-      space,
+      { ...space, ranges: spaceRanges },
       currentStacks(),
       cutRequest(),
       item.complexMode ?? 'off',
