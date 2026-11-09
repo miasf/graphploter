@@ -450,8 +450,8 @@ export class Viewer {
   /** 見る向きを、画面上で (dx, dy) px ドラッグした分だけ変える（カメラの位置は動かさない） */
   private look(dx: number, dy: number) {
     const h = this.container.clientHeight || 1
-    // 画面の高さ分のドラッグで、視野角の半分くらい向きが変わる（大きいと動きすぎて操作しにくい）
-    const k = (THREE.MathUtils.degToRad(this.camera.fov) * 0.5) / h
+    // 画面の高さ分のドラッグで、視野角と同じくらい向きが変わる
+    const k = (THREE.MathUtils.degToRad(this.camera.fov) * 1.0) / h
     const eye = this.camera.position
     const dir = this.controls.target.clone().sub(eye)
     const up = this.camera.up.clone().normalize()
@@ -461,7 +461,8 @@ export class Viewer {
     const right = new THREE.Vector3().crossVectors(dir, up).normalize()
     const pitch = Math.asin(THREE.MathUtils.clamp(dir.clone().normalize().dot(up), -1, 1))
     const limit = THREE.MathUtils.degToRad(85)
-    const next = THREE.MathUtils.clamp(pitch - dy * k, -limit, limit)
+    // マウスを上に動かすと下を向き、下に動かすと上を向く
+    const next = THREE.MathUtils.clamp(pitch + dy * k, -limit, limit)
     dir.applyAxisAngle(right, next - pitch)
     this.controls.target.copy(eye).add(dir)
     this.camera.lookAt(this.controls.target)
