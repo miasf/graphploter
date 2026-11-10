@@ -7,7 +7,7 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { coordName, missingParam, neededDims, prettyName } from './params'
-  import { GLOBAL_GROUP, type ComplexMode, type Domain, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
+  import { GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type Domain, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -50,7 +50,7 @@
     /** 回転: 次元と表示中の座標 */
     dims: number
     viewAxes: number[]
-    /** 回転のグループの一覧と、この式が入っているグループ（GLOBAL_GROUP なら全体） */
+    /** 回転のグループの一覧と、この式の回転の番号（負ならこの式だけ、GLOBAL_GROUP なら全体） */
     groups: RotationGroup[]
     groupId: number
     /** グループごとの式の数（選択肢に出す） */
@@ -205,7 +205,7 @@
     [
       { id: 'look' as const, label: '見た目' },
       ...(isCurve ? [] : [{ id: 'grid' as const, label: '格子線' }]),
-      { id: 'rotate' as const, label: groupId === GLOBAL_GROUP ? '回転' : '回転 ●' },
+      { id: 'rotate' as const, label: groupId > 0 ? '回転 ●' : '回転' },
     ],
   )
   // 曲線になって格子線のタブが無くなったら、見た目のタブに戻す
@@ -566,24 +566,27 @@
           <div class="group-row">
             <span class="label">回転</span>
             <select
-              value={groupId}
+              value={groupId < 0 ? OWN_GROUP : groupId}
               aria-label="この式の回転"
               onchange={(e) => {
                 const v = e.currentTarget.value
                 onGroup(v === 'new' ? 'new' : Number(v))
               }}
             >
+              <option value={OWN_GROUP}>この式だけ</option>
               <option value={GLOBAL_GROUP}>全体と同じ</option>
               {#each groups as g (g.id)}
                 <option value={g.id}>{g.name}（{groupSizes[g.id] ?? 0} 個の式）</option>
               {/each}
-              <option value="new">＋ この式だけの回転にする</option>
+              <option value="new">＋ 新しいグループを作る</option>
             </select>
           </div>
           <p class="hint">
-            {groupId === GLOBAL_GROUP
-              ? '全体の回転で描いています。ここで角度を変えると、全体と同じ式がまとめて回ります。'
-              : `「${groupName}」の回転で描いています。同じグループを選んだ式は一緒に回ります（同期）。`}
+            {groupId < 0
+              ? 'この式だけの回転です。ほかの式と一緒に回したいときは「全体と同じ」かグループを選びます。'
+              : groupId === GLOBAL_GROUP
+                ? '全体の回転で描いています。ここで角度を変えると、全体と同じ式がまとめて回ります。'
+                : `「${groupName}」の回転で描いています。同じグループを選んだ式は一緒に回ります（同期）。`}
             <button class="link" onclick={onOpenRotation}>まとめて設定</button>
           </p>
           <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} onStop={onStopRot} />

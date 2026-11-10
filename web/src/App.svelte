@@ -27,7 +27,7 @@
     SliderStyle,
     Space,
   } from './lib/types'
-  import { GLOBAL_GROUP } from './lib/types'
+  import { GLOBAL_GROUP, OWN_GROUP } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -132,6 +132,8 @@
         vertical: it.vertical,
         slider: it.slider,
         rotGroup: it.rotGroup,
+        rotation: it.rotGroup === undefined ? it.rotation : undefined,
+        center: it.rotGroup === undefined ? it.center : undefined,
         folder: it.folder,
       })),
       groups,
@@ -146,12 +148,14 @@
       flat,
       flatSlice,
       controlMode,
+      rotOwn: true,
     })
   }
 
   function restore(s: SavedState) {
     nextId = 1
-    items = s.items.map((si) => newItem(si.latex, { ...si }))
+    // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
+    items = s.items.map((si) => newItem(si.latex, { ...si, rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }))
     domain = s.domain
     resolution = s.resolution
     implicitResolution = s.implicitResolution
@@ -302,9 +306,9 @@
     settingsCat = null
   }
 
-  /** 式の ⚙ の「回転」から、そのグループの回転の設定を開く */
+  /** 式の ⚙ の「回転」から、そのグループの回転の設定を開く（この式だけの回転なら全体のタブ） */
   function openRotation(gid: number) {
-    rotTab = gid
+    rotTab = gid < 0 ? GLOBAL_GROUP : gid
     settingsCat = 'rotate'
     settingsOpen = true
   }
@@ -740,6 +744,7 @@
 
   function removeItem(item: PlotItem) {
     viewer?.removePlot(item.id)
+    delete playing[-item.id]
     items.splice(items.indexOf(item), 1)
     if (item.param) paramsChanged([item.param.name])
   }
@@ -848,31 +853,55 @@
   function setLayout(next: Space) {
     // 次元が変わったら、グループの回転も同じ座標の組の角度を引き継いで作り直す
     if (next.dims !== space.dims) {
-      groups = groups.map((g) => ({ ...g, ...resizeRotation(g.rotation, g.center, space.dims, next.dims) }))
+      resizeRotations(space.dims, next.dims)
     }
     space = next
     updateSpaceRangeErrors()
     replotAll(0)
   }
 
-  // ---- 回転のグループ（式ごとの回転・複数の式の同期）----
+  // ---- 回転（式ごとの回転・複数の式の同期）----
   //
-  // グループに入っていない式は全体の回転（space.rotation, space.center）で描く。
-  // 同じグループの式は、そのグループの回転で描く（角度を変えると、まとめて回る）
+  // 標準では、式ごとに自分だけの回転（item.rotation, item.center）で描く。
+  // 「全体と同じ」にした式は全体の回転（space.rotation, space.center）で描く。
+  // 同じグループの式は、そのグループの回転で描く（角度を変えると、まとめて回る）。
+  // 回転の番号（gid）: 0 は全体、正の数はグループ、負の数 −id は式 id だけの回転
 
   let groups = $state<RotationGroup[]>([])
   let nextGroupId = 1
 
-  /** 式が使うグループの番号（グループが無くなっていれば全体） */
+  /** 式が使う回転の番号（この式だけなら −id。入っていたグループが無くなっていれば全体） */
   function groupIdOf(item: PlotItem): number {
     const g = item.rotGroup
+    if (g === undefined) return -item.id
     return g && groups.some((x) => x.id === g) ? g : GLOBAL_GROUP
   }
 
-  /** グループ gid の回転角と中心 */
+  /** 回転角が全部 0、中心が原点 */
+  function zeroRotation(dims = space.dims) {
+    return { rotation: pairs(rotDims(dims)).map(() => 0), center: Array(rotDims(dims)).fill(0) }
+  }
+
+  /** 回転 gid の回転角と中心 */
   function rotationIn(gid: number): { rotation: number[]; center: number[] } {
+    if (gid < 0) {
+      const it = items.find((x) => x.id === -gid)
+      const zero = zeroRotation()
+      return { rotation: it?.rotation ?? zero.rotation, center: it?.center ?? zero.center }
+    }
     const g = groups.find((x) => x.id === gid)
     return g ? { rotation: g.rotation, center: g.center } : { rotation: space.rotation, center: space.center }
+  }
+
+  /** 次元が変わったとき、グループと式ごとの回転を、同じ座標の組の角度を引き継いで作り直す */
+  function resizeRotations(from: number, to: number) {
+    groups = groups.map((g) => ({ ...g, ...resizeRotation(g.rotation, g.center, from, to) }))
+    for (const it of items) {
+      if (!it.rotation) continue
+      const r = resizeRotation(it.rotation, it.center ?? [], from, to)
+      it.rotation = r.rotation
+      it.center = r.center
+    }
   }
 
   /** 式を描くときの回転角と中心 */
@@ -880,8 +909,16 @@
     return rotationIn(groupIdOf(item))
   }
 
-  /** グループ gid の回転を変える。そのグループの式だけを計算し直す */
+  /** 回転 gid を変える。その回転で描く式だけを計算し直す */
   function setRotation(gid: number, rotation: number[], center: number[]) {
+    if (gid < 0) {
+      const it = items.find((x) => x.id === -gid)
+      if (!it) return
+      it.rotation = rotation
+      it.center = center
+      if (!it.param) schedule(it, 0)
+      return
+    }
     const g = groups.find((x) => x.id === gid)
     if (g) {
       g.rotation = rotation
@@ -904,12 +941,24 @@
     return g.id
   }
 
-  /** 式をグループ gid に入れる（'new' なら、この式だけの新しいグループを作る） */
+  /**
+   * 式をグループ gid に入れる（'new' なら新しいグループを作って入れる、OWN_GROUP ならこの式だけの回転にする）。
+   * 新しいグループ・この式だけの回転は、今の回転を引き継ぐ
+   */
   function setItemGroup(item: PlotItem, gid: number | 'new') {
     const from = groupIdOf(item)
-    const to = gid === 'new' ? createGroup(from) : gid
-    if (to === from) return
-    item.rotGroup = to === GLOBAL_GROUP ? undefined : to
+    if (gid === OWN_GROUP) {
+      if (from < 0) return
+      const { rotation, center } = rotationIn(from)
+      item.rotation = [...rotation]
+      item.center = [...center]
+      item.rotGroup = undefined
+    } else {
+      const to = gid === 'new' ? createGroup(from) : gid
+      if (to === from) return
+      item.rotGroup = to
+    }
+    if (from < 0) delete playing[from] // この式だけの回転の再生は、ほかの回転に移ったら止める
     schedule(item, 0)
   }
 
@@ -918,13 +967,10 @@
     if (g && name.trim()) g.name = name.trim()
   }
 
-  /** グループを解散する（入っていた式は全体の回転に戻る） */
+  /** グループを解散する（入っていた式は、グループの今の回転を引き継いで、その式だけの回転になる） */
   function removeGroup(gid: number) {
     for (const it of items) {
-      if (it.rotGroup === gid) {
-        it.rotGroup = undefined
-        schedule(it, 0)
-      }
+      if (it.rotGroup === gid) setItemGroup(it, OWN_GROUP)
     }
     groups = groups.filter((g) => g.id !== gid)
     delete playing[gid]
@@ -1099,7 +1145,8 @@
     // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
     const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4).id : undefined
     for (const si of adding) {
-      items.push(newItem(si.latex, { ...si.options, folder }))
+      // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
+      items.push(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}) }))
       if (!view) schedule(items[items.length - 1], 0)
     }
     if (view) applyView(view)
@@ -1123,7 +1170,7 @@
     const dims = view.dims
     // グループの回転も、次元に合わせて作り直す
     if (dims !== space.dims) {
-      groups = groups.map((g) => ({ ...g, ...resizeRotation(g.rotation, g.center, space.dims, dims) }))
+      resizeRotations(space.dims, dims)
     }
     const rotation = pairs(rotDims(dims)).map((_, k) => view.rotation?.[k] ?? 0)
     space = {
@@ -1428,26 +1475,24 @@
             {/if}
             <p class="note">
               {rotTab === GLOBAL_GROUP
-                ? 'グループに入っていない式は、この回転で描きます。'
+                ? '式は標準では、その式だけの回転で描きます（式の ⚙ →「回転」）。チェックした式は、この全体の回転で一緒に動きます。'
                 : '同じグループの式は同じ回転で動きます（同期）。チェックした式がこのグループに入ります。'}
             </p>
-            {#if tabGroup || groups.length > 0}
-              <div class="members">
-                {#each plotItems as it (it.id)}
-                  {@const k = items.indexOf(it)}
-                  <label class="member">
-                    <input type="checkbox" checked={groupIdOf(it) === rotTab}
-                      disabled={rotTab === GLOBAL_GROUP && groupIdOf(it) === GLOBAL_GROUP}
-                      onchange={(e) => setItemGroup(it, e.currentTarget.checked ? rotTab : GLOBAL_GROUP)} />
-                    <span class="dot" style:background={it.color}></span>
-                    <span class="member-name">式 {k + 1}</span>
-                    {#if groupIdOf(it) !== rotTab}
-                      <span class="member-group">（{groupIdOf(it) === GLOBAL_GROUP ? '全体' : groups.find((g) => g.id === groupIdOf(it))?.name}）</span>
-                    {/if}
-                  </label>
-                {/each}
-              </div>
-            {/if}
+            <div class="members">
+              {#each plotItems as it (it.id)}
+                {@const k = items.indexOf(it)}
+                {@const gid = groupIdOf(it)}
+                <label class="member">
+                  <input type="checkbox" checked={gid === rotTab}
+                    onchange={(e) => setItemGroup(it, e.currentTarget.checked ? rotTab : OWN_GROUP)} />
+                  <span class="dot" style:background={it.color}></span>
+                  <span class="member-name">式 {k + 1}</span>
+                  {#if gid !== rotTab}
+                    <span class="member-group">（{gid < 0 ? 'この式だけ' : gid === GLOBAL_GROUP ? '全体' : groups.find((g) => g.id === gid)?.name}）</span>
+                  {/if}
+                </label>
+              {/each}
+            </div>
             {@const rot = rotationIn(rotTab)}
             <RotationPanel
               dims={space.dims}
@@ -1729,7 +1774,7 @@
                 「複素数」を押すと、複素平面の上で点を動かして値を決められます
               </li>
               <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
-              <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は「グループ」を選ぶと、同じグループの式が一緒に回ります（同期）</li>
+              <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は標準では式ごとに別々で、「全体と同じ」やグループを選ぶと、同じものを選んだ式が一緒に回ります（同期）</li>
                 <li>マウスの操作は「⚙ 設定」→「マウス操作」で、操作 A（標準: 左ドラッグで回転、右ドラッグで移動）と操作 B（Google Earth 風）を切り替えられます。右上の「⟲ 視点」で最初の視点に戻ります</li>
               </ul>
 
