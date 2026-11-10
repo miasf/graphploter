@@ -18,8 +18,10 @@
     /** 再生中（角度を自動で動かしている）回転の番号 */
     playing: number[]
     onPlay: (k: number) => void
+    /** 再生を止める（リセットしたとき） */
+    onStop: (ks: number[]) => void
   }
-  let { dims, axes, rotation, center, onRotate, playing, onPlay }: Props = $props()
+  let { dims, axes, rotation, center, onRotate, playing, onPlay, onStop }: Props = $props()
 
   /** 最初から見せる回転の数。これより多い分は折りたたむ */
   const SHOW = 6
@@ -52,7 +54,14 @@
     onRotate(rotation, next)
   }
 
+  /** 1つの回転を 0° に戻す（再生中なら止める） */
+  function resetAngle(k: number) {
+    if (playing.includes(k)) onStop([k])
+    setAngle(k, 0)
+  }
+
   function reset() {
+    if (playing.length > 0) onStop([...playing]) // リセットしたら再生も止める
     onRotate(
       rotation.map(() => 0),
       center.map(() => 0),
@@ -87,6 +96,13 @@
     onclick={() => onPlay(p.k)}
     aria-label="{coordName(p.i)}{coordName(p.j)} の回転を{playing.includes(p.k) ? '止める' : '再生する'}"
     title={playing.includes(p.k) ? '止める' : '回し続ける'}>{playing.includes(p.k) ? '❚❚' : '▶'}</button
+  >
+  <button
+    class="play"
+    disabled={rotation[p.k] === 0 && !playing.includes(p.k)}
+    onclick={() => resetAngle(p.k)}
+    aria-label="{coordName(p.i)}{coordName(p.j)} の回転を 0° に戻す"
+    title="0° に戻す（再生も止める）">⟲</button
   >
 {/snippet}
 
@@ -170,7 +186,7 @@
   }
   .planes {
     display: grid;
-    grid-template-columns: 2.6em 1fr auto 1.8em;
+    grid-template-columns: 2.6em 1fr auto 1.8em 1.8em;
     align-items: center;
     gap: 4px 8px;
   }
@@ -193,6 +209,10 @@
     color: var(--muted);
     font-size: 10px;
     cursor: pointer;
+  }
+  .play:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
   .play.on {
     background: #2d70b3;

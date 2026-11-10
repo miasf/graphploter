@@ -330,7 +330,7 @@
   // （陰関数は 1/8 の計算量）。指を離したら、粗く計算した式だけを細かく計算し直す。
   let pointerOnControl = false
   const coarseItems = new Set<number>()
-  const isCoarse = () => pointerOnControl || anyRotPlaying() || playingParams.length > 0
+  const isCoarse = () => pointerOnControl || anyRotPlaying() || playingParams.length > 0 || playingSlices.length > 0
 
   function refine() {
     viewer?.setBusy(isCoarse())
@@ -958,6 +958,39 @@
     animationChanged()
   }
 
+  /** 回転の再生を止める（リセットしたとき） */
+  function stopPlay(gid: number, ks: number[]) {
+    playing[gid] = (playing[gid] ?? []).filter((j) => !ks.includes(j))
+    animationChanged()
+  }
+
+  /** そのグループの回転で描いている、表示中のグラフがあるか（無ければ回転の再生は意味が無いので止める） */
+  function groupHasVisible(gid: number): boolean {
+    return items.some((it) => !it.param && it.visible && it.latex.trim() !== '' && groupIdOf(it) === gid)
+  }
+
+  // ---- 次元の断面の値の再生（w, w₂ などのスライダーを自動で動かす）----
+
+  /** 断面の値を自動で動かしている座標の番号 */
+  let playingSlices = $state<number[]>([])
+  /** 再生中の断面の値（刻みにそろえる前の値） */
+  const slicePos = new Map<number, number>()
+
+  function togglePlaySlice(k: number) {
+    slicePos.delete(k)
+    playingSlices = playingSlices.includes(k) ? playingSlices.filter((j) => j !== k) : [...playingSlices, k]
+    animationChanged()
+  }
+
+  function stopSlice(k: number) {
+    if (!playingSlices.includes(k)) return
+    playingSlices = playingSlices.filter((j) => j !== k)
+    animationChanged()
+  }
+
+  /** 座標 k が今も「固定」（断面）か。軸や範囲にしたり、次元を減らしたりしたら再生をやめる */
+  const isFixedCoord = (k: number) => k < space.dims && !space.axes.includes(k) && !space.ranges[k]
+
   // ---- パラメータの再生（スライダーの値を自動で動かす）----
 
   /** 再生中のパラメータの行（式の id） */
@@ -978,7 +1011,7 @@
 
   let animating = false
   function animationChanged() {
-    const any = anyRotPlaying() || playingParams.length > 0
+    const any = anyRotPlaying() || playingParams.length > 0 || playingSlices.length > 0
     if (any && !animating) {
       animating = true
       viewer?.setBusy(true)
@@ -990,8 +1023,14 @@
   }
 
   function playFrame(now: number) {
-    if (!anyRotPlaying() && playingParams.length === 0) {
+    // グラフを消した・非表示にした回転のグループは、再生を止める
+    for (const [key, ks] of Object.entries(playing)) {
+      if (ks.length > 0 && !groupHasVisible(Number(key))) playing[Number(key)] = []
+    }
+    playingSlices = playingSlices.filter(isFixedCoord)
+    if (!anyRotPlaying() && playingParams.length === 0 && playingSlices.length === 0) {
       animating = false
+      refine() // 止まったら、細かく計算し直す
       return
     }
     const dt = Math.min(0.1, (now - lastFrame) / 1000)
@@ -1007,6 +1046,15 @@
         rotation[k] = Math.round((((a + 180) % 360) - 180) * 10) / 10
       }
       setRotation(gid, rotation, cur.center)
+    }
+    // 断面の値: 最小値から最大値まで 4 秒で動かし、最大値に来たら最小値に戻る
+    for (const k of playingSlices) {
+      const { sliceMin: min, sliceMax: max } = space
+      if (!(min < max)) continue
+      let v = (slicePos.get(k) ?? space.slice[k]) + ((max - min) / PARAM_PLAY_SECONDS) * dt
+      if (v > max || v < min) v = min
+      slicePos.set(k, v)
+      setSlice(k, Number(v.toPrecision(6)))
     }
     for (const id of playingParams) {
       const it = items.find((x) => x.id === id)
@@ -1270,6 +1318,7 @@
             rotPlaying={playing[groupIdOf(item)] ?? []}
             onRotate={(r, c) => setRotation(groupIdOf(item), r, c)}
             onPlayRot={(k) => togglePlay(groupIdOf(item), k)}
+            onStopRot={(ks) => stopPlay(groupIdOf(item), ks)}
             onGroup={(g) => setItemGroup(item, g)}
             onOpenRotation={() => openRotation(groupIdOf(item))}
             {folders}
@@ -1351,6 +1400,12 @@
               onLayout={setLayout}
               onSlice={setSlice}
               onAddSlider={addSliderTop}
+              playing={playingSlices}
+              onPlaySlice={togglePlaySlice}
+              onResetSlice={(k) => {
+                stopSlice(k)
+                setSlice(k, 0)
+              }}
             />
 
           {:else if settingsCat === 'rotate'}
@@ -1402,6 +1457,7 @@
               onRotate={(r, c) => setRotation(rotTab, r, c)}
               playing={playing[rotTab] ?? []}
               onPlay={(k) => togglePlay(rotTab, k)}
+              onStop={(ks) => stopPlay(rotTab, ks)}
             />
           {:else if settingsCat === 'range'}
             <div class="ranges">
