@@ -58,7 +58,7 @@ const shapes = new Map<number, { key: string; shape: Shape }>()
  */
 function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[]): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.walls, req.layers]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -190,6 +190,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.walls,
         req.flat,
         req.layers,
+        req.flatSlice,
       )
       if (coordError && !r.param_name) {
         r.free()
@@ -215,6 +216,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       positions: r.positions,
       normals: r.normals,
       indices: r.indices,
+      lodIndices: r.lod_indices,
       gridCoords: r.grid_coords,
       complexValues: r.complex_values,
       curve: r.curve,
@@ -246,6 +248,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         res.mesh.positions.buffer,
         res.mesh.normals.buffer,
         res.mesh.indices.buffer,
+        res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
         ...capTransfer(res.cap),

@@ -7,7 +7,7 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { coordName, missingParam, neededDims, prettyName } from './params'
-  import { GLOBAL_GROUP, type ComplexMode, type Domain, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
+  import { GLOBAL_GROUP, type ComplexMode, type Domain, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -66,6 +66,9 @@
     onGroup: (gid: number | 'new') => void
     /** 設定の「回転」でグループを開く */
     onOpenRotation: () => void
+    /** フォルダの一覧と、この式をフォルダに入れる・出す（0 なら外へ、'new' なら新しいフォルダへ） */
+    folders: Folder[]
+    onFolder: (fid: number | 'new') => void
   }
   let {
     item,
@@ -106,7 +109,12 @@
     onPlayRot,
     onGroup,
     onOpenRotation,
+    folders,
+    onFolder,
   }: Props = $props()
+
+  /** フォルダを選ぶ欄を開いているか */
+  let choosingFolder = $state(false)
 
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
@@ -209,7 +217,7 @@
   }
 </script>
 
-<li class="item" class:has-error={!!item.error} class:dragging>
+<li class="item" class:has-error={!!item.error} class:dragging class:in-folder={!!item.folder} data-item-id={item.id}>
   <div class="gutter">
     <!-- 並べ替えのつまみ（上下にドラッグして式の順番を変える） -->
     <span
@@ -329,6 +337,26 @@
       <p class="info">{item.info}</p>
     {/if}
 
+    {#if choosingFolder}
+      <div class="folder-row">
+        <span class="label">フォルダ</span>
+        <select
+          value={item.folder ?? 0}
+          aria-label="この式を入れるフォルダ"
+          onchange={(e) => {
+            const v = e.currentTarget.value
+            onFolder(v === 'new' ? 'new' : Number(v))
+            choosingFolder = false
+          }}
+        >
+          <option value={0}>なし（フォルダの外）</option>
+          {#each folders as f (f.id)}
+            <option value={f.id}>{f.name}</option>
+          {/each}
+          <option value="new">＋ 新しいフォルダ</option>
+        </select>
+      </div>
+    {/if}
     {#if item.showSettings && !item.param}
       <div class="settings">
         <div class="tabs" role="tablist" aria-label="設定の項目">
@@ -565,6 +593,14 @@
       onclick={onToggleSettings}>⚙</button
     >
     {/if}
+    <button
+      class="icon folder-icon"
+      class:active={choosingFolder}
+      title="フォルダに入れる・出す"
+      aria-label="フォルダに入れる・出す"
+      aria-expanded={choosingFolder}
+      onclick={() => (choosingFolder = !choosingFolder)}>▤</button
+    >
     <button class="icon" title="削除" aria-label="削除" onclick={onRemove}>×</button>
   </div>
 </li>
@@ -765,6 +801,26 @@
     font-size: 12px;
     text-decoration: underline;
     cursor: pointer;
+  }
+  /* フォルダの中の式は、左に帯を付けて少し下げる */
+  .item.in-folder {
+    margin-left: 10px;
+    border-left: 1px solid var(--border);
+  }
+  .folder-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .folder-row select {
+    flex: 1;
+    min-width: 0;
+  }
+  .folder-icon {
+    font-size: 13px;
   }
   .part-actions {
     display: flex;

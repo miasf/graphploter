@@ -441,6 +441,11 @@ impl Program {
         &self.vars
     }
 
+    /// k 番目の変数を使っているか（定数に畳み込まれて消えた変数は使っていない）
+    pub fn uses_var_index(&self, k: usize) -> bool {
+        self.code.ops.iter().any(|op| matches!(op, Op::Var(j) if *j == k))
+    }
+
     /// この式で使われたパラメータの名前
     pub fn used_params(&self) -> &[String] {
         &self.used_params

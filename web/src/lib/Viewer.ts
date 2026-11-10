@@ -94,6 +94,8 @@ type PlotObject =
   | {
       kind: 'surface'
       group: THREE.Group // 曲面（と切り口のふた）
+      /** 曲面の形（そのままの細かさ）。粗い版があれば geo.userData.lod に入っている（頂点のデータは共有） */
+      geo: THREE.BufferGeometry
       grid: GridUniforms
       /** 媒介変数表示なら u, v（立体なら3つ目も）の範囲の長さ（格子線を媒介変数に沿って引く） */
       uvSpan: ParamSpan | null
@@ -106,6 +108,24 @@ type PlotObject =
       order: number
     }
   | { kind: 'curve'; line: LineSegments2 }
+
+/** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
+const WHEEL_PER_PIXEL = 0.0022
+/** ホイールの拡大縮小をならす時間（秒） */
+const WHEEL_SMOOTH_S = 0.1
+
+/** 動かしている間の画素密度の倍率（遅いときに、左から順に下げていく） */
+const MOTION_SCALES = [1, 0.75, 0.55, 0.4, 0.3]
+/** 1コマがこれより長ければ「遅い」（およそ 36 コマ/秒を下回る） */
+const SLOW_FRAME_MS = 28
+/** 1コマがこれより短ければ「速い」（およそ 50 コマ/秒を上回る） */
+const FAST_FRAME_MS = 20
+
+/** 曲面の形を捨てる（粗い版があれば、それも） */
+function disposeGeometry(geo: THREE.BufferGeometry) {
+  ;(geo.userData.lod as THREE.BufferGeometry | undefined)?.dispose()
+  geo.dispose()
+}
 
 export class Viewer {
   private renderer: THREE.WebGLRenderer
@@ -148,6 +168,16 @@ export class Viewer {
   private busy = false
   /** 動かしている最中は画素密度を下げて描く */
   private lowRes = false
+  /**
+   * 動かしている最中の画素密度を、さらに何倍にするか（MOTION_SCALES の番号）。
+   * 1コマにかかる時間を測って、遅ければ下げ、余裕があれば戻す（どんなに重いグラフでも、視点はなめらかに動かせる）
+   */
+  private motionLevel = 0
+  /** 前の回（requestAnimationFrame）の時刻 */
+  private lastTickAt = 0
+  private fastFrames = 0
+  /** 画素密度を戻してみたら遅くなったので、今回の操作の間はもう戻さない */
+  private raiseFailed = false
   /** カメラが（ほぼ）止まってから何フレームたったか */
   private stillFrames = 0
   /** 前のフレームのカメラの位置と向き（止まったかどうかの判定に使う） */
@@ -211,7 +241,8 @@ export class Viewer {
   private applyButtons() {
     const a = this.controlMode === 'A'
     this.controls.mouseButtons = {
-      LEFT: this.flat ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
+      // B の左ドラッグは、A の Shift + 左ドラッグと同じ平行移動（OrbitControls に任せる）
+      LEFT: this.flat || !a ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
       MIDDLE: a ? THREE.MOUSE.DOLLY : THREE.MOUSE.PAN,
       RIGHT: a ? THREE.MOUSE.PAN : THREE.MOUSE.DOLLY, // B の右ドラッグは setupMouse で受け取る
     }
@@ -221,7 +252,7 @@ export class Viewer {
 
   /**
    * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る。
-   * - 左ドラッグ: 平行移動（つかんだ点がカーソルについてくる）
+   * - 左ドラッグ: 平行移動（A の Shift + 左ドラッグと同じ。OrbitControls に任せる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
    * - 左ボタンを2回押して、2回目を押したままドラッグ・Shift + 左ドラッグ: 押した位置を中心に回転する
@@ -233,7 +264,7 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'grab' | 'orbit'
+      mode: 'look' | 'right' | 'orbit'
       pivot: THREE.Vector3
       plane: THREE.Plane | null
     }
@@ -254,14 +285,13 @@ export class Viewer {
         if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
-        // 左ドラッグ: どの距離でも平行移動（つかんだ点がカーソルについてくる）
-        else if (e.button === 0 && !this.flat) mode = 'grab'
+        // 左ドラッグ: A の Shift + 左ドラッグと同じ平行移動なので、OrbitControls に任せる
         else return
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
         el.setPointerCapture(e.pointerId)
         const pivot = mode === 'look' ? new THREE.Vector3() : (this.pick(e.clientX, e.clientY) ?? this.controls.target.clone())
-        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: mode === 'grab' ? this.grabPlane(pivot) : null }
+        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: null }
         this.interacting = true
         this.setLowRes(true)
       },
@@ -274,10 +304,6 @@ export class Viewer {
       last = { ...last, x: e.clientX, y: e.clientY }
       if (last.mode === 'look') {
         this.look(dx, dy)
-        return
-      }
-      if (last.mode === 'grab') {
-        this.grab(last.pivot, last.plane!, e.clientX, e.clientY)
         return
       }
       if (last.mode === 'orbit') {
@@ -390,8 +416,8 @@ export class Viewer {
         const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.container.clientHeight || 800 : 1
         let d = e.deltaY * unit
         if (e.ctrlKey) d *= 4 // トラックパッドのピンチ（値が小さい）
-        // 1目盛り（約 100 px）で約 1.07 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
-        this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * 0.0007, -3, 3)
+        // 1目盛り（約 100 px）で約 1.25 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
+        this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * WHEEL_PER_PIXEL, -3, 3)
         if (this.wheelLastTime === 0) this.wheelLastTime = performance.now()
         this.wheelHoldUntil = performance.now() + 350
         this.setLowRes(true)
@@ -401,18 +427,18 @@ export class Viewer {
     )
   }
 
-  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.5 秒ほどで大部分を動かす） */
+  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.3 秒ほどで大部分を動かす） */
   private stepWheelZoom() {
     if (this.wheelPending === 0) {
       this.wheelLastTime = 0
       return
     }
     const now = performance.now()
-    const dt = Math.min(0.1, (now - this.wheelLastTime) / 1000)
+    // 描くのが遅いコマでも、時間に見合った量だけ進める（上限が小さいと、重いグラフほど拡大縮小が遅くなる）
+    const dt = Math.min(0.25, (now - this.wheelLastTime) / 1000)
     this.wheelLastTime = now
-    // ならす時間 0.22 秒。短いと、目盛りごとに「急に動いて止まる」をくり返して波打って見える
-    // （目盛りの間隔 0.08 秒なら、速さの揺れが 0.1 秒では約 2.2 倍、0.22 秒では約 1.4 倍）
-    let step = this.wheelPending * (1 - Math.exp(-dt / 0.22))
+    // ならす時間 0.1 秒。長いと遅れて感じ、短すぎると目盛りごとに「急に動いて止まる」をくり返して波打って見える
+    let step = this.wheelPending * (1 - Math.exp(-dt / WHEEL_SMOOTH_S))
     // 残りがごくわずかになったら、最後まで動かして終える（いつまでも微小に動き続けないように）
     if (Math.abs(this.wheelPending) < 2e-3) step = this.wheelPending
     this.wheelPending -= step
@@ -490,9 +516,75 @@ export class Viewer {
   private setLowRes(on: boolean) {
     if (this.lowRes === on) return
     this.lowRes = on
-    this.renderer.setPixelRatio(on ? Math.min(this.basePixelRatio, 1) : this.basePixelRatio)
+    this.applyPixelRatio()
+  }
+
+  /**
+   * 視点（カメラ）が動いているかどうかが変わったとき。動いている間だけ、三角形の多い曲面は粗い版を描き、
+   * 画素密度も1コマの時間に合わせて下げる。スライダーや回転の再生でグラフの形が変わっているだけのときは、
+   * そうしない（遅いのは計算で、描くのを軽くしても速くならないため）
+   */
+  private setCamMoving(on: boolean) {
+    if (this.camMoving === on) return
+    this.camMoving = on
+    this.fastFrames = this.frameCount = 0
+    this.raiseFailed = this.raised = false
+    this.applyPixelRatio()
+    for (const p of this.plots.values()) this.applyLod(p)
+  }
+  private camMoving = false
+
+  private applyPixelRatio() {
+    const low = Math.min(this.basePixelRatio, 1) * (this.camMoving ? MOTION_SCALES[this.motionLevel] : 1)
+    this.renderer.setPixelRatio(this.lowRes ? low : this.basePixelRatio)
     this.dirty = true
   }
+
+  /** 曲面の形を、動かしている間は粗い版、止まっている間はそのままの版にする */
+  private applyLod(p: PlotObject) {
+    if (p.kind !== 'surface') return
+    const lod = p.geo.userData.lod as THREE.BufferGeometry | undefined
+    const geo = this.camMoving && lod ? lod : p.geo
+    const main = p.group.children[0] as THREE.Mesh
+    if (main.geometry !== geo) main.geometry = geo
+  }
+
+  /**
+   * 動かしている間の1コマの時間 dt（ミリ秒）から、画素密度を上げ下げする。
+   * 遅いコマが続けば1段下げる。速いコマが長く続けば1段戻してみる（それで遅くなったら、この操作の間はもう戻さない）
+   */
+  private adaptMotionScale(dt: number) {
+    if (!this.camMoving || !this.lowRes || dt > 2500) return // 視点が止まっている・タブが隠れていた などは数えない
+    // 1コマの時間は、数コマ分をならして見る（GPU が遅いとき、速いコマが数回続いた後でまとめて待たされることがあるため）
+    this.frameAvg = this.frameCount === 0 ? dt : this.frameAvg * 0.8 + dt * 0.2
+    if (++this.frameCount < 4) return // 画素密度を変えた直後は、ならした値が落ち着くまで待つ
+    if (this.frameAvg > SLOW_FRAME_MS) {
+      this.fastFrames = 0
+      if (this.motionLevel < MOTION_SCALES.length - 1) {
+        // 戻した直後に遅くなったなら、戻したのが原因
+        if (this.raised) this.raiseFailed = true
+        this.raised = false
+        // とても遅いときは、2段まとめて下げる
+        this.motionLevel = Math.min(this.motionLevel + (this.frameAvg > 3 * SLOW_FRAME_MS ? 2 : 1), MOTION_SCALES.length - 1)
+        this.frameCount = 0
+        this.applyPixelRatio()
+      }
+    } else if (this.frameAvg < FAST_FRAME_MS && ++this.fastFrames >= 45) {
+      this.fastFrames = 0
+      this.raised = false // 戻した後も速いままなら、戻して正解
+      if (this.motionLevel > 0 && !this.raiseFailed) {
+        this.raised = true
+        this.motionLevel--
+        this.frameCount = 0
+        this.applyPixelRatio()
+      }
+    }
+  }
+  /** ならした1コマの時間（ミリ秒）と、それに数えたコマの数 */
+  private frameAvg = 0
+  private frameCount = 0
+  /** 直前に画素密度を1段戻したところか */
+  private raised = false
 
   private resize() {
     const w = this.container.clientWidth
@@ -532,6 +624,11 @@ export class Viewer {
   private loop = () => {
     if (this.stopped) return
     requestAnimationFrame(this.loop)
+    // 前の回に描いたなら、そこから今回までの時間が、その1コマにかかった時間
+    // （描くのが遅いと、次の回が呼ばれるのが遅れる。今回は描かないとしても数える）
+    const now = performance.now()
+    if (this.renderedLastTick) this.adaptMotionScale(now - this.lastTickAt)
+    this.lastTickAt = now
     this.stepWheelZoom()
     // カメラが動いたか（慣性で動き続けている間も true）
     if (this.controls.update()) this.dirty = true
@@ -542,25 +639,28 @@ export class Viewer {
       this.camera.quaternion.angleTo(this.lastCamQuat) > 3e-4
     this.lastCamPos.copy(this.camera.position)
     this.lastCamQuat.copy(this.camera.quaternion)
+    const idle = !this.interacting && this.wheelPending === 0 && performance.now() > this.wheelHoldUntil
     if (visible) {
       this.stillFrames = 0
-    } else if (
-      ++this.stillFrames > 4 &&
-      !this.interacting &&
-      !this.busy &&
-      this.wheelPending === 0 &&
-      performance.now() > this.wheelHoldUntil
-    ) {
-      this.setLowRes(false) // 止まったら、元の画素密度で描き直す
+      this.setLowRes(true)
+      this.setCamMoving(true)
+    } else if (++this.stillFrames > 4 && idle) {
+      this.setCamMoving(false) // 視点が止まった（グラフの形は、まだ変わり続けているかもしれない）
+      if (!this.busy) this.setLowRes(false) // 何も動いていなければ、元の画素密度で描き直す
     }
     // 何も変わっていなければ描かない（止まっているときに電池を使わない）
-    if (!this.dirty) return
+    if (!this.dirty) {
+      this.renderedLastTick = false
+      return
+    }
     this.dirty = false
     this.updateClipRange()
     this.updateLabelSizes()
     this.updateStencilSides()
+    this.renderedLastTick = true
     this.renderer.render(this.scene, this.camera)
   }
+  private renderedLastTick = false
 
   /**
    * 文字の画面上の大きさを、CSS ピクセルで一定にする。
@@ -803,14 +903,14 @@ export class Viewer {
         old.line.geometry.dispose()
         old.line.geometry = this.curveGeometry(mesh.positions)
       } else {
-        const m = old.group.children[0] as THREE.Mesh
-        m.geometry.dispose()
-        m.geometry = this.surfaceGeometry(mesh)
+        disposeGeometry(old.geo)
+        old.geo = this.surfaceGeometry(mesh)
+        this.applyLod(old)
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
         old.solid = mesh.solid
         old.grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
         old.grid.uHeat.value = mesh.heat ? 1 : 0
-        if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = m.geometry
+        if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = old.geo
       }
     } else {
       this.removePlot(id)
@@ -922,8 +1022,8 @@ export class Viewer {
           stencilZPass: op,
           clippingPlanes: this.clipPlanes,
         })
-      const inc = new THREE.Mesh(main.geometry, pass(THREE.IncrementWrapStencilOp))
-      const dec = new THREE.Mesh(main.geometry, pass(THREE.DecrementStencilOp))
+      const inc = new THREE.Mesh(p.geo, pass(THREE.IncrementWrapStencilOp))
+      const dec = new THREE.Mesh(p.geo, pass(THREE.DecrementStencilOp))
       const quadMat = new THREE.MeshStandardMaterial({
         side: THREE.DoubleSide,
         roughness: 0.7,
@@ -973,7 +1073,7 @@ export class Viewer {
     geo.setIndex(up === cut.keepBelow ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2])
     p.stencil.quad.geometry.dispose()
     p.stencil.quad.geometry = geo
-    p.stencil.inc.geometry = p.stencil.dec.geometry = main.geometry
+    p.stencil.inc.geometry = p.stencil.dec.geometry = p.geo
   }
 
   /** ステンシルの inc / dec で使っている面の向きが、カメラが残した側にいるときのものか */
@@ -1009,6 +1109,13 @@ export class Viewer {
     // 複素数の色分けをしないときも、シェーダーが読む属性は用意しておく（使わないので位置で代用）
     geo.setAttribute('complexValue', mesh.complexValues.length > 0 ? new THREE.BufferAttribute(mesh.complexValues, 3) : pos)
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
+    // 粗い版: 頂点のデータは同じものを使い、三角形の頂点番号だけが違う
+    if (mesh.lodIndices.length > 0) {
+      const lod = new THREE.BufferGeometry()
+      for (const name of Object.keys(geo.attributes)) lod.setAttribute(name, geo.attributes[name])
+      lod.setIndex(new THREE.BufferAttribute(mesh.lodIndices, 1))
+      geo.userData.lod = lod
+    }
     return geo
   }
 
@@ -1016,7 +1123,8 @@ export class Viewer {
     // 表と裏は1つの材質で描く（裏面はシェーダーで暗くする）
     const grid = createGridUniforms()
     const group = new THREE.Group()
-    group.add(new THREE.Mesh(this.surfaceGeometry(mesh), createSurfaceMaterial(grid, this.clipPlanes)))
+    const geo = this.surfaceGeometry(mesh)
+    group.add(new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes)))
     const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
     grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
     grid.uHeat.value = mesh.heat ? 1 : 0
@@ -1025,6 +1133,7 @@ export class Viewer {
     this.plots.set(id, {
       kind: 'surface',
       group,
+      geo,
       grid,
       uvSpan,
       solid: mesh.solid,
@@ -1032,6 +1141,7 @@ export class Viewer {
       stencil: null,
       order: this.nextOrder++,
     })
+    this.applyLod(this.plots.get(id)!)
     this.scene.add(group)
   }
 
@@ -1150,6 +1260,7 @@ export class Viewer {
         if (!p.stencil || (o !== p.stencil.inc && o !== p.stencil.dec)) o.geometry.dispose()
         ;(o.material as THREE.Material).dispose()
       }
+      disposeGeometry(p.geo) // 粗い版を描いている最中でも、両方の版を捨てる
       this.scene.remove(p.group)
     }
     this.plots.delete(id)
