@@ -186,13 +186,26 @@
     nextGroupId = Math.max(0, ...groups.map((g) => g.id)) + 1
   }
 
-  // 変わるたびに（少し待ってから）ブラウザに保存する
+  // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
+  // 「変わるたびに待ち直す」形にすると、回転・パラメータの再生中は毎コマ変わるので、いつまでも保存されない
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  /** まだ保存していない最新の状態 */
+  let unsaved: SavedState | null = null
+  function flushSave() {
+    clearTimeout(saveTimer)
+    saveTimer = undefined
+    if (unsaved) saveLocal(unsaved)
+    unsaved = null
+  }
   $effect(() => {
     if (!loaded) return
-    const state = snapshot() // ここで読んだ値が変わると、この処理がもう一度動く
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => saveLocal(state), 500)
+    unsaved = snapshot() // ここで読んだ値が変わると、この処理がもう一度動く
+    saveTimer ??= setTimeout(flushSave, 500)
+  })
+  // タブを閉じる・別のアプリに切り替えるときは、待たずに保存する
+  window.addEventListener('pagehide', flushSave)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushSave()
   })
 
   let shareMessage = $state('')
@@ -211,6 +224,10 @@
 
   function resetAll() {
     if (!confirm('式と設定をすべて最初の状態に戻します。よろしいですか？')) return
+    // 読み込み直す前（ページを閉じるとき）に今の状態が保存し直されないようにする
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
     clearLocal()
     location.reload()
   }
