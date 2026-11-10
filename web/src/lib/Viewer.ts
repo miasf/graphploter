@@ -236,7 +236,8 @@ export class Viewer {
   private applyButtons() {
     const a = this.controlMode === 'A'
     this.controls.mouseButtons = {
-      LEFT: this.flat ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
+      // B の左ドラッグは、A の Shift + 左ドラッグと同じ平行移動（OrbitControls に任せる）
+      LEFT: this.flat || !a ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
       MIDDLE: a ? THREE.MOUSE.DOLLY : THREE.MOUSE.PAN,
       RIGHT: a ? THREE.MOUSE.PAN : THREE.MOUSE.DOLLY, // B の右ドラッグは setupMouse で受け取る
     }
@@ -246,7 +247,7 @@ export class Viewer {
 
   /**
    * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る。
-   * - 左ドラッグ: 平行移動（つかんだ点がカーソルについてくる）
+   * - 左ドラッグ: 平行移動（A の Shift + 左ドラッグと同じ。OrbitControls に任せる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
    * - 左ボタンを2回押して、2回目を押したままドラッグ・Shift + 左ドラッグ: 押した位置を中心に回転する
@@ -258,7 +259,7 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'grab' | 'orbit'
+      mode: 'look' | 'right' | 'orbit'
       pivot: THREE.Vector3
       plane: THREE.Plane | null
     }
@@ -279,14 +280,13 @@ export class Viewer {
         if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
-        // 左ドラッグ: どの距離でも平行移動（つかんだ点がカーソルについてくる）
-        else if (e.button === 0 && !this.flat) mode = 'grab'
+        // 左ドラッグ: A の Shift + 左ドラッグと同じ平行移動なので、OrbitControls に任せる
         else return
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
         el.setPointerCapture(e.pointerId)
         const pivot = mode === 'look' ? new THREE.Vector3() : (this.pick(e.clientX, e.clientY) ?? this.controls.target.clone())
-        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: mode === 'grab' ? this.grabPlane(pivot) : null }
+        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: null }
         this.interacting = true
         this.setLowRes(true)
       },
@@ -299,10 +299,6 @@ export class Viewer {
       last = { ...last, x: e.clientX, y: e.clientY }
       if (last.mode === 'look') {
         this.look(dx, dy)
-        return
-      }
-      if (last.mode === 'grab') {
-        this.grab(last.pivot, last.plane!, e.clientX, e.clientY)
         return
       }
       if (last.mode === 'orbit') {

@@ -250,6 +250,8 @@ export interface PlotRequest {
   complexMode: ComplexMode
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
+  /** 2D 表示の描き方。true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影 */
+  flatSlice: boolean
   /** 陽関数の段差の壁 */
   walls: boolean
   /** 媒介変数が4つ以上の図形の、面を描く所の分割数（1 なら範囲の両端だけ） */

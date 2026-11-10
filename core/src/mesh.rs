@@ -1495,6 +1495,35 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
     }
 }
 
+/// 2D 表示の「切り口」: 曲面のメッシュと、平面「縦の座標 = `level`」の交わりの線（曲線のメッシュ）。
+/// 三角形ごとに、平面をまたぐ2つの辺の上の点を結ぶ。線分どうしの間は NaN で切る
+pub fn slice_mesh(mesh: &Mesh, level: f32) -> Mesh {
+    let p = &mesh.positions;
+    let at = |k: u32| {
+        let k = k as usize * 3;
+        [p[k], p[k + 1], p[k + 2]]
+    };
+    let mut out: Vec<f32> = Vec::new();
+    for t in mesh.indices.chunks_exact(3) {
+        let v = [at(t[0]), at(t[1]), at(t[2])];
+        // 平面の上にちょうど乗った頂点は、わずかに上にあるとみなす（同じ線を2回引かないように）
+        let d = v.map(|q| if q[2] == level { f32::MIN_POSITIVE } else { q[2] - level });
+        let mut pts: Vec<[f32; 3]> = Vec::with_capacity(2);
+        for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+            if (d[a] > 0.0) != (d[b] > 0.0) {
+                let s = d[a] / (d[a] - d[b]);
+                pts.push([0, 1, 2].map(|c| if c == 2 { level } else { v[a][c] + (v[b][c] - v[a][c]) * s }));
+            }
+        }
+        if pts.len() == 2 {
+            out.extend_from_slice(&pts[0]);
+            out.extend_from_slice(&pts[1]);
+            out.extend_from_slice(&[f32::NAN; 3]);
+        }
+    }
+    Mesh { positions: out, ..Default::default() }
+}
+
 /// 2D 表示の `z = f(x, y)`（縦の座標が横・奥の座標の関数）: 平面を f の値で塗る（色の濃さと等高線）。
 /// 頂点は (x, y, 0)、格子線用の座標は (x, y, f) なので、z 方向の格子線が等高線になる。
 /// 複素数の色分けをするなら、[`explicit_surface_with`] と同じく偏角の色を付ける
@@ -1576,6 +1605,8 @@ pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> 
 /// 2D 表示の陰関数の曲線 F(x, y, 0) = 0。`prog` の変数は表示中の3つの座標（縦の座標は 0）。
 /// 格子の各マスで、辺の上の F = 0 の点を結ぶ（マーチング・スクエア法）。
 /// 線分ごとに (p, q, NaN) と並べる（NaN で線を切る）
+/// 2D 表示の陰関数の曲線 F(横, 奥, 0) = 0（マーチング・スクエア法）。
+/// `prog` の変数は (横, 奥, 縦) の3つか、縦の無い (横, 奥) の2つ（`z = f(x, y)` の切り口 f = 0 など）
 pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     let n = n.max(2);
     let m = n + 1;
@@ -1589,7 +1620,11 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     }
     let zs = vec![0.0; m * m];
     let mut out = vec![C::new(0.0, 0.0); m * m];
-    prog.eval_batch(&[&xs, &ys, &zs], &mut out);
+    if prog.vars().len() == 2 {
+        prog.eval_batch(&[&xs, &ys], &mut out);
+    } else {
+        prog.eval_batch(&[&xs, &ys, &zs], &mut out);
+    }
     let f: Vec<f64> = out.iter().map(|v| as_real(*v)).collect();
     let mut pts: Vec<f32> = Vec::new();
     for j in 0..n {
@@ -2284,6 +2319,23 @@ mod tests {
         let merged = merge(vec![small, sphere], false);
         assert!(!merged.lod.is_empty() && merged.lod.iter().all(|&k| k < merged.positions.len() as u32 / 3));
         assert!(merged.lod.len() < merged.indices.len() && n0 > 0);
+    }
+
+    #[test]
+    fn slice_of_surface() {
+        // 球面 (2 sin u cos v, 2 sin u sin v, 2 cos u) と平面 z = 0 の交わりは、半径 2 の円
+        let sphere = progs3(["2sin(u)cos(v)", "2sin(u)sin(v)", "2cos(u)"], &["u", "v"]);
+        let shape = parametric_surface_nd(&[sphere], (0.0, std::f64::consts::PI), (0.0, std::f64::consts::TAU), 60);
+        let m = project(&shape, &View::identity(3), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
+        let line = slice_mesh(&m, 0.0);
+        let pts: Vec<&[f32]> = line.positions.chunks_exact(3).filter(|p| p[0].is_finite()).collect();
+        assert!(pts.len() >= 100);
+        for p in pts {
+            assert!(p[2] == 0.0 && ((p[0] * p[0] + p[1] * p[1]).sqrt() - 2.0).abs() < 0.01, "{p:?}");
+        }
+        // 2D の z = f(x, y) の切り口: 変数が2つの式でも、曲線 f = 0 を描ける（x² + y² − 1 = 0 は単位円）
+        let c = implicit_curve_2d(&prog("x^2 + y^2 - 1", &["x", "y"]), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 80);
+        assert!(c.positions.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 1.0).abs() < 0.02));
     }
 
     /// 速さの目安を測る    /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`

@@ -38,6 +38,8 @@ pub struct MeshResult {
     solid: bool,
     /// 2D 表示で作ったもの（射影し直すときも平らにする）
     flat: bool,
+    /// 2D 表示の切り口（射影し直すときも、平面との交わりの線にする）
+    flat_slice: bool,
 }
 
 #[wasm_bindgen]
@@ -94,6 +96,7 @@ impl MeshResult {
         Some(Shape {
             inner,
             flat: self.flat,
+            flat_slice: self.flat_slice,
             explicit_used: self.explicit_used.clone(),
             kind: self.kind.clone(),
             params: self.params.clone(),
@@ -185,6 +188,8 @@ pub fn last_used_params() -> String {
 /// - `walls`: 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか
 /// - `flat`: 2D 表示。縦の軸の座標を 0 にして、横・奥の平面に描く。
 ///   縦の座標 = f(横, 奥) は平面の塗り分け、陰関数・ほかの陽関数は曲線、範囲で重ねた立体は塗った領域になる
+/// - `flat_slice`: 2D 表示の描き方。true なら「切り口」（縦の座標 = 0 の平面との交わり）、
+///   false なら「投影」（3次元の図形を真上から平面に押しつぶした形）
 /// - `layers`: 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（1 なら両端だけ）
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
@@ -211,6 +216,7 @@ pub fn plot(
     walls: bool,
     flat: bool,
     layers: u32,
+    flat_slice: bool,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
     let complex_mode = mesh::ComplexMode::from_u32(complex_mode);
@@ -282,6 +288,7 @@ pub fn plot(
         complex_mode,
         walls,
         flat,
+        flat_slice: flat && flat_slice,
         layers: layers.clamp(1, 12) as usize,
         range: &range,
         view: space.view(perspective),
@@ -291,13 +298,15 @@ pub fn plot(
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
             if flat {
-                mesh::flatten(&mut m, built.curve);
+                m = flat_finish(m, built.curve, ctx.flat_slice);
             }
             m
         }
         None => built.inner,
     };
-    if !built.curve {
+    // 2D の切り口で、射影してから線にした媒介変数表示の曲面
+    let curve = built.curve || (ctx.flat_slice && built.shape.is_some());
+    if !curve {
         mesh::add_cluster_lod(&mut inner);
     }
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
@@ -305,13 +314,14 @@ pub fn plot(
     Ok(MeshResult {
         inner,
         flat,
+        flat_slice: ctx.flat_slice,
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
         shape: built.shape,
         field: (!built.fields.is_empty()).then_some((built.fields, dom)),
         explicit_used,
         kind: built.kind,
         params: plot.param_vars(),
-        curve: built.curve,
+        curve,
         used_params: plot.used_params(),
         param: match &plot {
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
@@ -320,7 +330,18 @@ pub fn plot(
     })
 }
 
+/// 2D 表示で、3次元に射影した形を平面に描く形にする。
+/// 「切り口」なら曲面と平面（縦の座標 = 0）の交わりの線、「投影」なら縦の座標を 0 にした形
+fn flat_finish(mut m: mesh::Mesh, curve: bool, slice: bool) -> mesh::Mesh {
+    if slice && !curve {
+        return mesh::slice_mesh(&m, 0.0);
+    }
+    mesh::flatten(&mut m, curve);
+    m
+}
+
 /// 図形を作るのに使う設定
+#[derive(Clone)]
 struct Ctx<'a> {
     space: &'a equation::Space,
     dom: mesh::Domain,
@@ -332,6 +353,8 @@ struct Ctx<'a> {
     walls: bool,
     /// 2D 表示（[`plot`] の `flat` を参照）
     flat: bool,
+    /// 2D 表示で「切り口」を描くか（[`plot`] の `flat_slice` を参照）
+    flat_slice: bool,
     /// 媒介変数が4つ以上の図形の、面を描く所の分割数（[`plot`] の `layers` を参照）
     layers: usize,
     range: &'a dyn Fn(&str) -> (f64, f64),
@@ -357,28 +380,34 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     use equation::Plot as P;
     if let P::Multi(ps) = plot {
         let parts = ps.iter().map(|p| build(p, ctx)).collect::<Result<Vec<_>, _>>()?;
-        let curve = parts.first().is_some_and(|b| b.curve);
-        if parts.iter().any(|b| b.curve != curve) {
+        // 2D の切り口では、媒介変数表示の曲面も（射影した後で）線になる
+        let line = |b: &Built| b.curve || (ctx.flat_slice && b.shape.is_some());
+        let curve = parts.first().is_some_and(line);
+        if parts.iter().any(|b| line(b) != curve) {
             return Err("リストで、曲線と曲面が混ざる式はまとめて描けません".into());
         }
         let kind = format!("{} × {}", parts.first().map_or(String::new(), |b| b.kind.clone()), parts.len());
         let rotated_explicit = parts.iter().any(|b| b.rotated_explicit);
+        let parts_curve_raw = parts.first().is_some_and(|b| b.curve);
         let fields = parts.iter().flat_map(|b| b.fields.iter().cloned()).collect();
         // 全部が n 次元の点なら、点のままつなげる（回転だけ変わったとき使い回せる）
         if parts.iter().all(|b| b.shape.is_some()) {
             let shapes: Vec<mesh::NdShape> = parts.into_iter().filter_map(|b| b.shape).collect();
             if let Some(shape) = mesh::merge_shapes(shapes.clone()) {
+                // 切り口の線にするのは射影した後（plot・Shape::project）なので、ここでは元の種類のままにする
+                let curve = parts_curve_raw;
                 return Ok(Built { shape: Some(shape), fields, curve, kind, rotated_explicit, ..Default::default() });
             }
             // つなげられない（点の並べ方が違う）ときは、射影してからつなげる
             let meshes = shapes
                 .iter()
                 .map(|sh| {
-                    let mut m = mesh::project(sh, &ctx.view, ctx.dom);
+                    let m = mesh::project(sh, &ctx.view, ctx.dom);
                     if ctx.flat {
-                        mesh::flatten(&mut m, curve);
+                        flat_finish(m, curve, ctx.flat_slice)
+                    } else {
+                        m
                     }
-                    m
                 })
                 .collect();
             return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
@@ -387,11 +416,12 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             .into_iter()
             .map(|b| match &b.shape {
                 Some(sh) => {
-                    let mut m = mesh::project(sh, &ctx.view, ctx.dom);
+                    let m = mesh::project(sh, &ctx.view, ctx.dom);
                     if ctx.flat {
-                        mesh::flatten(&mut m, curve);
+                        flat_finish(m, curve, ctx.flat_slice)
+                    } else {
+                        m
                     }
-                    m
                 }
                 None => b.inner,
             })
@@ -399,7 +429,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
     }
     if ctx.flat {
-        return Ok(build_2d(plot, ctx));
+        return build_2d(plot, ctx);
     }
     let (space, dom) = (ctx.space, ctx.dom);
     let mut b = Built { kind: plot.kind_label(), curve: matches!(plot, P::Curve { .. }), ..Default::default() };
@@ -464,13 +494,38 @@ fn sheets(sets: &[Vec<eval::Program>], vars: &[String], ctx: &Ctx, kind: &mut St
 }
 
 /// 2D 表示の図形を作る（[`plot`] の `flat` を参照）
-fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Built {
+fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     use equation::Plot as P;
     let (space, dom) = (ctx.space, ctx.dom);
+    // 縦の座標を使っているか（使っていなければ、投影も切り口も同じ形になる）
+    let uses_vertical = match plot {
+        P::Explicit { axis: 2, .. } => true,
+        // y = f(x, z) などの f の変数は、残り2つの表示中の座標（2つ目が縦）
+        P::Explicit { prog, .. } => prog.uses_var_index(1),
+        P::Implicit { prog, .. } | P::Solid { prog, .. } => prog.uses_var_index(2),
+        _ => false,
+    };
+    // 投影: 3次元の図形を作ってから、縦の座標を 0 にする（z = f(x, y) は値で塗り分ける）
+    if !ctx.flat_slice && uses_vertical && !matches!(plot, P::Explicit { axis: 2, .. }) {
+        let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
+        let mut b = build(plot, &ctx3)?;
+        b.kind = format!("{}の投影", b.kind);
+        b.fields.clear();
+        if b.shape.is_none() {
+            mesh::flatten(&mut b.inner, b.curve);
+        }
+        return Ok(b);
+    }
     // 平面の曲線は、立体の格子よりずっと細かくしても軽い
     let res2 = (ctx.implicit_resolution * 4).clamp(8, 1200);
     let mut b = Built { kind: plot.kind_label(), ..Default::default() };
     match plot {
+        // 切り口: z = f(x, y) と平面 z = 0 の交わりは、曲線 f(x, y) = 0
+        P::Explicit { axis: 2, prog, names, .. } if ctx.flat_slice => {
+            b.curve = true;
+            b.kind = format!("{} = f({}, {}) の切り口（f = 0）", names[2], names[0], names[1]);
+            b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+        }
         P::Explicit { axis: 2, prog, names, .. } => {
             b.kind = format!("{} の値で塗り分け", names[2]);
             b.inner = mesh::flat_map(prog, dom, ctx.resolution, ctx.complex_mode);
@@ -504,7 +559,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Built {
         }
         P::Param { .. } | P::Multi(_) => {}
     }
-    b
+    Ok(b)
 }
 
 /// 媒介変数表示の、回転・射影する前の形（n 次元の点）。Worker が式ごとに持っておく
@@ -513,6 +568,8 @@ pub struct Shape {
     inner: mesh::NdShape,
     /// 2D 表示（射影した後で縦の座標を 0 にする）
     flat: bool,
+    /// 2D 表示の切り口（射影した後で、平面との交わりの線にする）
+    flat_slice: bool,
     explicit_used: Option<Vec<String>>,
     kind: String,
     params: Vec<String>,
@@ -557,18 +614,19 @@ impl Shape {
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
         let mut inner = mesh::project(&self.inner, &space.view(perspective), dom);
         if self.flat {
-            mesh::flatten(&mut inner, self.curve);
+            inner = flat_finish(inner, self.curve, self.flat_slice);
         }
         Ok(MeshResult {
             inner,
             flat: self.flat,
+            flat_slice: self.flat_slice,
             solid: self.inner.solid && !self.flat,
             field: None,
             shape: None,
             explicit_used: None,
             kind: self.kind.clone(),
             params: self.params.clone(),
-            curve: self.curve,
+            curve: self.curve || self.flat_slice,
             used_params: self.used_params.clone(),
             param: None,
         })
@@ -608,6 +666,7 @@ impl CapSource {
             field: None,
             solid: false,
             flat: false,
+            flat_slice: false,
         })
     }
 }

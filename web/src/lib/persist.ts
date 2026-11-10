@@ -42,6 +42,8 @@ export interface SavedState {
   flat?: boolean
   /** 回転のグループ（古い保存データには無い） */
   groups?: RotationGroup[]
+  /** 2D 表示を切り口で描くか（古い保存データには無い。無ければ投影） */
+  flatSlice?: boolean
   /** フォルダ（古い保存データには無い） */
   folders?: Folder[]
   /** マウスの操作モード（古い保存データには無い） */

@@ -66,6 +66,8 @@
   let perspective = $state(41)
   /** 2D 表示（縦の座標を 0 にして、横・奥の平面に描く） */
   let flat = $state(false)
+  /** 2D 表示の描き方: true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影（真上から押しつぶした形） */
+  let flatSlice = $state(false)
   /** 立体の切り口 */
   let cut = $state<CutStyle>({ enabled: false, axis: 0, pos: 0, flip: false })
   /** 計算担当・描画に渡す切り口の指定 */
@@ -142,6 +144,7 @@
       space,
       cut,
       flat,
+      flatSlice,
       controlMode,
     })
   }
@@ -157,6 +160,7 @@
     space = s.space
     if (s.cut) cut = s.cut
     flat = s.flat ?? false
+    flatSlice = s.flatSlice ?? false
     groups = s.groups ?? []
     folders = s.folders ?? []
     nextFolderId = Math.max(0, ...folders.map((f) => f.id)) + 1
@@ -529,6 +533,7 @@
       flat,
       item.walls ?? false,
       item.layers ?? 1,
+      flatSlice,
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -1678,6 +1683,16 @@
       </div>
     {/if}
   </div>
+  {#if flat}
+    <div class="flat-mode" role="radiogroup" aria-label="2D 表示の描き方">
+      <button role="radio" aria-checked={!flatSlice} class:selected={!flatSlice}
+        title="3次元の図形を、真上から平面に押しつぶした形（影）で描く。z = f(x, y) は値で塗り分ける"
+        onclick={() => { if (flatSlice) { flatSlice = false; replotAll(0) } }}>投影</button>
+      <button role="radio" aria-checked={flatSlice} class:selected={flatSlice}
+        title="縦の座標 = 0 の平面で切って、図形と交わる線を描く（z = f(x, y) なら f = 0 の曲線）"
+        onclick={() => { if (!flatSlice) { flatSlice = true; replotAll(0) } }}>切り口</button>
+    </div>
+  {/if}
   <button
     class="mode-toggle"
     onclick={() => setFlat(!flat)}
@@ -2120,6 +2135,30 @@
     min-height: 0;
   }
   /* 2D / 3D の切り替え（グラフの右上） */
+  .flat-mode {
+    position: fixed;
+    top: 56px;
+    right: 12px;
+    display: flex;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--panel);
+    z-index: 5;
+  }
+  .flat-mode button {
+    padding: 8px 12px;
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .flat-mode button.selected {
+    background: var(--hover);
+    color: var(--text);
+  }
   .mode-toggle {
     position: fixed;
     top: 12px;
