@@ -46,7 +46,8 @@ export interface PlotStyle {
 /** 媒介変数の範囲。媒介変数の名前（t, u, v, t1, …）→ [最小, 最大]（入力欄の LaTeX のまま。2π などの式も書ける） */
 export type ParamRanges = Record<string, [string, string]>
 
-/** 媒介変数の範囲の長さ。u, v は1つ目・2つ目、w は3つ目（立体のときだけ） */
+/** 媒介変数の範囲の長さ。u, v は1つ目・2つ目、w は3つ目（立体のときだけ）。
+ *  媒介変数が4つ以上の図形では、面ごとに 0〜1 にそろえてあるので u = v = 1、w = 0（3つ目の線は引かない） */
 export interface ParamSpan {
   u: number
   v: number
@@ -154,6 +155,8 @@ export interface PlotItem extends PlotStyle {
   walls?: boolean
   /** 回転のグループの番号（無い・0 なら全体の回転を使う） */
   rotGroup?: number
+  /** 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（無い・1 なら両端だけ） */
+  layers?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
 }
@@ -237,6 +240,8 @@ export interface PlotRequest {
   flat: boolean
   /** 陽関数の段差の壁 */
   walls: boolean
+  /** 媒介変数が4つ以上の図形の、面を描く所の分割数（1 なら範囲の両端だけ） */
+  layers: number
 }
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */

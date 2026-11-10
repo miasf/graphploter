@@ -96,6 +96,15 @@ export function missingParam(error: string | undefined): string | null {
   return m && !isReserved(m[1]) ? m[1] : null
 }
 
+/**
+ * 計算エンジンのエラー「次元を 5 にしてください」「次元を 5 以上にしてください」から、必要な次元を取り出す。
+ * 次元のエラーでなければ null
+ */
+export function neededDims(error: string | undefined): number | null {
+  const m = error?.match(/次元を (\d+) (?:以上)?にしてください/)
+  return m ? Number(m[1]) : null
+}
+
 /** スライダーの刻み。刻み（Step）を決めていれば、その値。無ければ範囲のおよそ 1/200 のきりの良い値 */
 export function sliderStep(slider: { min: number; max: number; step?: number }): number {
   if (slider.step && slider.step > 0) return slider.step

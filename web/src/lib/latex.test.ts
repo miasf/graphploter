@@ -27,6 +27,9 @@ const cases: [string, string][] = [
   ['\\lfloor x\\rfloor', 'floor(x)'],
   ['z=\\exponentialE^{x}', 'z=e^(x)'],
   ['x^2+y^2+z^2=4', 'x^(2)+y^(2)+z^(2)=4'],
+  // 添字（文字の後ろの数字。入力欄では w2 と打つと w_2 になる）: 多変数の媒介変数表示
+  ['\\left(t_1,t_2,t_3,t_{10}\\right)', '(t_1,t_2,t_3,t_10)'],
+  ['w_2^2+a_1', 'w_2^(2)+a_1'],
   // 名前に数字を含む関数・長い関数名
   ['\\operatorname{hyp2F1}\\left(1,1,2,x\\right)', 'hyp2F1 (1,1,2,x)'],
   ['x\\operatorname{\\mathrm{sinc}}\\left(x\\right)', 'x sinc (x)'],

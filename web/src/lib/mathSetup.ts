@@ -1,6 +1,7 @@
 // 数式入力欄（MathLive）の共通設定: フォントの場所、自動変換の一覧、画面上の数式キーボード。
 
 import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
+import { coordName, latexName, prettyName } from './params'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
 // 相対パスだとスクリプトの場所が基準になってしまうので、ページの URL を基準にした絶対 URL にする
@@ -24,10 +25,6 @@ export const SHORTCUTS: Record<string, string> = {
   pi: '\\pi',
   sqrt: '\\sqrt{#?}',
   gamma: '\\Gamma',
-  // w2 → w₂、t1 → t₁ のように、w と t の後ろの数字は添字にする（4次元目以降の座標・媒介変数）
-  ...Object.fromEntries(
-    ['w', 't'].flatMap((c) => Array.from({ length: 9 }, (_, k) => [`${c}${k + 1}`, `${c}_{${k + 1}}`])),
-  ),
   ...Object.fromEntries(
     ['sin', 'cos', 'tan', 'sec', 'csc', 'cot', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log'].map((f) => [
       f,
@@ -322,11 +319,78 @@ function setupKeyTips() {
   document.addEventListener('pointercancel', release, true)
 }
 
+/** 「変数」のタブに並べる媒介変数 t₁, t₂, … の数 */
+const NUMBERED_PARAMS = 8
+
+/**
+ * 「変数」のタブ: 今の次元で使える座標（x, y, z, w, w₂, …）と、媒介変数（t, u, v, t₁, t₂, …）を並べる。
+ * 4次元目以降の座標の名前（w の次は w₂）を覚えていなくても、ここから入れられる
+ */
+function variablesLayout(dims: number) {
+  const ordinal = (k: number) => `${k + 1}次元目の座標`
+  const coords = Array.from({ length: dims }, (_, k) => {
+    const name = coordName(k)
+    return { latex: latexName(name), tooltip: `${ordinal(k)} ${prettyName(name)}${k === 3 ? '（w₁ と書いても同じ）' : ''}` }
+  })
+  const numbered = Array.from({ length: NUMBERED_PARAMS }, (_, k) => ({
+    latex: `t_{${k + 1}}`,
+    tooltip: `媒介変数 t${prettyName(String(k + 1))}（いくつでも使える。4つ以上なら多変数の図形）`,
+  }))
+  const rows: (string | Partial<VirtualKeyboardKeycap>)[][] = [
+      coords,
+      [
+        { latex: 't', tooltip: '媒介変数 t（曲線）' },
+        { latex: 'u', tooltip: '媒介変数 u（曲面）' },
+        { latex: 'v', tooltip: '媒介変数 v（曲面）' },
+        '[separator-5]',
+        ...numbered,
+      ],
+      [
+        { latex: '(', tooltip: '左かっこ' },
+        { latex: ')', tooltip: '右かっこ' },
+        { latex: ',', tooltip: 'カンマ（成分の区切り）' },
+        { latex: '=', tooltip: '等号' },
+        { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（文字の後ろに数字を打っても添字になる）' },
+        { latex: '\\left[#0\\right]', label: '[ ]', tooltip: 'リスト（[−1, 1] など）' },
+        '[separator-5]',
+        { latex: 'a', tooltip: 'パラメータ a（スライダー）' },
+        { latex: 'b', tooltip: 'パラメータ b（スライダー）' },
+        { latex: 'c', tooltip: 'パラメータ c（スライダー）' },
+        { latex: 'r', tooltip: 'パラメータ r（スライダー）' },
+      ],
+      [
+        { label: '[left]', width: 1 },
+        { label: '[right]', width: 1 },
+        '[hide-keyboard]',
+        { label: '[return]', width: 1 },
+        '[separator-5]',
+        { latex: '+', tooltip: '足し算' },
+        { latex: '-', tooltip: '引き算・マイナス' },
+        { latex: '\\cdot', label: '×', tooltip: '掛け算' },
+        { label: '[backspace]', width: 1 },
+      ],
+  ]
+  return { label: '変数', tooltip: '座標と媒介変数', rows }
+}
+
+/** キーボードの「変数」のタブに並べている座標の数（次元） */
+let keyboardDims = 0
+
+/** 次元が変わったとき: 「変数」のタブの座標のキーを、その次元のものにする */
+export function setKeyboardDims(dims: number) {
+  if (dims === keyboardDims) return
+  keyboardDims = dims
+  window.mathVirtualKeyboard.layouts = keyboardLayouts(dims)
+}
+
 /** 画面上の数式キーボード（スマホでは入力欄を押すと自動で出る） */
 export function setupKeyboard() {
   setupKeyTips()
-  const kb = window.mathVirtualKeyboard
-  kb.layouts = [
+  setKeyboardDims(3)
+}
+
+function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layouts {
+  return [
     {
       label: '123',
       tooltip: '数字と記号',
@@ -335,7 +399,7 @@ export function setupKeyboard() {
           { latex: 'x', tooltip: '座標 x' },
           { latex: 'y', tooltip: '座標 y' },
           { latex: 'z', tooltip: '座標 z' },
-          { latex: 'w', tooltip: '4次元目の座標 w' },
+          { latex: 'w', tooltip: '4次元目の座標 w（5次元目からは w₂, w₃, …。「変数」のタブにある）' },
           { latex: 't', tooltip: '媒介変数 t（曲線）' },
           { latex: 'u', tooltip: '媒介変数 u（曲面）' },
           { latex: 'v', tooltip: '媒介変数 v（曲面）' },
@@ -352,7 +416,7 @@ export function setupKeyboard() {
           { latex: '\\pi', tooltip: '円周率 π' },
           { latex: '\\imaginaryI', label: 'i', tooltip: '虚数単位 i' },
           { latex: 'e', tooltip: 'ネイピア数 e' },
-          { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（w₂ など）' },
+          { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）' },
           '[separator-5]',
           '4',
           '5',
@@ -386,6 +450,7 @@ export function setupKeyboard() {
         ],
       ],
     },
+    variablesLayout(dims),
     {
       label: 'f(x)',
       tooltip: '関数',

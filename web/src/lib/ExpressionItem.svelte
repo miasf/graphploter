@@ -6,7 +6,7 @@
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
-  import { coordName, missingParam, prettyName } from './params'
+  import { coordName, missingParam, neededDims, prettyName } from './params'
   import { GLOBAL_GROUP, type ComplexMode, type Domain, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
@@ -23,6 +23,10 @@
     onOpacity: (opacity: number) => void
     onComplexMode: (mode: ComplexMode) => void
     onWalls: (on: boolean) => void
+    /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
+    onLayers: (layers: number) => void
+    /** 次元を n にする（「次元を 5 にする」ボタン・成分を足したとき） */
+    onSetDims: (n: number) => void
     onLineWidth: (width: number) => void
     onRange: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
@@ -74,6 +78,8 @@
     onOpacity,
     onComplexMode,
     onWalls,
+    onLayers,
+    onSetDims,
     onLineWidth,
     onRange,
     onToggle,
@@ -105,6 +111,10 @@
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
   const missing = $derived(missingParam(item.error))
+  /** 次元が足りなくてエラーになっているなら、必要な次元（その次元にするボタンを出す） */
+  const moreDims = $derived(neededDims(item.error))
+  /** 次元の上限（SpacePanel と同じ） */
+  const MAX_DIMS = 10
 
   // 1行の入力欄を編集している間は、縦の表示に切り替えない（入力中に欄が入れ替わらないように）
   let editingLine = $state(false)
@@ -119,6 +129,19 @@
     onInput(joinTuple(next))
   }
 
+  /** 成分を1つ足す（次の座標の成分。値は 0）。次元が足りなければ増やす */
+  function addPart() {
+    if (!parts || parts.length >= MAX_DIMS) return
+    if (parts.length + 1 > dims) onSetDims(parts.length + 1)
+    onInput(joinTuple([...parts, '0']))
+  }
+
+  /** 最後の成分を消す（次元はそのまま） */
+  function removePart() {
+    if (!parts || parts.length <= 2) return
+    onInput(joinTuple(parts.slice(0, -1)))
+  }
+
   /** 媒介変数表示の曲面で選べる分割数（0 は線なし） */
   const DIVISIONS = [0, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48, 60, 72, 96, 120]
   const divIndex = (n: number) =>
@@ -128,9 +151,15 @@
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
   const isCurve = $derived(item.params.length === 1)
   /** 媒介変数表示の曲面・立体（格子線を媒介変数に沿って引く） */
-  const isSurface = $derived(item.params.length === 2 || item.params.length === 3)
-  /** 媒介変数ごとの格子線の分割数の設定の名前（立体なら3つ目は w） */
-  const divAxes = $derived(item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const))
+  const isSurface = $derived(item.params.length >= 2)
+  /** 媒介変数が4つ以上の図形（媒介変数を2つずつ動かした面の集まり） */
+  const isSheets = $derived(item.params.length >= 4)
+  /** 媒介変数ごとの格子線の分割数の設定の名前（立体なら3つ目は w。面の集まりは、どの面も同じ分割にする） */
+  const divAxes = $derived(
+    isSheets ? (['u'] as const) : item.params.length === 3 ? (['u', 'v', 'w'] as const) : (['u', 'v'] as const),
+  )
+  /** 面を描く所の分割数の上限（面は kC2 · (分割 + 1)^(k − 2) 枚。多すぎると計算エンジンが減らす） */
+  const MAX_LAYERS = 6
 
   /** 陽関数（z = f(x, y) など）か。複素数の色分けができる */
   // 回して陰関数として計算し直した陽関数（「陰関数（z = f(x, y) を回したもの）」）も含む。
@@ -173,6 +202,11 @@
     if (!tabs.some((t) => t.id === tab)) tab = 'look'
   })
   const groupName = $derived(groups.find((g) => g.id === groupId)?.name)
+
+  /** 媒介変数に沿った格子線の分割数を変える。面の集まり（媒介変数4つ以上）は、面の2方向を同じ分割にする */
+  function setDivision(axis: 'u' | 'v' | 'w', n: number) {
+    onGrid(isSheets ? { ...item.grid, u: n, v: n } : { ...item.grid, [axis]: n })
+  }
 </script>
 
 <li class="item" class:has-error={!!item.error} class:dragging>
@@ -225,7 +259,16 @@
           </div>
         {/each}
       </div>
-      <button class="link" onclick={onToggleVertical}>1行で編集</button>
+      <div class="part-actions">
+        {#if parts.length < MAX_DIMS}
+          <button class="link" onclick={addPart} title="次の座標の成分を足す（次元が足りなければ増やす）"
+            >＋ {prettyName(coordName(parts.length))} 成分を追加</button>
+        {/if}
+        {#if parts.length > 2}
+          <button class="link" onclick={removePart}>− {prettyName(coordName(parts.length - 1))} 成分を消す</button>
+        {/if}
+        <button class="link" onclick={onToggleVertical}>1行で編集</button>
+      </div>
     {:else}
       <MathInput
         value={item.latex}
@@ -273,7 +316,14 @@
     {#if item.error}
       <p class="error">{item.error}</p>
       {#if missing}
-        <button class="add-slider" onclick={() => onAddSlider(missing)}>＋ {missing} のスライダーを追加</button>
+        <!-- 押した瞬間に入力欄からフォーカスが外れると、縦の表示に切り替わってボタンが動き、押せなくなる。
+             フォーカスを動かさないようにする -->
+        <button class="add-slider" onmousedown={(e) => e.preventDefault()} onclick={() => onAddSlider(missing)}
+          >＋ {prettyName(missing)} のスライダーを追加</button>
+      {/if}
+      {#if moreDims && moreDims <= MAX_DIMS}
+        <button class="add-slider" onmousedown={(e) => e.preventDefault()} onclick={() => onSetDims(moreDims)}
+          >次元を {moreDims} にする</button>
       {/if}
     {:else if item.info && !item.param}
       <p class="info">{item.info}</p>
@@ -340,6 +390,29 @@
             </span>
           </div>
 
+          {#if isSheets}
+            <div class="sliders">
+              <span class="label">中の面</span>
+              <input
+                type="range"
+                min="1"
+                max={MAX_LAYERS}
+                step="1"
+                value={item.layers ?? 1}
+                aria-label="中の面（固定する媒介変数の分割数）"
+                oninput={(e) => onLayers(e.currentTarget.valueAsNumber)}
+              />
+              <span class="value">
+                <EditableValue
+                  chars={5} value={item.layers ?? 1} label="固定する媒介変数の分割数" suffix=" 等分" min={1} max={MAX_LAYERS}
+                  integer onChange={onLayers} />
+              </span>
+            </div>
+            <p class="hint">
+              媒介変数を2つずつ動かした面を描いています（残りは固定）。1 等分なら、固定する値は範囲の両端だけ。
+              増やすと、範囲の途中の値に固定した面（中を通る面）も描きます。
+            </p>
+          {/if}
           {#if canWall}
             <label class="check">
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
@@ -380,7 +453,7 @@
               <!-- 媒介変数表示の曲面・立体: 媒介変数（u, v など）の範囲を何等分するか -->
               {#each divAxes as axis, n (axis)}
                 {@const k = divIndex(item.grid[axis] ?? item.grid.v)}
-                <span class="label">{prettyName(item.params[n])} 方向</span>
+                <span class="label">{isSheets ? '面の分割' : `${prettyName(item.params[n])} 方向`}</span>
                 <input
                   type="range"
                   min="0"
@@ -388,24 +461,24 @@
                   step="1"
                   value={k}
                   disabled={!item.grid.enabled}
-                  aria-label="{item.params[n]} 方向の分割数"
-                  oninput={(e) => onGrid({ ...item.grid, [axis]: DIVISIONS[e.currentTarget.valueAsNumber] })}
+                  aria-label="{isSheets ? '面' : `${item.params[n]} 方向`}の分割数"
+                  oninput={(e) => setDivision(axis, DIVISIONS[e.currentTarget.valueAsNumber])}
                 />
                 <span class="value">
                   <EditableValue
                 chars={5}
                     value={item.grid[axis] ?? item.grid.v}
-                    label="{item.params[n]} 方向の分割数"
+                    label="{isSheets ? '面' : `${item.params[n]} 方向`}の分割数"
                     suffix=" 等分"
                     min={0}
                     max={200}
                     integer
-                    onChange={(v) => onGrid({ ...item.grid, [axis]: v })}
+                    onChange={(v) => setDivision(axis, v)}
                   />
                 </span>
               {/each}
             {/if}
-            {#each item.params.length === 3 ? [] : isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
+            {#each item.params.length >= 3 ? [] : isSurface ? gridAxes.slice(2) : gridAxes as { axis, label } (axis)}
               {@const options = spacingOptions(ranges[axis])}
               {@const index = spacingToIndex(item.grid[axis], options)}
               <span class="label">{label}</span>
@@ -692,6 +765,11 @@
     font-size: 12px;
     text-decoration: underline;
     cursor: pointer;
+  }
+  .part-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 14px;
   }
   .param-range {
     display: grid;

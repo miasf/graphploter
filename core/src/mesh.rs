@@ -1,7 +1,7 @@
 //! 曲面のメッシュ（三角形の集まり）を作る。
 
 use crate::equation::others;
-use crate::eval::{as_real, Program};
+use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
 /// 表示範囲（直方体）。添字 0, 1, 2 が x, y, z。
@@ -1017,16 +1017,9 @@ pub const NO_GRID: f32 = -1e30;
 
 /// 各成分をまとめて計算し、n 次元の点を並べたもの（点ごとに d 個）にする。
 /// どれかの成分が実数にならない点は NaN
-fn eval_nd(progs: &[Program], inputs: &[&[f64]], n: usize) -> Vec<f64> {
-    let d = progs.len();
-    let mut pts = vec![0.0; n * d];
-    let mut out = vec![C::new(0.0, 0.0); n];
-    for (ax, prog) in progs.iter().enumerate() {
-        prog.eval_batch(inputs, &mut out);
-        for (k, v) in out.iter().enumerate() {
-            pts[k * d + ax] = as_real(*v);
-        }
-    }
+fn eval_nd(set: &ProgramSet, inputs: &[&[f64]], n: usize) -> Vec<f64> {
+    let mut pts = Vec::with_capacity(n * set.len());
+    set.eval_points(inputs, n, &mut pts);
     pts
 }
 
@@ -1057,7 +1050,7 @@ pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64)
     let mut points = Vec::with_capacity(sets.len() * m * m * dims);
     let mut grid = Vec::with_capacity(sets.len() * grid1.len());
     for progs in sets {
-        points.extend(eval_nd(progs, &[&us, &vs], m * m));
+        ProgramSet::new(progs).eval_points(&[&us, &vs], m * m, &mut points);
         grid.extend_from_slice(&grid1);
     }
     NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new() }
@@ -1073,36 +1066,124 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
     let n = n.max(2);
     let m = n + 1;
     let at = |k: usize, i: usize| r[k].0 + (r[k].1 - r[k].0) * i as f64 / n as f64;
-    // 6つの面の媒介変数の値と、格子線用の値
-    let mut cols: [Vec<f64>; 3] = Default::default();
-    let mut grid1 = Vec::with_capacity(6 * m * m * 3);
+    let dims = sets.first().map_or(0, |p| p.len());
+    let count = 6 * m * m;
+    let merged: Vec<ProgramSet> = sets.iter().map(|progs| ProgramSet::new(progs)).collect();
+    let mut points = Vec::with_capacity(sets.len() * count * dims);
+    // 6つの面の格子線用の値（立体ごとに同じ）
+    let mut grid1 = Vec::with_capacity(count * 3);
+    let mut faces = Vec::with_capacity(6);
     for k in 0..3 {
         for side in [0, 1] {
             let (a, b) = if side == 1 { ((k + 1) % 3, (k + 2) % 3) } else { ((k + 2) % 3, (k + 1) % 3) };
             let fixed = if side == 1 { r[k].1 } else { r[k].0 };
+            let mut cols: [Vec<f64>; 3] = Default::default();
             for j in 0..m {
                 for i in 0..m {
                     let mut p = [0.0; 3];
                     p[k] = fixed;
                     p[a] = at(a, i);
                     p[b] = at(b, j);
+                    cols[a].push(p[a]);
+                    cols[b].push(p[b]);
                     for c in 0..3 {
-                        cols[c].push(p[c]);
                         grid1.push(if c == k { NO_GRID } else { (p[c] - r[c].0) as f32 });
+                    }
+                }
+            }
+            faces.push((k, fixed, cols));
+        }
+    }
+    let mut grid = Vec::with_capacity(sets.len() * grid1.len());
+    for set in &merged {
+        for (k, fixed, cols) in &faces {
+            // その面で固定した媒介変数は定数にする（それだけで決まる部分は1回だけ計算すればよい）
+            set.bind(&[(*k, *fixed)]).eval_points(&[&cols[0], &cols[1], &cols[2]], m * m, &mut points);
+        }
+        grid.extend_from_slice(&grid1);
+    }
+    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new() }
+}
+
+/// 媒介変数が4つ以上の図形の、面の枚数と、1枚の格子のマス数。
+/// `(i, j)` の組ごとに、残りの媒介変数を `div + 1` 個の値に固定した面を描くので、
+/// 面は kC2 · (div + 1)^(k − 2) 枚。多すぎるときは `div` を減らす（1 なら範囲の両端だけ）。
+/// 頂点の数の合計がおよそ 6 · `resolution`² になるよう、面が多いほど1枚を粗くする
+pub fn sheet_layout(k: usize, div: usize, resolution: usize) -> (usize, usize, usize) {
+    const MAX_SHEETS: usize = 2400;
+    let pairs = k * (k - 1) / 2;
+    let count = |d: usize| pairs.saturating_mul((d + 1).saturating_pow(k as u32 - 2));
+    let mut div = div.max(1);
+    while div > 1 && count(div) > MAX_SHEETS {
+        div -= 1;
+    }
+    let sheets = count(div);
+    let n = ((6.0 * (resolution * resolution) as f64 / sheets as f64).sqrt() as usize).clamp(3, resolution.max(3));
+    (div, sheets, n)
+}
+
+/// 媒介変数表示で、媒介変数が4つ以上（k 個）の図形。3次元の画面には中身をそのまま描けないので、
+/// 媒介変数を2つだけ動かした曲面（面）をたくさん描いて形を表す。
+///
+/// 媒介変数の組 (a, b) ごとに、残りの k − 2 個を、範囲を `div` 等分した値（`div` = 1 なら両端だけ）の
+/// すべての組み合わせに固定する。`div` = 1 のとき、これは媒介変数の範囲の「k 次元の直方体」の
+/// 2次元の面（4次元の立方体なら 24 枚）の像になる。`div` を増やすと、中を通る面も描く。
+///
+/// 面ごとに、固定した媒介変数を定数にした式を作って計算する（[`ProgramSet::bind`]）。
+/// 格子線用の値は、面ごとに (a, b) を 0〜1 にそろえたもの
+pub fn parametric_sheets_nd(sets: &[Vec<Program>], r: &[(f64, f64)], div: usize, resolution: usize) -> NdShape {
+    let k = r.len();
+    assert!(k >= 3);
+    let (div, sheets, n) = sheet_layout(k, div, resolution);
+    let m = n + 1;
+    let dims = sets.first().map_or(0, |p| p.len());
+    let merged: Vec<ProgramSet> = sets.iter().map(|progs| ProgramSet::new(progs)).collect();
+    let mut points = Vec::with_capacity(sets.len() * sheets * m * m * dims);
+    let mut grid1 = Vec::with_capacity(m * m * 2);
+    for j in 0..m {
+        for i in 0..m {
+            grid1.extend_from_slice(&[i as f32 / n as f32, j as f32 / n as f32]);
+        }
+    }
+    let mut grid = Vec::with_capacity(sets.len() * sheets * grid1.len());
+    let empty: &[f64] = &[];
+    for set in &merged {
+        for a in 0..k {
+            for b in a + 1..k {
+                let at = |c: usize, i: usize| r[c].0 + (r[c].1 - r[c].0) * i as f64 / n as f64;
+                let us: Vec<f64> = (0..m * m).map(|p| at(a, p % m)).collect();
+                let vs: Vec<f64> = (0..m * m).map(|p| at(b, p / m)).collect();
+                let mut inputs = vec![empty; k];
+                inputs[a] = &us;
+                inputs[b] = &vs;
+                let others: Vec<usize> = (0..k).filter(|&c| c != a && c != b).collect();
+                // 残りの媒介変数の値の組み合わせ（それぞれ div + 1 通り）を順にたどる
+                let mut step = vec![0usize; others.len()];
+                loop {
+                    let fixed: Vec<(usize, f64)> = others
+                        .iter()
+                        .zip(&step)
+                        .map(|(&c, &s)| (c, r[c].0 + (r[c].1 - r[c].0) * s as f64 / div as f64))
+                        .collect();
+                    set.bind(&fixed).eval_points(&inputs, m * m, &mut points);
+                    grid.extend_from_slice(&grid1);
+                    let mut c = 0;
+                    while c < step.len() {
+                        step[c] += 1;
+                        if step[c] <= div {
+                            break;
+                        }
+                        step[c] = 0;
+                        c += 1;
+                    }
+                    if c == step.len() {
+                        break;
                     }
                 }
             }
         }
     }
-    let dims = sets.first().map_or(0, |p| p.len());
-    let count = 6 * m * m;
-    let mut points = Vec::with_capacity(sets.len() * count * dims);
-    let mut grid = Vec::with_capacity(sets.len() * grid1.len());
-    for progs in sets {
-        points.extend(eval_nd(progs, &[&cols[0], &cols[1], &cols[2]], count));
-        grid.extend_from_slice(&grid1);
-    }
-    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new() }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new() }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -1169,7 +1250,8 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         if k > 0 {
             points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
         }
-        points.extend(curve_nd(&|ts: &[f64]| eval_nd(progs, &[ts], ts.len()), progs.len(), t, n, tol));
+        let set = ProgramSet::new(progs);
+        points.extend(curve_nd(&|ts: &[f64]| eval_nd(&set, &[ts], ts.len()), progs.len(), t, n, tol));
     }
     NdShape { dims, points, grid: None, solid: false, complex: Vec::new() }
 }
@@ -1999,7 +2081,41 @@ mod tests {
         assert_eq!(sample_combos(&[(0.0, 1.0), (0.0, 1.0)], 100).len(), 64 * 64);
     }
 
-    /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`
+    #[test]
+    fn sheets_of_many_params() {
+        // 4次元の立方体 (t₁, t₂, t₃, t₄): 両端だけなら、面は 4C2 · 2² = 24 枚
+        let vars = ["t1", "t2", "t3", "t4"];
+        let progs: Vec<Program> = ["t_1", "t_2", "t_3", "t_4"].iter().map(|v| prog(v, &vars)).collect();
+        let r = [(-1.0, 1.0); 4];
+        assert_eq!(sheet_layout(4, 1, 100).1, 24);
+        assert_eq!(sheet_layout(4, 2, 100).1, 54); // 中を通る面も入れると 6 · 3²
+        assert_eq!(sheet_layout(5, 1, 100).1, 80);
+        // 面が多すぎるときは分割を減らす
+        assert_eq!(sheet_layout(8, 4, 100), (1, 28 * 64, 5));
+        let shape = parametric_sheets_nd(std::slice::from_ref(&progs), &r, 1, 20);
+        let (m, grid) = shape.grid.as_ref().unwrap();
+        let per = m * m;
+        assert_eq!(shape.points.len(), 24 * per * 4);
+        assert_eq!(grid.len(), 24 * per * 2);
+        // どの点も立方体の表面にあり、面ごとに2つの成分が ±1 に固定されている
+        for face in shape.points.chunks_exact(per * 4) {
+            let fixed = (0..4)
+                .filter(|&c| face.chunks_exact(4).all(|p| p[c] == face[c]) && face[c].abs() == 1.0)
+                .count();
+            assert_eq!(fixed, 2);
+        }
+        // 3次元に射影すると、立方体 [−1, 1]³ に収まる面の集まりになる
+        let mesh = project(&shape, &View::identity(4), dom());
+        assert!(!mesh.indices.is_empty());
+        assert!(mesh.positions.iter().all(|v| v.abs() <= 1.0));
+        // 中を通る面（div = 2）: 固定する値に 0 も入る
+        let shape = parametric_sheets_nd(&[progs], &r, 2, 20);
+        let per = shape.grid.as_ref().unwrap().0.pow(2);
+        assert_eq!(shape.points.len(), 54 * per * 4);
+        assert!(shape.points.chunks_exact(per * 4).any(|f| f.chunks_exact(4).all(|p| p[2] == 0.0 && p[3] == 0.0)));
+    }
+
+    /// 速さの目安を測る    /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn timing() {
@@ -2009,6 +2125,31 @@ mod tests {
             let m = implicit_surface(&prog("sin(x) + sin(y) + sin(z)", &AXES), d, n);
             println!("陰関数 n = {n}: {:?}, 三角形 {}", t.elapsed(), m.indices.len() / 3);
         }
+        let t = std::time::Instant::now();
+        let m = explicit_surface(&prog("sin(x) cos(y) + exp(-x^2 - y^2)", &["x", "y"]), d, 400, 2);
+        println!("陽関数 n = 400: {:?}, 三角形 {}", t.elapsed(), m.indices.len() / 3);
+        // 3次元球面の中身（4変数）
+        let vars = ["t1", "t2", "t3", "t4"];
+        let ball = [
+            "t_1 sin(t_2) sin(t_3) cos(t_4)",
+            "t_1 sin(t_2) sin(t_3) sin(t_4)",
+            "t_1 sin(t_2) cos(t_3)",
+            "t_1 cos(t_2)",
+        ];
+        let progs: Vec<Program> = ball.iter().map(|s| prog(s, &vars)).collect();
+        let (pi, tau) = (std::f64::consts::PI, std::f64::consts::TAU);
+        let r = [(0.0, 2.0), (0.0, pi), (0.0, pi), (0.0, tau)];
+        for div in [1, 3] {
+            let t = std::time::Instant::now();
+            let shape = parametric_sheets_nd(std::slice::from_ref(&progs), &r, div, 150);
+            let t1 = t.elapsed();
+            let mesh = project(&shape, &View::identity(4), d);
+            println!("4変数 div = {div}: 計算 {t1:?} + 射影 {:?}, 三角形 {}", t.elapsed() - t1, mesh.indices.len() / 3);
+        }
+        let torus: Vec<Program> = ["(3 + cos(v)) cos(u)", "(3 + cos(v)) sin(u)", "sin(v)"].iter().map(|s| prog(s, &["u", "v"])).collect();
+        let t = std::time::Instant::now();
+        let shape = parametric_surface_nd(&[torus], (0.0, tau), (0.0, tau), 400);
+        println!("媒介変数表示の曲面 n = 400: {:?}, 点 {}", t.elapsed(), shape.points.len() / 3);
     }
 }
 
