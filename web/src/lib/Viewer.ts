@@ -110,6 +110,8 @@ type PlotObject =
   | { kind: 'curve'; line: LineSegments2 }
 
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
+/** 拡大で中心の点にここまで（図形の大きさに対する割合）近づいたら、そこからは一定の速さで前に進む（通り抜けられる） */
+const NEAR_FRACTION = 0.08
 const WHEEL_PER_PIXEL = 0.0022
 /** ホイールの拡大縮小をならす時間（秒） */
 const WHEEL_SMOOTH_S = 0.1
@@ -272,9 +274,10 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'orbit'
+      mode: 'look' | 'right' | 'orbit' | 'dolly'
       pivot: THREE.Vector3
-      plane: THREE.Plane | null
+      /** 右ドラッグで拡大縮小するときに進む向き（押したときのカーソルの向き） */
+      fwd: THREE.Vector3
     }
     let last: Drag | null = null
     /** 前に左ボタンを押した時刻と位置（2回押しの判定に使う） */
@@ -286,7 +289,9 @@ export class Viewer {
         // Ctrl（Mac は ⌘）+ 左ドラッグの見回しは、操作 A でも使える（A の Ctrl + 左ドラッグは平行移動だったが、
         // 平行移動は右ドラッグ・Shift + 左ドラッグでもできるので重ならない）
         const look = e.pointerType !== 'touch' && e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
-        if (e.pointerType === 'touch' || (this.controlMode !== 'B' && !look)) {
+        // 操作 A の中ドラッグ（拡大縮小）も、ホイールと同じく図形を通り抜けられる拡大縮小にする（OrbitControls の拡大縮小は通り抜けられない）
+        const dolly = this.controlMode === 'A' && e.pointerType !== 'touch' && e.button === 1 && !this.flat
+        if (e.pointerType === 'touch' || (this.controlMode !== 'B' && !look && !dolly)) {
           // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
           const pan =
             e.pointerType !== 'touch' &&
@@ -303,6 +308,7 @@ export class Viewer {
         if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
         if (look) mode = 'look'
+        else if (dolly) mode = 'dolly'
         else if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
         // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
@@ -314,8 +320,15 @@ export class Viewer {
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
         el.setPointerCapture(e.pointerId)
-        const pivot = mode === 'look' ? new THREE.Vector3() : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
-        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: null }
+        if (mode === 'dolly') this.anchorTarget()
+        const pivot =
+          mode === 'look'
+            ? new THREE.Vector3()
+            : mode === 'dolly'
+              ? this.controls.target.clone()
+              : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
+        const fwd = this.rayAt(e.clientX, e.clientY).ray.direction.clone()
+        last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, fwd }
         this.interacting = true
         this.setLowRes(true)
       },
@@ -330,6 +343,11 @@ export class Viewer {
         this.look(dx, dy)
         return
       }
+      if (last.mode === 'dolly') {
+        // 上下で拡大縮小（OrbitControls の中ドラッグと同じ向き: 上へ動かすと拡大、下へ動かすと縮小）。画面の中央に向かって進む
+        this.zoomAround(this.controls.target.clone(), Math.pow(0.995, -dy))
+        return
+      }
       if (last.mode === 'orbit') {
         // 左ドラッグの回転と同じ感度（画面の高さ分で半回転）
         const k = Math.PI / (this.container.clientHeight || 1)
@@ -338,8 +356,12 @@ export class Viewer {
         return
       }
       // 右ドラッグ: 上下は拡大縮小（100 px で約 1.6 倍）、左右は回転（2D 表示では回さない）
-      this.zoomAround(last.pivot, Math.pow(0.995, dy))
-      if (!this.flat) this.rotateAround(last.pivot, (-dx * Math.PI) / (this.container.clientWidth || 1))
+      this.zoomAround(last.pivot, Math.pow(0.995, dy), last.fwd)
+      if (!this.flat) {
+        const angle = (-dx * Math.PI) / (this.container.clientWidth || 1)
+        this.rotateAround(last.pivot, angle)
+        last.fwd.applyAxisAngle(this.camera.up.clone().normalize(), angle) // 進む向きもカメラと一緒に回す
+      }
     })
     const end = (e: PointerEvent) => {
       if (!last || e.pointerId !== last.id) return
@@ -519,14 +541,35 @@ export class Viewer {
   }
 
   /** 点 pivot に向かって、カメラと注視点を factor 倍の距離にする（1 より小さいと近づいて拡大） */
-  private zoomAround(pivot: THREE.Vector3, factor: number) {
+  private zoomAround(pivot: THREE.Vector3, factor: number, forward?: THREE.Vector3) {
     const target = this.controls.target
-    const dist = this.camera.position.distanceTo(target)
+    const eye = this.camera.position
     const size = this.sceneSize()
-    // 近づきすぎ・遠ざかりすぎないようにする
-    const next = THREE.MathUtils.clamp(dist * factor, size * 1e-3, (size * 200) / this.perspective)
+    // 進む向き（省略なら中心の点の向き）。右ドラッグでは押したときのカーソルの向きに固定する
+    // （中心の点の向きにすると、点を通り過ぎたとたんに向きが反転し、点の周りを行ったり来たりして止まる）
+    const fwd = (forward ?? pivot.clone().sub(eye)).clone().normalize()
+    if (fwd.lengthSq() === 0) fwd.copy(target).sub(eye).normalize()
+    /** 中心の点の、進む向きに沿った奥行き（通り過ぎたら負） */
+    const ahead = pivot.clone().sub(eye).dot(fwd)
+    const floor = size * NEAR_FRACTION
+    // 中心の点までの距離を factor 倍にするだけだと、近づくほど1回に進む量が小さくなり、
+    // 図形の手前の見えない壁で止まったようになる（通り抜けられない）。
+    // 近づききったら（図形の大きさの NEAR_FRACTION まで来たら・通り過ぎたら）、そこからは一定の速さで前後に進む
+    if (ahead * factor < floor) {
+      const move = -floor * Math.log(factor) // 拡大なら前へ、縮小なら後ろへ
+      eye.addScaledVector(fwd, move)
+      target.addScaledVector(fwd, move)
+      // 注視点（回転の中心）がカメラのすぐ近く・後ろにならないよう、見ている向きの前に離しておく
+      const view = target.clone().sub(eye)
+      if (view.dot(fwd) < floor) target.copy(eye).addScaledVector(view.lengthSq() > 0 ? view.normalize() : fwd, floor)
+      this.dirty = true
+      return
+    }
+    // 遠ざかりすぎないようにする
+    const dist = eye.distanceTo(target)
+    const next = Math.min(dist * factor, (size * 200) / this.perspective)
     const f = next / dist
-    this.camera.position.sub(pivot).multiplyScalar(f).add(pivot)
+    eye.sub(pivot).multiplyScalar(f).add(pivot)
     target.sub(pivot).multiplyScalar(f).add(pivot)
     this.dirty = true
   }
