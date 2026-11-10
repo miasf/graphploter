@@ -259,7 +259,7 @@ export class Viewer {
   }
 
   /**
-   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る。
+   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る（Ctrl + 左ドラッグの見回しは操作 A でも使う）。
    * - 左ドラッグ: 平行移動（A の Shift + 左ドラッグと同じ。OrbitControls に任せる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
@@ -283,7 +283,10 @@ export class Viewer {
       'pointerdown',
       (e) => {
         this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
-        if (e.pointerType === 'touch' || this.controlMode !== 'B') {
+        // Ctrl（Mac は ⌘）+ 左ドラッグの見回しは、操作 A でも使える（A の Ctrl + 左ドラッグは平行移動だったが、
+        // 平行移動は右ドラッグ・Shift + 左ドラッグでもできるので重ならない）
+        const look = e.pointerType !== 'touch' && e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
+        if (e.pointerType === 'touch' || (this.controlMode !== 'B' && !look)) {
           // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
           const pan =
             e.pointerType !== 'touch' &&
@@ -299,8 +302,8 @@ export class Viewer {
           Math.hypot(e.clientX - prevLeft.x, e.clientY - prevLeft.y) < 8
         if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
-        if (e.button === 2) mode = 'right'
-        else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
+        if (look) mode = 'look'
+        else if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
         // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
         // 移動の速さは注視点までの距離で決まるので、カーソルの下の図形の奥行きに注視点を置く（つかんだ点がカーソルについてくる）
@@ -368,10 +371,11 @@ export class Viewer {
   }
 
   /**
-   * 画面上の点 (clientX, clientY) にある図形の点。曲面が無ければ表示範囲の箱（2D 表示なら z = 0 の平面）との交点。
-   * どれにも当たらなければ null。
-   * （以前は注視点を通る水平な面との交点にしていたが、Ctrl + ドラッグで見回した後は注視点がカメラと同じ高さにあり、
-   *   交点がカメラのすぐ近くになって、回転が「その場で首を振る」動きになっていた）
+   * 画面上の点 (clientX, clientY) にある図形の点。曲面が無ければ xy 平面（z = 0。z の表示範囲が 0 を含まなければ一番下の面）との交点。
+   * 交点が無い（上を向いている）か遠すぎる（地平線の近く）なら null。
+   * 表示範囲の箱の側面・上面は使わない（押した所によって中心が箱の壁に飛び、操作しにくいため）。
+   * 以前の「注視点を通る水平な面」は、Ctrl + ドラッグで見回した後はカメラと同じ高さになり、
+   * 交点がカメラのすぐ近くになって、回転が「その場で首を振る」動きになっていた
    */
   private pickContent(clientX: number, clientY: number): THREE.Vector3 | null {
     const ray = this.rayAt(clientX, clientY)
@@ -383,11 +387,14 @@ export class Viewer {
     for (const hit of ray.intersectObjects(meshes, false)) {
       if (inside(hit.point)) return hit.point.clone()
     }
+    // z の表示範囲が 0 を含まないなら、表示範囲の一番下の面にする（2D 表示では図形は z = 0 にある）
     const d = this.domain
-    if (!d) return null
-    if (this.flat) return ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3())
-    const box = new THREE.Box3(new THREE.Vector3(d.xmin, d.ymin, d.zmin), new THREE.Vector3(d.xmax, d.ymax, d.zmax))
-    return ray.ray.intersectBox(box, new THREE.Vector3())
+    const z0 = this.flat || !d || (d.zmin <= 0 && 0 <= d.zmax) ? 0 : d.zmin
+    const q = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -z0), new THREE.Vector3())
+    if (!q) return null
+    // 地平線の近くでは交点がはるか遠くになり、そこを中心に回すと大きく振り回される
+    const far = this.camera.position.distanceTo(this.controls.target) + 3 * this.sceneSize()
+    return q.distanceTo(this.camera.position) <= far ? q : null
   }
 
   /**
