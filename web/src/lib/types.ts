@@ -91,6 +91,14 @@ export interface RotationGroup {
   center: number[]
 }
 
+/** フォルダ: 式をまとめて、一覧で折りたためるようにする（Desmos のフォルダと同じ） */
+export interface Folder {
+  id: number
+  name: string
+  /** 折りたたんでいるか（中の式は一覧に出さないが、グラフには描く） */
+  collapsed: boolean
+}
+
 /** 全体の回転を表すグループの番号 */
 export const GLOBAL_GROUP = 0
 
@@ -157,6 +165,8 @@ export interface PlotItem extends PlotStyle {
   rotGroup?: number
   /** 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（無い・1 なら両端だけ） */
   layers?: number
+  /** 入っているフォルダの番号（無ければフォルダの外）。同じフォルダの式は、一覧で続けて並ぶ */
+  folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
 }
@@ -186,6 +196,8 @@ export interface MeshData {
   positions: Float32Array
   normals: Float32Array
   indices: Uint32Array
+  /** 粗い版の三角形の頂点番号（視点を動かしている間に描く。空なら indices をそのまま描く） */
+  lodIndices: Uint32Array
   /** 格子線用の座標（空なら positions を使う） */
   gridCoords: Float32Array
   /** 複素数の色分け: 頂点ごとの (Re w / |w|, Im w / |w|, log₂|w|)。空なら単色 */

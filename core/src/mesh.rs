@@ -32,6 +32,98 @@ pub struct Mesh {
     pub grid_coords: Vec<f32>,
     /// 複素数の色分けをするなら、頂点ごとの関数の値 w の (Re w / |w|, Im w / |w|, log₂|w|)。空なら単色
     pub complex: Vec<f32>,
+    /// 粗い版の三角形の頂点番号（頂点は同じものを使う）。視点を動かしている間は、こちらを描いて軽くする。
+    /// 三角形が少ないメッシュでは空（そのまま描く）
+    pub lod: Vec<u32>,
+}
+
+/// 三角形がこれより多いメッシュには、視点を動かしている間に描く粗い版（[`Mesh::lod`]）を作る
+pub const LOD_MIN_TRIANGLES: usize = 60_000;
+/// 粗い版の三角形の数の目安
+const LOD_TARGET_TRIANGLES: usize = 30_000;
+
+/// 三角形の向き（長さは面積の2倍）
+fn tri_normal(p: &[f32], t: [u32; 3]) -> [f64; 3] {
+    let v = |k: u32| {
+        let k = k as usize * 3;
+        [p[k] as f64, p[k + 1] as f64, p[k + 2] as f64]
+    };
+    let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+    let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+    [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// 格子でできていないメッシュ（陰関数など）の粗い版を作る（すでにあるか、三角形が少なければ何もしない）。
+///
+/// 空間を小さな立方体に区切り、同じ立方体に入る頂点を1つの頂点（最初に見つかったもの）で代表させる
+/// （頂点クラスタリング）。3つの頂点が別々の立方体に入る三角形だけが残る。
+/// 向きが大きく違う面（法線の一番大きい成分の軸と符号が違う面）は、同じ立方体の中でも別々に扱うので、
+/// 薄い板の表と裏がくっつくことは少ない
+pub fn add_cluster_lod(mesh: &mut Mesh) {
+    let tris = mesh.indices.len() / 3;
+    if !mesh.lod.is_empty() || tris <= LOD_MIN_TRIANGLES {
+        return;
+    }
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for p in mesh.positions.chunks_exact(3).filter(|p| p.iter().all(|v| v.is_finite())) {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+    }
+    let size = (0..3).map(|a| hi[a] - lo[a]).fold(0.0f32, f32::max);
+    if size <= 0.0 || size.is_nan() {
+        return;
+    }
+    let build = |cells: f32| -> Vec<u32> {
+        let scale = cells / size;
+        let mut first: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+        let rep: Vec<u32> = (0..mesh.positions.len() / 3)
+            .map(|k| {
+                let p = &mesh.positions[3 * k..3 * k + 3];
+                if !p.iter().all(|v| v.is_finite()) {
+                    return NONE;
+                }
+                let cell = |a: usize| ((p[a] - lo[a]) * scale) as u64;
+                // 法線の一番大きい成分の軸と符号（6通り）
+                let nr = mesh.normals.get(3 * k..3 * k + 3).unwrap_or(&[0.0, 0.0, 1.0]);
+                let ax = (0..3).max_by(|&a, &b| nr[a].abs().total_cmp(&nr[b].abs())).unwrap_or(2);
+                let side = (ax * 2 + (nr[ax] < 0.0) as usize) as u64;
+                let key = cell(0) | cell(1) << 16 | cell(2) << 32 | side << 48;
+                *first.entry(key).or_insert(k as u32)
+            })
+            .collect();
+        let mut out = Vec::new();
+        for t in mesh.indices.chunks_exact(3) {
+            let (a, b, c) = (rep[t[0] as usize], rep[t[1] as usize], rep[t[2] as usize]);
+            if a != b && b != c && a != c && a != NONE && b != NONE && c != NONE {
+                // 代表の頂点に置き換えると三角形が裏返ることがある。元の三角形と同じ向きにそろえる
+                // （そうしないと、裏面として暗く描かれる点々が出る）
+                if dot3(tri_normal(&mesh.positions, [a, b, c]), tri_normal(&mesh.positions, [t[0], t[1], t[2]])) < 0.0 {
+                    out.extend_from_slice(&[a, c, b]);
+                } else {
+                    out.extend_from_slice(&[a, b, c]);
+                }
+            }
+        }
+        out
+    };
+    // まず粗く作って三角形の数を見てから、目安の数になる細かさで作り直す（曲面の三角形の数は、細かさの2乗に比例する）
+    let mut cells = 40.0f32;
+    let mut lod = build(cells);
+    let got = (lod.len() / 3).max(1);
+    if got < LOD_TARGET_TRIANGLES / 2 {
+        cells = (cells * (LOD_TARGET_TRIANGLES as f32 / got as f32).sqrt()).min(200.0);
+        lod = build(cells);
+    }
+    // 粗くしても減らないメッシュ（細かい破片の集まりなど）は、そのまま描く
+    if lod.len() < mesh.indices.len() / 2 && !lod.is_empty() {
+        mesh.lod = lod;
+    }
 }
 
 /// 複素数の値をとる陽関数の表し方。色は偏角 arg f で付け、高さは次のどれか
@@ -1332,6 +1424,7 @@ pub fn merge(meshes: Vec<Mesh>, curve: bool) -> Mesh {
     let mut out = Mesh::default();
     let grid = meshes.iter().any(|m| !m.grid_coords.is_empty());
     let complex = meshes.iter().any(|m| !m.complex.is_empty());
+    let lod = meshes.iter().any(|m| !m.lod.is_empty());
     for m in meshes {
         if curve && !out.positions.is_empty() {
             out.positions.extend_from_slice(&[f32::NAN; 3]);
@@ -1356,6 +1449,11 @@ pub fn merge(meshes: Vec<Mesh>, curve: bool) -> Mesh {
         out.positions.extend_from_slice(&m.positions);
         out.normals.extend_from_slice(&m.normals);
         out.indices.extend(m.indices.iter().map(|k| k + base));
+        // 粗い版が無いメッシュは、そのままの三角形を使う
+        if lod {
+            let src = if m.lod.is_empty() { &m.indices } else { &m.lod };
+            out.lod.extend(src.iter().map(|k| k + base));
+        }
     }
     out
 }
@@ -1613,9 +1711,37 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     }
     // 曲面ごとに m × m 個の点が並んでいる。立体は6枚ずつ
     let per = if shape.solid { 6 * m * m } else { m * m };
+    // 粗い版: 格子の点を stride 個おきに使う（最後の行・列は必ず入れるので、面の端は変わらない）
+    let quads = count / (m * m) * n * n;
+    let stride = if 2 * quads > LOD_MIN_TRIANGLES {
+        ((2 * quads) as f64 / LOD_TARGET_TRIANGLES as f64).sqrt().ceil() as usize
+    } else {
+        0
+    };
+    let picks: Vec<usize> = if stride > 1 {
+        let mut v: Vec<usize> = (0..n).step_by(stride).collect();
+        v.push(n);
+        v
+    } else {
+        Vec::new()
+    };
     for start in (0..count).step_by(per) {
         let first = mesh.indices.len();
+        let lod_first = mesh.lod.len();
         for base in (start..start + per).step_by(m * m) {
+            for js in picks.windows(2) {
+                for is in picks.windows(2) {
+                    let a = index_of[base + js[0] * m + is[0]];
+                    let b = index_of[base + js[0] * m + is[1]];
+                    let c = index_of[base + js[1] * m + is[0]];
+                    let e = index_of[base + js[1] * m + is[1]];
+                    for tri in [[a, b, e], [a, e, c]] {
+                        if !tri.contains(&NONE) {
+                            mesh.lod.extend_from_slice(&tri);
+                        }
+                    }
+                }
+            }
             for j in 0..n {
                 for i in 0..n {
                     let a = index_of[base + j * m + i];
@@ -1633,6 +1759,9 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
         // 立体: 面で囲まれた体積（向き付き）が負なら裏返っている（写像や射影が向きを変えた）ので、三角形の向きを直す
         if shape.solid && signed_volume(&mesh, first) < 0.0 {
             for t in mesh.indices[first..].chunks_exact_mut(3) {
+                t.swap(1, 2);
+            }
+            for t in mesh.lod[lod_first..].chunks_exact_mut(3) {
                 t.swap(1, 2);
             }
         }
@@ -2113,6 +2242,48 @@ mod tests {
         let per = shape.grid.as_ref().unwrap().0.pow(2);
         assert_eq!(shape.points.len(), 54 * per * 4);
         assert!(shape.points.chunks_exact(per * 4).any(|f| f.chunks_exact(4).all(|p| p[2] == 0.0 && p[3] == 0.0)));
+    }
+
+    #[test]
+    fn coarse_versions() {
+        // 細かい格子の曲面: 粗い版は点を間引いた格子で、端は同じ
+        let torus: Vec<Program> =
+            ["(1.5 + 0.5cos(v)) cos(u)", "(1.5 + 0.5cos(v)) sin(u)", "0.5sin(v)"].iter().map(|s| prog(s, &["u", "v"])).collect();
+        let shape = parametric_surface_nd(&[torus], (0.0, 6.0), (0.0, 6.0), 300);
+        let m = project(&shape, &View::identity(3), dom());
+        assert_eq!(m.indices.len() / 3, 180_000);
+        let lod = m.lod.len() / 3;
+        assert!(lod > 10_000 && lod <= 2 * LOD_TARGET_TRIANGLES, "{lod}");
+        assert!(m.lod.iter().all(|&k| (k as usize) < m.positions.len() / 3));
+        // 四隅の点は粗い版にも入っている
+        for corner in [0, 300, 300 * 301, 301 * 301 - 1] {
+            assert!(m.lod.contains(&corner));
+        }
+        // 小さいメッシュには作らない
+        let small = project(&parametric_surface_nd(&[progs3(["u", "v", "0"], &["u", "v"])], (0.0, 1.0), (0.0, 1.0), 50), &View::identity(3), dom());
+        assert!(small.lod.is_empty());
+
+        // 陰関数（格子でないメッシュ）: 頂点をまとめた粗い版。球の表面から離れない
+        let mut sphere = implicit_surface(&prog("x^2 + y^2 + z^2 - 0.64", &AXES), dom(), 160);
+        let tris = sphere.indices.len() / 3;
+        assert!(tris > LOD_MIN_TRIANGLES);
+        add_cluster_lod(&mut sphere);
+        let lod = sphere.lod.len() / 3;
+        assert!(lod > 5_000 && lod < tris / 2, "{lod} / {tris}");
+        // 粗い版の三角形は裏返っていない（球の中心から見た向きが、元の三角形と同じ）
+        let v = |k: u32| {
+            let k = k as usize * 3;
+            [sphere.positions[k] as f64, sphere.positions[k + 1] as f64, sphere.positions[k + 2] as f64]
+        };
+        let side = |t: &[u32]| dot3(tri_normal(&sphere.positions, [t[0], t[1], t[2]]), v(t[0])).signum();
+        let full = side(&sphere.indices[..3]);
+        let flipped = sphere.lod.chunks_exact(3).filter(|t| side(t) != full).count();
+        assert!(flipped * 200 < lod, "{flipped} / {lod}");
+        // まとめても、粗い版の番号はずれない
+        let n0 = sphere.positions.len() as u32 / 3;
+        let merged = merge(vec![small, sphere], false);
+        assert!(!merged.lod.is_empty() && merged.lod.iter().all(|&k| k < merged.positions.len() as u32 / 3));
+        assert!(merged.lod.len() < merged.indices.len() && n0 > 0);
     }
 
     /// 速さの目安を測る    /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`

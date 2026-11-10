@@ -16,11 +16,31 @@ export interface Sample {
   /** 必要な次元（足りなければ自動で増やす） */
   dims?: number
   items: SampleItem[]
-  /** 式を追加するだけでなく、表示範囲や回転も設定する特別な例 */
-  special?: 'tesseract' | 'tesseractFaces' | 'cube5Faces'
+  /** 式を追加するだけでなく、次元・回転・表示範囲も設定する例（今ある式は非表示にする） */
+  view?: SampleView
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
   play?: string
 }
+
+/** サンプルと一緒に設定する見え方 */
+export interface SampleView {
+  /** 次元 */
+  dims: number
+  /** 回転角（度）。座標の組の番号（(0,1), (0,2), (0,3), (0,4), (1,2), … の順）→ 角度 */
+  rotation?: Record<number, number>
+  /** 4次元の遠近感（0〜100） */
+  perspective?: number
+  /** 表示範囲（−half 〜 half） */
+  half: number
+  /** 再生する回転（座標の組の番号） */
+  play?: number
+}
+
+// 回転の組の番号（5次元までの回転。params.ts の pairs と同じ並び）
+const XW = 2
+const YZ = 4
+const YW2 = 6
+const ZW = 7
 
 export interface SampleGroup {
   title: string
@@ -28,6 +48,21 @@ export interface SampleGroup {
 }
 
 const TWO_PI = ['0', '2\\pi'] as [string, string]
+
+/** n 次元の立方体 (t₁, …, tₙ)（各 −1〜1）。媒介変数が n 個なので、面をまとめて描く */
+function cube(n: number, color: string, opacity: number): SampleItem {
+  const vars = Array.from({ length: n }, (_, k) => k + 1)
+  return {
+    latex: `\\left(${vars.map((k) => `t_${k}`).join(',')}\\right)`,
+    options: {
+      color,
+      opacity,
+      solidSeen: true,
+      grid: { enabled: true, x: 1, y: 1, z: 0, u: 1, v: 1, w: 1, width: 1.5 },
+      ranges: Object.fromEntries(vars.map((k) => [`t${k}`, ['-1', '1'] as [string, string]])),
+    },
+  }
+}
 
 export const SAMPLE_GROUPS: SampleGroup[] = [
   {
@@ -186,13 +221,125 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           },
         ],
       },
-      { label: '正八胞体（4次元の立方体）の回転', items: [], special: 'tesseract' },
+      {
+        label: '正八胞体（4次元の立方体）の回転',
+        // 辺 32 本: 1つの座標を t で動かし、残りの3つは ±1 のすべての組み合わせ（リスト）
+        items: [0, 1, 2, 3].map((k) => ({
+          latex: `\\left(${[0, 1, 2, 3].map((j) => (j === k ? 't' : '\\left[-1,1\\right]')).join(',')}\\right)`,
+          options: { color: '#2d70b3', lineWidth: 2.5, ranges: { t: ['-1', '1'] as [string, string] } },
+        })),
+        view: { dims: 4, rotation: { [XW]: 20, [YZ]: 20 }, perspective: 40, half: 2.5, play: XW },
+      },
+    ],
+  },
+  {
+    title: '多次元の図形・関数',
+    samples: [
+      {
+        label: 'クラインの壺（4次元では自分と交わらない）',
+        items: [
+          {
+            latex:
+              '\\left(\\left(2+\\cos v\\right)\\cos u,\\left(2+\\cos v\\right)\\sin u,\\sin v\\cos\\frac{u}{2},\\sin v\\sin\\frac{u}{2}\\right)',
+            options: { color: '#1a9ea0', opacity: 0.75, grid: { enabled: true, x: 1, y: 1, z: 0, u: 24, v: 12, w: 12, width: 1 } },
+          },
+        ],
+        view: { dims: 4, rotation: { [ZW]: 0, [YZ]: 25 }, perspective: 30, half: 4, play: ZW },
+      },
+      {
+        label: 'ホップのトーラス（3次元球面 S³ の中の入れ子のトーラス）',
+        // S³ の点 (cos a·e^{iu}, sin a·e^{iv})。a を変えると、S³ を埋めつくすトーラスの族になる
+        items: [
+          ['0.35', '#c74440'],
+          ['0.785', '#388c46'],
+          ['1.2', '#2d70b3'],
+        ].map(([a, color]) => ({
+          latex: `\\left(\\cos\\left(${a}\\right)\\cos u,\\cos\\left(${a}\\right)\\sin u,\\sin\\left(${a}\\right)\\cos v,\\sin\\left(${a}\\right)\\sin v\\right)`,
+          options: { color, opacity: 0.6, grid: { enabled: true, x: 1, y: 1, z: 0, u: 16, v: 16, w: 16, width: 1 } },
+        })),
+        view: { dims: 4, rotation: { [XW]: 0, [YZ]: 20 }, perspective: 55, half: 2.2, play: XW },
+      },
+      {
+        label: 'リーマン面 √z（複素関数 z = w² のグラフ。4次元の曲面）',
+        // w = u + iv として (Re w², Im w², Re w, Im w)。3次元では自分と交わって見えるが、4次元では交わらない
+        items: [
+          {
+            latex: '\\left(u^2-v^2,2uv,u,v\\right)',
+            options: {
+              color: '#6042a6',
+              opacity: 0.8,
+              grid: { enabled: true, x: 1, y: 1, z: 0, u: 12, v: 12, w: 12, width: 1 },
+              ranges: { u: ['-1.5', '1.5'], v: ['-1.5', '1.5'] },
+            },
+          },
+        ],
+        view: { dims: 4, rotation: { [ZW]: 0, [YZ]: 15 }, perspective: 0, half: 2.5, play: ZW },
+      },
+      {
+        label: 'フェルマー曲面 z₁³ + z₂³ = 1（カラビ・ヤウ多様体の絵でおなじみの形。9 枚）',
+        // z₁ = e^{2πik₁/3} cos(u + iv)^{2/3}, z₂ = e^{2πik₂/3} sin(u + iv)^{2/3} の (Re z₁, Re z₂, Im z₁, Im z₂)。
+        // k₁, k₂ = 0, 1, 2 の 9 枚で1つの曲面になる
+        items: [0, 1, 2].flatMap((k1) =>
+          [0, 1, 2].map((k2) => {
+            const phase = (k: number) => (k === 0 ? '' : `e^{\\frac{${2 * k}\\pi i}{3}}`)
+            const z1 = `${phase(k1)}\\left(\\cos\\left(u+iv\\right)\\right)^{\\frac{2}{3}}`
+            const z2 = `${phase(k2)}\\left(\\sin\\left(u+iv\\right)\\right)^{\\frac{2}{3}}`
+            const re = (z: string) => `\\operatorname{Re}\\left(${z}\\right)`
+            const im = (z: string) => `\\operatorname{Im}\\left(${z}\\right)`
+            return {
+              latex: `\\left(${re(z1)},${re(z2)},${im(z1)},${im(z2)}\\right)`,
+              options: {
+                color: ['#c74440', '#fa7e19', '#388c46', '#1a9ea0', '#2d70b3', '#6042a6', '#c74440', '#fa7e19', '#388c46'][(k1 * 3 + k2 * 4) % 9],
+                grid: { enabled: true, x: 1, y: 1, z: 0, u: 8, v: 8, w: 8, width: 1 },
+                ranges: { u: ['0', '\\frac{\\pi}{2}'], v: ['-1', '1'] } as Record<string, [string, string]>,
+              },
+            }
+          }),
+        ),
+        view: { dims: 4, rotation: { [ZW]: 35, [YZ]: 20 }, perspective: 0, half: 2, play: ZW },
+      },
+      {
+        label: '3変数の関数 w = sin x + sin y + sin z の等値面（w を動かす）',
+        dims: 4,
+        items: [{ latex: 'w=\\sin x+\\sin y+\\sin z', options: { color: '#fa7e19' } }],
+      },
+      {
+        label: '5次元の超球の断面（w と w₂ を動かす）',
+        dims: 5,
+        items: [{ latex: 'x^2+y^2+z^2+w^2+w_2^2=9', options: { color: '#2d70b3' } }],
+      },
     ],
   },
   {
     title: '多変数（媒介変数4つ以上）',
     samples: [
-      { label: '4次元の立方体の面 24 枚 (t₁, t₂, t₃, t₄) の回転', items: [], special: 'tesseractFaces' },
+      {
+        label: '4次元の立方体の面 24 枚 (t₁, t₂, t₃, t₄) の回転',
+        items: [cube(4, '#2d70b3', 0.3)],
+        view: { dims: 4, rotation: { [XW]: 20, [YZ]: 20 }, perspective: 40, half: 2.5, play: XW },
+      },
+      {
+        label: '5次元の立方体の面 80 枚 (t₁, …, t₅) の回転',
+        items: [cube(5, '#6042a6', 0.2)],
+        view: { dims: 5, rotation: { [XW]: 20, [YZ]: 20, [YW2]: 35 }, perspective: 40, half: 3.5, play: XW },
+      },
+      {
+        label: 'デュオシリンダー（円板 × 円板。半径2つと角度2つ）',
+        // (t₃ e^{i t₁}, t₄ e^{i t₂}): 2つの円板の直積。表面は2つの「中身の詰まったトーラス」でできている
+        items: [
+          {
+            latex: '\\left(t_3\\cos t_1,t_3\\sin t_1,t_4\\cos t_2,t_4\\sin t_2\\right)',
+            options: {
+              color: '#fa7e19',
+              opacity: 0.35,
+              solidSeen: true,
+              grid: { enabled: true, x: 1, y: 1, z: 0, u: 8, v: 8, w: 8, width: 1 },
+              ranges: { t1: TWO_PI, t2: TWO_PI, t3: ['0', '1'], t4: ['0', '1'] },
+            },
+          },
+        ],
+        view: { dims: 4, rotation: { [XW]: 30, [YZ]: 25 }, perspective: 50, half: 2, play: XW },
+      },
       {
         label: '4次元の球の中身（半径 t₁ と3つの角度）',
         dims: 4,
@@ -210,7 +357,6 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           },
         ],
       },
-      { label: '5次元の立方体の面 80 枚 (t₁, …, t₅) の回転', items: [], special: 'cube5Faces' },
     ],
   },
 ]

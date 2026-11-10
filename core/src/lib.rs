@@ -120,6 +120,11 @@ impl MeshResult {
     pub fn indices(&self) -> Vec<u32> {
         self.inner.indices.clone()
     }
+    /// 粗い版の三角形の頂点番号（Uint32Array）。視点を動かしている間に描く。空なら、そのまま描く
+    #[wasm_bindgen(getter)]
+    pub fn lod_indices(&self) -> Vec<u32> {
+        self.inner.lod.clone()
+    }
 }
 
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
@@ -282,7 +287,7 @@ pub fn plot(
         view: space.view(perspective),
     };
     let built = build(&plot, &ctx).map_err(|e| JsError::new(&e))?;
-    let inner = match &built.shape {
+    let mut inner = match &built.shape {
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
             if flat {
@@ -292,6 +297,9 @@ pub fn plot(
         }
         None => built.inner,
     };
+    if !built.curve {
+        mesh::add_cluster_lod(&mut inner);
+    }
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
     let explicit_used = (built.shape.is_some() && built.rotated_explicit).then(|| plot.used_params());
     Ok(MeshResult {

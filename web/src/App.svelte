@@ -7,9 +7,9 @@
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, latexName, prettyName, resizeRotation, resizeSpace, sliderStep, snapToStep } from './lib/params'
+  import { complexLatex, coordName, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
   import { setKeyboardDims } from './lib/mathSetup'
-  import { SAMPLE_GROUPS, type Sample } from './lib/samples'
+  import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
@@ -18,6 +18,7 @@
     CutRequest,
     CutStyle,
     Domain,
+    Folder,
     GridStyle,
     ParamRanges,
     ParamValue,
@@ -129,8 +130,10 @@
         vertical: it.vertical,
         slider: it.slider,
         rotGroup: it.rotGroup,
+        folder: it.folder,
       })),
       groups,
+      folders,
       domain,
       resolution,
       implicitResolution,
@@ -155,6 +158,9 @@
     if (s.cut) cut = s.cut
     flat = s.flat ?? false
     groups = s.groups ?? []
+    folders = s.folders ?? []
+    nextFolderId = Math.max(0, ...folders.map((f) => f.id)) + 1
+    normalizeFolders()
     if (s.controlMode) controlMode = s.controlMode
     nextGroupId = Math.max(0, ...groups.map((g) => g.id)) + 1
   }
@@ -599,7 +605,7 @@
   /** エンター: その式のすぐ下に空の式を足して、そこに入力を始める */
   async function insertAfter(item: PlotItem) {
     const k = items.indexOf(item) + 1
-    items.splice(k, 0, newItem('', { autofocus: true }))
+    items.splice(k, 0, newItem('', { autofocus: true, folder: item.folder }))
     await tick()
     items[k].autofocus = false // 入力欄が作られて入力が始まったら、もう要らない
   }
@@ -619,21 +625,112 @@
       dragId = null
       return
     }
-    // 指（マウス）の高さが、ほかの式の真ん中より上なら、その式の前に入れる
-    const rows = Array.from(listEl.children) as HTMLElement[]
+    // 指（マウス）の高さが、ほかの式の真ん中より上なら、その式の前に入れる（下まで行ったら最後に入れる）。
+    // 一覧には、フォルダの見出しや、折りたたまれて出ていない式もあるので、行に付けた式の番号で探す
     const from = items.indexOf(item)
-    let to = items.length - 1
-    for (let k = 0; k < rows.length; k++) {
-      const r = rows[k].getBoundingClientRect()
+    let to = items.length
+    for (const row of listEl.querySelectorAll<HTMLElement>('li[data-item-id]')) {
+      const r = row.getBoundingClientRect()
       if (e.clientY < r.top + r.height / 2) {
-        to = k > from ? k - 1 : k
+        to = items.findIndex((it) => it.id === Number(row.dataset.itemId))
         break
       }
     }
-    if (to !== from) {
-      items.splice(from, 1)
-      items.splice(to, 0, item)
+    if (to > from) to-- // 自分を抜いた後の位置
+    if (to < 0 || to === from) return
+    items.splice(from, 1)
+    items.splice(to, 0, item)
+    // フォルダ: 同じフォルダの式の隣にいる間は、そのまま。2つの式が同じフォルダなら、その間に入るとそのフォルダに入る。
+    // それ以外はフォルダの外（こうすると、同じフォルダの式はいつも続けて並ぶ）
+    const prev = items[to - 1]?.folder
+    const next = items[to + 1]?.folder
+    if (!(item.folder && (prev === item.folder || next === item.folder))) {
+      item.folder = prev && prev === next ? prev : undefined
     }
+  }
+
+  // ---- フォルダ（式をまとめて折りたたむ）----
+
+  let folders = $state<Folder[]>([])
+  let nextFolderId = 1
+
+  /** 一覧の1行: フォルダの見出しか、式 */
+  type Row =
+    | { kind: 'folder'; folder: Folder; members: PlotItem[] }
+    | { kind: 'item'; item: PlotItem; index: number }
+
+  /**
+   * 一覧に並べる行。フォルダの見出しは、そのフォルダの最初の式の前に出す。
+   * 折りたたんだフォルダの式は出さない（グラフには描く）。空のフォルダは最後に出す
+   */
+  const rows = $derived.by(() => {
+    const out: Row[] = []
+    const seen = new Set<number>()
+    items.forEach((item, index) => {
+      const f = item.folder ? folders.find((f) => f.id === item.folder) : undefined
+      if (f && !seen.has(f.id)) {
+        seen.add(f.id)
+        out.push({ kind: 'folder', folder: f, members: items.filter((it) => it.folder === f.id) })
+      }
+      if (!f || !f.collapsed) out.push({ kind: 'item', item, index })
+    })
+    for (const f of folders) if (!seen.has(f.id)) out.push({ kind: 'folder', folder: f, members: [] })
+    return out
+  })
+
+  function addFolder(name = `フォルダ ${folders.length + 1}`, collapsed = false): Folder {
+    folders.push({ id: nextFolderId++, name, collapsed })
+    return folders[folders.length - 1]
+  }
+
+  /** 同じフォルダの式が続けて並ぶようにする（保存データを読み込んだとき）。無いフォルダの番号は消す */
+  function normalizeFolders() {
+    const ids = new Set(folders.map((f) => f.id))
+    for (const it of items) if (it.folder && !ids.has(it.folder)) it.folder = undefined
+    const out: PlotItem[] = []
+    const done = new Set<number>()
+    for (const it of items) {
+      if (!it.folder) out.push(it)
+      else if (!done.has(it.folder)) {
+        done.add(it.folder)
+        out.push(...items.filter((x) => x.folder === it.folder))
+      }
+    }
+    items = out
+  }
+
+  /** 式をフォルダ fid に入れる（0 なら外に出す、'new' なら新しいフォルダを作って入れる） */
+  function setItemFolder(item: PlotItem, fid: number | 'new') {
+    const target = fid === 'new' ? addFolder().id : fid
+    if ((item.folder ?? 0) === target) return
+    const old = item.folder
+    let k = items.indexOf(item)
+    items.splice(k, 1)
+    // 入れ先のフォルダの最後の式の後ろへ。入れ先が空（または外に出す）なら、元のフォルダの最後の式の後ろへ
+    const lastOf = (f: number | undefined) => (f ? items.findLastIndex((it) => it.folder === f) : -1)
+    const after = lastOf(target) >= 0 ? lastOf(target) : lastOf(old)
+    if (after >= 0) k = after + 1
+    items.splice(k, 0, item)
+    items[k].folder = target || undefined
+  }
+
+  /** フォルダを消す。withItems なら中の式も消す。そうでなければ式は残す（フォルダの解除） */
+  function removeFolder(folder: Folder, withItems: boolean) {
+    const members = items.filter((it) => it.folder === folder.id)
+    if (withItems) {
+      if (members.length > 0 && !confirm(`フォルダ「${folder.name}」と、中の ${members.length} 個の式を削除します。よろしいですか？`)) return
+      for (const it of members) removeItem(it)
+    } else {
+      for (const it of members) it.folder = undefined
+    }
+    folders.splice(folders.indexOf(folder), 1)
+  }
+
+  /** フォルダの中の式をまとめて表示・非表示にする（1つでも表示中なら、全部を非表示にする） */
+  function toggleFolderVisible(members: PlotItem[]) {
+    const plots = members.filter((it) => !it.param)
+    const show = !plots.some((it) => it.visible)
+    for (const it of plots) if (it.visible !== show) toggle(it)
   }
 
   function removeItem(item: PlotItem) {
@@ -645,7 +742,7 @@
   /** 「a のスライダーを追加」: その式のすぐ上に a = 1 の行を足す */
   function addSlider(item: PlotItem, name: string) {
     const k = items.indexOf(item)
-    items.splice(k, 0, newItem(`${name}=1`))
+    items.splice(k, 0, newItem(`${name}=1`, { folder: item.folder }))
     schedule(items[k], 0) // items[k] は Svelte の状態に入ったもの（元のオブジェクトではない）
   }
 
@@ -926,29 +1023,33 @@
 
   // ---- 例の読み込み ----
 
-  /**
-   * 正八胞体（4次元の立方体）の辺 32 本を、4次元の遠近法と xw 平面の回転の再生つきで表示する。
-   * ネットでよく見る「内側の立方体が外へ出てきて裏返る」動き
-   */
   /** サンプルを一覧の最後に追加する（今ある式は消さない） */
   async function addSample(sample: Sample) {
-    if (sample.special) {
-      loadTesseract(sample.special === 'tesseractFaces' ? 4 : sample.special === 'cube5Faces' ? 5 : 0)
-      return
+    const view = sample.view
+    if (view) {
+      // 次元・回転・表示範囲を変える例: 今ある式は非表示にする（見え方が変わってしまうため）
+      for (const it of items) {
+        if (!it.visible) continue
+        it.visible = false
+        viewer?.setStyle(it.id, it)
+      }
     }
     // 4次元の例などは、次元が足りなければ増やす
-    if (sample.dims && space.dims < sample.dims) setLayout(resizeSpace(space, sample.dims))
+    if (!view && sample.dims && space.dims < sample.dims) setLayout(resizeSpace(space, sample.dims))
     // 空の式が1つだけなら、それはサンプルで置き換える
     if (items.length === 1 && items[0].latex === '') {
       viewer?.removePlot(items[0].id)
       items.splice(0, 1)
     }
     const defined = new Set(items.map((it) => it.param?.name ?? latexParamName(it.latex)))
-    for (const si of sample.items) {
-      if (si.param && defined.has(si.param)) continue // 同じ名前のパラメータがすでにある
-      items.push(newItem(si.latex, si.options ?? {}))
-      schedule(items[items.length - 1], 0)
+    const adding = sample.items.filter((si) => !(si.param && defined.has(si.param))) // 同じ名前のパラメータがすでにあれば足さない
+    // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
+    const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4).id : undefined
+    for (const si of adding) {
+      items.push(newItem(si.latex, { ...si.options, folder }))
+      if (!view) schedule(items[items.length - 1], 0)
     }
+    if (view) applyView(view)
     // パラメータを再生する例
     if (sample.play) {
       const p = items.find((it) => (it.param?.name ?? latexParamName(it.latex)) === sample.play)
@@ -964,49 +1065,14 @@
     return /^([a-zA-Z])\s*=/.exec(latex)?.[1]
   }
 
-  /**
-   * `faces` が 4 か 5 なら、辺の代わりに、媒介変数がその数の式 (t₁, t₂, …) 1つで、
-   * その次元の立方体の面（4次元なら 24 枚、5次元なら 80 枚）を描く
-   */
-  function loadTesseract(faces: 0 | 4 | 5 = 0) {
-    for (const it of items) {
-      it.visible = false
-      viewer?.setStyle(it.id, it)
-    }
-    const dims = faces || 4
-    const vars = Array.from({ length: dims }, (_, k) => k + 1)
-    if (faces) {
-      items.push(
-        newItem(`\\left(${vars.map((k) => `t_${k}`).join(',')}\\right)`, {
-          color: faces === 5 ? '#6042a6' : '#2d70b3',
-          opacity: faces === 5 ? 0.2 : 0.3,
-          solidSeen: true,
-          grid: { enabled: true, x: 1, y: 1, z: 0, u: 1, v: 1, w: 1, width: 1.5 },
-          ranges: Object.fromEntries(vars.map((k) => [`t${k}`, ['-1', '1']])),
-        }),
-      )
-    }
-    const edge = (k: number) =>
-      '\\left(' +
-      [0, 1, 2, 3].map((j) => (j === k ? 't' : '\\left[-1,1\\right]')).join(',') +
-      '\\right)'
-    for (let k = 0; k < (faces ? 0 : 4); k++) {
-      items.push(
-        newItem(edge(k), {
-          color: '#2d70b3',
-          lineWidth: 2.5,
-          ranges: { t: ['-1', '1'], u: ['0', '2\\pi'], v: ['0', '2\\pi'] },
-        }),
-      )
-    }
-    const rotation = Array(10).fill(0)
-    rotation[2] = 20 // xw
-    rotation[4] = 20 // yz（少し斜めから見る）
-    if (dims === 5) rotation[6] = 35 // yw₂（5次元目の方向にも傾ける）
+  /** サンプルの見え方（次元・回転・4次元の遠近感・表示範囲・回転の再生）にして、すべて計算し直す */
+  function applyView(view: SampleView) {
+    const dims = view.dims
     // グループの回転も、次元に合わせて作り直す
     if (dims !== space.dims) {
       groups = groups.map((g) => ({ ...g, ...resizeRotation(g.rotation, g.center, space.dims, dims) }))
     }
+    const rotation = pairs(rotDims(dims)).map((_, k) => view.rotation?.[k] ?? 0)
     space = {
       ...space,
       dims,
@@ -1014,16 +1080,19 @@
       slice: Array(dims).fill(0),
       ranges: Array(dims).fill(null),
       rotation,
-      center: Array(5).fill(0),
-      perspective: 40,
+      center: Array(rotDims(dims)).fill(0),
+      perspective: view.perspective ?? 0,
     }
-    // 図形（−1〜1）が大きく見えるよう、表示範囲を狭めて視点もリセットする
-    const half = dims === 5 ? 3.5 : 2.5
-    domain = { xmin: -half, xmax: half, ymin: -half, ymax: half, zmin: -half, zmax: half }
+    // 図形が大きく見えるよう、表示範囲を合わせて視点もリセットする
+    const h = view.half
+    domain = { xmin: -h, xmax: h, ymin: -h, ymax: h, zmin: -h, zmax: h }
     domainError = ''
     viewer?.setDomain(domain, true)
+    updateSpaceRangeErrors()
     replotAll(0)
-    if (!(playing[GLOBAL_GROUP] ?? []).includes(2)) togglePlay(GLOBAL_GROUP, 2) // xw の回転を再生
+    // 全体の回転の再生は、この例のものだけにする
+    for (const k of [...(playing[GLOBAL_GROUP] ?? [])]) if (k !== view.play) togglePlay(GLOBAL_GROUP, k)
+    if (view.play !== undefined && !(playing[GLOBAL_GROUP] ?? []).includes(view.play)) togglePlay(GLOBAL_GROUP, view.play)
   }
 
   /** パラメータのスライダーの設定を変えたとき。範囲で重ねる設定が変われば、それを使う式を計算し直す */
@@ -1136,7 +1205,29 @@
     <div class="panel-body">
 
       <ul class="list" bind:this={listEl}>
-        {#each items as item, i (item.id)}
+        {#each rows as row (row.kind === 'folder' ? `f${row.folder.id}` : row.item.id)}
+          {#if row.kind === 'folder'}
+            {@const f = row.folder}
+            {@const errors = row.members.filter((it) => it.error).length}
+            {@const shown = row.members.some((it) => !it.param && it.visible)}
+            <li class="folder" class:collapsed={f.collapsed}>
+              <button class="fold" aria-expanded={!f.collapsed} aria-label={f.collapsed ? 'フォルダを開く' : 'フォルダを折りたたむ'}
+                title={f.collapsed ? '開く' : '折りたたむ'} onclick={() => (f.collapsed = !f.collapsed)}>{f.collapsed ? '▸' : '▾'}</button>
+              <input class="folder-name" value={f.name} aria-label="フォルダの名前"
+                onchange={(e) => (f.name = e.currentTarget.value.trim() || f.name)} />
+              <span class="folder-count" class:has-error={errors > 0}
+                >{row.members.length} 個{errors > 0 ? `（エラー ${errors}）` : ''}</span>
+              <button class="folder-btn" title={shown ? '中の式をまとめて非表示にする' : '中の式をまとめて表示する'}
+                aria-label={shown ? '中の式をまとめて非表示にする' : '中の式をまとめて表示する'}
+                onclick={() => toggleFolderVisible(row.members)}>{shown ? '●' : '○'}</button>
+              <button class="folder-btn" title="フォルダを解除（式は残す）" aria-label="フォルダを解除（式は残す）"
+                onclick={() => removeFolder(f, false)}>⇱</button>
+              <button class="folder-btn" title="フォルダごと削除" aria-label="フォルダごと削除"
+                onclick={() => removeFolder(f, true)}>×</button>
+            </li>
+          {:else}
+            {@const item = row.item}
+            {@const i = row.index}
           <ExpressionItem
             {item}
             index={i}
@@ -1176,10 +1267,16 @@
             onPlayRot={(k) => togglePlay(groupIdOf(item), k)}
             onGroup={(g) => setItemGroup(item, g)}
             onOpenRotation={() => openRotation(groupIdOf(item))}
+            {folders}
+            onFolder={(fid) => setItemFolder(item, fid)}
           />
+          {/if}
         {/each}
       </ul>
-      <button class="add" onclick={addItem}>＋ 式を追加</button>
+      <div class="add-row">
+        <button class="add" onclick={addItem}>＋ 式を追加</button>
+        <button class="add" onclick={() => addFolder()}>＋ フォルダ</button>
+      </div>
       <details class="samples" open>
         <summary>サンプル（タップで追加）</summary>
         {#each SAMPLE_GROUPS as group (group.title)}
@@ -1634,10 +1731,68 @@
     margin: 0;
     padding: 0;
   }
+  .add-row {
+    display: flex;
+    gap: 8px;
+    margin: 8px 16px;
+  }
+  .add-row .add:last-child {
+    flex: 0 0 auto;
+    padding: 8px 14px;
+  }
+  .folder {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px 4px 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--gutter);
+  }
+  .fold,
+  .folder-btn {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--muted);
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .fold:hover,
+  .folder-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .folder-name {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: none;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .folder-name:hover,
+  .folder-name:focus {
+    border-color: var(--border-strong);
+    background: var(--bg);
+    outline: none;
+  }
+  .folder-count {
+    flex: none;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .folder-count.has-error {
+    color: var(--error);
+  }
   .add {
     display: block;
-    width: calc(100% - 32px);
-    margin: 8px 16px;
+    flex: 1;
     padding: 8px;
     border: 1px dashed var(--border-strong);
     border-radius: 8px;
