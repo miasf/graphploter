@@ -20,6 +20,8 @@ export const SHORTCUTS: Record<string, string> = {
     [
       'sinc', 'gammaP', 'gammaQ', 'loggamma', 'lngamma', 'digamma', 'polygamma', 'polylog',
       'expIntegralEi', 'expIntegralE', 'logIntegral', 'sinIntegral', 'cosIntegral', 'sinhIntegral', 'coshIntegral',
+      // 逆双曲線関数と、逆三角関数の短い名前（"arcsinh" が「arc sinh」、"asin" が「a sin」にならないように）
+      'arcsinh', 'arccosh', 'arctanh', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh',
     ].map((f) => [f, `\\operatorname{${f}}`]),
   ),
   pi: '\\pi',
