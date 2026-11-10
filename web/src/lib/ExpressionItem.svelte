@@ -62,6 +62,8 @@
     rotPlaying: number[]
     onRotate: (rotation: number[], center: number[]) => void
     onPlayRot: (k: number) => void
+    /** 回転の再生を止める（リセットしたとき） */
+    onStopRot: (ks: number[]) => void
     /** グループを変える（'new' ならこの式だけの新しいグループ） */
     onGroup: (gid: number | 'new') => void
     /** 設定の「回転」でグループを開く */
@@ -107,6 +109,7 @@
     rotPlaying,
     onRotate,
     onPlayRot,
+    onStopRot,
     onGroup,
     onOpenRotation,
     folders,
@@ -583,7 +586,7 @@
               : `「${groupName}」の回転で描いています。同じグループを選んだ式は一緒に回ります（同期）。`}
             <button class="link" onclick={onOpenRotation}>まとめて設定</button>
           </p>
-          <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} />
+          <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} onStop={onStopRot} />
         {/if}
       </div>
     {/if}

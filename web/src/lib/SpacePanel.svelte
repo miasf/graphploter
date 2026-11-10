@@ -15,8 +15,14 @@
     rangeErrors: Record<number, string>
     /** 「a のスライダーを追加」を押したとき */
     onAddSlider: (name: string) => void
+    /** 断面の値を自動で動かしている座標の番号 */
+    playing: number[]
+    /** 座標 k の断面の値の再生を始める・止める */
+    onPlaySlice: (k: number) => void
+    /** 座標 k の断面の値を 0 に戻す（再生も止める） */
+    onResetSlice: (k: number) => void
   }
-  let { space, onLayout, onSlice, rangeErrors, onAddSlider }: Props = $props()
+  let { space, onLayout, onSlice, rangeErrors, onAddSlider, playing, onPlaySlice, onResetSlice }: Props = $props()
 
   const ROLES = ['横', '奥', '縦'] as const
   const step = $derived(niceStep(space.sliceMax - space.sliceMin, 200))
@@ -131,6 +137,23 @@
             onChange={(v) => onSlice(k, v)}
           />
         </span>
+        <span class="buttons">
+          <button
+            class="mini"
+            class:on={playing.includes(k)}
+            onclick={() => onPlaySlice(k)}
+            aria-label="{coordName(k)} の値を{playing.includes(k) ? '止める' : '自動で動かす'}"
+            title={playing.includes(k) ? '止める' : '値を自動で動かす（最小値から最大値まで 4 秒）'}
+            >{playing.includes(k) ? '❚❚' : '▶'}</button
+          >
+          <button
+            class="mini"
+            disabled={space.slice[k] === 0 && !playing.includes(k)}
+            onclick={() => onResetSlice(k)}
+            aria-label="{coordName(k)} の値を 0 に戻す"
+            title="0 に戻す（再生も止める）">⟲</button
+          >
+        </span>
       {/if}
     </div>
   {/each}
@@ -178,7 +201,7 @@
   }
   .coord {
     display: grid;
-    grid-template-columns: 2.2em auto 1fr auto;
+    grid-template-columns: 2.2em auto 1fr auto auto;
     align-items: center;
     gap: 8px;
   }
@@ -209,6 +232,30 @@
     font: 12px var(--mono);
     color: var(--muted);
     min-width: 4em;
+  }
+  .buttons {
+    display: flex;
+    gap: 3px;
+  }
+  .mini {
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--muted);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .mini.on {
+    background: #2d70b3;
+    border-color: #2d70b3;
+    color: #fff;
+  }
+  .mini:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
   .range-error {
     grid-column: 1 / -1;
