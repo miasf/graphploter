@@ -368,7 +368,7 @@ export class Viewer {
   }
 
   /**
-   * 画面上の点 (clientX, clientY) にある図形の点。曲面が無ければ xy 平面（z = 0）との交点。
+   * 画面上の点 (clientX, clientY) にある図形の点。曲面が無ければ xy 平面（z = 0。z の表示範囲が 0 を含まなければ一番下の面）との交点。
    * 交点が無い（上を向いている）か遠すぎる（地平線の近く）なら null。
    * 表示範囲の箱の側面・上面は使わない（押した所によって中心が箱の壁に飛び、操作しにくいため）。
    * 以前の「注視点を通る水平な面」は、Ctrl + ドラッグで見回した後はカメラと同じ高さになり、
@@ -384,7 +384,10 @@ export class Viewer {
     for (const hit of ray.intersectObjects(meshes, false)) {
       if (inside(hit.point)) return hit.point.clone()
     }
-    const q = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3())
+    // z の表示範囲が 0 を含まないなら、表示範囲の一番下の面にする（2D 表示では図形は z = 0 にある）
+    const d = this.domain
+    const z0 = this.flat || !d || (d.zmin <= 0 && 0 <= d.zmax) ? 0 : d.zmin
+    const q = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -z0), new THREE.Vector3())
     if (!q) return null
     // 地平線の近くでは交点がはるか遠くになり、そこを中心に回すと大きく振り回される
     const far = this.camera.position.distanceTo(this.controls.target) + 3 * this.sceneSize()
