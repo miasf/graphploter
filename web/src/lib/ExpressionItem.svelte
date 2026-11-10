@@ -334,7 +334,14 @@
           >次元を {moreDims} にする</button>
       {/if}
     {:else if item.info && !item.param}
-      <p class="info">{item.info}</p>
+      <!-- 計算時間（〇〇 ms）は桁数が変わっても幅が変わらないようにする。
+           そうしないと、1桁 ⇔ 2桁で改行の位置が変わり、下の行が上下にカクカク動く -->
+      {@const m = /^(.*?)(\d+) ms(.*)$/s.exec(item.info)}
+      {#if m}
+        <p class="info">{m[1]}<span class="ms">{m[2]} ms</span>{m[3]}</p>
+      {:else}
+        <p class="info">{item.info}</p>
+      {/if}
     {/if}
 
     {#if choosingFolder}
@@ -677,6 +684,12 @@
   }
   .info {
     color: var(--muted);
+    font-variant-numeric: tabular-nums; /* 数字の幅をそろえる（三角形の数が変わっても幅が揺れない） */
+  }
+  .ms {
+    display: inline-block;
+    min-width: 7ch; /* 「9999 ms」まで同じ幅 */
+    white-space: nowrap;
   }
   .add-slider {
     margin-top: 6px;
