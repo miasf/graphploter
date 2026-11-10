@@ -259,7 +259,7 @@ export class Viewer {
   }
 
   /**
-   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る。
+   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る（Ctrl + 左ドラッグの見回しは操作 A でも使う）。
    * - 左ドラッグ: 平行移動（A の Shift + 左ドラッグと同じ。OrbitControls に任せる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
@@ -283,7 +283,10 @@ export class Viewer {
       'pointerdown',
       (e) => {
         this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
-        if (e.pointerType === 'touch' || this.controlMode !== 'B') {
+        // Ctrl（Mac は ⌘）+ 左ドラッグの見回しは、操作 A でも使える（A の Ctrl + 左ドラッグは平行移動だったが、
+        // 平行移動は右ドラッグ・Shift + 左ドラッグでもできるので重ならない）
+        const look = e.pointerType !== 'touch' && e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
+        if (e.pointerType === 'touch' || (this.controlMode !== 'B' && !look)) {
           // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
           const pan =
             e.pointerType !== 'touch' &&
@@ -299,8 +302,8 @@ export class Viewer {
           Math.hypot(e.clientX - prevLeft.x, e.clientY - prevLeft.y) < 8
         if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
-        if (e.button === 2) mode = 'right'
-        else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
+        if (look) mode = 'look'
+        else if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
         // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
         // 移動の速さは注視点までの距離で決まるので、カーソルの下の図形の奥行きに注視点を置く（つかんだ点がカーソルについてくる）
