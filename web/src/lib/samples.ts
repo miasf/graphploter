@@ -174,6 +174,44 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
   {
     title: '複素数・特殊関数',
     samples: [
+      {
+        label: '複素平面の eⁱᵗ（単位円）と、t で持ち上げたらせん',
+        items: [
+          { latex: 'e^{it}', options: { color: '#c74440', lineWidth: 4, ranges: { t: TWO_PI, u: TWO_PI, v: TWO_PI } } },
+          {
+            latex: 'e^{it}',
+            options: { color: '#2d70b3', lineWidth: 3, complexMode: 'param', ranges: { t: ['0', '4\\pi'], u: TWO_PI, v: TWO_PI } },
+          },
+        ],
+      },
+      {
+        label: '複素平面の点 c, c², 1/c（c をドラッグ）と単位円',
+        items: [
+          { latex: 'c=0.8+0.6i', param: 'c' },
+          { latex: 'c', options: { color: '#c74440', lineWidth: 4 } },
+          { latex: 'c^2', options: { color: '#2d70b3', lineWidth: 4 } },
+          { latex: '\\frac{1}{c}', options: { color: '#388c46', lineWidth: 4 } },
+          { latex: 'e^{it}', options: { color: '#000000', lineWidth: 1.5, ranges: { t: TWO_PI, u: TWO_PI, v: TWO_PI } } },
+        ],
+      },
+      {
+        label: '複素平面の等角写像 (u + iv)²（格子線の像）',
+        items: [
+          {
+            latex: '\\left(u+iv\\right)^2',
+            options: { color: '#388c46', opacity: 0.35, ranges: { t: TWO_PI, u: ['0', '1.5'], v: ['-1.5', '1.5'] } },
+          },
+        ],
+      },
+      {
+        label: '複素平面の Γ(1 + it)（縦は |Γ|）',
+        items: [
+          {
+            latex: '\\Gamma\\left(1+it\\right)',
+            options: { color: '#6042a6', lineWidth: 4, complexMode: 'abs', ranges: { t: ['-4', '4'], u: TWO_PI, v: TWO_PI } },
+          },
+        ],
+      },
       { label: '|Γ(x + iy)|', items: [{ latex: 'z=\\left|\\Gamma\\left(x+iy\\right)\\right|', options: { color: '#fa7e19' } }] },
       {
         label: 'Γ(x + iy) の色分け（高さ |Γ|、色は偏角）',

@@ -410,7 +410,9 @@
   function currentParams(): Record<string, ParamValue> {
     const out: Record<string, ParamValue> = {}
     for (const it of items) {
-      if (it.param && !it.error && !(it.param.name in out)) out[it.param.name] = { re: it.param.re, im: it.param.im }
+      if (it.param && !it.error && !(it.param.name in out)) {
+        out[it.param.name] = { re: it.param.re, im: it.param.im, complex: it.slider.complex }
+      }
     }
     return out
   }
@@ -631,14 +633,35 @@
     item.kind = res.kind
     viewer.setPlot(item.id, res.mesh, item)
     viewer.setCap(item.id, res.cap, item)
-    const size = res.mesh.curve
+    // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
+    const plain = space.axes.every((a, k) => a === k) && space.rotation.every((a) => a === 0)
+    const size = /^複素平面の点/.test(res.kind) && plain
+      ? `(${complexPointText(res.mesh.positions)})`
+      : /^複素平面の点/.test(res.kind)
+      ? '点'
+      : res.mesh.curve
       ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
     item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
     // 陽関数の値がどこでも実数にならない（複素数の関数）なら、色分けで描けることを知らせる
     if (!res.mesh.curve && res.mesh.indices.length === 0 && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
-      item.info += ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます'
+      item.info +=
+        ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます。' +
+        '値を複素平面の点として描くなら、x, y の代わりに媒介変数 t を使ってください（例: e^{it} → 単位円）'
     }
+  }
+
+  /** 複素平面の点の位置を「0.28 + 0.96i」のように書く（リストで複数あれば、ちがう点を並べる） */
+  function complexPointText(pts: Float32Array): string {
+    const seen: string[] = []
+    for (let k = 0; k + 2 < pts.length && seen.length < 4; k += 3) {
+      const [re, im] = [pts[k], pts[k + 1]]
+      if (!Number.isFinite(re) || !Number.isFinite(im)) continue
+      const r = (v: number) => String(Number(v.toPrecision(4))).replace('-', '−')
+      const s = im === 0 ? r(re) : `${r(re)} ${im < 0 ? '−' : '+'} ${r(Math.abs(im))}i`
+      if (!seen.includes(s)) seen.push(s)
+    }
+    return seen.join(', ') || '表示範囲の外か、値が計算できません'
   }
 
   function replotAll(delay = 200) {
@@ -1245,7 +1268,8 @@
     else item.sliderError = undefined
     next = item.slider
     const stackChanged = prev.stack !== next.stack || (next.stack && (prev.min !== next.min || prev.max !== next.max))
-    if (item.param && stackChanged) paramsChanged([item.param.name], item)
+    // 複素数のスライダーにした・戻したときも、それを使う式を計算し直す（定数の式が点になる・平面に戻る）
+    if (item.param && (stackChanged || prev.complex !== next.complex)) paramsChanged([item.param.name], item)
   }
 
   /** 表示しない座標の断面の値を変えたとき: その座標を使う式だけを計算し直す */
@@ -1757,6 +1781,10 @@
                 <li>陽関数: <code>z = x^2 - y^2</code>（<code>z =</code> は省略可）、<code>y = sin(x) z</code> なども可</li>
                 <li>陰関数: <code>x^2 + y^2 + z^2 = 4</code>、<code>sin x + sin y + sin z = 0</code></li>
                 <li>曲線: <code>(cos t, sin t, t/4)</code>（t を使う。範囲は式の下で指定）</li>
+                <li>
+                  複素平面: <code>e^(it)</code> のように、座標を使わず t（または u, v）だけの式は、値を複素平面（横 = 実部、奥 = 虚部）に描く（単位円）。
+                  ⚙ の「縦の軸」で t・|f|・arg f を縦にとれる（らせん）。<code>1 + 2i</code> や複素数のパラメータ <code>c</code>、<code>c^2</code> は複素平面の点になる
+                </li>
                 <li>曲面: <code>(u cos v, u sin v, u)</code>（u と v を使う）</li>
                 <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
                 <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>

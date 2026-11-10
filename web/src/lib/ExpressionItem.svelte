@@ -160,7 +160,9 @@
 
   /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
-  const isCurve = $derived(item.params.length === 1)
+  /** 複素平面の点（1 + 2i、複素数のパラメータ c など）。曲線と同じく線の太さ（点の大きさ）を選べる */
+  const isComplexPoint = $derived(/^複素平面の点/.test(item.kind ?? ''))
+  const isCurve = $derived(item.params.length === 1 || isComplexPoint)
   /** 媒介変数表示の曲面・立体（格子線を媒介変数に沿って引く） */
   const isSurface = $derived(item.params.length >= 2)
   /** 媒介変数が4つ以上の図形（媒介変数を2つずつ動かした面の集まり） */
@@ -175,7 +177,11 @@
   /** 陽関数（z = f(x, y) など）か。複素数の色分けができる */
   // 回して陰関数として計算し直した陽関数（「陰関数（z = f(x, y) を回したもの）」）も含む。
   // 色分けをしている間は、計算できなかったときも選べるようにしておく（元に戻せるように）
-  const isExplicit = $derived(/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off')
+  /** 複素平面の図形（e^{it} など。横 Re f・奥 Im f）。縦の軸に描くものを選べる */
+  const isComplexPlane = $derived(/^複素平面/.test(item.kind ?? ''))
+  const isExplicit = $derived(
+    !isComplexPlane && (/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off'),
+  )
   /** 段差の壁を描けるか（陽関数をそのまま描くときだけ） */
   const canWall = $derived(isExplicit && /^[^陰]* = f\(/.test(item.kind ?? '') && !/塗り分け/.test(item.kind ?? ''))
   const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
@@ -183,7 +189,17 @@
     { mode: 'abs', label: '高さ |f|' },
     { mode: 're', label: '高さ Re f' },
     { mode: 'im', label: '高さ Im f' },
+    { mode: 'arg', label: '高さ arg f' },
   ]
+  /** 複素平面の図形の縦の軸（媒介変数は曲線のときだけ） */
+  const LIFT_MODES = $derived<{ mode: ComplexMode; label: string }[]>([
+    { mode: 'off', label: '0（平面の上）' },
+    ...(isCurve && !isComplexPoint ? [{ mode: 'param' as const, label: `媒介変数 ${prettyName(item.params[0] ?? 't')}` }] : []),
+    { mode: 'abs', label: '|f|' },
+    { mode: 'arg', label: 'arg f' },
+    { mode: 're', label: 'Re f' },
+    { mode: 'im', label: 'Im f' },
+  ])
 
   // 格子線の方向（grid.x, grid.y, grid.z は、画面の横・奥・縦の軸の方向）
   const gridAxes = $derived([
@@ -387,7 +403,7 @@
         </label>
           {#if isCurve}
           <div class="sliders">
-            <span class="label">線の太さ</span>
+            <span class="label">{isComplexPoint ? "点の大きさ" : "線の太さ"}</span>
             <input
               type="range"
               min="1"
@@ -476,6 +492,23 @@
             {/if}
           {/if}
 
+          {/if}
+          {#if isComplexPlane}
+            <div class="complex-mode">
+              <span class="label">縦の軸</span>
+              <select
+                value={item.complexMode ?? 'off'}
+                onchange={(e) => onComplexMode(e.currentTarget.value as ComplexMode)}
+              >
+                {#each LIFT_MODES as { mode, label } (mode)}
+                  <option value={mode}>{label}</option>
+                {/each}
+              </select>
+            </div>
+            <p class="hint">
+              値 f を複素平面（横 = 実部 Re f、奥 = 虚部 Im f）の点として描いています。縦の軸に媒介変数や |f| を選ぶと、
+              平面から持ち上げた形になります（e<sup>it</sup> なら、らせん）
+            </p>
           {/if}
         {:else if tab === 'grid'}
           <label class="check">

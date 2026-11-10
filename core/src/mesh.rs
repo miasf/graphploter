@@ -137,6 +137,10 @@ pub enum ComplexMode {
     Re,
     /// 高さ = Im f
     Im,
+    /// 高さ = arg f
+    Arg,
+    /// 複素平面の図形（[`crate::equation::Plot::ComplexPlane`]）で、縦の軸を媒介変数にする。陽関数では色分けしない
+    Param,
 }
 
 impl ComplexMode {
@@ -145,6 +149,8 @@ impl ComplexMode {
             1 => ComplexMode::Abs,
             2 => ComplexMode::Re,
             3 => ComplexMode::Im,
+            4 => ComplexMode::Arg,
+            5 => ComplexMode::Param,
             _ => ComplexMode::Off,
         }
     }
@@ -188,10 +194,11 @@ fn complex_attr(z: C) -> [f32; 3] {
 /// 複素数の値 z を、`mode` の表し方での高さにする
 fn height(z: C, mode: ComplexMode) -> f64 {
     let w = match mode {
-        ComplexMode::Off => as_real(z),
+        ComplexMode::Off | ComplexMode::Param => as_real(z),
         ComplexMode::Abs => z.norm(),
         ComplexMode::Re => z.re,
         ComplexMode::Im => z.im,
+        ComplexMode::Arg => z.arg(),
     };
     if z.re.is_finite() && z.im.is_finite() { w } else { f64::NAN }
 }
@@ -1545,10 +1552,11 @@ pub fn flat_map(prog: &Program, dom: Domain, n: usize, mode: ComplexMode) -> Mes
     for k in 0..m * m {
         let z = vals[k];
         let w = match mode {
-            ComplexMode::Off => as_real(z),
+            ComplexMode::Off | ComplexMode::Param => as_real(z),
             ComplexMode::Abs => z.norm(),
             ComplexMode::Re => z.re,
             ComplexMode::Im => z.im,
+            ComplexMode::Arg => z.arg(),
         };
         if !w.is_finite() || !z.re.is_finite() || !z.im.is_finite() {
             continue;

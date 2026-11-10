@@ -28,9 +28,12 @@ export interface GridStyle {
 
 /**
  * 複素数の値をとる陽関数の表し方（色は偏角 arg f）。
- * off: 色分けしない（実数にならない点は描かない）/ abs: 高さ |f| / re: 高さ Re f / im: 高さ Im f
+ * off: 色分けしない（実数にならない点は描かない）/ abs: 高さ |f| / re: 高さ Re f / im: 高さ Im f / arg: 高さ arg f。
+ * 複素平面の図形（e^{it} など。横 Re f・奥 Im f）では、縦の軸に描くもの（off: 0 / param: 媒介変数 / abs: |f| / arg: arg f …）
  */
-export type ComplexMode = 'off' | 'abs' | 're' | 'im'
+export type ComplexMode = 'off' | 'abs' | 're' | 'im' | 'arg' | 'param'
+/** 計算エンジンに渡す ComplexMode の番号の順 */
+export const COMPLEX_MODE_ORDER: ComplexMode[] = ['off', 'abs', 're', 'im', 'arg', 'param']
 
 /** 曲面の見た目 */
 export interface PlotStyle {
@@ -109,6 +112,8 @@ export const OWN_GROUP = -1
 export interface ParamValue {
   re: number
   im: number
+  /** 複素数のスライダー（複素平面）にしたパラメータか。これを使った定数の式は複素平面の点になる */
+  complex?: boolean
 }
 
 /** パラメータのスライダーの設定 */

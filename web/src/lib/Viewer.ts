@@ -107,7 +107,12 @@ type PlotObject =
       /** ステンシルで描く順番を決める番号 */
       order: number
     }
-  | { kind: 'curve'; line: LineSegments2 }
+  | {
+      kind: 'curve'
+      line: LineSegments2
+      /** 長さの無い曲線（点。複素平面の点 1 + 2i や組 (1, 2, 3)）を描く丸。line の子 */
+      dots: THREE.Points
+    }
 
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
 /** 拡大で中心の点にここまで（図形の大きさに対する割合）近づいたら、そこからは一定の速さで前に進む（通り抜けられる） */
@@ -1018,6 +1023,8 @@ export class Viewer {
       if (old.kind === 'curve') {
         old.line.geometry.dispose()
         old.line.geometry = this.curveGeometry(mesh.positions)
+        old.dots.geometry.dispose()
+        old.dots.geometry = dotGeometry(mesh.positions)
       } else {
         disposeGeometry(old.geo)
         old.geo = this.surfaceGeometry(mesh)
@@ -1045,6 +1052,7 @@ export class Viewer {
     for (const p of this.plots.values()) {
       if (p.kind === 'curve') {
         ;(p.line.material as THREE.Material).clippingPlanes = this.clipPlanes
+        ;(p.dots.material as THREE.Material).clippingPlanes = this.clipPlanes
         continue
       }
       ;((p.group.children[0] as THREE.Mesh).material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -1284,7 +1292,23 @@ export class Viewer {
     const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
     mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
     const line = new LineSegments2(this.curveGeometry(pts), mat)
-    this.plots.set(id, { kind: 'curve', line })
+    const dotMat = new THREE.PointsMaterial({
+      size: 9,
+      sizeAttenuation: false,
+      map: dotTexture(),
+      alphaTest: 0.5,
+      clippingPlanes: this.clipPlanes,
+    })
+    const dots = new THREE.Points(dotGeometry(pts), dotMat)
+    dots.frustumCulled = false
+    dots.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
+    // 点の大きさは画面の画素で決める（画素密度を下げても同じ大きさに見えるように）
+    dots.onBeforeRender = (r) => {
+      dotMat.size = dots.userData.size * r.getPixelRatio()
+    }
+    dots.userData.size = 9
+    line.add(dots)
+    this.plots.set(id, { kind: 'curve', line, dots })
     this.scene.add(line)
   }
 
@@ -1304,6 +1328,8 @@ export class Viewer {
       const m = p.line.material as LineMaterial
       m.color.copy(c)
       m.linewidth = style.lineWidth
+      ;(p.dots.material as THREE.PointsMaterial).color.copy(c)
+      p.dots.userData.size = Math.max(7, style.lineWidth * 3)
       return
     }
 
@@ -1369,6 +1395,8 @@ export class Viewer {
     if (p.kind === 'curve') {
       p.line.geometry.dispose()
       ;(p.line.material as THREE.Material).dispose()
+      p.dots.geometry.dispose()
+      ;(p.dots.material as THREE.Material).dispose()
       this.scene.remove(p.line)
     } else {
       for (const o of p.group.children as THREE.Mesh[]) {
@@ -1382,4 +1410,50 @@ export class Viewer {
     this.plots.delete(id)
     this.styles.delete(id)
   }
+}
+
+/**
+ * 曲線の点の列のうち、長さの無い部分（NaN で区切られた一続きの点がすべて同じ位置）を、点として描く形にする。
+ * 複素平面の点（1 + 2i など）や組 (1, 2, 3) は、同じ位置の点の列として届く
+ */
+function dotGeometry(pts: Float32Array): THREE.BufferGeometry {
+  const out: number[] = []
+  const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
+  let k = 0
+  while (k + 2 < pts.length) {
+    if (!ok(k)) {
+      k += 3
+      continue
+    }
+    // 一続きの点 [k, end) が、最初の点からどれだけ離れているか
+    const [x, y, z] = [pts[k], pts[k + 1], pts[k + 2]]
+    let end = k
+    let same = true
+    while (end + 2 < pts.length && ok(end)) {
+      const d = Math.abs(pts[end] - x) + Math.abs(pts[end + 1] - y) + Math.abs(pts[end + 2] - z)
+      if (d > 1e-9 * (1 + Math.abs(x) + Math.abs(y) + Math.abs(z))) same = false
+      end += 3
+    }
+    if (same) out.push(x, y, z)
+    k = end
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(out, 3))
+  return geo
+}
+
+/** 点を丸く描くための、白い円の絵（1つだけ作って使い回す） */
+let dotTex: THREE.Texture | null = null
+function dotTexture(): THREE.Texture {
+  if (dotTex) return dotTex
+  const n = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = n
+  const g = canvas.getContext('2d')!
+  g.fillStyle = '#fff'
+  g.beginPath()
+  g.arc(n / 2, n / 2, n / 2 - 1, 0, Math.PI * 2)
+  g.fill()
+  dotTex = new THREE.CanvasTexture(canvas)
+  return dotTex
 }
