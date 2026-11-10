@@ -266,7 +266,7 @@ export class Viewer {
   }
 
   /**
-   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る（Ctrl + 左ドラッグの見回しは操作 A でも使う）。
+   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る（操作 A は OrbitControls そのまま）。
    * - 左ドラッグ: 平行移動（A の Shift + 左ドラッグと同じ。OrbitControls に任せる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
@@ -279,7 +279,7 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'orbit' | 'dolly'
+      mode: 'look' | 'right' | 'orbit'
       pivot: THREE.Vector3
       /** 右ドラッグで拡大縮小するときに進む向き（押したときのカーソルの向き） */
       fwd: THREE.Vector3
@@ -297,19 +297,11 @@ export class Viewer {
           return
         }
         this.applyButtons() // 回転の感度を、マウスの操作モードのものに戻す（指で操作した後かもしれない）
+        // 操作 A（標準）も、パソコン用の調整（注視点の置き直し・Ctrl + ドラッグの見回し・中ドラッグの通り抜ける拡大縮小・
+        // 慣性の停止）を入れる前の、OrbitControls そのままの操作にする
+        if (this.controlMode === 'A') return
         this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
-        // Ctrl（Mac は ⌘）+ 左ドラッグの見回しは、操作 A でも使える（A の Ctrl + 左ドラッグは平行移動だったが、
-        // 平行移動は右ドラッグ・Shift + 左ドラッグでもできるので重ならない）
         const look = e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
-        // 操作 A の中ドラッグ（拡大縮小）も、ホイールと同じく図形を通り抜けられる拡大縮小にする（OrbitControls の拡大縮小は通り抜けられない）
-        const dolly = this.controlMode === 'A' && e.button === 1 && !this.flat
-        if (this.controlMode !== 'B' && !look && !dolly) {
-          // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
-          const pan = this.flat || e.button === 2 || (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey))
-          if (pan) this.anchorTarget(e.clientX, e.clientY)
-          else this.anchorTarget()
-          return
-        }
         // 左ボタンの2回押し（0.35 秒以内・ほぼ同じ位置）
         const double =
           e.button === 0 &&
@@ -318,7 +310,6 @@ export class Viewer {
         if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
         if (look) mode = 'look'
-        else if (dolly) mode = 'dolly'
         else if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
         // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
@@ -330,13 +321,8 @@ export class Viewer {
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
         el.setPointerCapture(e.pointerId)
-        if (mode === 'dolly') this.anchorTarget()
         const pivot =
-          mode === 'look'
-            ? new THREE.Vector3()
-            : mode === 'dolly'
-              ? this.controls.target.clone()
-              : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
+          mode === 'look' ? new THREE.Vector3() : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
         const fwd = this.rayAt(e.clientX, e.clientY).ray.direction.clone()
         last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, fwd }
         this.interacting = true
@@ -351,11 +337,6 @@ export class Viewer {
       last = { ...last, x: e.clientX, y: e.clientY }
       if (last.mode === 'look') {
         this.look(dx, dy)
-        return
-      }
-      if (last.mode === 'dolly') {
-        // 上下で拡大縮小（OrbitControls の中ドラッグと同じ向き: 上へ動かすと拡大、下へ動かすと縮小）。画面の中央に向かって進む
-        this.zoomAround(this.controls.target.clone(), Math.pow(0.995, -dy))
         return
       }
       if (last.mode === 'orbit') {
@@ -509,6 +490,8 @@ export class Viewer {
     this.renderer.domElement.addEventListener(
       'wheel',
       (e) => {
+        // 操作 A（標準）のホイールは、OrbitControls そのままの拡大縮小（画面の中央に向かう。滑らかにはしない）
+        if (this.controlMode === 'A') return
         e.preventDefault()
         e.stopImmediatePropagation() // OrbitControls には渡さない
         // 行・ページ単位のホイールは画素に直す
