@@ -209,6 +209,7 @@ export class Viewer {
     // B: setupMouse を参照（Google Earth に近い操作）
     this.camera.up.set(0, 0, 1)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
+    this.setupTouch()
     this.setupMouse()
     this.setupWheel()
     this.applyButtons()
@@ -378,6 +379,90 @@ export class Viewer {
     }
     el.addEventListener('pointerup', end)
     el.addEventListener('pointercancel', end)
+  }
+
+  /**
+   * スマホの2本指の操作。OrbitControls の2本指（画面の中央に向かう拡大縮小と、注視点の奥行きで決まる速さの平行移動）は、
+   * 指の下に図形が無いと奥の床の面などを基準に動くので、つかんだ所が指についてこず、操作しにくかった。そこで2本指は自分で扱う:
+   * - 2本の指の中点の下にある図形の点（無ければ z = 0 の面との交点）をつかみ、その点が中点の下にとどまるように平行移動する
+   * - 指の間隔の変化で、その点に向かって拡大縮小する（ホイールと同じく、図形を通り抜けられる）
+   * 1本指（3D は回転、2D は移動）は今までどおり OrbitControls に任せる（慣性の動きを残すため）
+   */
+  private setupTouch() {
+    const el = this.renderer.domElement
+    const touches = new Map<number, { x: number; y: number }>()
+    type Pinch = { pivot: THREE.Vector3; plane: THREE.Plane; dist: number }
+    let pinch: Pinch | null = null
+    const mid = () => {
+      const [a, b] = [...touches.values()]
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) }
+    }
+    /** 中点の下の点をつかみ直す（指が増えた・つかんだ点が後ろに回った） */
+    const start = () => {
+      const m = mid()
+      const pivot = this.pickContent(m.x, m.y) ?? this.controls.target.clone()
+      pinch = { pivot, plane: this.grabPlane(pivot), dist: Math.max(m.d, 1) }
+    }
+    el.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (e.pointerType !== 'touch') return
+        touches.set(e.pointerId, { x: e.clientX, y: e.clientY })
+        if (touches.size < 2) return
+        // 2本目の指: OrbitControls の操作を止めて、ここで扱う（3本目以降は数えるだけ）
+        e.stopImmediatePropagation()
+        if (touches.size === 2) {
+          this.controls.enabled = false
+          this.stopInertia()
+          this.wheelPending = 0
+          this.interacting = true
+          this.setLowRes(true)
+          start()
+        }
+      },
+      { capture: true },
+    )
+    el.addEventListener(
+      'pointermove',
+      (e) => {
+        if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return
+        touches.set(e.pointerId, { x: e.clientX, y: e.clientY })
+        if (!pinch) return
+        e.stopImmediatePropagation()
+        if (touches.size !== 2) return
+        const m = mid()
+        const d = Math.max(m.d, 1)
+        // 指を広げると拡大（つかんだ点に近づく）。進む向きは中点の下への視線
+        const factor = THREE.MathUtils.clamp(pinch.dist / d, 0.5, 2)
+        pinch.dist = d
+        this.zoomAround(pinch.pivot, factor, this.rayAt(m.x, m.y).ray.direction)
+        // 通り抜けて、つかんだ点がカメラの後ろ・すぐ近くになったら、中点の下の点をつかみ直す
+        const ahead = pinch.pivot.clone().sub(this.camera.position).dot(this.rayAt(m.x, m.y).ray.direction)
+        if (ahead < this.sceneSize() * NEAR_FRACTION * 0.5) {
+          start()
+          return
+        }
+        this.grab(pinch.pivot, pinch.plane, m.x, m.y)
+        this.camera.lookAt(this.controls.target)
+      },
+      { capture: true },
+    )
+    const end = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch' || !touches.delete(e.pointerId)) return
+      if (!pinch) return
+      if (touches.size === 2) {
+        start() // 3本目を離した: 残りの2本でつかみ直す
+        return
+      }
+      if (touches.size > 0) return // 1本残っている間は何もしない（離すまで待つ）
+      pinch = null
+      this.interacting = false
+      // 注視点（回転の中心）を、画面の中央の図形の奥行きに置き直してから OrbitControls に戻す
+      this.anchorTarget()
+      this.controls.enabled = true
+    }
+    el.addEventListener('pointerup', end, { capture: true })
+    el.addEventListener('pointercancel', end, { capture: true })
   }
 
   /** 点 pivot を通る、カメラの右向きの軸の周りに、カメラと注視点を angle（ラジアン）回す（見下ろす角度を変える）。
