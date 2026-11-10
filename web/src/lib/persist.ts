@@ -17,8 +17,11 @@ export interface SavedItem {
   slider: SliderStyle
   complexMode?: ComplexMode
   walls?: boolean
-  /** 回転のグループの番号（古い保存データには無い） */
+  /** 回転のグループの番号（無ければこの式だけの回転。ただし rotOwn の無い古い保存データでは全体の回転） */
   rotGroup?: number
+  /** この式だけの回転角と中心（古い保存データには無い） */
+  rotation?: number[]
+  center?: number[]
   /** 媒介変数が4つ以上の図形の、面を描く所の分割数（古い保存データには無い） */
   layers?: number
   /** 入っているフォルダの番号（古い保存データには無い） */
@@ -48,6 +51,8 @@ export interface SavedState {
   folders?: Folder[]
   /** マウスの操作モード（古い保存データには無い） */
   controlMode?: 'A' | 'B'
+  /** 式の回転の標準が「この式だけ」になった後の保存データか（古いものは、グループに入っていない式が全体の回転） */
+  rotOwn?: boolean
 }
 
 const STORAGE_KEY = 'graphploter:state'

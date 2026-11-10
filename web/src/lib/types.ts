@@ -102,6 +102,9 @@ export interface Folder {
 /** 全体の回転を表すグループの番号 */
 export const GLOBAL_GROUP = 0
 
+/** 「この式だけの回転」を選ぶときの番号（式の rotGroup は無しになる。式を新しく作ったときはこれ） */
+export const OWN_GROUP = -1
+
 /** パラメータ（スライダーで値を決める文字）の値。複素数も扱えるよう実部と虚部を持つ */
 export interface ParamValue {
   re: number
@@ -161,8 +164,12 @@ export interface PlotItem extends PlotStyle {
   complexMode?: ComplexMode
   /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
   walls?: boolean
-  /** 回転のグループの番号（無い・0 なら全体の回転を使う） */
+  /** 回転のグループの番号（無ければこの式だけの回転 rotation, center、0 なら全体の回転を使う） */
   rotGroup?: number
+  /** この式だけの回転角（rotGroup が無いとき使う。無ければ全部 0） */
+  rotation?: number[]
+  /** この式だけの回転の中心（rotGroup が無いとき使う。無ければ原点） */
+  center?: number[]
   /** 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（無い・1 なら両端だけ） */
   layers?: number
   /** 入っているフォルダの番号（無ければフォルダの外）。同じフォルダの式は、一覧で続けて並ぶ */
