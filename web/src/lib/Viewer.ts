@@ -222,6 +222,12 @@ export class Viewer {
     this.camera.add(head, head.target)
     this.scene.add(this.camera, this.frame)
 
+    // WebGL のコンテキストが失われて戻ったとき（スマホでアプリを切り替えて戻った、GPU がリセットされたなど）は、
+    // three.js が GPU のデータを作り直すので、描き直す（何も変わっていないときは描かないので、そのままだと真っ白になる）
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      this.dirty = true
+    })
+
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(container)
     this.resize()
