@@ -290,17 +290,22 @@ export class Viewer {
     el.addEventListener(
       'pointerdown',
       (e) => {
+        // スマホ（指）の操作は、パソコン用の調整（注視点の置き直し・慣性の停止・回転の感度）の前の挙動のまま、
+        // OrbitControls にそのまま任せる（パソコン用の調整を入れたら、スマホでは操作しにくくなったため）
+        if (e.pointerType === 'touch') {
+          this.controls.rotateSpeed = 1
+          return
+        }
+        this.applyButtons() // 回転の感度を、マウスの操作モードのものに戻す（指で操作した後かもしれない）
         this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
         // Ctrl（Mac は ⌘）+ 左ドラッグの見回しは、操作 A でも使える（A の Ctrl + 左ドラッグは平行移動だったが、
         // 平行移動は右ドラッグ・Shift + 左ドラッグでもできるので重ならない）
-        const look = e.pointerType !== 'touch' && e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
+        const look = e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
         // 操作 A の中ドラッグ（拡大縮小）も、ホイールと同じく図形を通り抜けられる拡大縮小にする（OrbitControls の拡大縮小は通り抜けられない）
-        const dolly = this.controlMode === 'A' && e.pointerType !== 'touch' && e.button === 1 && !this.flat
-        if (e.pointerType === 'touch' || (this.controlMode !== 'B' && !look && !dolly)) {
+        const dolly = this.controlMode === 'A' && e.button === 1 && !this.flat
+        if (this.controlMode !== 'B' && !look && !dolly) {
           // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
-          const pan =
-            e.pointerType !== 'touch' &&
-            (this.flat || e.button === 2 || (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey)))
+          const pan = this.flat || e.button === 2 || (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey))
           if (pan) this.anchorTarget(e.clientX, e.clientY)
           else this.anchorTarget()
           return
