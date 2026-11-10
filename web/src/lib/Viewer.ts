@@ -209,7 +209,6 @@ export class Viewer {
     // B: setupMouse を参照（Google Earth に近い操作）
     this.camera.up.set(0, 0, 1)
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
-    this.setupTouch()
     this.setupMouse()
     this.setupWheel()
     this.applyButtons()
@@ -267,7 +266,7 @@ export class Viewer {
   }
 
   /**
-   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る（Ctrl + 左ドラッグの見回しは操作 A でも使う）。
+   * 操作モード B のマウス（パソコン）用の操作。OrbitControls より先に受け取る（操作 A は OrbitControls そのまま）。
    * - 左ドラッグ: 平行移動（A の Shift + 左ドラッグと同じ。OrbitControls に任せる）
    * - 右ドラッグ: 押した位置を中心に、上下で縮小・拡大、左右で回転
    * - Ctrl（Mac は ⌘）+ 左ドラッグ: カメラの位置を固定して、見る向きだけを変える（首を振る）
@@ -280,7 +279,7 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'orbit' | 'dolly'
+      mode: 'look' | 'right' | 'orbit'
       pivot: THREE.Vector3
       /** 右ドラッグで拡大縮小するときに進む向き（押したときのカーソルの向き） */
       fwd: THREE.Vector3
@@ -291,21 +290,18 @@ export class Viewer {
     el.addEventListener(
       'pointerdown',
       (e) => {
-        this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
-        // Ctrl（Mac は ⌘）+ 左ドラッグの見回しは、操作 A でも使える（A の Ctrl + 左ドラッグは平行移動だったが、
-        // 平行移動は右ドラッグ・Shift + 左ドラッグでもできるので重ならない）
-        const look = e.pointerType !== 'touch' && e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
-        // 操作 A の中ドラッグ（拡大縮小）も、ホイールと同じく図形を通り抜けられる拡大縮小にする（OrbitControls の拡大縮小は通り抜けられない）
-        const dolly = this.controlMode === 'A' && e.pointerType !== 'touch' && e.button === 1 && !this.flat
-        if (e.pointerType === 'touch' || (this.controlMode !== 'B' && !look && !dolly)) {
-          // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
-          const pan =
-            e.pointerType !== 'touch' &&
-            (this.flat || e.button === 2 || (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey)))
-          if (pan) this.anchorTarget(e.clientX, e.clientY)
-          else this.anchorTarget()
+        // スマホ（指）の操作は、パソコン用の調整（注視点の置き直し・慣性の停止・回転の感度）の前の挙動のまま、
+        // OrbitControls にそのまま任せる（パソコン用の調整を入れたら、スマホでは操作しにくくなったため）
+        if (e.pointerType === 'touch') {
+          this.controls.rotateSpeed = 1
           return
         }
+        this.applyButtons() // 回転の感度を、マウスの操作モードのものに戻す（指で操作した後かもしれない）
+        // 操作 A（標準）も、パソコン用の調整（注視点の置き直し・Ctrl + ドラッグの見回し・中ドラッグの通り抜ける拡大縮小・
+        // 慣性の停止）を入れる前の、OrbitControls そのままの操作にする
+        if (this.controlMode === 'A') return
+        this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
+        const look = e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
         // 左ボタンの2回押し（0.35 秒以内・ほぼ同じ位置）
         const double =
           e.button === 0 &&
@@ -314,7 +310,6 @@ export class Viewer {
         if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
         if (look) mode = 'look'
-        else if (dolly) mode = 'dolly'
         else if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
         // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
@@ -326,13 +321,8 @@ export class Viewer {
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
         el.setPointerCapture(e.pointerId)
-        if (mode === 'dolly') this.anchorTarget()
         const pivot =
-          mode === 'look'
-            ? new THREE.Vector3()
-            : mode === 'dolly'
-              ? this.controls.target.clone()
-              : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
+          mode === 'look' ? new THREE.Vector3() : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
         const fwd = this.rayAt(e.clientX, e.clientY).ray.direction.clone()
         last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, fwd }
         this.interacting = true
@@ -347,11 +337,6 @@ export class Viewer {
       last = { ...last, x: e.clientX, y: e.clientY }
       if (last.mode === 'look') {
         this.look(dx, dy)
-        return
-      }
-      if (last.mode === 'dolly') {
-        // 上下で拡大縮小（OrbitControls の中ドラッグと同じ向き: 上へ動かすと拡大、下へ動かすと縮小）。画面の中央に向かって進む
-        this.zoomAround(this.controls.target.clone(), Math.pow(0.995, -dy))
         return
       }
       if (last.mode === 'orbit') {
@@ -379,90 +364,6 @@ export class Viewer {
     }
     el.addEventListener('pointerup', end)
     el.addEventListener('pointercancel', end)
-  }
-
-  /**
-   * スマホの2本指の操作。OrbitControls の2本指（画面の中央に向かう拡大縮小と、注視点の奥行きで決まる速さの平行移動）は、
-   * 指の下に図形が無いと奥の床の面などを基準に動くので、つかんだ所が指についてこず、操作しにくかった。そこで2本指は自分で扱う:
-   * - 2本の指の中点の下にある図形の点（無ければ z = 0 の面との交点）をつかみ、その点が中点の下にとどまるように平行移動する
-   * - 指の間隔の変化で、その点に向かって拡大縮小する（ホイールと同じく、図形を通り抜けられる）
-   * 1本指（3D は回転、2D は移動）は今までどおり OrbitControls に任せる（慣性の動きを残すため）
-   */
-  private setupTouch() {
-    const el = this.renderer.domElement
-    const touches = new Map<number, { x: number; y: number }>()
-    type Pinch = { pivot: THREE.Vector3; plane: THREE.Plane; dist: number }
-    let pinch: Pinch | null = null
-    const mid = () => {
-      const [a, b] = [...touches.values()]
-      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) }
-    }
-    /** 中点の下の点をつかみ直す（指が増えた・つかんだ点が後ろに回った） */
-    const start = () => {
-      const m = mid()
-      const pivot = this.pickContent(m.x, m.y) ?? this.controls.target.clone()
-      pinch = { pivot, plane: this.grabPlane(pivot), dist: Math.max(m.d, 1) }
-    }
-    el.addEventListener(
-      'pointerdown',
-      (e) => {
-        if (e.pointerType !== 'touch') return
-        touches.set(e.pointerId, { x: e.clientX, y: e.clientY })
-        if (touches.size < 2) return
-        // 2本目の指: OrbitControls の操作を止めて、ここで扱う（3本目以降は数えるだけ）
-        e.stopImmediatePropagation()
-        if (touches.size === 2) {
-          this.controls.enabled = false
-          this.stopInertia()
-          this.wheelPending = 0
-          this.interacting = true
-          this.setLowRes(true)
-          start()
-        }
-      },
-      { capture: true },
-    )
-    el.addEventListener(
-      'pointermove',
-      (e) => {
-        if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return
-        touches.set(e.pointerId, { x: e.clientX, y: e.clientY })
-        if (!pinch) return
-        e.stopImmediatePropagation()
-        if (touches.size !== 2) return
-        const m = mid()
-        const d = Math.max(m.d, 1)
-        // 指を広げると拡大（つかんだ点に近づく）。進む向きは中点の下への視線
-        const factor = THREE.MathUtils.clamp(pinch.dist / d, 0.5, 2)
-        pinch.dist = d
-        this.zoomAround(pinch.pivot, factor, this.rayAt(m.x, m.y).ray.direction)
-        // 通り抜けて、つかんだ点がカメラの後ろ・すぐ近くになったら、中点の下の点をつかみ直す
-        const ahead = pinch.pivot.clone().sub(this.camera.position).dot(this.rayAt(m.x, m.y).ray.direction)
-        if (ahead < this.sceneSize() * NEAR_FRACTION * 0.5) {
-          start()
-          return
-        }
-        this.grab(pinch.pivot, pinch.plane, m.x, m.y)
-        this.camera.lookAt(this.controls.target)
-      },
-      { capture: true },
-    )
-    const end = (e: PointerEvent) => {
-      if (e.pointerType !== 'touch' || !touches.delete(e.pointerId)) return
-      if (!pinch) return
-      if (touches.size === 2) {
-        start() // 3本目を離した: 残りの2本でつかみ直す
-        return
-      }
-      if (touches.size > 0) return // 1本残っている間は何もしない（離すまで待つ）
-      pinch = null
-      this.interacting = false
-      // 注視点（回転の中心）を、画面の中央の図形の奥行きに置き直してから OrbitControls に戻す
-      this.anchorTarget()
-      this.controls.enabled = true
-    }
-    el.addEventListener('pointerup', end, { capture: true })
-    el.addEventListener('pointercancel', end, { capture: true })
   }
 
   /** 点 pivot を通る、カメラの右向きの軸の周りに、カメラと注視点を angle（ラジアン）回す（見下ろす角度を変える）。
@@ -589,6 +490,8 @@ export class Viewer {
     this.renderer.domElement.addEventListener(
       'wheel',
       (e) => {
+        // 操作 A（標準）のホイールは、OrbitControls そのままの拡大縮小（画面の中央に向かう。滑らかにはしない）
+        if (this.controlMode === 'A') return
         e.preventDefault()
         e.stopImmediatePropagation() // OrbitControls には渡さない
         // 行・ページ単位のホイールは画素に直す
