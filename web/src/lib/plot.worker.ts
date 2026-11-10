@@ -38,7 +38,8 @@ function range(
     const a = value(lo)
     const b = value(hi)
     if (!Number.isFinite(a) || !Number.isFinite(b)) throw new Error('値が有限ではありません')
-    if (!anyOrder && !(a < b)) throw new Error('左の値を右の値より小さくしてください')
+    // 両端が同じ値はよい（長さ 0: 何も描かない）。0 ≤ u ≤ c の c を再生すると、最小値の 0 に戻るたびにこうなる
+    if (!anyOrder && !(a <= b)) throw new Error('左の値を右の値以下にしてください')
     return [a, b]
   } catch (e) {
     throw new Error(`${name} の範囲: ${e instanceof Error ? e.message : e}`)

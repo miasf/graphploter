@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "fonts": "node -e \"require('fs').cpSync('node_modules/mathlive/fonts', 'public/mathlive-fonts', { recursive: true })\"",
-    "test": "node --experimental-strip-types --no-warnings src/lib/latex.test.ts"
+    "test": "node --experimental-strip-types --no-warnings src/lib/latex.test.ts && node --experimental-strip-types --no-warnings src/lib/params.test.ts"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

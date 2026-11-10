@@ -46,6 +46,7 @@ const SYMBOLS: Record<string, string> = {
 const OPENERS: Record<string, string> = {
   '(': '(',
   '[': '[',
+  '\\lbrack': '[', // キーボードで [ を打つと、MathLive は \left\lbrack … \right\rbrack と書く（リスト）
   '\\{': '(',
   '|': ' abs(',
   '\\vert': ' abs(',
@@ -244,7 +245,7 @@ class Converter {
         this.seq('\\right')
         if (this.toks[this.i] !== '\\right') throw new LatexError('括弧が閉じていません')
         this.i += 2 // \right と閉じ括弧
-        this.out += d === '[' ? ']' : ')'
+        this.out += OPENERS[d] === '[' ? ']' : ')'
         return
       }
       case 'operatorname':

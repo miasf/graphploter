@@ -7,7 +7,7 @@
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
+  import { complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
   import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -161,11 +161,24 @@
     implicitResolution = s.implicitResolution
     perspective = s.perspective
     dark = s.dark
-    space = s.space
+    // 古い保存データ・壊れた共有リンクでも動くよう、次元に合わせて配列の長さをそろえる
+    const dims = Math.max(3, Math.min(10, Math.round(Number(s.space.dims)) || 3))
+    space = {
+      ...s.space,
+      dims,
+      axes: s.space.axes?.length === 3 && s.space.axes.every((a) => a < dims) ? s.space.axes : [0, 1, 2],
+      slice: Array.from({ length: dims }, (_, k) => s.space.slice?.[k] ?? 0),
+      ranges: Array.from({ length: dims }, (_, k) => s.space.ranges?.[k] ?? null),
+      perspective: s.space.perspective ?? 0,
+      ...fitRotation(s.space.rotation, s.space.center, dims),
+    }
+    for (const it of items) {
+      if (it.rotation) Object.assign(it, fitRotation(it.rotation, it.center, dims))
+    }
     if (s.cut) cut = s.cut
     flat = s.flat ?? false
     flatSlice = s.flatSlice ?? false
-    groups = s.groups ?? []
+    groups = (s.groups ?? []).map((g) => ({ ...g, ...fitRotation(g.rotation, g.center, dims) }))
     folders = s.folders ?? []
     nextFolderId = Math.max(0, ...folders.map((f) => f.id)) + 1
     normalizeFolders()
@@ -173,13 +186,26 @@
     nextGroupId = Math.max(0, ...groups.map((g) => g.id)) + 1
   }
 
-  // 変わるたびに（少し待ってから）ブラウザに保存する
+  // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
+  // 「変わるたびに待ち直す」形にすると、回転・パラメータの再生中は毎コマ変わるので、いつまでも保存されない
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  /** まだ保存していない最新の状態 */
+  let unsaved: SavedState | null = null
+  function flushSave() {
+    clearTimeout(saveTimer)
+    saveTimer = undefined
+    if (unsaved) saveLocal(unsaved)
+    unsaved = null
+  }
   $effect(() => {
     if (!loaded) return
-    const state = snapshot() // ここで読んだ値が変わると、この処理がもう一度動く
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => saveLocal(state), 500)
+    unsaved = snapshot() // ここで読んだ値が変わると、この処理がもう一度動く
+    saveTimer ??= setTimeout(flushSave, 500)
+  })
+  // タブを閉じる・別のアプリに切り替えるときは、待たずに保存する
+  window.addEventListener('pagehide', flushSave)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushSave()
   })
 
   let shareMessage = $state('')
@@ -198,6 +224,10 @@
 
   function resetAll() {
     if (!confirm('式と設定をすべて最初の状態に戻します。よろしいですか？')) return
+    // 読み込み直す前（ページを閉じるとき）に今の状態が保存し直されないようにする
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
     clearLocal()
     location.reload()
   }
@@ -556,6 +586,17 @@
     if (res.param) {
       // パラメータの定義（a = 1 など）: グラフは描かず、値を覚えてスライダーを出す
       viewer.removePlot(item.id)
+      // 同じ名前を上の行ですでに定義していたら、この行はエラーにする（使われない値のスライダーを出さない）
+      const name = res.param.name
+      const k = items.indexOf(item)
+      if (items.slice(0, k).some((it) => it.param?.name === name && !it.error)) {
+        item.error = `${prettyName(name)} は上の行ですでに定義されています`
+        item.info = undefined
+        dropParam(item)
+        return
+      }
+      // 下の行に同じ名前の定義があれば、そちらをエラーにするため計算し直す（先に計算が終わっていたかもしれない）
+      for (const it of items.slice(k + 1)) if (it.param?.name === name) schedule(it, 0)
       const prev = item.param
       item.param = res.param
       if (res.param.im !== 0) item.slider.complex = true
@@ -766,7 +807,7 @@
     if (im !== 0) im = snapToStep(im, item.slider) // 実数のときの虚部 0 はそのまま
     item.param.re = re
     item.param.im = im
-    item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step)}`
+    item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step, item.slider.min)}`
     paramsChanged([item.param.name], item)
   }
 

@@ -52,13 +52,13 @@
 
 <div class="param">
   {#if slider.stack}
-    <p class="value">{name} を {formatNumber(slider.min, step)} 〜 {formatNumber(slider.max, step)} で動かして重ねています</p>
+    <p class="value">{name} を {formatNumber(slider.min, step, slider.min)} 〜 {formatNumber(slider.max, step, slider.max)} で動かして重ねています</p>
   {:else if slider.complex}
     <ComplexPad re={value.re} im={value.im} min={slider.min} max={slider.max} {step} {onChange} />
     <p class="value">
-      {name} = {formatNumber(value.re, step)}
+      {name} = {formatNumber(value.re, step, slider.min)}
       {value.im < 0 ? '−' : '+'}
-      {formatNumber(Math.abs(value.im), step)}<i>i</i>
+      {formatNumber(Math.abs(value.im), step, slider.min)}<i>i</i>
     </p>
   {:else}
     <div class="slider-row">

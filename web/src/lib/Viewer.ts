@@ -222,10 +222,18 @@ export class Viewer {
     this.camera.add(head, head.target)
     this.scene.add(this.camera, this.frame)
 
+    // WebGL のコンテキストが失われて戻ったとき（スマホでアプリを切り替えて戻った、GPU がリセットされたなど）は、
+    // three.js が GPU のデータを作り直すので、描き直す（何も変わっていないときは描かないので、そのままだと真っ白になる）
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      this.dirty = true
+    })
+
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(container)
     this.resize()
     this.loop()
+    // 開発中だけ: 操作のテスト（Playwright）からカメラの状態を読めるようにする（本番のビルドには入らない）
+    if (import.meta.env.DEV) (window as unknown as { __viewer: Viewer }).__viewer = this
   }
 
   /** マウスの操作モード（A: 標準 / B: Google Earth に近い操作） */
@@ -274,7 +282,16 @@ export class Viewer {
     el.addEventListener(
       'pointerdown',
       (e) => {
-        if (e.pointerType === 'touch' || this.controlMode !== 'B') return
+        this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
+        if (e.pointerType === 'touch' || this.controlMode !== 'B') {
+          // OrbitControls に任せる操作: 平行移動ならカーソルの下、回転・拡大縮小なら画面の中央の図形の奥行きに注視点を置く
+          const pan =
+            e.pointerType !== 'touch' &&
+            (this.flat || e.button === 2 || (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey)))
+          if (pan) this.anchorTarget(e.clientX, e.clientY)
+          else this.anchorTarget()
+          return
+        }
         // 左ボタンの2回押し（0.35 秒以内・ほぼ同じ位置）
         const double =
           e.button === 0 &&
@@ -285,12 +302,16 @@ export class Viewer {
         if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat) mode = 'look'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
-        // 左ドラッグ: A の Shift + 左ドラッグと同じ平行移動なので、OrbitControls に任せる
-        else return
+        // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
+        // 移動の速さは注視点までの距離で決まるので、カーソルの下の図形の奥行きに注視点を置く（つかんだ点がカーソルについてくる）
+        else {
+          this.anchorTarget(e.clientX, e.clientY)
+          return
+        }
         e.stopImmediatePropagation() // OrbitControls には渡さない
         e.preventDefault()
         el.setPointerCapture(e.pointerId)
-        const pivot = mode === 'look' ? new THREE.Vector3() : (this.pick(e.clientX, e.clientY) ?? this.controls.target.clone())
+        const pivot = mode === 'look' ? new THREE.Vector3() : (this.pickContent(e.clientX, e.clientY) ?? this.controls.target.clone())
         last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, plane: null }
         this.interacting = true
         this.setLowRes(true)
@@ -319,6 +340,9 @@ export class Viewer {
     })
     const end = (e: PointerEvent) => {
       if (!last || e.pointerId !== last.id) return
+      // 見回した後は、注視点が何も無い所に向いているかもしれない。画面の中央の図形の奥行きに置き直す
+      // （そのままだと、後の回転・拡大縮小が何も無い所を中心にして、感度もおかしくなる）
+      if (last.mode === 'look') this.anchorTarget()
       last = null
       this.interacting = false
     }
@@ -343,9 +367,13 @@ export class Viewer {
     this.dirty = true
   }
 
-  /** 画面上の点 (clientX, clientY) にある曲面の点（表示範囲の外で切り落とした部分は除く）。
-   *  曲面が無ければ、注視点を通る水平な面との交点 */
-  private pick(clientX: number, clientY: number): THREE.Vector3 | null {
+  /**
+   * 画面上の点 (clientX, clientY) にある図形の点。曲面が無ければ表示範囲の箱（2D 表示なら z = 0 の平面）との交点。
+   * どれにも当たらなければ null。
+   * （以前は注視点を通る水平な面との交点にしていたが、Ctrl + ドラッグで見回した後は注視点がカメラと同じ高さにあり、
+   *   交点がカメラのすぐ近くになって、回転が「その場で首を振る」動きになっていた）
+   */
+  private pickContent(clientX: number, clientY: number): THREE.Vector3 | null {
     const ray = this.rayAt(clientX, clientY)
     const meshes: THREE.Object3D[] = []
     for (const p of this.plots.values()) {
@@ -355,9 +383,41 @@ export class Viewer {
     for (const hit of ray.intersectObjects(meshes, false)) {
       if (inside(hit.point)) return hit.point.clone()
     }
-    const up = this.camera.up.clone().normalize()
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(up, this.controls.target)
-    return ray.ray.intersectPlane(plane, new THREE.Vector3())
+    const d = this.domain
+    if (!d) return null
+    if (this.flat) return ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3())
+    const box = new THREE.Box3(new THREE.Vector3(d.xmin, d.ymin, d.zmin), new THREE.Vector3(d.xmax, d.ymax, d.zmax))
+    return ray.ray.intersectBox(box, new THREE.Vector3())
+  }
+
+  /**
+   * 注視点（回転・拡大縮小の中心、平行移動の速さの基準）を、見ている向きは変えずに、
+   * 画面上の点 (clientX, clientY)（省略なら画面の中央）にある図形の奥行きに置き直す。見た目は変わらない。
+   * OrbitControls の平行移動は注視点までの距離に比例した速さなので、つかんだ点の奥行きにすると、その点がカーソルについてくる
+   * （注視点が図形よりずっと奥や手前にあると、感度が高すぎ・低すぎになる）
+   */
+  private anchorTarget(clientX?: number, clientY?: number) {
+    if (clientX === undefined || clientY === undefined) {
+      const r = this.renderer.domElement.getBoundingClientRect()
+      clientX = r.left + r.width / 2
+      clientY = r.top + r.height / 2
+    }
+    const p = this.pickContent(clientX, clientY)
+    if (!p) return
+    const eye = this.camera.position
+    const dir = this.controls.target.clone().sub(eye).normalize()
+    const depth = p.clone().sub(eye).dot(dir)
+    if (!(depth > this.sceneSize() * 1e-3)) return
+    this.controls.target.copy(eye).addScaledVector(dir, depth)
+    this.controls.update()
+  }
+
+  /** OrbitControls の慣性（指を離した後もしばらく回り続ける・動き続ける分）を止める */
+  private stopInertia() {
+    const c = this.controls as unknown as { _sphericalDelta?: THREE.Spherical; _panOffset?: THREE.Vector3; _scale?: number }
+    c._sphericalDelta?.set(0, 0, 0)
+    c._panOffset?.set(0, 0, 0)
+    if (c._scale !== undefined) c._scale = 1
   }
 
   /** つかんで動かす面: 上から見下ろしているなら点 p を通る水平な面、横から見ているなら画面に平行な面 */
@@ -418,7 +478,13 @@ export class Viewer {
         if (e.ctrlKey) d *= 4 // トラックパッドのピンチ（値が小さい）
         // 1目盛り（約 100 px）で約 1.25 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
         this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * WHEEL_PER_PIXEL, -3, 3)
-        if (this.wheelLastTime === 0) this.wheelLastTime = performance.now()
+        if (this.wheelLastTime === 0) {
+          // 回し始め: 拡大縮小の量は注視点までの距離に比例するので、画面の中央の図形の奥行きに注視点を置く
+          // （見回した後などで注視点が何も無い遠くにあると、1目盛りで飛びすぎる）
+          this.stopInertia()
+          this.anchorTarget()
+          this.wheelLastTime = performance.now()
+        }
         this.wheelHoldUntil = performance.now() + 350
         this.setLowRes(true)
         this.dirty = true

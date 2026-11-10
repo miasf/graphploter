@@ -45,7 +45,61 @@
     el.smartFence = true // ( を打つと ) も自動で入る
     el.mathVirtualKeyboardPolicy = keyboardPolicy() // 画面上の数式キーボードを出す（PC では入力欄に入ったときに出す）
     if (autofocus) startEditing()
+    el.addEventListener('keydown', fixLayoutKey, { capture: true })
   })
+
+  // ---- 日本語（JIS）配列などのキーボード ----
+  // MathLive は、キーの操作（\ で LaTeX の命令の入力、" で文字の入力など）をキーの位置（code）から US 配列として決める。
+  // JIS 配列では位置と文字の対応が違うので、] を打つと「\ のキー」として LaTeX の命令の入力に変わり（続けて打った文字が消える）、
+  // * を打つと「" のキー」として文字の入力に変わってしまう。
+  // そこで、打った文字が US 配列のその位置の文字と違うキーは、同じ文字を出す US 配列の位置のキーとして MathLive に渡し直す。
+
+  /** US 配列の記号のキーの位置 → [そのまま, Shift] の文字 */
+  const US_KEYS: Record<string, [string, string]> = {
+    Backquote: ['`', '~'],
+    Minus: ['-', '_'],
+    Equal: ['=', '+'],
+    BracketLeft: ['[', '{'],
+    BracketRight: [']', '}'],
+    Backslash: ['\\', '|'],
+    Semicolon: [';', ':'],
+    Quote: ["'", '"'],
+    Comma: [',', '<'],
+    Period: ['.', '>'],
+    Slash: ['/', '?'],
+    Digit1: ['1', '!'],
+    Digit2: ['2', '@'],
+    Digit3: ['3', '#'],
+    Digit4: ['4', '$'],
+    Digit5: ['5', '%'],
+    Digit6: ['6', '^'],
+    Digit7: ['7', '&'],
+    Digit8: ['8', '*'],
+    Digit9: ['9', '('],
+    Digit0: ['0', ')'],
+  }
+  /** 文字 → US 配列でその文字を出すキーの位置と Shift */
+  const US_CHARS = new Map<string, { code: string; shiftKey: boolean }>()
+  for (const [code, [a, b]] of Object.entries(US_KEYS)) {
+    US_CHARS.set(a, { code, shiftKey: false })
+    US_CHARS.set(b, { code, shiftKey: true })
+  }
+
+  function fixLayoutKey(e: KeyboardEvent) {
+    if (!e.isTrusted || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.key.length !== 1) return
+    const us = US_KEYS[e.code]
+    if (!us || us[e.shiftKey ? 1 : 0] === e.key) return // US 配列と同じ（または記号のキーでない）
+    // MathLive に届く前に止めて、同じ文字の US 配列のキーとして送り直す。
+    // US 配列に無い文字（¥ など）は、位置を空にして送る（MathLive は文字だけで処理する）
+    e.stopPropagation()
+    e.preventDefault()
+    const target = e.composedPath()[0] ?? el
+    const as = US_CHARS.get(e.key) ?? { code: '', shiftKey: e.shiftKey }
+    const ev = new KeyboardEvent('keydown', { key: e.key, ...as, bubbles: true, cancelable: true, composed: true })
+    target.dispatchEvent(ev)
+    // キーの操作として処理されなかった文字（ふつうの文字）は、打った文字として入れる
+    if (!ev.defaultPrevented) el.executeCommand(['typedText', e.key])
+  }
 
   /** 入力を始める（スマホでは数式キーボードが出る）。x, y があれば、その位置にカーソルを置く */
   function startEditing(x?: number, y?: number) {
@@ -124,18 +178,12 @@
     const [from, to] = el.selection.ranges[0] ?? [0, 0]
     if (el.selection.ranges.length !== 1 || from !== to) return // 選んだ範囲を置き換える・消す入力はそのまま
     const pos = el.position
-    // 一文字消す: 添字付きの文字の直後なら、添字の最後の数字を消す（数字が無くなったら添字ごと消す）。
-    // そのままだと、1回目はカーソルが添字の中に入るだけで何も消えない
+    // 一文字消す（物理キーボードの Backspace も、数式キーボードの ⌫ もここを通る）
     if (e.inputType === 'deleteContentBackward') {
-      const digits = digitSubscriptBefore(pos)
-      if (digits === 0) return
       e.preventDefault()
       subscripting = true
       try {
-        el.position = pos - 1
-        el.executeCommand('deleteBackward')
-        if (digits > 1) el.executeCommand('moveAfterParent')
-        else el.executeCommand('deleteBackward') // 空になった添字を消す
+        deleteBackward(pos)
       } finally {
         subscripting = false
       }
@@ -174,6 +222,74 @@
       subscripting = false
     }
     emit()
+  }
+
+  /**
+   * カーソル（位置 pos）の前を一文字消す。
+   * - 添字付きの文字の直後なら、添字の最後の数字を消す（数字が無くなったら添字ごと消す）。
+   *   そのままだと、1回目はカーソルが添字の中に入るだけで何も消えない
+   * - 関数名（floor などの \operatorname）や括弧の中身の先頭では、MathLive の「一文字消す」は何もせず、
+   *   カーソルも動かない（何回押しても消せない）。例: mod(□, b) の最初の引数を消した後。
+   *   そのときは、その箱の手前に出てから、その前を消す
+   */
+  function deleteBackward(pos: number, depth = 0) {
+    const digits = digitSubscriptBefore(pos)
+    if (digits > 0) {
+      el.position = pos - 1
+      el.executeCommand('deleteBackward')
+      if (digits > 1) el.executeCommand('moveAfterParent')
+      else el.executeCommand('deleteBackward') // 空になった添字を消す
+      return
+    }
+    const before = el.value
+    el.executeCommand('deleteBackward')
+    if (el.value !== before && el.position === pos && ghostOpens(el.value) > ghostOpens(before)) {
+      unwrapFence(pos)
+      return
+    }
+    if (el.value !== before || el.position !== pos || depth >= 8) return
+    // 行き詰まった: 箱の手前に出る（式の先頭で、手前に何も無ければそのまま）
+    el.executeCommand('moveToPreviousChar')
+    const out = el.position
+    if (out < pos) deleteBackward(out, depth + 1)
+  }
+
+  /** 見えない開き括弧（\left.）の数 */
+  const ghostOpens = (latex: string) => latex.match(/\\left\./g)?.length ?? 0
+
+  /** 関数名（\sin, \Gamma, \operatorname{floor} など）で終わっているか */
+  const FUNCTION_TAIL =
+    /(\\operatorname\{(\\mathrm\{[^{}]*\}|[^{}])*\}|\\(arc)?(sin|cos|tan|sec|csc|cot)h?|\\(exp|ln|log|Gamma|zeta|psi|max|min|arg|Re|Im))$/
+
+  /**
+   * 開き括弧を消した直後（MathLive は「(」を見えない括弧 \left. に変えて「)」を残す）。位置 pos はその括弧の中身の先頭。
+   * 括弧の組ごと外して中身だけを残す。括弧の前が関数名なら、関数名も消す（Desmos と同じ: sin(x) → x）。
+   * そのままだと、見えない括弧の前で何回押しても消せず、「)」だけが残る
+   */
+  function unwrapFence(pos: number) {
+    el.executeCommand('moveToPreviousChar') // 括弧の手前へ
+    const start = el.position
+    const head = el.getValue(0, start, 'latex')
+    // 括弧の終わり: 先頭からそこまでの中身に、見えない括弧が増える所
+    let end = -1
+    for (let k = pos; k <= el.lastOffset; k++) {
+      if (ghostOpens(el.getValue(0, k, 'latex')) > ghostOpens(head)) {
+        end = k
+        break
+      }
+    }
+    if (start >= pos || end < 0) {
+      el.position = pos
+      return
+    }
+    let inner = el.getValue(pos, end - 1, 'latex')
+    // 中身が空欄（□）とカンマだけ（関数キーで入れて何も書いていない mod(□, □) など）なら、中身ごと消す
+    if (inner.replace(/\\placeholder\{\}|,/g, '').trim() === '') inner = ''
+    el.selection = { ranges: [[start, end]], direction: 'forward' }
+    if (inner === '') el.executeCommand('deleteBackward')
+    else el.insert(inner, { format: 'latex', selectionMode: 'after' })
+    el.position = start
+    if (FUNCTION_TAIL.test(head)) el.executeCommand('deleteBackward')
   }
 
   /** 今の中身を外へ知らせる（こちらで書き換えたときは、MathLive の input を待たずに知らせる） */
