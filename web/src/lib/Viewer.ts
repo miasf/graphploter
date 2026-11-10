@@ -109,6 +109,11 @@ type PlotObject =
     }
   | { kind: 'curve'; line: LineSegments2 }
 
+/** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
+const WHEEL_PER_PIXEL = 0.0022
+/** ホイールの拡大縮小をならす時間（秒） */
+const WHEEL_SMOOTH_S = 0.1
+
 /** 動かしている間の画素密度の倍率（遅いときに、左から順に下げていく） */
 const MOTION_SCALES = [1, 0.75, 0.55, 0.4, 0.3]
 /** 1コマがこれより長ければ「遅い」（およそ 36 コマ/秒を下回る） */
@@ -411,8 +416,8 @@ export class Viewer {
         const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.container.clientHeight || 800 : 1
         let d = e.deltaY * unit
         if (e.ctrlKey) d *= 4 // トラックパッドのピンチ（値が小さい）
-        // 1目盛り（約 100 px）で約 1.07 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
-        this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * 0.0007, -3, 3)
+        // 1目盛り（約 100 px）で約 1.25 倍。一度に大きく動きすぎないよう、ためる量に上限をつける
+        this.wheelPending = THREE.MathUtils.clamp(this.wheelPending + d * WHEEL_PER_PIXEL, -3, 3)
         if (this.wheelLastTime === 0) this.wheelLastTime = performance.now()
         this.wheelHoldUntil = performance.now() + 350
         this.setLowRes(true)
@@ -422,18 +427,18 @@ export class Viewer {
     )
   }
 
-  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.5 秒ほどで大部分を動かす） */
+  /** 毎フレーム: ためた拡大縮小を少しずつ進める（0.3 秒ほどで大部分を動かす） */
   private stepWheelZoom() {
     if (this.wheelPending === 0) {
       this.wheelLastTime = 0
       return
     }
     const now = performance.now()
-    const dt = Math.min(0.1, (now - this.wheelLastTime) / 1000)
+    // 描くのが遅いコマでも、時間に見合った量だけ進める（上限が小さいと、重いグラフほど拡大縮小が遅くなる）
+    const dt = Math.min(0.25, (now - this.wheelLastTime) / 1000)
     this.wheelLastTime = now
-    // ならす時間 0.22 秒。短いと、目盛りごとに「急に動いて止まる」をくり返して波打って見える
-    // （目盛りの間隔 0.08 秒なら、速さの揺れが 0.1 秒では約 2.2 倍、0.22 秒では約 1.4 倍）
-    let step = this.wheelPending * (1 - Math.exp(-dt / 0.22))
+    // ならす時間 0.1 秒。長いと遅れて感じ、短すぎると目盛りごとに「急に動いて止まる」をくり返して波打って見える
+    let step = this.wheelPending * (1 - Math.exp(-dt / WHEEL_SMOOTH_S))
     // 残りがごくわずかになったら、最後まで動かして終える（いつまでも微小に動き続けないように）
     if (Math.abs(this.wheelPending) < 2e-3) step = this.wheelPending
     this.wheelPending -= step
