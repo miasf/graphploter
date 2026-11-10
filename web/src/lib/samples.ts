@@ -185,6 +185,16 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         ],
       },
       {
+        label: '複素平面の点 c, c², 1/c（c をドラッグ）と単位円',
+        items: [
+          { latex: 'c=0.8+0.6i', param: 'c' },
+          { latex: 'c', options: { color: '#c74440', lineWidth: 4 } },
+          { latex: 'c^2', options: { color: '#2d70b3', lineWidth: 4 } },
+          { latex: '\\frac{1}{c}', options: { color: '#388c46', lineWidth: 4 } },
+          { latex: 'e^{it}', options: { color: '#000000', lineWidth: 1.5, ranges: { t: TWO_PI, u: TWO_PI, v: TWO_PI } } },
+        ],
+      },
+      {
         label: '複素平面の等角写像 (u + iv)²（格子線の像）',
         items: [
           {

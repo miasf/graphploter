@@ -53,6 +53,8 @@ pub struct Space {
     pub complex_height: Option<crate::functions::Func>,
     /// 複素平面の図形（[`complex_plane`]）で、縦の軸を媒介変数にするか（`complex_height` より優先）
     pub lift_param: bool,
+    /// 複素数のパラメータ（スライダーを複素平面にしたもの）の名前。これを使った定数の式は複素平面の点になる
+    pub complex_params: Vec<String>,
 }
 
 impl Space {
@@ -74,6 +76,7 @@ impl Space {
             center: vec![0.0; rot_dims(dims)],
             complex_height: None,
             lift_param: false,
+            complex_params: Vec::new(),
         }
     }
 
@@ -299,6 +302,8 @@ impl Plot {
             | Plot::Volume { vars, .. }
             | Plot::Sheets { vars, .. } => vars.clone(),
             Plot::Multi(ps) => ps.first().map_or(Vec::new(), |p| p.param_vars()),
+            // 点（媒介変数を使わない）なら、範囲の欄を出さない
+            Plot::ComplexPlane { label, .. } if label.starts_with("複素平面の点") => Vec::new(),
             Plot::ComplexPlane { inner, .. } => inner.param_vars(),
             _ => Vec::new(),
         }
@@ -660,14 +665,22 @@ fn complex_plane(e: &Expr, params: &Params, space: &Space) -> Result<Option<Plot
         return Ok(None);
     }
     let vars: Vec<&String> = used.iter().filter(|v| is_param_var(v) && !params.contains_key(*v)).collect();
-    if vars.is_empty() {
-        return Ok(None);
+    // 媒介変数が無ければ、値は1つの複素数。i を書いたか、複素数のパラメータを使ったか、値が実数でなければ点にする
+    // （実数の定数 `2` や `a` は、今までどおり平面 z = 2 など）
+    let point = vars.is_empty();
+    if point {
+        let complex = uses_i(e)
+            || used.iter().any(|v| space.complex_params.contains(v))
+            || used.iter().any(|v| params.get(v).is_some_and(|c| c.im != 0.0));
+        if !complex || used.iter().any(|v| !params.contains_key(v)) {
+            return Ok(None);
+        }
     }
     let call = |f: crate::functions::Func| Expr::Call(f, vec![e.clone()]);
     use crate::functions::Func;
     let mut items = vec![call(Func::Re), call(Func::Im), Expr::Num(0.0)];
     let mut height = None;
-    if space.lift_param {
+    if space.lift_param && !point {
         // 媒介変数が1つ（曲線）のときだけ。曲面のときは平面のまま
         let p = parametric(items.clone(), params, space)?;
         if let [v] = p.param_vars().as_slice() {
@@ -686,6 +699,7 @@ fn complex_plane(e: &Expr, params: &Params, space: &Space) -> Result<Option<Plot
     }
     let inner = parametric(items, params, space)?;
     let shape = match &inner {
+        Plot::Curve { .. } if point => "点",
         Plot::Curve { .. } => "曲線",
         Plot::Surface { .. } => "曲面",
         Plot::Volume { .. } => "立体",
@@ -696,6 +710,18 @@ fn complex_plane(e: &Expr, params: &Params, space: &Space) -> Result<Option<Plot
         None => format!("複素平面の{shape}（横 Re f, 奥 Im f）"),
     };
     Ok(Some(Plot::ComplexPlane { inner: Box::new(inner), label }))
+}
+
+/// 式が虚数単位 i を使っているか
+fn uses_i(e: &Expr) -> bool {
+    use crate::parser::Constant;
+    match e {
+        Expr::Const(Constant::I) => true,
+        Expr::Num(_) | Expr::Const(_) | Expr::Var(_) => false,
+        Expr::Neg(a) => uses_i(a),
+        Expr::Bin(_, a, b) => uses_i(a) || uses_i(b),
+        Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(uses_i),
+    }
 }
 
 /// 媒介変数の名前を画面に出す形にする（t1 → t₁）
@@ -854,10 +880,11 @@ mod tests {
         assert_eq!(kind("(u + i v)^2"), "複素平面の曲面（横 Re f, 奥 Im f）");
         // 座標を使えば今までどおり陽関数
         assert_eq!(kind("e^(i x)"), "z = f(x, y)");
-        // t がパラメータとして定義されていれば、今までどおり z = (t の式)
+        // t がパラメータとして定義されていれば、t はパラメータ（e^(i t) は1つの複素数なので点、t だけなら平面）
         let mut ps = Params::new();
         ps.insert("t".into(), C::new(2.0, 0.0));
-        assert_eq!(compile_with("e^(i t)", &ps, &Space::standard()).unwrap().kind_label(), "z = f(x, y)");
+        assert_eq!(compile_with("e^(i t)", &ps, &Space::standard()).unwrap().kind_label(), "複素平面の点（横 Re f, 奥 Im f）");
+        assert_eq!(compile_with("2t", &ps, &Space::standard()).unwrap().kind_label(), "z = f(x, y)");
         // 点を計算すると単位円（縦を t にすると、らせん）
         let mut sp = Space::standard();
         sp.lift_param = true;
@@ -879,6 +906,34 @@ mod tests {
         assert_eq!(compile_with("2e^(i t)", &Params::new(), &sp).unwrap().kind_label(), "複素平面の曲線（横 Re f, 奥 Im f, 縦 |f|）");
         // リストも使える
         assert!(kind("[1, 2] e^(i t)").starts_with("複素平面の曲線"));
+    }
+
+    #[test]
+    fn complex_point() {
+        assert_eq!(kind("1 + 2i"), "複素平面の点（横 Re f, 奥 Im f）");
+        assert_eq!(kind("[1, 2] + i"), "複素平面の点（横 Re f, 奥 Im f）");
+        // 実数の定数は今までどおり平面
+        assert_eq!(kind("2"), "z = f(x, y)");
+        let mut ps = Params::new();
+        ps.insert("a".into(), C::new(2.0, 0.0));
+        ps.insert("c".into(), C::new(1.0, 1.0));
+        let sp = Space::standard();
+        assert_eq!(compile_with("a", &ps, &sp).unwrap().kind_label(), "z = f(x, y)");
+        assert_eq!(compile_with("c^2", &ps, &sp).unwrap().kind_label(), "複素平面の点（横 Re f, 奥 Im f）");
+        // 複素数のスライダーなら、値がたまたま実数でも点のまま
+        let mut sp = Space::standard();
+        sp.complex_params = vec!["a".into()];
+        assert_eq!(compile_with("a", &ps, &sp).unwrap().kind_label(), "複素平面の点（横 Re f, 奥 Im f）");
+        // 点の位置
+        let p = compile_with("c^2", &ps, &Space::standard()).unwrap();
+        let Plot::ComplexPlane { inner, .. } = p else { panic!() };
+        let Plot::Curve { sets, .. } = *inner else { panic!() };
+        let at = |k: usize| {
+            let mut out = [C::new(0.0, 0.0)];
+            sets[0][k].eval_batch(&[&[0.0]], &mut out);
+            out[0].re
+        };
+        assert!(at(0).abs() < 1e-12 && (at(1) - 2.0).abs() < 1e-12);
     }
 
     #[test]

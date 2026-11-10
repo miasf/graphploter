@@ -112,6 +112,8 @@ export const OWN_GROUP = -1
 export interface ParamValue {
   re: number
   im: number
+  /** 複素数のスライダー（複素平面）にしたパラメータか。これを使った定数の式は複素平面の点になる */
+  complex?: boolean
 }
 
 /** パラメータのスライダーの設定 */

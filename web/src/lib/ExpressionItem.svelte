@@ -160,7 +160,9 @@
 
   /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
-  const isCurve = $derived(item.params.length === 1)
+  /** 複素平面の点（1 + 2i、複素数のパラメータ c など）。曲線と同じく線の太さ（点の大きさ）を選べる */
+  const isComplexPoint = $derived(/^複素平面の点/.test(item.kind ?? ''))
+  const isCurve = $derived(item.params.length === 1 || isComplexPoint)
   /** 媒介変数表示の曲面・立体（格子線を媒介変数に沿って引く） */
   const isSurface = $derived(item.params.length >= 2)
   /** 媒介変数が4つ以上の図形（媒介変数を2つずつ動かした面の集まり） */
@@ -192,7 +194,7 @@
   /** 複素平面の図形の縦の軸（媒介変数は曲線のときだけ） */
   const LIFT_MODES = $derived<{ mode: ComplexMode; label: string }[]>([
     { mode: 'off', label: '0（平面の上）' },
-    ...(isCurve ? [{ mode: 'param' as const, label: `媒介変数 ${prettyName(item.params[0] ?? 't')}` }] : []),
+    ...(isCurve && !isComplexPoint ? [{ mode: 'param' as const, label: `媒介変数 ${prettyName(item.params[0] ?? 't')}` }] : []),
     { mode: 'abs', label: '|f|' },
     { mode: 'arg', label: 'arg f' },
     { mode: 're', label: 'Re f' },
@@ -401,7 +403,7 @@
         </label>
           {#if isCurve}
           <div class="sliders">
-            <span class="label">線の太さ</span>
+            <span class="label">{isComplexPoint ? "点の大きさ" : "線の太さ"}</span>
             <input
               type="range"
               min="1"

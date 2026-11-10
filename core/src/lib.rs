@@ -178,13 +178,15 @@ pub fn last_used_params() -> String {
 /// - `range_names`, `ranges`: 媒介変数の範囲。例: "t,u,v" と [t0, t1, u0, u1, v0, v1]。
 ///   無い媒介変数は 0〜2π
 /// - `param_names`, `param_values`: パラメータ（スライダー）。例: "a,b" と [a の実部, a の虚部, b の実部, …]
+/// - `complex_params`: 複素数のスライダーにしたパラメータの名前（カンマ区切り）。これを使った定数の式は複素平面の点になる
 /// - `dims`: 次元、`axes`: 画面の横・奥・縦に表示する座標の番号、`slice`: 各座標の断面の値
 /// - `coord_ranges`: 各座標の「範囲で重ねる」範囲 [x の最小, x の最大, y の最小, …]（重ねない座標は NaN）
 /// - `stack_names`, `stack_ranges`: 範囲で重ねるパラメータの名前（カンマ区切り）と [最小, 最大, …]
 /// - `samples`: 範囲を何等分して重ねるか
 /// - `rotation`: 回転角（ラジアン、座標の組 (0,1), (0,2), …, (1,2), … の順）、`center`: 回転の中心
 /// - `perspective`: 4次元の遠近法の視点までの距離（0 なら遠近法なし）。射影で描く図形（媒介変数表示・回した陽関数）だけに効く
-/// - `complex_mode`: 陽関数の複素数の色分け（0: しない, 1: 高さ |f|, 2: 高さ Re f, 3: 高さ Im f。色は偏角）
+/// - `complex_mode`: 陽関数の複素数の色分け（0: しない, 1: 高さ |f|, 2: 高さ Re f, 3: 高さ Im f, 4: 高さ arg f。色は偏角）。
+///   複素平面の図形では縦の軸に描くもの（0: 0, 1: |f|, 2: Re f, 3: Im f, 4: arg f, 5: 媒介変数）
 /// - `walls`: 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか
 /// - `flat`: 2D 表示。縦の軸の座標を 0 にして、横・奥の平面に描く。
 ///   縦の座標 = f(横, 奥) は平面の塗り分け、陰関数・ほかの陽関数は曲線、範囲で重ねた立体は塗った領域になる
@@ -202,6 +204,7 @@ pub fn plot(
     ranges: &[f64],
     param_names: &str,
     param_values: &[f64],
+    complex_params: &str,
     dims: u32,
     axes: &[u32],
     slice: &[f64],
@@ -263,6 +266,7 @@ pub fn plot(
             mesh::ComplexMode::Arg => Some(functions::Func::Arg),
         },
         lift_param: complex_mode == mesh::ComplexMode::Param,
+        complex_params: split(complex_params),
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));

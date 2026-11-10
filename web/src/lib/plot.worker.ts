@@ -178,6 +178,10 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         new Float64Array(rangeValues.flat()),
         Object.keys(params).join(','),
         new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
+        Object.entries(params)
+          .filter(([, p]) => p.complex)
+          .map(([k]) => k)
+          .join(','),
         space.dims,
         new Uint32Array(space.axes),
         new Float64Array(coord.slice),

@@ -69,7 +69,7 @@ export function requestPlot(
     implicitResolution,
     // Svelte の $state（Proxy）は Worker に送れないので、ふつうの配列にコピーする
     ranges: Object.fromEntries(Object.entries(ranges).map(([k, [a, b]]) => [k, [a, b]])),
-    params: Object.fromEntries(Object.entries(params).map(([k, p]) => [k, { re: p.re, im: p.im }])),
+    params: Object.fromEntries(Object.entries(params).map(([k, p]) => [k, { re: p.re, im: p.im, complex: p.complex }])),
     space: {
       dims: space.dims,
       axes: [...space.axes],
