@@ -586,6 +586,17 @@
     if (res.param) {
       // パラメータの定義（a = 1 など）: グラフは描かず、値を覚えてスライダーを出す
       viewer.removePlot(item.id)
+      // 同じ名前を上の行ですでに定義していたら、この行はエラーにする（使われない値のスライダーを出さない）
+      const name = res.param.name
+      const k = items.indexOf(item)
+      if (items.slice(0, k).some((it) => it.param?.name === name && !it.error)) {
+        item.error = `${prettyName(name)} は上の行ですでに定義されています`
+        item.info = undefined
+        dropParam(item)
+        return
+      }
+      // 下の行に同じ名前の定義があれば、そちらをエラーにするため計算し直す（先に計算が終わっていたかもしれない）
+      for (const it of items.slice(k + 1)) if (it.param?.name === name) schedule(it, 0)
       const prev = item.param
       item.param = res.param
       if (res.param.im !== 0) item.slider.complex = true
