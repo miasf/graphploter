@@ -24,14 +24,35 @@
   /** 最後に外へ知らせた値。これと違う値が来たときだけ「外から変わった」とみなして欄を書き換える */
   let emitted: number | null = null
   let invalid = $state(false)
+  /** 入力中か。入力中は、外から値が変わっても欄を書き換えない */
+  let editing = false
+
+  const show = (v: number) => (format ? format(v) : String(Number(v.toPrecision(12)))) // 0.30000000000000004 → 0.3
 
   $effect(() => {
     if (value !== emitted) {
       emitted = value
-      text = format ? format(value) : String(Number(value.toPrecision(12))) // 0.30000000000000004 → 0.3
+      // 入力中に知らせた値が範囲の端にそろえられて戻ってきた（下限 0.25 の欄で 0.25 → 0.2 と消した途中など）ときも、
+      // ここで書き換えると打っている途中の文字が消えて先へ進めない。欄を出たときに書き直す
+      if (editing) return
+      text = show(value)
       invalid = false
     }
   })
+
+  /**
+   * 入力欄から出たとき: 入れた値が範囲の端にそろえられていた・数値として読めない（空など）なら、実際の値を書く
+   * （欄の文字と、実際に使っている値が食い違ったままにしない）
+   */
+  function finish() {
+    editing = false
+    const r = evalNumber(text, () => {})
+    if (r && ('error' in r || r.value !== value)) {
+      emitted = value
+      text = show(value)
+      invalid = false
+    }
+  }
 
   function run() {
     const r = evalNumber(text, run)
@@ -51,7 +72,11 @@
     {label}
     {autofocus}
     onFocusChange={(f) => {
-      if (!f) onDone?.()
+      if (f) editing = true
+      else {
+        finish()
+        onDone?.()
+      }
     }}
     onEnter={() => onDone?.()}
     onInput={(v) => {
