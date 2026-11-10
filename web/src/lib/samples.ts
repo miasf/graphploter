@@ -17,7 +17,7 @@ export interface Sample {
   dims?: number
   items: SampleItem[]
   /** 式を追加するだけでなく、表示範囲や回転も設定する特別な例 */
-  special?: 'tesseract'
+  special?: 'tesseract' | 'tesseractFaces' | 'cube5Faces'
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
   play?: string
 }
@@ -187,6 +187,30 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         ],
       },
       { label: '正八胞体（4次元の立方体）の回転', items: [], special: 'tesseract' },
+    ],
+  },
+  {
+    title: '多変数（媒介変数4つ以上）',
+    samples: [
+      { label: '4次元の立方体の面 24 枚 (t₁, t₂, t₃, t₄) の回転', items: [], special: 'tesseractFaces' },
+      {
+        label: '4次元の球の中身（半径 t₁ と3つの角度）',
+        dims: 4,
+        items: [
+          {
+            latex:
+              '\\left(t_1\\sin t_2\\sin t_3\\cos t_4,t_1\\sin t_2\\sin t_3\\sin t_4,t_1\\sin t_2\\cos t_3,t_1\\cos t_2\\right)',
+            options: {
+              color: '#388c46',
+              opacity: 0.4,
+              layers: 2,
+              grid: { enabled: true, x: 1, y: 1, z: 0, u: 6, v: 6, w: 6, width: 1 },
+              ranges: { t1: ['0', '2'], t2: ['0', '\\pi'], t3: ['0', '\\pi'], t4: TWO_PI },
+            },
+          },
+        ],
+      },
+      { label: '5次元の立方体の面 80 枚 (t₁, …, t₅) の回転', items: [], special: 'cube5Faces' },
     ],
   },
 ]

@@ -10,7 +10,9 @@
 //! - `(x(t), y(t), z(t), …)`                                  → 媒介変数表示の曲線
 //! - `(x(u,v), y(u,v), z(u,v), …)`                            → 媒介変数表示の曲面
 //! - `(x(u,v,t), y(u,v,t), z(u,v,t), …)`                      → 媒介変数表示の立体（媒介変数の直方体の6つの面を描く）
-//!   （媒介変数は t / u, v / u, v, t / t₁, t₂, t₃。成分が次元より少なければ残りは 0）
+//! - `(x(t₁,…,t₄), y(t₁,…,t₄), …)`（媒介変数が4つ以上）       → 媒介変数表示の多変数の図形
+//!   （媒介変数を2つずつ動かした面をたくさん描く。[`crate::mesh::parametric_sheets_nd`]）
+//!   （媒介変数は t / u, v / u, v, t / t₁, t₂, t₃, t₄, …。成分が次元より少なければ残りは 0）
 //! - `a = 1`（座標以外の名前 = 数）                            → パラメータ（スライダー）の定義
 //!
 //! 表示していない座標と、パラメータは、式の中では定数として扱う。
@@ -224,6 +226,9 @@ pub fn coord_index(name: &str) -> Option<usize> {
     }
 }
 
+/// 媒介変数（と、範囲で重ねるパラメータ）の数の上限
+pub const MAX_PARAM_VARS: usize = 8;
+
 /// 媒介変数として使える名前か（t, u, v, t1, t2, …）
 fn is_param_var(name: &str) -> bool {
     matches!(name, "t" | "u" | "v")
@@ -251,6 +256,9 @@ pub enum Plot {
     /// 媒介変数表示の立体。`sets` の1つ1つが1つの立体。変数は `vars`（3つ）。
     /// 媒介変数の範囲の直方体を写した形として、直方体の6つの面の像を描く
     Volume { sets: Vec<Vec<Program>>, vars: Vec<String> },
+    /// 媒介変数が4つ以上の媒介変数表示。変数は `vars`（4つ以上）。
+    /// 媒介変数を2つずつ動かした面（残りは固定）をたくさん描いて表す
+    Sheets { sets: Vec<Vec<Program>>, vars: Vec<String> },
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
     /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
@@ -271,6 +279,7 @@ impl Plot {
             Plot::Curve { .. } => "媒介変数表示の曲線".into(),
             Plot::Surface { .. } => "媒介変数表示の曲面".into(),
             Plot::Volume { .. } => "媒介変数表示の立体".into(),
+            Plot::Sheets { vars, .. } => format!("媒介変数表示の多変数の図形（{} 変数）", vars.len()),
             Plot::Param { .. } => "パラメータ".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
         }
@@ -279,7 +288,10 @@ impl Plot {
     /// 媒介変数の名前（媒介変数表示でなければ空）
     pub fn param_vars(&self) -> Vec<String> {
         match self {
-            Plot::Curve { vars, .. } | Plot::Surface { vars, .. } | Plot::Volume { vars, .. } => vars.clone(),
+            Plot::Curve { vars, .. }
+            | Plot::Surface { vars, .. }
+            | Plot::Volume { vars, .. }
+            | Plot::Sheets { vars, .. } => vars.clone(),
             Plot::Multi(ps) => ps.first().map_or(Vec::new(), |p| p.param_vars()),
             _ => Vec::new(),
         }
@@ -295,9 +307,10 @@ impl Plot {
                 out.extend(prog.used_params().iter().filter(|n| !names.contains(n)).cloned());
                 return out;
             }
-            Plot::Curve { sets, .. } | Plot::Surface { sets, .. } | Plot::Volume { sets, .. } => {
-                sets.iter().flatten().collect()
-            }
+            Plot::Curve { sets, .. }
+            | Plot::Surface { sets, .. }
+            | Plot::Volume { sets, .. }
+            | Plot::Sheets { sets, .. } => sets.iter().flatten().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
             Plot::Multi(ps) => {
                 let mut out: Vec<String> = Vec::new();
@@ -570,7 +583,7 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
     });
     let named = vars.iter().filter(|v| matches!(v.as_str(), "t" | "u" | "v")).count();
     if named > 0 && named < vars.len() {
-        return Err("媒介変数は t / u, v / u, v, t / t₁, t₂, t₃ のどれか1組だけを使ってください".into());
+        return Err("媒介変数は t / u, v / u, v, t / t₁, t₂, t₃, … のどれか1組だけを使ってください".into());
     }
     if named > 0 {
         // t だけなら曲線、u・v だけなら曲面（u だけ・v だけでも曲面）、t と u・v を両方使えば立体
@@ -585,9 +598,7 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
     if vars.is_empty() {
         vars.push("t".into()); // 媒介変数を使っていない（点）
     }
-    if vars.len() > 3 {
-        return Err("媒介変数は3つまでにしてください（4つ以上の図形は3次元の画面に描けません）".into());
-    }
+    vars.dedup();
 
     // 範囲で重ねるパラメータを使っていれば、それも媒介変数として動かす（曲線 → 曲面）
     let ranged: Vec<String> = space
@@ -596,10 +607,12 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
         .map(|(n, _, _)| n.clone())
         .filter(|n| !vars.contains(n) && items.iter().any(|e| e.uses_var(n)))
         .collect();
-    if vars.len() + ranged.len() > 3 {
-        return Err("媒介変数と、範囲で重ねるパラメータは、合わせて3つまでにしてください".into());
-    }
     vars.extend(ranged);
+    if vars.len() > MAX_PARAM_VARS {
+        return Err(format!(
+            "媒介変数（と、範囲で重ねるパラメータ）は、合わせて {MAX_PARAM_VARS} 個までにしてください"
+        ));
+    }
     let mut consts = params.clone();
     for (n, _, _) in &space.param_ranges {
         consts.remove(n);
@@ -617,9 +630,10 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
     }
     // 回転・射影は点を計算した後で行う（Space::view）
     Ok(match vars.len() {
-        3 => Plot::Volume { sets, vars },
+        1 => Plot::Curve { sets, vars },
         2 => Plot::Surface { sets, vars },
-        _ => Plot::Curve { sets, vars },
+        3 => Plot::Volume { sets, vars },
+        _ => Plot::Sheets { sets, vars },
     })
 }
 
@@ -831,7 +845,14 @@ mod tests {
         );
         assert_eq!(compile_with("(t_1, t_2, 0, t_1 t_2)", &ps, &sp).unwrap().param_vars(), vec!["t1", "t2"]);
         assert_eq!(compile_with("(t_1, t_2, t_3, 0)", &ps, &sp).unwrap().kind_label(), "媒介変数表示の立体");
-        assert!(compile_with("(t_1, t_2, t_3, t_4)", &ps, &sp).err().unwrap().contains("3つまで"));
+        // 媒介変数が4つ以上でも描ける（面をたくさん描いて表す）
+        let p = compile_with("(t_1, t_2, t_3, t_4)", &ps, &sp).unwrap();
+        assert_eq!(p.kind_label(), "媒介変数表示の多変数の図形（4 変数）");
+        assert_eq!(p.param_vars(), vec!["t1", "t2", "t3", "t4"]);
+        // 番号は飛んでいてもよい（小さい順に並べる）。同じ媒介変数を何度使っても1つ
+        assert_eq!(compile_with("(t_7 t_2, t_2, t_10 + t_7, t_4)", &ps, &sp).unwrap().param_vars(), vec!["t2", "t4", "t7", "t10"]);
+        let many = "(t_1+t_2+t_3+t_4+t_5, t_6+t_7+t_8+t_9, 0, 0)";
+        assert!(compile_with(many, &ps, &sp).err().unwrap().contains("8 個まで"));
         assert!(compile_with("(1, 2, 3, 4, 5)", &ps, &sp).err().unwrap().contains("次元を 5"));
         // 5次元目は w₂
         let sp5 = Space::basic(5, [0, 3, 4], vec![0.5; 5]);
@@ -859,8 +880,11 @@ mod tests {
         let p = compile_with("(u, v, a)", &ps, &sp).unwrap();
         assert_eq!(p.kind_label(), "媒介変数表示の立体");
         assert_eq!(p.param_vars(), vec!["u", "v", "a"]);
+        // 立体をさらに範囲で重ねると、多変数の図形
         sp.param_ranges.push(("b".into(), 0.0, 1.0));
-        assert!(compile_with("(u, v, a b)", &ps, &sp).err().unwrap().contains("3つまで"));
+        let p = compile_with("(u, v, a b)", &ps, &sp).unwrap();
+        assert_eq!(p.param_vars(), vec!["u", "v", "a", "b"]);
+        assert!(matches!(p, Plot::Sheets { .. }));
     }
 
     #[test]

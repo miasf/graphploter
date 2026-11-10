@@ -92,14 +92,105 @@
     }
   })
 
+  // ---- 文字の後ろの数字を添字にする（w2 → w₂、t10 → t₁₀）----
+  // 数字を入れる直前（beforeinput）に、カーソルの前を調べる。物理キーボードでも画面のキーボードでも同じように通る。
+  // MathLive は入力欄の中身を「位置 k の直前にあるもの」の列として持っていて、w₁ は [w, 添字の先頭, 1, 添字の終わり] と並ぶ。
+
+  /** 添字にしない文字（定数 e と虚数単位 i） */
+  const NO_SUBSCRIPT = new Set(['e', 'i'])
+  /** 名前の途中に数字がある関数（hyp2F1, hankelH1 など）。ここまで打ったら、次の数字は名前の続き */
+  const NAMES_WITH_DIGIT = ['hyp', 'hyp0F', 'hyp1F', 'hyp2F', 'hankelH']
+  /** こちらで数字を入れている最中か（その間の beforeinput は調べない） */
+  let subscripting = false
+
+  /** 位置 k の直前にあるものの LaTeX */
+  const atomAt = (k: number) => (k >= 1 ? el.getValue(k - 1, k, 'latex') : '')
+
+  /**
+   * カーソルが「数字だけの添字が付いた文字」（w₁₂ など）の直後にあれば、添字の数字の数。そうでなければ 0。
+   * このとき、添字の最後の数字の後ろは 位置 − 1
+   */
+  function digitSubscriptBefore(pos: number): number {
+    if (pos < 4 || atomAt(pos) !== '') return 0
+    let k = pos - 1
+    while (k >= 1 && /^\d$/.test(atomAt(k))) k--
+    const digits = pos - 1 - k
+    if (digits === 0 || k < 2 || atomAt(k) !== '') return 0
+    return /^[a-zA-Z]_\{?\d+\}?$/.test(el.getValue(k - 2, pos, 'latex')) ? digits : 0
+  }
+
+  function handleBeforeInput(e: InputEvent) {
+    if (subscripting) return
+    const [from, to] = el.selection.ranges[0] ?? [0, 0]
+    if (el.selection.ranges.length !== 1 || from !== to) return // 選んだ範囲を置き換える・消す入力はそのまま
+    const pos = el.position
+    // 一文字消す: 添字付きの文字の直後なら、添字の最後の数字を消す（数字が無くなったら添字ごと消す）。
+    // そのままだと、1回目はカーソルが添字の中に入るだけで何も消えない
+    if (e.inputType === 'deleteContentBackward') {
+      const digits = digitSubscriptBefore(pos)
+      if (digits === 0) return
+      e.preventDefault()
+      subscripting = true
+      try {
+        el.position = pos - 1
+        el.executeCommand('deleteBackward')
+        if (digits > 1) el.executeCommand('moveAfterParent')
+        else el.executeCommand('deleteBackward') // 空になった添字を消す
+      } finally {
+        subscripting = false
+      }
+      emit()
+      return
+    }
+    const digit = e.data
+    if (e.inputType !== 'insertText' || !digit || !/^\d$/.test(digit)) return
+    const prev = atomAt(pos)
+    /** 添字の中の、最後の数字の後ろ（ここに数字を足す）。新しく添字を作るなら null */
+    let inside: number | null = null
+    if (/^[a-zA-Z]$/.test(prev)) {
+      // 文字の直後: その文字に添字を付ける
+      if (NO_SUBSCRIPT.has(prev)) return
+      let name = ''
+      for (let k = pos; k >= 1 && name.length < 8; k--) {
+        const c = atomAt(k)
+        if (!/^[a-zA-Z0-9]$/.test(c)) break
+        name = c + name
+      }
+      if (NAMES_WITH_DIGIT.some((n) => name.endsWith(n))) return
+    } else if (digitSubscriptBefore(pos) > 0) {
+      // 数字だけの添字が付いた文字の直後（w₁ の後ろ）: 添字に数字を足す（w₁₀）
+      inside = pos - 1
+    } else {
+      return
+    }
+    e.preventDefault()
+    subscripting = true
+    try {
+      if (inside === null) el.executeCommand('moveToSubscript')
+      else el.position = inside
+      el.insert(digit)
+      el.executeCommand('moveAfterParent') // 添字から出る（続けて + などを打てるように）
+    } finally {
+      subscripting = false
+    }
+    emit()
+  }
+
+  /** 今の中身を外へ知らせる（こちらで書き換えたときは、MathLive の input を待たずに知らせる） */
+  function emit() {
+    if (el.value === lastEmitted) return
+    lastEmitted = el.value
+    onInput(lastEmitted)
+  }
+
   function handleInput(e: Event) {
     // エンター（改行）は式には入れず、新しい式を足す合図にする
     if ((e as InputEvent).inputType === 'insertLineBreak') {
       onEnter?.()
       return
     }
-    lastEmitted = el.value
-    onInput(lastEmitted)
+    if (subscripting) return // 書き換えの途中の値は知らせない（終わってから emit で知らせる）
+    emit()
   }
 </script>
 
@@ -110,6 +201,7 @@
   class:no-toggle={!keyboardToggle || small}
   aria-label={label}
   {placeholder}
+  onbeforeinput={handleBeforeInput}
   oninput={handleInput}
   onfocus={() => {
     focused = true

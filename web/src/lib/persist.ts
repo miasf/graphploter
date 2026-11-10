@@ -19,6 +19,8 @@ export interface SavedItem {
   walls?: boolean
   /** 回転のグループの番号（古い保存データには無い） */
   rotGroup?: number
+  /** 媒介変数が4つ以上の図形の、面を描く所の分割数（古い保存データには無い） */
+  layers?: number
 }
 
 /** 保存する状態全体 */

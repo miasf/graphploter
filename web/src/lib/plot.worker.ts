@@ -58,7 +58,7 @@ const shapes = new Map<number, { key: string; shape: Shape }>()
  */
 function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[]): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.walls]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.walls, req.layers]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -189,6 +189,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         ['off', 'abs', 're', 'im'].indexOf(req.complexMode),
         req.walls,
         req.flat,
+        req.layers,
       )
       if (coordError && !r.param_name) {
         r.free()
@@ -220,7 +221,13 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       solid: r.solid,
       heat: r.kind.includes('の値で塗り分け'),
       params: vars,
-      paramSpan: vars.length === 3 ? { u: span(0), v: span(1), w: span(2) } : { u: span(0), v: span(1) },
+      // 媒介変数が4つ以上の図形は、格子線用の値を面ごとに 0〜1 にそろえてある
+      paramSpan:
+        vars.length >= 4
+          ? { u: 1, v: 1, w: 0 }
+          : vars.length === 3
+            ? { u: span(0), v: span(1), w: span(2) }
+            : { u: span(0), v: span(1) },
     }
     const kind = r.kind
     const usedParams = [...new Set([...r.used_params.split(',').filter((s) => s !== ''), ...rangeUsed])]

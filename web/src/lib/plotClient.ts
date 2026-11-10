@@ -56,6 +56,7 @@ export function requestPlot(
   complexMode: ComplexMode = 'off',
   flat = false,
   walls = false,
+  layers = 1,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -83,6 +84,7 @@ export function requestPlot(
     complexMode,
     flat,
     walls,
+    layers,
   }
   return new Promise((resolve) => {
     pending.set(requestId, resolve)

@@ -180,6 +180,7 @@ pub fn last_used_params() -> String {
 /// - `walls`: 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか
 /// - `flat`: 2D 表示。縦の軸の座標を 0 にして、横・奥の平面に描く。
 ///   縦の座標 = f(横, 奥) は平面の塗り分け、陰関数・ほかの陽関数は曲線、範囲で重ねた立体は塗った領域になる
+/// - `layers`: 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（1 なら両端だけ）
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -204,6 +205,7 @@ pub fn plot(
     complex_mode: u32,
     walls: bool,
     flat: bool,
+    layers: u32,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
     let complex_mode = mesh::ComplexMode::from_u32(complex_mode);
@@ -275,6 +277,7 @@ pub fn plot(
         complex_mode,
         walls,
         flat,
+        layers: layers.clamp(1, 12) as usize,
         range: &range,
         view: space.view(perspective),
     };
@@ -321,6 +324,8 @@ struct Ctx<'a> {
     walls: bool,
     /// 2D 表示（[`plot`] の `flat` を参照）
     flat: bool,
+    /// 媒介変数が4つ以上の図形の、面を描く所の分割数（[`plot`] の `layers` を参照）
+    layers: usize,
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
     view: mesh::View,
@@ -433,12 +438,21 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
             b.shape = Some(mesh::parametric_solid_nd(sets, r, (ctx.resolution * 2 / 3).max(2)));
         }
+        P::Sheets { sets, vars } => b.shape = Some(sheets(sets, vars, ctx, &mut b.kind)),
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
         P::Param { .. } | P::Multi(_) => {}
     }
     Ok(b)
+}
+
+/// 媒介変数が4つ以上の図形（面の集まり）を作り、説明に面の枚数を足す
+fn sheets(sets: &[Vec<eval::Program>], vars: &[String], ctx: &Ctx, kind: &mut String) -> mesh::NdShape {
+    let ranges: Vec<(f64, f64)> = vars.iter().map(|v| (ctx.range)(v)).collect();
+    let (_, count, n) = mesh::sheet_layout(vars.len(), ctx.layers, ctx.resolution);
+    *kind = format!("{kind} · 面 {count} 枚（{n} × {n}）");
+    mesh::parametric_sheets_nd(sets, &ranges, ctx.layers, ctx.resolution)
 }
 
 /// 2D 表示の図形を作る（[`plot`] の `flat` を参照）
@@ -475,6 +489,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Built {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
             b.shape = Some(mesh::parametric_solid_nd(sets, r, (ctx.resolution * 2 / 3).max(2)));
         }
+        P::Sheets { sets, vars } => b.shape = Some(sheets(sets, vars, ctx, &mut b.kind)),
         P::Curve { sets, vars } => {
             b.curve = true;
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));

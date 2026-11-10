@@ -8,6 +8,7 @@
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
   import { complexLatex, coordName, latexName, prettyName, resizeRotation, resizeSpace, sliderStep, snapToStep } from './lib/params'
+  import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
@@ -123,6 +124,7 @@
         lineWidth: it.lineWidth,
         complexMode: it.complexMode,
         walls: it.walls,
+        layers: it.layers,
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
@@ -520,6 +522,7 @@
       item.complexMode ?? 'off',
       flat,
       item.walls ?? false,
+      item.layers ?? 1,
     )
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
@@ -558,7 +561,8 @@
 
     dropParam(item)
     // 範囲で重ねた立体は、内側の境界面（穴など）が外から見えないので、最初は半透明にする
-    if (res.kind.startsWith('範囲で重ねた立体') && !item.solidSeen) {
+    // 媒介変数が4つ以上の図形も、面が何枚も重なるので同じようにする
+    if (/^(範囲で重ねた立体|媒介変数表示の多変数)/.test(res.kind) && !item.solidSeen) {
       item.solidSeen = true
       if (item.opacity === 1) item.opacity = 0.45
     }
@@ -684,6 +688,11 @@
     schedule(item, 300)
   }
 
+  function setLayers(item: PlotItem, layers: number) {
+    item.layers = Math.max(1, Math.round(layers))
+    schedule(item, 0)
+  }
+
   function setWalls(item: PlotItem, on: boolean) {
     item.walls = on
     schedule(item, 0)
@@ -726,6 +735,9 @@
   })
   /** 画面の横・奥・縦の軸に表示している座標の名前 */
   const axisNames = $derived(space.axes.map(coordName))
+
+  // 数式キーボードの「変数」のタブに、今の次元の座標を並べる
+  $effect(() => setKeyboardDims(space.dims))
 
   $effect(() => {
     viewer?.setAxisNames(axisNames.map(prettyName))
@@ -920,8 +932,8 @@
    */
   /** サンプルを一覧の最後に追加する（今ある式は消さない） */
   async function addSample(sample: Sample) {
-    if (sample.special === 'tesseract') {
-      loadTesseract()
+    if (sample.special) {
+      loadTesseract(sample.special === 'tesseractFaces' ? 4 : sample.special === 'cube5Faces' ? 5 : 0)
       return
     }
     // 4次元の例などは、次元が足りなければ増やす
@@ -952,16 +964,33 @@
     return /^([a-zA-Z])\s*=/.exec(latex)?.[1]
   }
 
-  function loadTesseract() {
+  /**
+   * `faces` が 4 か 5 なら、辺の代わりに、媒介変数がその数の式 (t₁, t₂, …) 1つで、
+   * その次元の立方体の面（4次元なら 24 枚、5次元なら 80 枚）を描く
+   */
+  function loadTesseract(faces: 0 | 4 | 5 = 0) {
     for (const it of items) {
       it.visible = false
       viewer?.setStyle(it.id, it)
+    }
+    const dims = faces || 4
+    const vars = Array.from({ length: dims }, (_, k) => k + 1)
+    if (faces) {
+      items.push(
+        newItem(`\\left(${vars.map((k) => `t_${k}`).join(',')}\\right)`, {
+          color: faces === 5 ? '#6042a6' : '#2d70b3',
+          opacity: faces === 5 ? 0.2 : 0.3,
+          solidSeen: true,
+          grid: { enabled: true, x: 1, y: 1, z: 0, u: 1, v: 1, w: 1, width: 1.5 },
+          ranges: Object.fromEntries(vars.map((k) => [`t${k}`, ['-1', '1']])),
+        }),
+      )
     }
     const edge = (k: number) =>
       '\\left(' +
       [0, 1, 2, 3].map((j) => (j === k ? 't' : '\\left[-1,1\\right]')).join(',') +
       '\\right)'
-    for (let k = 0; k < 4; k++) {
+    for (let k = 0; k < (faces ? 0 : 4); k++) {
       items.push(
         newItem(edge(k), {
           color: '#2d70b3',
@@ -973,18 +1002,24 @@
     const rotation = Array(10).fill(0)
     rotation[2] = 20 // xw
     rotation[4] = 20 // yz（少し斜めから見る）
+    if (dims === 5) rotation[6] = 35 // yw₂（5次元目の方向にも傾ける）
+    // グループの回転も、次元に合わせて作り直す
+    if (dims !== space.dims) {
+      groups = groups.map((g) => ({ ...g, ...resizeRotation(g.rotation, g.center, space.dims, dims) }))
+    }
     space = {
       ...space,
-      dims: 4,
+      dims,
       axes: [0, 1, 2],
-      slice: [0, 0, 0, 0],
-      ranges: [null, null, null, null],
+      slice: Array(dims).fill(0),
+      ranges: Array(dims).fill(null),
       rotation,
       center: Array(5).fill(0),
       perspective: 40,
     }
     // 図形（−1〜1）が大きく見えるよう、表示範囲を狭めて視点もリセットする
-    domain = { xmin: -2.5, xmax: 2.5, ymin: -2.5, ymax: 2.5, zmin: -2.5, zmax: 2.5 }
+    const half = dims === 5 ? 3.5 : 2.5
+    domain = { xmin: -half, xmax: half, ymin: -half, ymax: half, zmin: -half, zmax: half }
     domainError = ''
     viewer?.setDomain(domain, true)
     replotAll(0)
@@ -1113,6 +1148,8 @@
             onOpacity={(o) => setOpacity(item, o)}
             onComplexMode={(m) => setComplexMode(item, m)}
             onWalls={(on) => setWalls(item, on)}
+            onLayers={(n) => setLayers(item, n)}
+            onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}
             onToggle={() => toggle(item)}
@@ -1502,8 +1539,17 @@
               </li>
               <li>入力欄に入ると数式用のキーボードが出ます（123 / f(x) / 特殊 / abc のタブで切り替え）。キーにカーソルを当てる（スマホでは長押しする）と、そのキーの名前が出ます</li>
               <li>
-                4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（<code>w2</code> と打つと w₂）。
+                4次元以上: 「次元」を増やすと座標 w、w₂、w₃… が使えます（4次元目が w、5次元目が w₂。w₁ と書くと w と同じ）。
                 表示する3つの座標を選び、残りはスライダーで固定した断面を描きます
+              </li>
+              <li>
+                添字: 文字の後ろに数字を打つと添字になります（<code>w2</code> → w₂、<code>t10</code> → t₁₀）。
+                数式キーボードの「変数」のタブには、今の次元で使える座標と媒介変数 t₁, t₂, … が並んでいます
+              </li>
+              <li>
+                多変数: 媒介変数は t₁, t₂, t₃, t₄, … といくつでも使えます（8個まで）。4つ以上のときは、
+                媒介変数を2つずつ動かした面（残りは範囲の両端に固定）をたくさん描いて形を表します。
+                例: <code>(t1, t2, t3, t4)</code> は4次元の立方体の面 24 枚。⚙ の「中の面」で、中を通る面も描けます
               </li>
               <li>
                 範囲で重ねる: 座標を「範囲」にするか、パラメータの「範囲で重ねる」を押すと、その範囲で動かしたときに
