@@ -7,7 +7,7 @@
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
+  import { complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
   import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -161,11 +161,24 @@
     implicitResolution = s.implicitResolution
     perspective = s.perspective
     dark = s.dark
-    space = s.space
+    // 古い保存データ・壊れた共有リンクでも動くよう、次元に合わせて配列の長さをそろえる
+    const dims = Math.max(3, Math.min(10, Math.round(Number(s.space.dims)) || 3))
+    space = {
+      ...s.space,
+      dims,
+      axes: s.space.axes?.length === 3 && s.space.axes.every((a) => a < dims) ? s.space.axes : [0, 1, 2],
+      slice: Array.from({ length: dims }, (_, k) => s.space.slice?.[k] ?? 0),
+      ranges: Array.from({ length: dims }, (_, k) => s.space.ranges?.[k] ?? null),
+      perspective: s.space.perspective ?? 0,
+      ...fitRotation(s.space.rotation, s.space.center, dims),
+    }
+    for (const it of items) {
+      if (it.rotation) Object.assign(it, fitRotation(it.rotation, it.center, dims))
+    }
     if (s.cut) cut = s.cut
     flat = s.flat ?? false
     flatSlice = s.flatSlice ?? false
-    groups = s.groups ?? []
+    groups = (s.groups ?? []).map((g) => ({ ...g, ...fitRotation(g.rotation, g.center, dims) }))
     folders = s.folders ?? []
     nextFolderId = Math.max(0, ...folders.map((f) => f.id)) + 1
     normalizeFolders()
@@ -766,7 +779,7 @@
     if (im !== 0) im = snapToStep(im, item.slider) // 実数のときの虚部 0 はそのまま
     item.param.re = re
     item.param.im = im
-    item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step)}`
+    item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step, item.slider.min)}`
     paramsChanged([item.param.name], item)
   }
 

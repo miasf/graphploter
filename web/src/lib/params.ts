@@ -47,6 +47,25 @@ export function resizeRotation(
   }
 }
 
+/**
+ * 保存データ・共有リンクの回転角と中心を、今の並び（max(次元, 5) 次元の座標の組 nC2 個）にそろえる。
+ * 5次元の回転ができる前の保存データは、次元 dims の nC2 個（3次元なら3個）だったので、
+ * 同じ座標の組の角度を引き継いで並べ直す（そのまま使うと角度が別の組にずれ、足りない分が NaN になる）
+ */
+export function fitRotation(rotation: unknown, center: unknown, dims: number): { rotation: number[]; center: number[] } {
+  const n = rotDims(dims)
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  const rot = Array.isArray(rotation) ? rotation.map(num) : []
+  const cen = Array.isArray(center) ? center.map(num) : []
+  const from = rot.length === pairs(dims).length ? dims : n
+  const old = new Map<string, number>()
+  pairs(from).forEach(([i, j], k) => old.set(`${i},${j}`, rot[k] ?? 0))
+  return {
+    rotation: pairs(n).map(([i, j]) => old.get(`${i},${j}`) ?? 0),
+    center: Array.from({ length: n }, (_, k) => cen[k] ?? 0),
+  }
+}
+
 /** 回転に使う次元。次元が5未満でも、w, w₂ を使った5次元の回転ができる */
 export function rotDims(dims: number): number {
   return Math.max(dims, 5)
@@ -70,17 +89,29 @@ export function niceStep(range: number, n: number): number {
   return (r < 1.5 ? 1 : r < 3 ? 2 : r < 7 ? 5 : 10) * mag
 }
 
-/** 刻み step に合わせて丸め、余計な桁を落とした文字列にする（0.30000000000000004 → "0.3"） */
-export function formatNumber(v: number, step: number): string {
-  const digits = Math.max(0, -Math.floor(Math.log10(step)))
-  const r = Math.round(v / step) * step
-  return String(Number(r.toFixed(digits)))
+/** x を表すのに要る小数の桁数（0.25 → 2、0.1 → 1、5 → 0）。12 桁まで */
+function decimals(x: number): number {
+  x = Math.abs(x)
+  if (!Number.isFinite(x) || x === 0) return 0
+  let d = Math.max(0, -Math.floor(Math.log10(x)))
+  while (d < 12 && Math.abs(x * 10 ** d - Math.round(x * 10 ** d)) > 1e-9 * x * 10 ** d) d++
+  return d
+}
+
+/**
+ * 刻み step（と、刻みの基準の値 base。スライダーの値は 最小値 + 刻みの整数倍）で表せる桁まで丸め、
+ * 余計な桁を落とした文字列にする（0.30000000000000004 → "0.3"）。
+ * 刻みが 0.25 なら小数第2位まで書く（第1位までにすると 0.25 が "0.3" になる）
+ */
+export function formatNumber(v: number, step: number, base = 0): string {
+  const digits = Math.max(decimals(step), decimals(base))
+  return String(Number(v.toFixed(digits)))
 }
 
 /** 複素数 re + im·i を、数式入力欄に入れる形（LaTeX）にする。例: 1.5−0.5i → "1.5-0.5i" */
-export function complexLatex(re: number, im: number, step: number): string {
-  const a = formatNumber(re, step)
-  const b = formatNumber(im, step)
+export function complexLatex(re: number, im: number, step: number, base = 0): string {
+  const a = formatNumber(re, step, base)
+  const b = formatNumber(im, step, base)
   if (b === '0') return a
   const imPart = b === '1' ? 'i' : b === '-1' ? '-i' : `${b}i`
   if (a === '0') return imPart
