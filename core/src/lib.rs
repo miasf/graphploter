@@ -219,7 +219,7 @@ pub fn plot(
     flat_slice: bool,
 ) -> Result<MeshResult, JsError> {
     let err = |m: &str| JsError::new(m);
-    let complex_mode = mesh::ComplexMode::from_u32(complex_mode);
+    let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
     if domain.len() != 6
         || axes.len() != 3
@@ -256,17 +256,23 @@ pub fn plot(
         rotation: rotation.to_vec(),
         center: center.to_vec(),
         complex_height: match complex_mode {
-            mesh::ComplexMode::Off => None,
+            mesh::ComplexMode::Off | mesh::ComplexMode::Param => None,
             mesh::ComplexMode::Abs => Some(functions::Func::Abs),
             mesh::ComplexMode::Re => Some(functions::Func::Re),
             mesh::ComplexMode::Im => Some(functions::Func::Im),
+            mesh::ComplexMode::Arg => Some(functions::Func::Arg),
         },
+        lift_param: complex_mode == mesh::ComplexMode::Param,
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
     }
 
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
+    // 「縦を媒介変数にする」は複素平面の図形だけの設定。陽関数では色分けしない
+    if complex_mode == mesh::ComplexMode::Param {
+        complex_mode = mesh::ComplexMode::Off;
+    }
     let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
     // 媒介変数の範囲（範囲で重ねるパラメータならスライダーの範囲。指定が無ければ 0〜2π）
@@ -378,6 +384,12 @@ struct Built {
 /// 式の種類ごとに図形を作る。リストで複数の図形になったもの（[`equation::Plot::Multi`]）は、まとめて1つにする
 fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     use equation::Plot as P;
+    // 複素平面の図形は、中身の媒介変数表示として作る（説明だけ差し替える）
+    if let P::ComplexPlane { inner, label } = plot {
+        let mut b = build(inner, ctx)?;
+        b.kind = if ctx.flat { format!("{label}（2D）") } else { label.clone() };
+        return Ok(b);
+    }
     if let P::Multi(ps) = plot {
         let parts = ps.iter().map(|p| build(p, ctx)).collect::<Result<Vec<_>, _>>()?;
         // 2D の切り口では、媒介変数表示の曲面も（射影した後で）線になる
@@ -480,7 +492,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
-        P::Param { .. } | P::Multi(_) => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
     }
     Ok(b)
 }
@@ -557,7 +569,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.curve = true;
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
-        P::Param { .. } | P::Multi(_) => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
     }
     Ok(b)
 }

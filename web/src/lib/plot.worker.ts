@@ -11,6 +11,7 @@ import init, {
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
 import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse } from './types'
+import { COMPLEX_MODE_ORDER } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -187,7 +188,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         new Float64Array(space.rotation),
         new Float64Array(space.center),
         space.perspective,
-        ['off', 'abs', 're', 'im'].indexOf(req.complexMode),
+        Math.max(0, COMPLEX_MODE_ORDER.indexOf(req.complexMode)),
         req.walls,
         req.flat,
         req.layers,

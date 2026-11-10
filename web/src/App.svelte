@@ -637,7 +637,9 @@
     item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
     // 陽関数の値がどこでも実数にならない（複素数の関数）なら、色分けで描けることを知らせる
     if (!res.mesh.curve && res.mesh.indices.length === 0 && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
-      item.info += ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます'
+      item.info +=
+        ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます。' +
+        '値を複素平面の点として描くなら、x, y の代わりに媒介変数 t を使ってください（例: e^{it} → 単位円）'
     }
   }
 
@@ -1757,6 +1759,10 @@
                 <li>陽関数: <code>z = x^2 - y^2</code>（<code>z =</code> は省略可）、<code>y = sin(x) z</code> なども可</li>
                 <li>陰関数: <code>x^2 + y^2 + z^2 = 4</code>、<code>sin x + sin y + sin z = 0</code></li>
                 <li>曲線: <code>(cos t, sin t, t/4)</code>（t を使う。範囲は式の下で指定）</li>
+                <li>
+                  複素平面: <code>e^(it)</code> のように、座標を使わず t（または u, v）だけの式は、値を複素平面（横 = 実部、奥 = 虚部）に描く（単位円）。
+                  ⚙ の「縦の軸」で t・|f|・arg f を縦にとれる（らせん）
+                </li>
                 <li>曲面: <code>(u cos v, u sin v, u)</code>（u と v を使う）</li>
                 <li>掛け算の <code>*</code> は省略可: <code>2xy</code>, <code>x sin(y)</code></li>
                 <li>定数: <code>pi</code>, <code>e</code>, <code>i</code>（虚数単位）</li>

@@ -51,6 +51,8 @@ pub struct Space {
     /// 陽関数の複素数の色分けで、高さにするもの（|f| なら Abs、Re f なら Re、Im f なら Im。しないなら None）。
     /// 表示していない座標（w など）が絡む回転で陽関数を陰関数として計算し直すとき、f の代わりにこれを使う
     pub complex_height: Option<crate::functions::Func>,
+    /// 複素平面の図形（[`complex_plane`]）で、縦の軸を媒介変数にするか（`complex_height` より優先）
+    pub lift_param: bool,
 }
 
 impl Space {
@@ -71,6 +73,7 @@ impl Space {
             rotation: vec![0.0; rot_dims(dims) * (rot_dims(dims) - 1) / 2],
             center: vec![0.0; rot_dims(dims)],
             complex_height: None,
+            lift_param: false,
         }
     }
 
@@ -263,6 +266,8 @@ pub enum Plot {
     Param { name: String, value: C, uses: Vec<String> },
     /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
     Multi(Vec<Plot>),
+    /// 複素平面の図形（[`complex_plane`]）。中身は媒介変数表示 (Re f, Im f, 縦の値) で、`label` は画面に出す説明
+    ComplexPlane { inner: Box<Plot>, label: String },
 }
 
 impl Plot {
@@ -282,6 +287,7 @@ impl Plot {
             Plot::Sheets { vars, .. } => format!("媒介変数表示の多変数の図形（{} 変数）", vars.len()),
             Plot::Param { .. } => "パラメータ".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
+            Plot::ComplexPlane { label, .. } => label.clone(),
         }
     }
 
@@ -293,6 +299,7 @@ impl Plot {
             | Plot::Volume { vars, .. }
             | Plot::Sheets { vars, .. } => vars.clone(),
             Plot::Multi(ps) => ps.first().map_or(Vec::new(), |p| p.param_vars()),
+            Plot::ComplexPlane { inner, .. } => inner.param_vars(),
             _ => Vec::new(),
         }
     }
@@ -312,6 +319,7 @@ impl Plot {
             | Plot::Volume { sets, .. }
             | Plot::Sheets { sets, .. } => sets.iter().flatten().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
+            Plot::ComplexPlane { inner, .. } => return inner.used_params(),
             Plot::Multi(ps) => {
                 let mut out: Vec<String> = Vec::new();
                 for n in ps.iter().flat_map(|p| p.used_params()) {
@@ -378,6 +386,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
             check_dims(&e, space)?;
             if let Expr::Tuple(items) = e {
                 return parametric(items, params, space);
+            }
+            if let Some(p) = complex_plane(&e, params, space)? {
+                return Ok(p);
             }
             // = が無い式は「縦の軸の座標 = 式」
             if e.uses_var(&shown[2]) {
@@ -637,6 +648,62 @@ fn parametric(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Pl
     })
 }
 
+/// 複素平面の図形。`=` の無い式 f が、座標（x, y, z, …）を使わず、媒介変数（t / u, v / t₁, t₂, …）だけを
+/// 変数として使っていれば（同じ名前のパラメータが定義されていなければ）、f の値を複素平面の点として描く。
+/// 複素平面は x 座標が実部・y 座標が虚部の平面で、ほかの図形と同じ空間に置く。縦（z 座標）には
+/// 「+α」として、0（平面の上）・媒介変数・|f|・arg f などを選んで描ける（[`Space::complex_height`]・[`Space::lift_param`]）。
+/// 例) `e^(i t)` → 単位円（縦を t にすると、らせん）、`(u + i v)^2` → 長方形の像（格子線は等角写像の像）
+fn complex_plane(e: &Expr, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    let mut used = Vec::new();
+    e.collect_vars(&mut used);
+    if used.iter().any(|v| coord_index(v).is_some()) {
+        return Ok(None);
+    }
+    let vars: Vec<&String> = used.iter().filter(|v| is_param_var(v) && !params.contains_key(*v)).collect();
+    if vars.is_empty() {
+        return Ok(None);
+    }
+    let call = |f: crate::functions::Func| Expr::Call(f, vec![e.clone()]);
+    use crate::functions::Func;
+    let mut items = vec![call(Func::Re), call(Func::Im), Expr::Num(0.0)];
+    let mut height = None;
+    if space.lift_param {
+        // 媒介変数が1つ（曲線）のときだけ。曲面のときは平面のまま
+        let p = parametric(items.clone(), params, space)?;
+        if let [v] = p.param_vars().as_slice() {
+            items[2] = Expr::Var(v.clone());
+            height = Some(prettify(v));
+        }
+    } else if let Some(h) = space.complex_height {
+        items[2] = call(h);
+        height = Some(match h {
+            Func::Abs => "|f|".into(),
+            Func::Arg => "arg f".into(),
+            Func::Re => "Re f".into(),
+            Func::Im => "Im f".into(),
+            _ => String::new(),
+        });
+    }
+    let inner = parametric(items, params, space)?;
+    let shape = match &inner {
+        Plot::Curve { .. } => "曲線",
+        Plot::Surface { .. } => "曲面",
+        Plot::Volume { .. } => "立体",
+        _ => "図形",
+    };
+    let label = match height {
+        Some(h) => format!("複素平面の{shape}（横 Re f, 奥 Im f, 縦 {h}）"),
+        None => format!("複素平面の{shape}（横 Re f, 奥 Im f）"),
+    };
+    Ok(Some(Plot::ComplexPlane { inner: Box::new(inner), label }))
+}
+
+/// 媒介変数の名前を画面に出す形にする（t1 → t₁）
+fn prettify(v: &str) -> String {
+    const SUB: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+    v.chars().map(|c| c.to_digit(10).map_or(c, |d| SUB[d as usize])).collect()
+}
+
 /// リストを含む式の中で、最初に出てくるリストの要素を返す（リストが無ければ None）
 fn first_list(e: &Expr) -> Option<&Vec<Expr>> {
     match e {
@@ -777,6 +844,41 @@ mod tests {
         assert!(kind("(1, 2, 3, 4)").starts_with("error"));
         // 括弧の掛け算は組ではない
         assert_eq!(kind("(x+1)(y-1)"), "z = f(x, y)");
+    }
+
+    #[test]
+    fn complex_plane() {
+        assert_eq!(kind("e^(i t)"), "複素平面の曲線（横 Re f, 奥 Im f）");
+        assert_eq!(kind("e^(it)"), "複素平面の曲線（横 Re f, 奥 Im f）");
+        assert_eq!(kind("gamma (1+it)"), "複素平面の曲線（横 Re f, 奥 Im f）");
+        assert_eq!(kind("(u + i v)^2"), "複素平面の曲面（横 Re f, 奥 Im f）");
+        // 座標を使えば今までどおり陽関数
+        assert_eq!(kind("e^(i x)"), "z = f(x, y)");
+        // t がパラメータとして定義されていれば、今までどおり z = (t の式)
+        let mut ps = Params::new();
+        ps.insert("t".into(), C::new(2.0, 0.0));
+        assert_eq!(compile_with("e^(i t)", &ps, &Space::standard()).unwrap().kind_label(), "z = f(x, y)");
+        // 点を計算すると単位円（縦を t にすると、らせん）
+        let mut sp = Space::standard();
+        sp.lift_param = true;
+        let p = compile_with("e^(i t)", &Params::new(), &sp).unwrap();
+        assert_eq!(p.kind_label(), "複素平面の曲線（横 Re f, 奥 Im f, 縦 t）");
+        let Plot::ComplexPlane { inner, .. } = p else { panic!() };
+        let Plot::Curve { sets, .. } = *inner else { panic!() };
+        let t = [0.5];
+        let at = |k: usize| {
+            let mut out = [C::new(0.0, 0.0)];
+            sets[0][k].eval_batch(&[&t], &mut out);
+            out[0].re
+        };
+        assert!((at(0) - 0.5f64.cos()).abs() < 1e-12);
+        assert!((at(1) - 0.5f64.sin()).abs() < 1e-12);
+        assert!((at(2) - 0.5).abs() < 1e-12);
+        sp.lift_param = false;
+        sp.complex_height = Some(crate::functions::Func::Abs);
+        assert_eq!(compile_with("2e^(i t)", &Params::new(), &sp).unwrap().kind_label(), "複素平面の曲線（横 Re f, 奥 Im f, 縦 |f|）");
+        // リストも使える
+        assert!(kind("[1, 2] e^(i t)").starts_with("複素平面の曲線"));
     }
 
     #[test]
