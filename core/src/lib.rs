@@ -2,6 +2,7 @@
 //!
 //! - `parser`    : 数式の文字列 → 構文木
 //! - `eval`      : 構文木 → 命令列、多数の点でまとめて計算（複素数）
+//! - `interval`  : 区間演算（箱の上で式の値が入る範囲。曲面の無い所を飛ばすのに使う）
 //! - `functions` : 組み込み関数の一覧
 //! - `special`   : 特殊関数の実装
 //! - `equation`  : 式の種類（陽関数・陰関数）の判定
@@ -12,6 +13,7 @@
 pub mod equation;
 pub mod eval;
 pub mod functions;
+pub mod interval;
 pub mod mesh;
 pub mod parser;
 pub mod special;
