@@ -347,6 +347,7 @@ pub fn plot(
         },
         lift_param: complex_mode == mesh::ComplexMode::Param,
         complex_params: split(complex_params),
+        flat_slice: flat && flat_slice,
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
@@ -722,9 +723,13 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind = format!("{} = f({})", names[*axis], other);
             b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
         }
-        P::Implicit { prog, .. } => {
+        P::Implicit { prog, from } => {
             b.curve = true;
-            b.kind = "陰関数の曲線".into();
+            b.kind = match from {
+                // 回した陽関数（2D の切り口）: 縦の座標 = 0 の曲線
+                Some(f) => format!("{f} を回したものの切り口"),
+                None => "陰関数の曲線".into(),
+            };
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
         }
         P::Solid { prog, ranges, .. } => {
