@@ -1,6 +1,7 @@
 // Web Worker に計算を頼むための窓口。
 
 import type {
+  FieldStageResponse,
   CapRequest,
   CapResponse,
   ComplexMode,
@@ -90,10 +91,84 @@ export function requestPlot(
     flatSlice,
     flags,
   }
+  return planned(req)
+}
+
+// ---- 重い陰関数の F の計算を、全部の Worker に分ける ----
+// 前回の計算で、式の計算（F）に 30 ms 以上かかった陰関数・範囲で重ねた立体は、
+// 担当の Worker に計画（F を計算する点の「かたまり」の数）を頼み、かたまりを Worker の数で等分して全部の Worker に計算を頼む。
+// 返ってきた値をつなげて担当の Worker に渡し、メッシュを作ってもらう（メッシュを作るのは担当だけ。点・ふたの使い回しも担当だけ）。
+// かたまりの切れ目はいつも同じなので、分けても 1 回で計算したときと同じ形になる。
+// 手伝いの依頼は、各 Worker の自分の依頼の後ろに並ぶ（Worker は届いた順に 1 つずつ処理する）
+
+/** 式ごとの、前回の F の計算の時間（分けたときは、各 Worker の時間の合計）。30 ms 以上なら分ける */
+const fieldCost = new Map<number, number>()
+/** 式ごとの、いちばん新しい依頼の番号（古い依頼の途中の段階は、続けずにやめる） */
+const latestOf = new Map<number, number>()
+const SPLIT_EVAL_MS = 30
+
+function send<T>(worker: number, req: PlotRequest): Promise<T> {
   return new Promise((resolve) => {
-    pending.set(requestId, resolve)
-    workers[itemId % WORKERS].postMessage(req)
+    pending.set(req.requestId, resolve)
+    workers[worker].postMessage(req, req.field?.mode === 'given' ? [req.field.values.buffer as ArrayBuffer] : [])
   })
+}
+
+async function planned(req: PlotRequest): Promise<PlotResponse> {
+  const { itemId } = req
+  const owner = itemId % WORKERS
+  latestOf.set(itemId, req.requestId)
+  const split = WORKERS >= 2 && !req.flat && (fieldCost.get(itemId) ?? 0) >= SPLIT_EVAL_MS
+  if (split) {
+    const t0 = performance.now()
+    const res = await splitPlot(req, owner)
+    if (res) {
+      if (res.ok) res.ms = performance.now() - t0 // 待った時間（細かさの見積もりに使う）
+      return res
+    }
+    // 分けられない式だった・途中で失敗した: ふつうに計算する
+    fieldCost.delete(itemId)
+  }
+  const res = await send<PlotResponse>(owner, req)
+  if (res.ok) {
+    if (res.cost === 'volume' && !res.reprojected) fieldCost.set(itemId, res.timing.eval)
+    else fieldCost.delete(itemId)
+  }
+  return res
+}
+
+/** F の計算を分けて計算する。分けられなければ null */
+async function splitPlot(req: PlotRequest, owner: number): Promise<PlotResponse | null> {
+  const stage = (field: NonNullable<PlotRequest['field']>, w: number) =>
+    send<FieldStageResponse>(w, { ...req, requestId: nextId++, field })
+  const superseded = (): PlotResponse => ({ requestId: req.requestId, ok: false, error: '新しい依頼があるので中止しました' })
+  const plan = await stage({ mode: 'plan' }, owner)
+  if (!plan.ok || plan.chunks < 2) return null
+  if (latestOf.get(req.itemId) !== req.requestId) return superseded()
+  // かたまりを Worker の数で等分する（担当の Worker も手伝う）
+  const c = plan.chunks
+  const parts = Array.from({ length: Math.min(WORKERS, c) }, (_, k) => {
+    const from = Math.floor((c * k) / Math.min(WORKERS, c))
+    const to = Math.floor((c * (k + 1)) / Math.min(WORKERS, c))
+    return stage({ mode: 'chunks', from, to }, (owner + k) % WORKERS)
+  })
+  const got = await Promise.all(parts)
+  if (got.some((g) => !g.ok || !g.values)) return null
+  if (latestOf.get(req.itemId) !== req.requestId) return superseded()
+  const vals = got.map((g) => (g.ok && g.values) || new Float32Array())
+  const values = new Float32Array(vals.reduce((n, v) => n + v.length, 0))
+  let at = 0
+  for (const v of vals) {
+    values.set(v, at)
+    at += v.length
+  }
+  const evalMs = got.reduce((t, g) => t + (g.ok ? g.ms : 0), 0)
+  const res = await send<PlotResponse>(owner, { ...req, field: { mode: 'given', values } })
+  if (res.ok) {
+    fieldCost.set(req.itemId, evalMs)
+    res.timing = { ...res.timing, eval: res.timing.eval + evalMs }
+  }
+  return res
 }
 
 /**

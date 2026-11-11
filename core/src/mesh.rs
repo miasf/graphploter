@@ -791,7 +791,38 @@ fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f6
     // 1. 格子を 1 辺 BLOCK マスのブロックに分け、区間演算で「曲面が無い」と分かったブロック（空のブロック）では
     //    F を計算しない。あるブロックの格子点と、その周りの1点（隣の辺の傾き・接する所の判定に使う）で F を計算し、
     //    f32 で保存する（[`SparseField`]）
-    let field = SparseField::build(prog, &combos, ranges, dom, n, all_blocks);
+    // F の計算の仕方（ふつうは全部ここで計算する。重い式は、Worker が計算を分けるために計画だけ・一部だけを頼む）
+    let field = {
+        let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks);
+        let vals = FIELD_MODE.with(|mode| {
+            let mut mode = mode.borrow_mut();
+            FIELD_OUT.with(|out| {
+                let mut out = out.borrow_mut();
+                out.calls += 1;
+                match &mut *mode {
+                    FieldMode::Normal => Some(plan.values(prog, &combos, dom, 0..plan.chunks())),
+                    FieldMode::Plan => {
+                        out.chunks = plan.chunks();
+                        None
+                    }
+                    FieldMode::Chunks(a, b) => {
+                        let (a, b) = ((*a).min(plan.chunks()), (*b).min(plan.chunks()));
+                        out.values = plan.values(prog, &combos, dom, a..b.max(a));
+                        None
+                    }
+                    // 渡された値を使う（数が合わなければ、ここで計算する）。1 回だけ使う
+                    FieldMode::Given(v) => {
+                        let v = std::mem::take(v);
+                        *mode = FieldMode::Normal;
+                        Some(if v.len() == plan.len() { v } else { plan.values(prog, &combos, dom, 0..plan.chunks()) })
+                    }
+                }
+            })
+        });
+        let Some(vals) = vals else { return Mesh::default() };
+        plan.fill(&vals);
+        plan.field
+    };
     let idx = |i: usize, j: usize, k: usize| i + m * (j + m * k);
 
     let t_field = crate::timing::now_ms();
@@ -1648,8 +1679,134 @@ impl BlockView {
 /// ブロックごとに値を写す小さな配列の1辺（ブロックの 1 点手前から 1 + BLOCK + 3 点。辺の先の 2 点まで届く）
 const BLOCK_BUF: usize = BLOCK + 4;
 
+/// 陰関数の F の計算の仕方（[`implicit_solid`] が見る）。重い式の F の計算を、いくつかの Worker に分けるために使う
+#[derive(Debug, Default)]
+pub enum FieldMode {
+    /// 全部ここで計算する（ふつう）
+    #[default]
+    Normal,
+    /// 計画（かたまりの数）だけを [`FieldOut::chunks`] に入れて、メッシュは作らない
+    Plan,
+    /// かたまり a..b の値だけを計算して [`FieldOut::values`] に入れ、メッシュは作らない
+    Chunks(usize, usize),
+    /// 全部のかたまりの値（ほかの Worker が計算したもの）を使ってメッシュを作る
+    Given(Vec<f32>),
+}
+
+/// [`FieldMode`] の結果
+#[derive(Debug, Default)]
+pub struct FieldOut {
+    /// [`implicit_solid`] が呼ばれた回数（1 回でなければ、分けられない式）
+    pub calls: usize,
+    pub chunks: usize,
+    pub values: Vec<f32>,
+}
+
+thread_local! {
+    pub static FIELD_MODE: std::cell::RefCell<FieldMode> = const { std::cell::RefCell::new(FieldMode::Normal) };
+    pub static FIELD_OUT: std::cell::RefCell<FieldOut> = std::cell::RefCell::new(FieldOut::default());
+}
+
+/// F の計算の仕方を決めて、結果を空にする
+pub fn set_field_mode(mode: FieldMode) {
+    FIELD_MODE.with(|m| *m.borrow_mut() = mode);
+    FIELD_OUT.with(|o| *o.borrow_mut() = FieldOut::default());
+}
+
+/// F の計算の仕方をふつうに戻して、結果を取り出す
+pub fn take_field_out() -> FieldOut {
+    FIELD_MODE.with(|m| *m.borrow_mut() = FieldMode::Normal);
+    FIELD_OUT.with(|o| std::mem::take(&mut *o.borrow_mut()))
+}
+
+/// F を計算する前の [`SparseField`] と、F を計算する点の一覧。点は「かたまり」（密な格子なら 1 層、
+/// まばらなら [`FIELD_CHUNK`] 点ずつ）に分けて計算する。かたまりの切れ目はいつも同じなので、かたまりを
+/// いくつかに分けて（別々の Worker で）計算してつなげても、1 回で計算したときと同じ値になる
+struct FieldPlan {
+    field: SparseField,
+    /// 範囲を外に広げた格子のマス数
+    n: usize,
+    /// まばらなら、要る格子点（値の置き場所, 格子点の番号 i + m (j + m k)）。密なら空（全部の点を順に使う）
+    spots: Vec<(u32, u32)>,
+}
+
+/// まばらな格子で、1 回に F を計算する点の数
+const FIELD_CHUNK: usize = 1 << 15;
+
+impl FieldPlan {
+    /// かたまりの数
+    fn chunks(&self) -> usize {
+        if self.field.dense { self.field.m } else { self.spots.len().div_ceil(FIELD_CHUNK) }
+    }
+
+    /// かたまり `range` の点で F を計算して、点の順に並べたもの
+    fn values(&self, prog: &Program, combos: &[Vec<f64>], dom: Domain, range: std::ops::Range<usize>) -> Vec<f32> {
+        let (m, n) = (self.field.m, self.n);
+        let mut scratch = FieldScratch::default();
+        let mut out = Vec::new();
+        if self.field.dense {
+            let mut xs = Vec::with_capacity(m * m);
+            let mut ys = Vec::with_capacity(m * m);
+            for j in 0..m {
+                for i in 0..m {
+                    xs.push(dom.at(0, i as f64, n));
+                    ys.push(dom.at(1, j as f64, n));
+                }
+            }
+            let mut zs = vec![0.0; m * m];
+            for k in range {
+                zs.fill(dom.at(2, k as f64, n));
+                out.extend(field_values_with(prog, combos, [&xs, &ys, &zs], &mut scratch).iter().map(|&v| v as f32));
+            }
+            return out;
+        }
+        let coord: [Vec<f64>; 3] = [0, 1, 2].map(|ax| (0..m).map(|q| dom.at(ax, q as f64, n)).collect());
+        let mut cols: [Vec<f64>; 3] = Default::default();
+        for c in range {
+            let part = &self.spots[c * FIELD_CHUNK..((c + 1) * FIELD_CHUNK).min(self.spots.len())];
+            for col in cols.iter_mut() {
+                col.clear();
+            }
+            for &(_, p) in part {
+                let p = p as usize;
+                let q = [p % m, (p / m) % m, p / (m * m)];
+                for ax in 0..3 {
+                    cols[ax].push(coord[ax][q[ax]]);
+                }
+            }
+            out.extend(field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut scratch).iter().map(|&v| v as f32));
+        }
+        out
+    }
+
+    /// 全部のかたまりの値（[`FieldPlan::values`] を全範囲でつなげたもの）を、値の置き場所に入れる
+    fn fill(&mut self, vals: &[f32]) {
+        if self.field.dense {
+            self.field.vals.copy_from_slice(vals);
+        } else {
+            for (&(at, _), &v) in self.spots.iter().zip(vals) {
+                self.field.vals[at as usize] = v;
+            }
+        }
+    }
+
+    /// 全部の点の数
+    fn len(&self) -> usize {
+        if self.field.dense { self.field.m.pow(3) } else { self.spots.len() }
+    }
+}
+
 impl SparseField {
+    #[cfg(test)]
     fn build(prog: &Program, combos: &[Vec<f64>], ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool) -> SparseField {
+        let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks);
+        let vals = plan.values(prog, combos, dom, 0..plan.chunks());
+        plan.fill(&vals);
+        plan.field
+    }
+
+    /// F の値を入れる前の形（あるブロック・値の置き場所）と、F を計算する点の一覧（[`FieldPlan`]）
+    fn plan(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool) -> FieldPlan {
         let m = n + 1;
         let nb = n.div_ceil(BLOCK);
         let occupied = if all_blocks { vec![true; nb * nb * nb] } else { block_occupancy(prog, ranges, dom, n, nb) };
@@ -1660,24 +1817,7 @@ impl SparseField {
         if field.occupied.iter().all(|&o| o) {
             field.dense = true;
             field.vals = vec![0.0; m * m * m];
-            let mut xs = Vec::with_capacity(m * m);
-            let mut ys = Vec::with_capacity(m * m);
-            for j in 0..m {
-                for i in 0..m {
-                    xs.push(dom.at(0, i as f64, n));
-                    ys.push(dom.at(1, j as f64, n));
-                }
-            }
-            let mut zs = vec![0.0; m * m];
-            let mut scratch = FieldScratch::default();
-            for k in 0..m {
-                zs.fill(dom.at(2, k as f64, n));
-                let vals = field_values_with(prog, combos, [&xs, &ys, &zs], &mut scratch);
-                for (dst, &v) in field.vals[k * m * m..(k + 1) * m * m].iter_mut().zip(vals) {
-                    *dst = v as f32;
-                }
-            }
-            return field;
+            return FieldPlan { field, n, spots: Vec::new() };
         }
         field.pages = vec![NONE; np * np * np];
         // 要る格子点: あるブロックのセルの角と、その周りの1点
@@ -1722,26 +1862,8 @@ impl SparseField {
                 }
             }
         }
-        // 要る格子点で、まとめて F を計算する（1回に数万点ずつ）
-        const CHUNK_POINTS: usize = 1 << 15;
-        let mut spots: Vec<usize> = Vec::with_capacity(CHUNK_POINTS);
-        let mut cols: [Vec<f64>; 3] = Default::default();
-        let mut scratch = FieldScratch::default();
-        // 軸ごとの格子点の座標
-        let coord: [Vec<f64>; 3] = [0, 1, 2].map(|ax| (0..m).map(|q| dom.at(ax, q as f64, n)).collect());
-        let mut flush = |spots: &mut Vec<usize>, cols: &mut [Vec<f64>; 3], field: &mut SparseField| {
-            if spots.is_empty() {
-                return;
-            }
-            let vals = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut scratch);
-            for (&at, &v) in spots.iter().zip(vals) {
-                field.vals[at] = v as f32;
-            }
-            spots.clear();
-            for c in cols.iter_mut() {
-                c.clear();
-            }
-        };
+        // 要る格子点の一覧（値の置き場所, 格子点の番号）。ページの順に並べる
+        let mut spots: Vec<(u32, u32)> = Vec::new();
         for pk in 0..np {
             for pj in 0..np {
                 for pi in 0..np {
@@ -1755,19 +1877,12 @@ impl SparseField {
                         if !need[at] || q.iter().any(|&x| x >= m) {
                             continue;
                         }
-                        spots.push(at);
-                        for ax in 0..3 {
-                            cols[ax].push(coord[ax][q[ax]]);
-                        }
-                        if spots.len() == CHUNK_POINTS {
-                            flush(&mut spots, &mut cols, &mut field);
-                        }
+                        spots.push((at as u32, (q[0] + m * (q[1] + m * q[2])) as u32));
                     }
                 }
             }
         }
-        flush(&mut spots, &mut cols, &mut field);
-        field
+        FieldPlan { field, n, spots }
     }
 
     /// 格子点 q の値の置き場所（持っていなければ usize::MAX）
@@ -4506,6 +4621,43 @@ mod tests {
         let (la, nb) = (a.lod_mesh.as_ref().unwrap().indices.len(), b.indices.len());
         let merged = merge(vec![a, b], false);
         assert_eq!(merged.lod_mesh.as_ref().unwrap().indices.len(), la + nb);
+    }
+
+    #[test]
+    fn field_split_matches_whole() {
+        // F の計算をかたまりで 3 つに分けてつなげた値は、1 回で計算した値と同じ。その値を渡して作ったメッシュも同じ
+        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let cases: [(&str, &[&str], Vec<(f64, f64)>); 3] = [
+            ("x^2 + y^2 + z^2 - 4.01", &AXES, vec![]),                       // まばら
+            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", &AXES, vec![]), // 密
+            ("(x - a)^2 + y^2 + z^2 - 1", &["x", "y", "z", "a"], vec![(-2.0, 2.0)]), // 範囲で重ねた立体
+        ];
+        for (src, vars, ranges) in cases {
+            let p = prog(src, vars);
+            let run = |mode: FieldMode| {
+                set_field_mode(mode);
+                let m = implicit_solid(&p, big, 60, &ranges, 8);
+                (m, take_field_out())
+            };
+            let (whole, _) = run(FieldMode::Normal);
+            let (_, plan) = run(FieldMode::Plan);
+            assert_eq!(plan.calls, 1);
+            let c = plan.chunks;
+            assert!(c >= 1, "{src}");
+            let (a, b) = (c / 3, 2 * c / 3);
+            let mut vals = Vec::new();
+            for (x, y) in [(0, a), (a, b), (b, c)] {
+                let (m, out) = run(FieldMode::Chunks(x, y));
+                assert!(m.indices.is_empty());
+                vals.extend(out.values);
+            }
+            let (_, all) = run(FieldMode::Chunks(0, c));
+            assert_eq!(vals.len(), all.values.len(), "{src}");
+            assert!(vals.iter().zip(&all.values).all(|(x, y)| x.to_bits() == y.to_bits()), "{src}");
+            let (given, _) = run(FieldMode::Given(vals));
+            assert_eq!(given.positions, whole.positions, "{src}");
+            assert_eq!(given.indices, whole.indices, "{src}");
+        }
     }
 
     #[test]

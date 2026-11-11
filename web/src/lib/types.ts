@@ -276,7 +276,17 @@ export interface PlotRequest {
   layers: number
   /** そのほかの設定（ビットごと）。ビット 0（PLOT_NO_REFINE）: 形が急に変わる所を細かくしない（再生・ドラッグ中） */
   flags: number
+  /**
+   * 重い陰関数の F の計算を、いくつかの Worker に分けるときの段階（無ければふつうに計算する）。
+   * plan: かたまりの数だけ返す / chunks: かたまり from..to の値だけ返す / given: 渡した値でメッシュを作る
+   */
+  field?: { mode: 'plan' } | { mode: 'chunks'; from: number; to: number } | { mode: 'given'; values: Float32Array }
 }
+
+/** F の計算を分ける途中の段階（計画・一部の計算）の返事 */
+export type FieldStageResponse =
+  | { requestId: number; ok: true; chunks: number; values: Float32Array | null; ms: number }
+  | { requestId: number; ok: false; error: string }
 
 /** PlotRequest.flags のビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。止まったら細かく計算し直す） */
 export const PLOT_NO_REFINE = 1

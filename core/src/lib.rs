@@ -421,6 +421,49 @@ pub fn plot(
     })
 }
 
+// ---- 重い陰関数の F の計算を、いくつかの Worker に分ける ----
+// 使い方（Worker 側）: field_mode_plan() → plot(…) → field_chunks() でかたまりの数を知る。
+// 手伝う Worker は field_mode_chunks(a, b) → plot(…) → take_field_values()。
+// 担当の Worker は全部の値をつなげて field_mode_given(値) → plot(…) でメッシュを作る。
+// 計画・一部の計算のときの plot の結果（空のメッシュ）は捨てる
+
+/// 次の [`plot`] では、F の計算の計画（かたまりの数）だけを作る
+#[wasm_bindgen]
+pub fn field_mode_plan() {
+    mesh::set_field_mode(mesh::FieldMode::Plan);
+}
+
+/// 次の [`plot`] では、F のかたまり `from..to` の値だけを計算する
+#[wasm_bindgen]
+pub fn field_mode_chunks(from: u32, to: u32) {
+    mesh::set_field_mode(mesh::FieldMode::Chunks(from as usize, to as usize));
+}
+
+/// 次の [`plot`] では、F の値 `values`（全部のかたまりをつなげたもの）を使ってメッシュを作る
+#[wasm_bindgen]
+pub fn field_mode_given(values: Vec<f32>) {
+    mesh::set_field_mode(mesh::FieldMode::Given(values));
+}
+
+/// 計画の結果: かたまりの数。分けられない式（陰関数でない・陰関数が 2 つ以上）なら 0。F の計算の仕方はふつうに戻す
+#[wasm_bindgen]
+pub fn field_chunks() -> u32 {
+    let out = mesh::take_field_out();
+    if out.calls == 1 { out.chunks as u32 } else { 0 }
+}
+
+/// 一部の計算の結果（Float32Array）。F の計算の仕方はふつうに戻す
+#[wasm_bindgen]
+pub fn take_field_values() -> Vec<f32> {
+    mesh::take_field_out().values
+}
+
+/// F の計算の仕方をふつうに戻す（途中で失敗したとき）
+#[wasm_bindgen]
+pub fn field_mode_reset() {
+    mesh::take_field_out();
+}
+
 /// 2D 表示で、3次元に射影した形を平面に描く形にする。
 /// 「切り口」なら曲面と平面（縦の座標 = 0）の交わりの線、「投影」なら縦の座標を 0 にした形
 fn flat_finish(mut m: mesh::Mesh, curve: bool, slice: bool) -> mesh::Mesh {
