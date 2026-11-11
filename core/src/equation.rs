@@ -160,7 +160,7 @@ impl Space {
     }
 
     /// 回転していれば、回転行列 R（n × n）。回転していなければ None
-    fn rotation_matrix(&self) -> Option<Vec<Vec<f64>>> {
+    pub fn rotation_matrix(&self) -> Option<Vec<Vec<f64>>> {
         if self.rotation.iter().all(|&a| a == 0.0) {
             return None;
         }
