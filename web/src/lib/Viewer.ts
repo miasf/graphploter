@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
+import { MotionQuality } from './motionQuality'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -121,13 +122,6 @@ const WHEEL_PER_PIXEL = 0.0022
 /** ホイールの拡大縮小をならす時間（秒） */
 const WHEEL_SMOOTH_S = 0.1
 
-/** 動かしている間の画素密度の倍率（遅いときに、左から順に下げていく） */
-const MOTION_SCALES = [1, 0.75, 0.55, 0.4, 0.3]
-/** 1コマがこれより長ければ「遅い」（およそ 36 コマ/秒を下回る） */
-const SLOW_FRAME_MS = 28
-/** 1コマがこれより短ければ「速い」（およそ 50 コマ/秒を上回る） */
-const FAST_FRAME_MS = 20
-
 /** 曲面の形を捨てる（粗い版があれば、それも） */
 function disposeGeometry(geo: THREE.BufferGeometry) {
   ;(geo.userData.lod as THREE.BufferGeometry | undefined)?.dispose()
@@ -173,18 +167,15 @@ export class Viewer {
   private interacting = false
   /** スライダーを動かしている・回転を再生しているなど、グラフが次々に変わっている最中か */
   private busy = false
-  /** 動かしている最中は画素密度を下げて描く */
-  private lowRes = false
   /**
-   * 動かしている最中の画素密度を、さらに何倍にするか（MOTION_SCALES の番号）。
-   * 1コマにかかる時間を測って、遅ければ下げ、余裕があれば戻す（どんなに重いグラフでも、視点はなめらかに動かせる）
+   * 動かしている最中の描き方（画素密度・粗い版）。1コマにかかる時間を測って、遅いときだけ段階的に下げ、
+   * 余裕があれば戻す（軽いグラフは止まっているときと同じ絵のまま。重いグラフでも、視点はなめらかに動かせる）
    */
-  private motionLevel = 0
+  private quality = new MotionQuality()
+  /** 図形が増えた・減った・差し替わった（quality に三角形の合計を伝え直す） */
+  private sceneChanged = true
   /** 前の回（requestAnimationFrame）の時刻 */
   private lastTickAt = 0
-  private fastFrames = 0
-  /** 画素密度を戻してみたら遅くなったので、今回の操作の間はもう戻さない */
-  private raiseFailed = false
   /** カメラが（ほぼ）止まってから何フレームたったか */
   private stillFrames = 0
   /** 前のフレームのカメラの位置と向き（止まったかどうかの判定に使う） */
@@ -214,10 +205,9 @@ export class Viewer {
     this.applyButtons()
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.1 // 指を離した後の慣性の回転を、少し早めに止める
-    // グラフを動かし始めたら画素密度を下げ、止まったら元に戻す（動いている間は細部が見えにくいので、軽さを優先）
+    // 画素密度・粗い版は、動かし始めても すぐには下げない（1コマが遅いときだけ、loop の中で段階的に下げる）
     this.controls.addEventListener('start', () => {
       this.interacting = true
-      this.setLowRes(true)
     })
     this.controls.addEventListener('end', () => (this.interacting = false))
 
@@ -326,7 +316,6 @@ export class Viewer {
         const fwd = this.rayAt(e.clientX, e.clientY).ray.direction.clone()
         last = { x: e.clientX, y: e.clientY, id: e.pointerId, mode, pivot, fwd }
         this.interacting = true
-        this.setLowRes(true)
       },
       { capture: true },
     )
@@ -508,7 +497,6 @@ export class Viewer {
           this.wheelLastTime = performance.now()
         }
         this.wheelHoldUntil = performance.now() + 350
-        this.setLowRes(true)
         this.dirty = true
       },
       { capture: true, passive: false },
@@ -614,86 +602,64 @@ export class Viewer {
 
   /**
    * スライダーを動かしている間など、グラフが次々に変わる間は true にする。
-   * その間は、グラフを回しているときと同じく画素密度を下げて描く（止まったら元に戻す）
+   * その間も、視点を動かしているときと同じ段階で描く（1コマの時間は、カメラが動いているコマだけで数える）
    */
   setBusy(on: boolean) {
+    if (this.busy === on) return
     this.busy = on
-    if (on) this.setLowRes(true)
-    this.dirty = true
-  }
-
-  private setLowRes(on: boolean) {
-    if (this.lowRes === on) return
-    this.lowRes = on
-    this.applyPixelRatio()
+    this.updateOperation()
   }
 
   /**
-   * 視点（カメラ）が動いているかどうかが変わったとき。動いている間だけ、三角形の多い曲面は粗い版を描き、
-   * 画素密度も1コマの時間に合わせて下げる。スライダーや回転の再生でグラフの形が変わっているだけのときは、
-   * そうしない（遅いのは計算で、描くのを軽くしても速くならないため）
+   * 視点（カメラ）が動いているかどうかが変わったとき。動いている間、段階に応じて三角形の多い曲面は粗い版を描く。
+   * スライダーや回転の再生でグラフの形が変わっているだけのときは、粗い版にしない
+   * （遅いのは計算で、描くのを軽くしても速くならないため）
    */
   private setCamMoving(on: boolean) {
     if (this.camMoving === on) return
     this.camMoving = on
-    this.fastFrames = this.frameCount = 0
-    this.raiseFailed = this.raised = false
-    this.applyPixelRatio()
-    for (const p of this.plots.values()) this.applyLod(p)
+    this.updateOperation()
   }
   private camMoving = false
 
-  private applyPixelRatio() {
-    const low = Math.min(this.basePixelRatio, 1) * (this.camMoving ? MOTION_SCALES[this.motionLevel] : 1)
-    this.renderer.setPixelRatio(this.lowRes ? low : this.basePixelRatio)
-    this.dirty = true
-  }
-
-  /** 曲面の形を、動かしている間は粗い版、止まっている間はそのままの版にする */
-  private applyLod(p: PlotObject) {
-    if (p.kind !== 'surface') return
-    const lod = p.geo.userData.lod as THREE.BufferGeometry | undefined
-    const geo = this.camMoving && lod ? lod : p.geo
-    const main = p.group.children[0] as THREE.Mesh
-    if (main.geometry !== geo) main.geometry = geo
+  /** 操作（視点の移動・スライダー・再生）の始まりと終わりを quality に伝え、描き方を合わせる */
+  private updateOperation() {
+    if (this.camMoving || this.busy) this.quality.begin()
+    else this.quality.end()
+    this.applyQuality()
   }
 
   /**
-   * 動かしている間の1コマの時間 dt（ミリ秒）から、画素密度を上げ下げする。
-   * 遅いコマが続けば1段下げる。速いコマが長く続けば1段戻してみる（それで遅くなったら、この操作の間はもう戻さない）
+   * 今の段階の描き方にする。操作の最中でなければ、元の画素密度・そのままの版
+   * （止まったら1回描き直す）
    */
-  private adaptMotionScale(dt: number) {
-    if (!this.camMoving || !this.lowRes || dt > 2500) return // 視点が止まっている・タブが隠れていた などは数えない
-    // 1コマの時間は、数コマ分をならして見る（GPU が遅いとき、速いコマが数回続いた後でまとめて待たされることがあるため）
-    this.frameAvg = this.frameCount === 0 ? dt : this.frameAvg * 0.8 + dt * 0.2
-    if (++this.frameCount < 4) return // 画素密度を変えた直後は、ならした値が落ち着くまで待つ
-    if (this.frameAvg > SLOW_FRAME_MS) {
-      this.fastFrames = 0
-      if (this.motionLevel < MOTION_SCALES.length - 1) {
-        // 戻した直後に遅くなったなら、戻したのが原因
-        if (this.raised) this.raiseFailed = true
-        this.raised = false
-        // とても遅いときは、2段まとめて下げる
-        this.motionLevel = Math.min(this.motionLevel + (this.frameAvg > 3 * SLOW_FRAME_MS ? 2 : 1), MOTION_SCALES.length - 1)
-        this.frameCount = 0
-        this.applyPixelRatio()
-      }
-    } else if (this.frameAvg < FAST_FRAME_MS && ++this.fastFrames >= 45) {
-      this.fastFrames = 0
-      this.raised = false // 戻した後も速いままなら、戻して正解
-      if (this.motionLevel > 0 && !this.raiseFailed) {
-        this.raised = true
-        this.motionLevel--
-        this.frameCount = 0
-        this.applyPixelRatio()
-      }
-    }
+  private applyQuality() {
+    const ratio = this.camMoving || this.busy ? this.quality.stage.ratio : this.basePixelRatio
+    if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio)
+    for (const p of this.plots.values()) this.applyLod(p)
+    this.dirty = true
   }
-  /** ならした1コマの時間（ミリ秒）と、それに数えたコマの数 */
-  private frameAvg = 0
-  private frameCount = 0
-  /** 直前に画素密度を1段戻したところか */
-  private raised = false
+
+  /** 場面の三角形の合計と、粗い版があるかを quality に伝える */
+  private updateQualityScene() {
+    let triangles = 0
+    let hasLod = false
+    for (const p of this.plots.values()) {
+      if (p.kind !== 'surface' || !p.group.visible) continue
+      triangles += (p.geo.index?.count ?? p.geo.getAttribute('position')?.count ?? 0) / 3
+      if (p.geo.userData.lod) hasLod = true
+    }
+    this.quality.setScene(this.basePixelRatio, triangles, hasLod)
+  }
+
+  /** 曲面の形を、動かしている間は（段階が粗い版なら）粗い版、それ以外はそのままの版にする */
+  private applyLod(p: PlotObject) {
+    if (p.kind !== 'surface') return
+    const lod = p.geo.userData.lod as THREE.BufferGeometry | undefined
+    const geo = this.camMoving && this.quality.stage.lod && lod ? lod : p.geo
+    const main = p.group.children[0] as THREE.Mesh
+    if (main.geometry !== geo) main.geometry = geo
+  }
 
   private resize() {
     const w = this.container.clientWidth
@@ -736,7 +702,15 @@ export class Viewer {
     // 前の回に描いたなら、そこから今回までの時間が、その1コマにかかった時間
     // （描くのが遅いと、次の回が呼ばれるのが遅れる。今回は描かないとしても数える）
     const now = performance.now()
-    if (this.renderedLastTick) this.adaptMotionScale(now - this.lastTickAt)
+    if (this.sceneChanged) {
+      this.sceneChanged = false
+      this.updateQualityScene()
+      this.applyQuality()
+    }
+    // 視点が動いているコマだけ数える（スライダーだけのときは、計算待ちで描いていないだけのことが多い）。
+    // 長すぎる間隔（タブが隠れていた など）は数えない
+    const dt = now - this.lastTickAt
+    if (this.renderedLastTick && this.camMoving && dt <= 2500 && this.quality.frame(dt)) this.applyQuality()
     this.lastTickAt = now
     this.stepWheelZoom()
     // カメラが動いたか（慣性で動き続けている間も true）
@@ -751,11 +725,11 @@ export class Viewer {
     const idle = !this.interacting && this.wheelPending === 0 && performance.now() > this.wheelHoldUntil
     if (visible) {
       this.stillFrames = 0
-      this.setLowRes(true)
       this.setCamMoving(true)
     } else if (++this.stillFrames > 4 && idle) {
-      this.setCamMoving(false) // 視点が止まった（グラフの形は、まだ変わり続けているかもしれない）
-      if (!this.busy) this.setLowRes(false) // 何も動いていなければ、元の画素密度で描き直す
+      // 視点が止まった（グラフの形は、まだ変わり続けているかもしれない）。
+      // 何も動いていなければ、元の画素密度・そのままの版で描き直す
+      this.setCamMoving(false)
     }
     // 何も変わっていなければ描かない（止まっているときに電池を使わない）
     if (!this.dirty) {
@@ -1003,6 +977,7 @@ export class Viewer {
 
   /** 式 id の曲面・曲線を設定（作り直し） */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
+    this.sceneChanged = true
     const old = this.plots.get(id)
     const kind = mesh.curve ? 'curve' : 'surface'
     // 同じ種類なら、材質（シェーダー）はそのまま使い、形のデータだけ差し替える。
@@ -1321,6 +1296,7 @@ export class Viewer {
       return
     }
 
+    if (p.group.visible !== style.visible) this.sceneChanged = true
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
@@ -1380,6 +1356,7 @@ export class Viewer {
     const p = this.plots.get(id)
     if (!p) return
     this.dirty = true
+    this.sceneChanged = true
     if (p.kind === 'curve') {
       p.line.geometry.dispose()
       ;(p.line.material as THREE.Material).dispose()
