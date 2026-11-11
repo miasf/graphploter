@@ -13,6 +13,7 @@
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
+  import { lastBreakdown } from './lib/timings'
   import type {
     ComplexMode,
     CutRequest,
@@ -571,6 +572,8 @@
       item.layers ?? 1,
       flatSlice,
     )
+    // 計算担当が返事を送ってから受け取るまで（受け渡し）
+    const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
     if (latest.get(item.id) !== token || !items.includes(item)) return // もっと新しい依頼がある / 削除済み
 
     if (!res.ok) {
@@ -631,8 +634,10 @@
     for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
     item.kind = res.kind
+    const s0 = performance.now()
     viewer.setPlot(item.id, res.mesh, item)
     viewer.setCap(item.id, res.cap, item)
+    lastBreakdown.set(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
     const plain = space.axes.every((a, k) => a === k) && space.rotation.every((a) => a === 0)
     const size = /^複素平面の点/.test(res.kind) && plain
@@ -808,6 +813,7 @@
 
   function removeItem(item: PlotItem) {
     viewer?.removePlot(item.id)
+    lastBreakdown.delete(item.id)
     delete playing[-item.id]
     items.splice(items.indexOf(item), 1)
     if (item.param) paramsChanged([item.param.name])

@@ -241,6 +241,10 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
 | `web/` | `npm run check` | 画面側の型チェック |
 | `web/` | `npm test` | 数式の変換（latex.ts）のテスト |
 | `web/` | `npm run build` | 公開用のファイルを `web/dist/` に作る |
+| `core/` | `cargo test --release --test bench -- --ignored --nocapture` | ベンチマーク。式ごとの時間の内訳（式の計算 / メッシュ / 粗い版）・頂点と三角形の数・形の傷（縁や重なりの辺の数など）を表で出す |
+
+画面を `?bench=1` を付けて開くと、式ごとの最後の計算の内訳（計算担当の中の `eval` / `mesh` / `lod` / `copy` / `total`、受け渡し `transfer`、描画側への登録 `setPlot`）を、
+開発者ツールのコンソールで `__plotTimings` として読める（式の行の番号 → 内訳の `Map`）。
 
 ## 数式の書き方
 

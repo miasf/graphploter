@@ -196,7 +196,14 @@ impl Code {
 
     /// `n` 個の点でまとめて計算して、結果を `sink` に渡す。`inputs[k]` は k 番目の変数の値の列
     /// （式に出てこない変数の列は空でもよい）
+    /// `run_inner` を呼び、かかった時間と点の数を記録する（[`crate::timing`]）
     fn run<S: Sink>(&self, inputs: &[&[f64]], n: usize, sink: &mut S) {
+        let t = crate::timing::now_ms();
+        self.run_inner(inputs, n, sink);
+        crate::timing::record_eval(crate::timing::now_ms() - t, n);
+    }
+
+    fn run_inner<S: Sink>(&self, inputs: &[&[f64]], n: usize, sink: &mut S) {
         let m = self.ops.len();
         // 命令ごとの作業領域（CHUNK 個ずつ）。定数は最初に1回だけ書き込む
         let mut re: Vec<f64> = Vec::new();

@@ -35,6 +35,21 @@ pub struct Mesh {
     /// 粗い版の三角形の頂点番号（頂点は同じものを使う）。視点を動かしている間は、こちらを描いて軽くする。
     /// 三角形が少ないメッシュでは空（そのまま描く）
     pub lod: Vec<u32>,
+    /// 作るのにかかった時間の内訳（`lib.rs` の入口で記録する。メッシュを作る関数自体は 0 のまま）
+    pub stats: Stats,
+}
+
+/// メッシュを作るのにかかった時間の内訳（ミリ秒）
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Stats {
+    /// 式の計算（[`crate::timing`] で集めた時間）
+    pub eval_ms: f64,
+    /// 式の計算と粗い版を除いた、メッシュを作る時間（式の解析・射影を含む）
+    pub mesh_ms: f64,
+    /// 粗い版（`add_cluster_lod`）を作る時間
+    pub lod_ms: f64,
+    /// 式を計算した点の数
+    pub points: f64,
 }
 
 /// 三角形がこれより多いメッシュには、視点を動かしている間に描く粗い版（[`Mesh::lod`]）を作る

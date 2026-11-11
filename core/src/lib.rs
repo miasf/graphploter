@@ -15,6 +15,7 @@ pub mod functions;
 pub mod mesh;
 pub mod parser;
 pub mod special;
+pub mod timing;
 
 use wasm_bindgen::prelude::*;
 
@@ -128,6 +129,19 @@ impl MeshResult {
     pub fn lod_indices(&self) -> Vec<u32> {
         self.inner.lod.clone()
     }
+    /// かかった時間の内訳 [式の計算 ms, メッシュ ms, 粗い版 ms, 計算した点の数]（`mesh::Stats` を参照）
+    #[wasm_bindgen(getter)]
+    pub fn stats(&self) -> Vec<f64> {
+        let s = self.inner.stats;
+        vec![s.eval_ms, s.mesh_ms, s.lod_ms, s.points]
+    }
+}
+
+/// `start` から計った時間の内訳を `mesh.stats` に入れる。`lod_start` 〜 `end` が粗い版を作った時間。
+/// 式の計算の時間は、`start` の時点で `timing::reset` してから集めたもの
+fn record_stats(mesh: &mut mesh::Mesh, start: f64, lod_start: f64, end: f64) {
+    let (eval_ms, points) = timing::take();
+    mesh.stats = mesh::Stats { eval_ms, mesh_ms: (lod_start - start - eval_ms).max(0.0), lod_ms: end - lod_start, points };
 }
 
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
@@ -221,6 +235,8 @@ pub fn plot(
     layers: u32,
     flat_slice: bool,
 ) -> Result<MeshResult, JsError> {
+    let start = timing::now_ms();
+    timing::reset();
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -316,9 +332,11 @@ pub fn plot(
     };
     // 2D の切り口で、射影してから線にした媒介変数表示の曲面
     let curve = built.curve || (ctx.flat_slice && built.shape.is_some());
+    let lod_start = timing::now_ms();
     if !curve {
         mesh::add_cluster_lod(&mut inner);
     }
+    record_stats(&mut inner, start, lod_start, timing::now_ms());
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
     let explicit_used = (built.shape.is_some() && built.rotated_explicit).then(|| plot.used_params());
     Ok(MeshResult {
@@ -614,6 +632,8 @@ impl Shape {
         center: &[f64],
         perspective: f64,
     ) -> Result<MeshResult, JsError> {
+        let start = timing::now_ms();
+        timing::reset();
         let n = dims as usize;
         let rn = equation::rot_dims(n);
         if domain.len() != 6 || axes.len() != 3 || rotation.len() != rn * (rn - 1) / 2 || n != self.inner.dims {
@@ -632,6 +652,8 @@ impl Shape {
         if self.flat {
             inner = flat_finish(inner, self.curve, self.flat_slice);
         }
+        let end = timing::now_ms();
+        record_stats(&mut inner, start, end, end);
         Ok(MeshResult {
             inner,
             flat: self.flat,
@@ -664,14 +686,19 @@ impl CapSource {
         if axis > 2 {
             return Err(JsError::new("内部エラー: 切り口の軸の番号が違います"));
         }
+        let start = timing::now_ms();
+        timing::reset();
+        let mut inner = mesh::merge(
+            self.inner
+                .iter()
+                .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
+                .collect(),
+            false,
+        );
+        let end = timing::now_ms();
+        record_stats(&mut inner, start, end, end);
         Ok(MeshResult {
-            inner: mesh::merge(
-                self.inner
-                    .iter()
-                    .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
-                    .collect(),
-                false,
-            ),
+            inner,
             kind: String::new(),
             params: Vec::new(),
             curve: false,
