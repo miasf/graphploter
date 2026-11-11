@@ -374,6 +374,14 @@
   const lastScale = new Map<number, number>()
   /** 2段階の表示: 粗い版を出した後、続けて細かく計算する式 */
   const fineNext = new Set<number>()
+  /**
+   * 前の返事が「点を使い回して射影だけし直した」ものだった式（回転の再生・回転角のドラッグ中の、媒介変数表示・回した陽関数）。
+   * こうした式は、点を一度細かく計算すれば、あとは回しても計算し直さない。操作中でも細かさを下げずに計算する
+   * （下げると、操作が終わるまで粗い形のまま回すことになる）
+   */
+  const reusable = new Set<number>()
+  /** reusable のために、操作中でも細かく計算し直した式（その返事は使い回しではないが、次からは使い回せる） */
+  const upgrading = new Set<number>()
   const isCoarse = () => pointerOnControl || anyRotPlaying() || playingParams.length > 0 || playingSlices.length > 0
 
   function refine() {
@@ -541,7 +549,9 @@
     const sizes = { res: resolution, ires: implicitResolution }
     const coarse = isCoarse()
     const preview = !coarse && !full ? budget.previewScale(item.id, sizes) : null
-    const scale = coarse ? budget.scaleFor(item.id, sizes) : (preview ?? 1)
+    const keepFine = coarse && reusable.has(item.id)
+    if (keepFine) upgrading.add(item.id)
+    const scale = keepFine ? 1 : coarse ? budget.scaleFor(item.id, sizes) : (preview ?? 1)
     // 止まったときに細かく計算し直す式（2段階の表示の粗い版は、続けて細かく計算するので入れない）。
     // 操作中は、形が急に変わる所を細かくしない（PLOT_NO_REFINE）ので、細かさを下げなかった式も計算し直す
     if (coarse) coarseItems.add(item.id)
@@ -613,6 +623,9 @@
     item.error = undefined
     item.usedParams = res.usedParams
     budget.record(item.id, res.ms, used, res.cost, res.reprojected)
+    if (res.reprojected) reusable.add(item.id)
+    else if (!upgrading.has(item.id)) reusable.delete(item.id)
+    upgrading.delete(item.id)
 
     if (res.param) {
       // パラメータの定義（a = 1 など）: グラフは描かず、値を覚えてスライダーを出す
@@ -846,6 +859,8 @@
     viewer?.removePlot(item.id)
     lastBreakdown.delete(item.id)
     budget.forget(item.id)
+    reusable.delete(item.id)
+    upgrading.delete(item.id)
     lastScale.delete(item.id)
     fineNext.delete(item.id)
     delete playing[-item.id]
