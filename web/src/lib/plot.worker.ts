@@ -105,7 +105,9 @@ function looksLikeDefinition(source: string): boolean {
 
 /**
  * 計算時間が細かさの何乗に比例するか: 陰関数・範囲で重ねた立体は3乗、曲線（細かさによらず曲がり方で点を足す）はほぼ無関係、
- * ほか（陽関数・媒介変数表示の曲面、2D 表示の陰関数の曲線・切り口の線）は2乗
+ * ほか（陽関数・媒介変数表示の曲面、2D 表示の陰関数の曲線・切り口の線）は2乗。
+ * w などが絡む回転をした陽関数は、傾いた座標系の陽関数（説明が「z = f(x, y)（回したもの）」）なら曲面なので2乗、
+ * 陰関数として計算し直したもの（「陰関数（… を回したもの）」）なら3乗
  */
 function costOf(kind: string, curve: boolean, flat: boolean): Cost {
   if (!flat && !curve && /^(陰関数|範囲で重ねた立体)/.test(kind)) return 'volume'
@@ -272,7 +274,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
           space.perspective,
         )
       } catch {
-        r = null // 回転した陽関数で、回転が条件を外れた（陰関数として計算し直す）
+        r = null // 回転した陽関数で、回転が条件を外れた（傾いた座標系の陽関数・陰関数として計算し直す）
       }
       if (r) {
         wall = performance.now() - w0

@@ -160,7 +160,7 @@ impl Space {
     }
 
     /// 回転していれば、回転行列 R（n × n）。回転していなければ None
-    fn rotation_matrix(&self) -> Option<Vec<Vec<f64>>> {
+    pub fn rotation_matrix(&self) -> Option<Vec<Vec<f64>>> {
         if self.rotation.iter().all(|&a| a == 0.0) {
             return None;
         }
@@ -256,6 +256,13 @@ pub enum Plot {
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
     /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
     Implicit { prog: Program, from: Option<String> },
+    /// 表示していない座標が絡む回転をした陽関数を、傾いた直交座標系 (u, v, t) の陽関数 t = g(u, v) として描くもの（[`tilted`]）。
+    /// 表示中の点は q = u e₁ + v e₂ + t e₃（`frame` = [e₁, e₂, e₃]。正規直交・右手系）。
+    /// `prog` の変数は (u, v)（利用者が打てない名前 [`TILT_U`]・[`TILT_V`]）。
+    /// `color` は複素数の色分け用の f（色分けしないなら None）。
+    /// `grid` は格子線用の 2 つの 1 次式 c₀ + c_u u + c_v v（f が使う座標がちょうど 2 つなら、その元の座標の値。None なら (u, v)）。
+    /// `label` は元の陽関数の説明（z = f(x, y) など）
+    Tilted { prog: Program, color: Option<Program>, frame: [[f64; 3]; 3], grid: Option<[[f64; 3]; 2]>, label: String },
     /// 範囲で重ねた立体。`prog` の変数は表示中の3つの座標と、範囲で動かす名前（`ranges` の順）。
     Solid { prog: Program, ranges: Vec<(f64, f64)>, names: Vec<String> },
     /// 媒介変数表示の曲線。`sets` の1つ1つが1本の曲線で、すべての座標の成分（次元の数）の式。
@@ -288,6 +295,7 @@ impl Plot {
             }
             Plot::Implicit { from: Some(f), .. } => format!("陰関数（{f} を回したもの）"),
             Plot::Implicit { .. } => "陰関数".into(),
+            Plot::Tilted { label, .. } => format!("{label}（回したもの）"),
             Plot::Solid { .. } => "範囲で重ねた立体".into(),
             Plot::Curve { .. } => "媒介変数表示の曲線".into(),
             Plot::Surface { .. } => "媒介変数表示の曲面".into(),
@@ -318,6 +326,7 @@ impl Plot {
     pub fn used_params(&self) -> Vec<String> {
         let progs: Vec<&Program> = match self {
             Plot::Explicit { prog, .. } | Plot::Implicit { prog, .. } => vec![prog],
+            Plot::Tilted { prog, color, .. } => std::iter::once(prog).chain(color.as_ref()).collect(),
             Plot::Solid { prog, names, .. } => {
                 // 範囲で重ねている名前も「使ったもの」に含める（範囲が変わったら計算し直すため）
                 let mut out = names.clone();
@@ -479,6 +488,20 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         }
     }
 
+    // 表示していない座標が絡む回転でも、傾いた座標系の陽関数になるなら、陽関数のまま描く（段差・壁・色分けが残る）。
+    // 2D の切り口（Space::flat_slice）と、範囲で重ねる名前を使う式は、今までどおり陰関数・立体にする
+    if let Some(m) = &rot {
+        if !space.flat_slice {
+            let ranged = space.ranged();
+            let (rl, rr) = (rotate_coords(&l, m, space), rotate_coords(&r, m, space));
+            if !ranged.iter().any(|(n, _, _)| rl.uses_var(n) || rr.uses_var(n)) {
+                if let Some(p) = tilted(&l, &r, m, &consts, space)? {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+
     // 陽関数（z = f(x, y) など）を回して陰関数として計算し直すときは、その形を覚えておく。
     // 複素数の色分けをしているなら、f の代わりに高さ（|f|・Re f・Im f）を使う（f のままだと実数にならない）
     let mut from = None;
@@ -527,6 +550,144 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     }
     let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
     Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)?, from })
+}
+
+/// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）
+pub const TILT_U: &str = "#u";
+pub const TILT_V: &str = "#v";
+
+/// 回転した陽関数 p_a = f(p_k : k ∈ U) を、傾いた直交座標系の陽関数 t = g(u, v) にする（[`Plot::Tilted`]）。
+///
+/// 元の座標 p_k は表示中の点 q の 1 次式 p_k = β_k + L_k · q。f が使う座標の L_k が張る空間 W に垂直な向き e₃ を「高さ」にとると、
+/// q = u e₁ + v e₂ + t e₃（e₁, e₂ は e₃ に垂直）で p_k（k ∈ U）は t によらないので、
+/// t = (f(p_k(u, v)) − β_a − (L_a·e₁) u − (L_a·e₂) v) / (L_a·e₃)。
+/// 原点は 0 にとる（どこにとっても同じ形になるので、表示範囲を知らなくてよい）。
+///
+/// 使えない場合は None（今までどおり陰関数にする）: 陽関数でない、W の次元が 3（f が 3 つ以上の独立な向きを使う）、
+/// L_a の W に垂直な成分の長さが 0.05 未満（面が「高さ」の向きにほぼ平行で、傾きすぎる）
+fn tilted(l: &Expr, r: &Expr, m: &[Vec<f64>], consts: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    let shown = space.shown();
+    let Some(explicit) = find_explicit(l, r, &shown, consts)? else {
+        return Ok(None);
+    };
+    let label = explicit.kind_label();
+    let Plot::Explicit { axis, .. } = explicit else {
+        return Ok(None);
+    };
+    // 左辺の座標 a と、f の式（find_explicit と同じく左辺を優先）
+    let name = &shown[axis];
+    let f = if matches!(l, Expr::Var(v) if v == name) && !r.uses_var(name) { r } else { l };
+    let a = space.axes[axis];
+
+    let n = space.dims;
+    let rn = rot_dims(n);
+    let c = |j: usize| space.center.get(j).copied().unwrap_or(0.0);
+    let s = space.axes;
+    // p_k = β_k + L_k · q
+    let lk = |k: usize| -> [f64; 3] { [m[s[0]][k], m[s[1]][k], m[s[2]][k]] };
+    let beta = |k: usize| -> f64 {
+        let mut b = c(k) - (0..3).map(|i| m[s[i]][k] * c(s[i])).sum::<f64>();
+        for j in (0..rn).filter(|j| !s.contains(j)) {
+            let sigma = if j < n { space.slice.get(j).copied().unwrap_or(0.0) } else { 0.0 };
+            b += m[j][k] * (sigma - c(j));
+        }
+        b
+    };
+
+    // f が使う座標
+    let mut vars = Vec::new();
+    f.collect_vars(&mut vars);
+    let mut used: Vec<usize> = vars.iter().filter_map(|v| coord_index(v)).filter(|&k| k < n).collect();
+    used.sort_unstable();
+    used.dedup();
+
+    let Some(frame) = tilted_frame(&used.iter().map(|&k| lk(k)).collect::<Vec<_>>(), lk(a)) else {
+        return Ok(None);
+    };
+    let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    // 元の座標 p_k を (u, v) の 1 次式 [定数, u の係数, v の係数] にする
+    let coef = |k: usize| [beta(k), dot(lk(k), frame[0]), dot(lk(k), frame[1])];
+    let as_expr = |cf: [f64; 3]| linear(cf[0], vec![(cf[1], Expr::Var(TILT_U.into())), (cf[2], Expr::Var(TILT_V.into()))]);
+    let in_uv = |e: &Expr| {
+        e.substitute(&|v: &str| {
+            let k = coord_index(v).filter(|&k| k < n)?;
+            Some(as_expr(coef(k)))
+        })
+    };
+    // 複素数の色分けをしているなら、高さは h(f)、色は f
+    let fh = match space.complex_height {
+        Some(h) => Expr::Call(h, vec![f.clone()]),
+        None => f.clone(),
+    };
+    let ca = coef(a);
+    let g = Expr::Bin(
+        BinOp::Div,
+        Box::new(Expr::Bin(BinOp::Sub, Box::new(in_uv(&fh)), Box::new(as_expr(ca)))),
+        Box::new(Expr::Num(dot(lk(a), frame[2]))),
+    );
+    let uv = [TILT_U, TILT_V];
+    let prog = Program::compile_with(&g, &uv, consts)?;
+    let color = match space.complex_height {
+        Some(_) => Some(Program::compile_with(&in_uv(f), &uv, consts)?),
+        None => None,
+    };
+    let grid = (used.len() == 2).then(|| [coef(used[0]), coef(used[1])]);
+    Ok(Some(Plot::Tilted { prog, color, frame, grid, label }))
+}
+
+/// 傾いた座標系の向き [e₁, e₂, e₃]（[`tilted`]）。`ls` は f が使う座標の L_k、`la` は左辺の座標の L_a。
+/// e₃ は L_a の、ls が張る空間 W に垂直な成分の向き。e₁, e₂ は W の基底を含むようにとり、右手系にする。
+/// W の次元が 3、または垂直な成分の長さが 0.05 未満なら None
+pub fn tilted_frame(ls: &[[f64; 3]], la: [f64; 3]) -> Option<[[f64; 3]; 3]> {
+    let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    // x から、正規直交な basis の成分を除いたもの
+    let reject = |x: [f64; 3], basis: &[[f64; 3]]| {
+        let mut r = x;
+        for b in basis {
+            let d = dot(r, *b);
+            r = [r[0] - d * b[0], r[1] - d * b[1], r[2] - d * b[2]];
+        }
+        r
+    };
+    let unit = |x: [f64; 3]| {
+        let len = dot(x, x).sqrt();
+        [x[0] / len, x[1] / len, x[2] / len]
+    };
+    // グラム・シュミット（長さが 1e-9 未満になったものは捨てる）
+    let mut w: Vec<[f64; 3]> = Vec::new();
+    for &x in ls {
+        let r = reject(x, &w);
+        if dot(r, r).sqrt() >= 1e-9 {
+            w.push(unit(r));
+        }
+    }
+    if w.len() >= 3 {
+        return None;
+    }
+    let g = reject(la, &w);
+    if dot(g, g).sqrt() < 0.05 {
+        return None;
+    }
+    let e3 = unit(g);
+    // e₃ に垂直な平面の基底: W の基底から始め、足りない分は座標軸の向きで補う
+    let mut plane = w.clone();
+    for cand in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+        if plane.len() == 2 {
+            break;
+        }
+        let mut basis = plane.clone();
+        basis.push(e3);
+        let r = reject(cand, &basis);
+        if dot(r, r).sqrt() >= 1e-6 {
+            plane.push(unit(r));
+        }
+    }
+    let (e1, mut e2) = (plane[0], plane[1]);
+    let cross = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+    if dot(cross, e3) < 0.0 {
+        e2 = [-e2[0], -e2[1], -e2[2]];
+    }
+    Some([e1, e2, e3])
 }
 
 /// 陽関数 `座標 = f` の f の側を h(f) にする（h は abs・Re・Im）
@@ -1092,7 +1253,18 @@ mod tests {
         let mut sp = Space::standard();
         sp.rotation[2] = std::f64::consts::FRAC_PI_3; // 組 (0,3) = xw は3番目
         assert!((view(&sp, &[2.0, 0.0, 0.0])[0] - 1.0).abs() < 1e-12);
-        // 陰関数 x = 1 は w 方向に伸びた形なので、xw で 60° 回して w = 0 で見ると x = 1/cos60° = 2
+        // x = 1 は w 方向に伸びた形なので、xw で 60° 回して w = 0 で見ると x = 1/cos60° = 2。
+        // 傾いた座標系の陽関数になる（高さの向き e₃ が x 軸）
+        if let Plot::Tilted { prog, frame, .. } = compile_with("x = 1", &ps, &sp).unwrap() {
+            let mut o = [C::new(0.0, 0.0)];
+            prog.eval_batch(&[&[0.0], &[0.0]], &mut o);
+            assert!((frame[2][0].abs() - 1.0).abs() < 1e-12);
+            assert!((o[0].re * frame[2][0] - 2.0).abs() < 1e-12);
+        } else {
+            panic!()
+        }
+        // 2D の切り口では、陰関数として計算し直す
+        sp.flat_slice = true;
         if let Plot::Implicit { prog, .. } = compile_with("x = 1", &ps, &sp).unwrap() {
             let mut o = [C::new(0.0, 0.0)];
             prog.eval_batch(&[&[2.0], &[0.0], &[0.0]], &mut o);
@@ -1185,8 +1357,10 @@ mod tests {
         // xz で回すだけなら、陽関数のまま（点を計算してから回す）
         sp.rotation[1] = 0.3;
         assert!(matches!(compile_with("z = x y", &ps, &sp).unwrap(), Plot::Explicit { rotated: true, .. }));
-        // xw（表示していない w の方向）が絡むと、陰関数として計算し直す
+        // xw（表示していない w の方向）が絡むと、傾いた座標系の陽関数になる（2D の切り口では陰関数）
         sp.rotation[2] = 0.3;
+        assert!(matches!(compile_with("z = x y", &ps, &sp).unwrap(), Plot::Tilted { .. }));
+        sp.flat_slice = true;
         assert!(matches!(compile_with("z = x y", &ps, &sp).unwrap(), Plot::Implicit { .. }));
         // 式が使っていない座標どうし（3次元のときの w と w₂）の回転は、影響しない
         let mut sp = Space::standard();
@@ -1200,12 +1374,23 @@ mod tests {
 
     #[test]
     fn rotated_complex_explicit() {
-        // xw で回すと陽関数は陰関数として計算し直す。複素数の色分けをしているなら f の代わりに |f| を使うので、
-        // F = z − |(x + iy)²| は実数になる（f のままだと複素数になり、曲面が描けない）
+        // xw で回すと、傾いた座標系の陽関数になる。複素数の色分けをしているなら、高さは |f| で、色は f
         let ps = Params::new();
         let mut sp = space4([0, 1, 2], 0.0);
         sp.rotation[2] = 0.3; // xw
         sp.complex_height = Some(crate::functions::Func::Abs);
+        let p = compile_with("z = (x + i y)^2", &ps, &sp).unwrap();
+        assert_eq!(p.kind_label(), "z = f(x, y)（回したもの）");
+        let Plot::Tilted { prog, color: Some(color), .. } = p else { panic!() };
+        let mut out = [C::new(0.0, 0.0); 3];
+        let (us, vs) = ([0.3, -0.7, 1.1], [0.5, 0.2, -0.4]);
+        prog.eval_batch(&[&us, &vs], &mut out);
+        assert!(out.iter().all(|z| z.im.abs() < 1e-12));
+        color.eval_batch(&[&us, &vs], &mut out);
+        assert!(out.iter().any(|z| z.im.abs() > 1e-3));
+        // 2D の切り口では陰関数として計算し直す。f の代わりに |f| を使うので、
+        // F = z − |(x + iy)²| は実数になる（f のままだと複素数になり、曲面が描けない）
+        sp.flat_slice = true;
         let p = compile_with("z = (x + i y)^2", &ps, &sp).unwrap();
         assert_eq!(p.kind_label(), "陰関数（z = f(x, y) を回したもの）");
         let Plot::Implicit { prog, .. } = p else { panic!() };

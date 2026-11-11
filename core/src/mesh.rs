@@ -3865,6 +3865,8 @@ pub struct NdShape {
     pub tris: Option<(usize, Vec<u32>)>,
     /// 段差のある陽関数を回したもの。射影したメッシュの [`Mesh::keep_full`] にする（まとめると段差が崩れる）
     pub keep_full: bool,
+    /// 表示範囲から遠い点も捨てない（陽関数から作った形。[`project`] を参照）
+    pub keep_far: bool,
 }
 
 /// 格子線を引かない成分の印（シェーダーはこれより小さい値の成分には線を引かない）
@@ -3923,7 +3925,7 @@ pub fn parametric_surface_nd_opt(
         grid.extend_from_slice(&grid1);
     }
     let Some(tol) = tol.filter(|t| *t > 0.0 && dims > 0) else {
-        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false };
+        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false };
     };
     // 曲面ごとに細かくする。足した点は、全部の曲面の一様な格子の点の後ろに並べる
     let base = sets.len() * m * m;
@@ -3970,11 +3972,11 @@ pub fn parametric_surface_nd_opt(
         tris.extend(r.tris.iter().flat_map(|t| t.map(map)));
     }
     if !refined_any {
-        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false };
+        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false };
     }
     points.extend_from_slice(&extra_points);
     grid.extend_from_slice(&extra_grid);
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)), keep_full: false }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)), keep_full: false, keep_far: false }
 }
 
 /// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
@@ -4023,7 +4025,7 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
         }
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new(), tris: None, keep_full: false }
+    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
 }
 
 /// 媒介変数が4つ以上の図形の、面の枚数と、1枚の格子のマス数。
@@ -4104,7 +4106,7 @@ pub fn parametric_sheets_nd(sets: &[Vec<Program>], r: &[(f64, f64)], div: usize,
             }
         }
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -4135,6 +4137,81 @@ pub fn explicit_nd(
     mesh_to_nd(&mesh, axes, base, Some(axis))
 }
 
+/// 傾いた座標系の陽関数 t = g(u, v)（[`crate::equation::Plot::Tilted`]）の曲面を、表示中の座標で作る。
+///
+/// 表示範囲の 8 つの角を (u, v, t) = (q·e₁, q·e₂, q·e₃) に移し、それを囲む直方体を「計算する範囲」にして、
+/// 回さない陽関数と同じ [`explicit_surface_scaled`] で作る（段差の切り分け・壁・急な所の細分・定義域の縁がそのまま効く）。
+/// 計算する範囲の u, v の幅の大きいほうが、表示範囲の一番長い辺の k 倍なら、分割数を k 倍にする（1 ≤ k ≤ 2）。
+/// 段差・細分の目安の高さは、表示範囲の一番短い辺の長さ。
+/// 頂点と法線は q = u e₁ + v e₂ + t e₃ で表示中の座標に移す。
+/// `color` があれば、頂点の (u, v) で計算して複素数の色分けにする（段差の縁の頂点は、同じ (u, v) の 2 つが同じ色になる）。
+/// 格子線用の座標は、`grid` があればその 2 つの 1 次式（元の座標の値）、無ければ (u, v)。3 つ目は表示中の縦の座標
+#[allow(clippy::too_many_arguments)]
+pub fn explicit_tilted(
+    prog: &Program,
+    color: Option<&Program>,
+    frame: [[f64; 3]; 3],
+    grid: Option<[[f64; 3]; 2]>,
+    dom: Domain,
+    n: usize,
+    walls: bool,
+    refine: bool,
+) -> Mesh {
+    let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for corner in 0..8 {
+        let q = [0, 1, 2].map(|a| if (corner >> a) & 1 == 0 { dom.lo[a] } else { dom.hi[a] });
+        for k in 0..3 {
+            let x = dot(q, frame[k]);
+            lo[k] = lo[k].min(x);
+            hi[k] = hi[k].max(x);
+        }
+    }
+    let ext = Domain { lo, hi };
+    let edges = [0, 1, 2].map(|a| dom.hi[a] - dom.lo[a]);
+    let longest = edges.iter().cloned().fold(0.0, f64::max);
+    let shortest = edges.iter().cloned().fold(f64::INFINITY, f64::min);
+    let k = ((hi[0] - lo[0]).max(hi[1] - lo[1]) / longest).clamp(1.0, 2.0);
+    let mut mesh = explicit_surface_scaled(
+        prog,
+        ext,
+        (n as f64 * k).round() as usize,
+        2,
+        ComplexMode::Off,
+        walls,
+        refine,
+        shortest,
+    );
+    let uvt: Vec<[f64; 3]> =
+        mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let to_q = |p: [f64; 3]| [0, 1, 2].map(|a| p[0] * frame[0][a] + p[1] * frame[1][a] + p[2] * frame[2][a]);
+    mesh.positions = uvt.iter().flat_map(|&p| to_q(p).map(|v| v as f32)).collect();
+    let normals: Vec<f32> = mesh
+        .normals
+        .chunks_exact(3)
+        .flat_map(|nv| to_q([nv[0] as f64, nv[1] as f64, nv[2] as f64]).map(|v| v as f32))
+        .collect();
+    mesh.normals = normals;
+    let lin = |c: [f64; 3], p: [f64; 3]| (c[0] + c[1] * p[0] + c[2] * p[1]) as f32;
+    mesh.grid_coords = uvt
+        .iter()
+        .zip(mesh.positions.chunks_exact(3))
+        .flat_map(|(&p, q)| match grid {
+            Some([g1, g2]) => [lin(g1, p), lin(g2, p), q[2]],
+            None => [p[0] as f32, p[1] as f32, q[2]],
+        })
+        .collect();
+    if let Some(cp) = color {
+        let us: Vec<f64> = uvt.iter().map(|p| p[0]).collect();
+        let vs: Vec<f64> = uvt.iter().map(|p| p[1]).collect();
+        let mut vals = vec![C::new(0.0, 0.0); uvt.len()];
+        cp.eval_batch(&[&us, &vs], &mut vals);
+        mesh.complex = vals.into_iter().flat_map(complex_attr).collect();
+    }
+    mesh
+}
+
 /// 表示中の座標で作ったメッシュを、n 次元の点（表示していない座標は `base` の値）の形にする。
 /// 曲面（`surface` が Some(高さの軸)）なら、三角形は [`NdShape::tris`] にそのまま入れ（一様な格子の点は無い）、
 /// 格子線用の座標には高さでない2つの座標の値を入れる。None なら曲線（NaN は線の切れ目）
@@ -4154,7 +4231,7 @@ fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize
         }
     }
     let Some(axis) = surface else {
-        return NdShape { dims: d, points, keep_full: mesh.keep_full, ..Default::default() };
+        return NdShape { dims: d, points, keep_full: mesh.keep_full, keep_far: true, ..Default::default() };
     };
     let (ua, va) = others(axis);
     let grid: Vec<f32> = mesh.positions.chunks_exact(3).flat_map(|q| [q[ua], q[va]]).collect();
@@ -4167,6 +4244,8 @@ fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize
         complex: mesh.complex.clone(),
         tris: Some((0, mesh.indices.clone())),
         keep_full: mesh.keep_full,
+        // 陽関数の点は、高さを「計算する範囲 ± 表示範囲の高さ」にそろえてあるので、遠くても f32 で無限大にならない
+        keep_far: true,
     }
 }
 
@@ -4224,7 +4303,7 @@ pub fn parametric_edges_nd(sets: &[Vec<Program>], r: &[(f64, f64)], n: usize, to
             }
         }
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
 }
 
 pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: f64) -> NdShape {
@@ -4237,7 +4316,7 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         let set = ProgramSet::new(progs);
         points.extend(curve_nd(&|ts: &[f64]| eval_nd(&set, &[ts], ts.len()), progs.len(), t, n, tol));
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
 }
 
 /// 1本の曲線の点（適応サンプリング）。`eval` は媒介変数の値の列から、d 次元の点を並べたものを計算する
@@ -4401,6 +4480,7 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
             complex: Vec::new(),
             tris: Some((base, Vec::new())),
             keep_full: shapes.iter().any(|s| s.keep_full),
+            keep_far: shapes.iter().any(|s| s.keep_far),
         };
         let (mut base_at, mut extra_at) = (0usize, base);
         let mut extra = (Vec::new(), Vec::new(), Vec::new());
@@ -4446,6 +4526,7 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
             complex: Vec::new(),
             tris: None,
             keep_full: shapes.iter().any(|s| s.keep_full),
+            keep_far: shapes.iter().any(|s| s.keep_far),
         };
     for s in shapes {
         if m.is_none() && !out.points.is_empty() {
@@ -5110,12 +5191,16 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     };
 
     // 表示範囲から大きく外れた点（無限大の近くなど）は省く。はみ出た部分は描画側で切り落とす。
+    // 陽関数から作った形（keep_far）は、有限かどうかだけを見る。遠い頂点を捨てると、その頂点を使う
+    // 三角形（見えている部分を含む）ごと消えて、極の近くの面が欠けるため。
+    // 4 次元の遠近法で視点の後ろに回った点（View::apply が NaN を返す）は、どちらでも捨てる
     let ok = |p: &[f64; 3]| {
         finite(p)
-            && (0..3).all(|a| {
-                let h = dom.hi[a] - dom.lo[a];
-                p[a] >= dom.lo[a] - h && p[a] <= dom.hi[a] + h
-            })
+            && (shape.keep_far
+                || (0..3).all(|a| {
+                    let h = dom.hi[a] - dom.lo[a];
+                    p[a] >= dom.lo[a] - h && p[a] <= dom.hi[a] + h
+                }))
     };
     let m = *m;
     let n = m - 1;
