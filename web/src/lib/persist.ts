@@ -37,6 +37,8 @@ export interface SavedState {
   domain: Domain
   resolution: number
   implicitResolution: number
+  /** 陰関数で、格子より小さい図形を念入りに探すか（古い保存データには無い。無ければ探さない） */
+  findSmall?: boolean
   /** 3次元の遠近感（0〜100） */
   perspective: number
   dark: boolean
