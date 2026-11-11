@@ -35,6 +35,8 @@ pub struct Mesh {
     /// 粗い版の三角形の頂点番号（頂点は同じものを使う）。視点を動かしている間は、こちらを描いて軽くする。
     /// 三角形が少ないメッシュでは空（そのまま描く）
     pub lod: Vec<u32>,
+    /// 粗い版（頂点をまとめる [`add_cluster_lod`]）を作らない（段差のある陽関数など、まとめると形が崩れるもの）
+    pub keep_full: bool,
     /// 作るのにかかった時間の内訳（`lib.rs` の入口で記録する。メッシュを作る関数自体は 0 のまま）
     pub stats: Stats,
 }
@@ -83,7 +85,7 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// 薄い板の表と裏がくっつくことは少ない
 pub fn add_cluster_lod(mesh: &mut Mesh) {
     let tris = mesh.indices.len() / 3;
-    if !mesh.lod.is_empty() || tris <= LOD_MIN_TRIANGLES {
+    if !mesh.lod.is_empty() || mesh.keep_full || tris <= LOD_MIN_TRIANGLES {
         return;
     }
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
@@ -229,15 +231,24 @@ struct Jump {
     /// 飛ぶ直前（始点の側）と直後（終点の側）の値
     before: C,
     after: C,
+    /// 辺の両端の高さの差（段差の大きさの目安）
+    first: f64,
 }
 
 /// 陽関数の曲面。値が飛ぶ所（段差）を見つけて、そこで三角形を切り分ける（段差の縁がギザギザにならない）。
 /// `walls` なら、段差の上下の縁を結ぶ縦の壁も描く。
 ///
+/// 形が急に変わる所（極の近く、定義域の縁、表示範囲の上下の端を横切る急な斜面）は、三角形を二分して細かくする
+/// （[`crate::adaptive`]。6 回まで。三角形は最初の数と同じだけ増やせる）。分けるのは、見えている高さにかかる三角形で、
+/// 斜辺の中点の値と、両端の値の平均とのずれが、表示範囲の高さの 0.4% を超えるもの、
+/// または頂点・中点で定義される所とされない所が混ざるもの。
+/// 段差のある辺を含む三角形は分けない（段差は下の切り分けで描く）。2 回続けて分けてもずれが半分にならない所も、
+/// 段差の疑いがあるので、それ以上分けない。
+///
 /// 段差の見つけ方: 両端の高さの差が大きい辺を二分法で 12 回狭めていき、差がほとんど縮まらなければ
 /// 「値が飛んでいる」とみなす（なめらかな関数なら、区間を半分にすると差もおよそ半分になる）。
 /// 三角形の3辺のうち2辺で値が飛んでいれば、飛ぶ所を結ぶ線で三角形を2つの部分に分け、それぞれの側の値で描く。
-/// 1辺・3辺のとき（段差の線が三角形の中で終わるなど）は、その三角形を描かない。
+/// 1辺のときは、飛ぶ所と向かいの頂点を結ぶ線で分ける。3辺のときは、その三角形を描かない。
 pub fn explicit_surface_full(
     prog: &Program,
     dom: Domain,
@@ -245,6 +256,19 @@ pub fn explicit_surface_full(
     axis: usize,
     mode: ComplexMode,
     walls: bool,
+) -> Mesh {
+    explicit_surface_opt(prog, dom, n, axis, mode, walls, true)
+}
+
+/// [`explicit_surface_full`] で、`refine` が偽なら細かくしない（一様な格子のまま。再生・ドラッグ中）
+pub fn explicit_surface_opt(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    axis: usize,
+    mode: ComplexMode,
+    walls: bool,
+    refine: bool,
 ) -> Mesh {
     let n = n.max(2);
     let m = n + 1; // 1辺の頂点数
@@ -263,7 +287,6 @@ pub fn explicit_surface_full(
     // まとめて計算
     let mut vals = vec![C::new(0.0, 0.0); m * m];
     prog.eval_batch(&[&us, &vs], &mut vals);
-    let hs: Vec<f64> = vals.iter().map(|&z| height(z, mode)).collect();
 
     // 表示範囲の上下に、範囲の高さ1つ分の余裕を持たせる。
     // はみ出た部分は描画側（Three.js のクリッピング）で切り落とす。
@@ -273,17 +296,141 @@ pub fn explicit_surface_full(
     let (wlo, whi) = (dom.lo[axis] - h, dom.hi[axis] + h);
     let usable = |w: f64| w.is_finite();
     let clamped = |z: C| height(z, mode).clamp(wlo, whi);
-    // 段差を探すのは、範囲にそろえた高さで（両側とも +∞ に向かう極は段差ではない。+∞ から −∞ に飛ぶ極は段差）
-    let hs_clamped: Vec<f64> = hs.iter().map(|&w| w.clamp(wlo, whi)).collect();
+    let threshold = h * 0.03;
 
-    // 格子の辺: 0 = 右 (i, j)–(i+1, j)、1 = 上 (i, j)–(i, j+1)、2 = 斜め (i, j)–(i+1, j+1)
-    let edge_end = |k: usize, e: usize| match e {
-        0 => k + 1,
-        1 => k + m,
-        _ => k + m + 1,
+    // 最初の格子の辺: 右 (i, j)–(i+1, j)、上 (i, j)–(i, j+1)、斜め (i, j)–(i+1, j+1)。番号の小さいほうが始点
+    let mut grid_edges = Vec::with_capacity(3 * m * m);
+    for j in 0..m {
+        for i in 0..m {
+            let k = j * m + i;
+            if i + 1 < m {
+                grid_edges.push((k, k + 1));
+            }
+            if j + 1 < m {
+                grid_edges.push((k, k + m));
+            }
+            if i + 1 < m && j + 1 < m {
+                grid_edges.push((k, k + m + 1));
+            }
+        }
+    }
+    // 段差は、切り分けるもの（差が threshold より大きい）より小さいものまで探す。小さい段差（階段の 1 段が
+    // 表示範囲の高さの 3% より低いなど）は切り分けずに描くが、そこを細かくしても急な斜面が増えるだけなので、細かくしない
+    let mut steps: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+    let base_jumps: crate::adaptive::HashMap<(u32, u32), Jump> = {
+        let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+        let mut out: crate::adaptive::HashMap<(u32, u32), Jump> = Default::default();
+        let small = if refine { 0.01 * h } else { threshold };
+        for (e, jp) in find_jumps(
+            prog,
+            &us,
+            &vs,
+            &vals,
+            &hs,
+            &grid_edges,
+            &clamped,
+            small,
+            &usable,
+        ) {
+            let key = (grid_edges[e].0 as u32, grid_edges[e].1 as u32);
+            steps.insert(key);
+            if jp.first > threshold {
+                out.insert(key, jp);
+            }
+        }
+        out
     };
-    let edge_id = |k: usize, e: usize| 3 * k + e;
-    let jumps = find_jumps(prog, &us, &vs, &vals, &hs_clamped, m, &clamped, h * 0.03, &usable);
+
+    // 形が急に変わる所を細かくする
+    let r = {
+        let mut eval = |a: &[f64], b: &[f64]| {
+            let mut out = vec![C::new(0.0, 0.0); a.len()];
+            prog.eval_batch(&[a, b], &mut out);
+            out
+        };
+        let (lo, hi) = (dom.lo[axis], dom.hi[axis]);
+        let tol = 0.004 * h;
+        let ek = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+        let mut decide = |c: &crate::adaptive::Candidate<C>| -> Option<f64> {
+            let [a, b, w] = c.ids;
+            if [ek(a, b), ek(b, w), ek(w, a)]
+                .iter()
+                .any(|e| steps.contains(e))
+            {
+                return None; // 段差のある三角形は、段差の切り分けで描く
+            }
+            let hv = [
+                clamped(*c.vals[0]),
+                clamped(*c.vals[1]),
+                clamped(*c.vals[2]),
+                clamped(*c.mid),
+            ];
+            let defined = hv.iter().filter(|v| v.is_finite()).count();
+            // 見えない所（全部が表示範囲の上・下にある）は分けない
+            let above = hv.iter().all(|&v| !v.is_finite() || v >= hi);
+            let below = hv.iter().all(|&v| !v.is_finite() || v <= lo);
+            if defined == 0 || above || below {
+                return None;
+            }
+            if defined < 4 {
+                return Some(h); // 定義域の縁
+            }
+            let e = (hv[3] - 0.5 * (hv[0] + hv[1])).abs();
+            if e <= tol {
+                return None;
+            }
+            // 2 回分けてもずれが半分にならない: 段差の疑い（なめらかなら 2 回で 1/4 になる）
+            let grand = c.history[1];
+            if grand.is_finite() && e > 0.5 * grand {
+                return None;
+            }
+            Some(e)
+        };
+        let base_tris = 2 * n * n;
+        let limits = crate::adaptive::Limits {
+            passes: if refine { 6 } else { 0 },
+            max_new_triangles: base_tris.max(30_000),
+        };
+        let (u0, u1) = (dom.lo[ua], dom.hi[ua]);
+        let (v0, v1) = (dom.lo[va], dom.hi[va]);
+        crate::adaptive::refine(n, (u0, u1), (v0, v1), vals, &mut eval, &mut decide, limits)
+    };
+    let count = r.uv.len();
+    let us: Vec<f64> = r.uv.iter().map(|p| p[0]).collect();
+    let vs: Vec<f64> = r.uv.iter().map(|p| p[1]).collect();
+    let vals = r.vals;
+    let hs: Vec<f64> = vals.iter().map(|&z| height(z, mode)).collect();
+
+    // 細かくしてできた辺の段差を探す（最初の格子のままの辺は、もう調べてある）
+    let mut jumps = base_jumps;
+    {
+        let mut new_edges: Vec<(usize, usize)> = Vec::new();
+        let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+        for t in &r.tris {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let e = if a < b { (a, b) } else { (b, a) };
+                if (e.1 as usize) >= m * m && seen.insert(e) {
+                    new_edges.push((e.0 as usize, e.1 as usize));
+                }
+            }
+        }
+        if !new_edges.is_empty() {
+            let hs_clamped: Vec<f64> = hs.iter().map(|&w| w.clamp(wlo, whi)).collect();
+            for (e, jp) in find_jumps(
+                prog,
+                &us,
+                &vs,
+                &vals,
+                &hs_clamped,
+                &new_edges,
+                &clamped,
+                threshold,
+                &usable,
+            ) {
+                jumps.insert((new_edges[e].0 as u32, new_edges[e].1 as u32), jp);
+            }
+        }
+    }
 
     let mut mesh = Mesh::default();
     let complex = mode != ComplexMode::Off;
@@ -298,22 +445,33 @@ pub fn explicit_surface_full(
         mesh.push_vertex(p)
     };
 
-    // 使える頂点だけに番号を振る
-    let mut index_of = vec![NONE; m * m];
-    for k in 0..m * m {
-        if usable(hs[k]) {
+    // 三角形に使われる、使える頂点だけに番号を振る
+    let mut index_of = vec![NONE; count];
+    let mut used = vec![false; count];
+    for t in &r.tris {
+        for &k in t {
+            used[k as usize] = true;
+        }
+    }
+    for k in 0..count {
+        if used[k] && usable(hs[k]) {
             index_of[k] = push(&mut mesh, us[k], vs[k], vals[k]);
         }
     }
     // 値が飛ぶ辺の上の2つの頂点（始点の側・終点の側）。隣り合う三角形で共有する
-    let mut jump_vertex: std::collections::HashMap<usize, (u32, u32)> = std::collections::HashMap::new();
-    for (&id, jp) in &jumps {
-        let (k, e) = (id / 3, id % 3);
-        let k2 = edge_end(k, e);
-        let (u, v) = (us[k] + (us[k2] - us[k]) * jp.t, vs[k] + (vs[k2] - vs[k]) * jp.t);
+    let mut jump_vertex: crate::adaptive::HashMap<(u32, u32), (u32, u32)> = Default::default();
+    let mut keys: Vec<(u32, u32)> = jumps.keys().copied().collect();
+    keys.sort_unstable(); // 頂点の並びを毎回同じにする
+    for e in keys {
+        let jp = jumps[&e];
+        let (k0, k1) = (e.0 as usize, e.1 as usize);
+        let (u, v) = (
+            us[k0] + (us[k1] - us[k0]) * jp.t,
+            vs[k0] + (vs[k1] - vs[k0]) * jp.t,
+        );
         let a = push(&mut mesh, u, v, jp.before);
         let b = push(&mut mesh, u, v, jp.after);
-        jump_vertex.insert(id, (a, b));
+        jump_vertex.insert(e, (a, b));
     }
 
     // 法線が axis の正の向きになるように三角形の向きを決める
@@ -321,84 +479,101 @@ pub fn explicit_surface_full(
     let flip = (ua + 1) % 3 != va;
     let mut wall_quads: Vec<[(f64, f64, C, C); 2]> = Vec::new();
 
-    // 各マスを2つの三角形に分ける。3頂点とも使えるものだけ残す。
-    for j in 0..n {
-        for i in 0..n {
-            let k = j * m + i;
-            let (a, b, c, d) = (k, k + 1, k + m, k + m + 1);
-            // 三角形の頂点（格子点の番号）と、各辺 (p→q) の辺の番号・向き（格子の辺の向きと同じなら true）
-            let tris = [
-                ([a, b, d], [(edge_id(a, 0), true), (edge_id(b, 1), true), (edge_id(a, 2), false)]),
-                ([a, d, c], [(edge_id(a, 2), true), (edge_id(c, 0), false), (edge_id(a, 1), false)]),
-            ];
-            for (vtx, edges) in tris {
-                if vtx.iter().any(|&p| index_of[p] == NONE) {
-                    continue;
-                }
-                let jumped: Vec<usize> = (0..3).filter(|&e| jumps.contains_key(&edges[e].0)).collect();
-                let emit = |mesh: &mut Mesh, t: [u32; 3]| {
-                    mesh.indices.extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
+    // 3頂点とも使える三角形だけ残す
+    for t in &r.tris {
+        let vtx = [t[0] as usize, t[1] as usize, t[2] as usize];
+        if vtx.iter().any(|&p| index_of[p] == NONE) {
+            continue;
+        }
+        // 各辺 (p→q) の辺の名前（番号の小さい頂点が先）と、向き（三角形の辺の向きと同じなら true）
+        let edge = |p: u32, q: u32| {
+            if p < q {
+                ((p, q), true)
+            } else {
+                ((q, p), false)
+            }
+        };
+        let edges = [edge(t[0], t[1]), edge(t[1], t[2]), edge(t[2], t[0])];
+        let jumped: Vec<usize> = (0..3)
+            .filter(|&e| jumps.contains_key(&edges[e].0))
+            .collect();
+        let emit = |mesh: &mut Mesh, t: [u32; 3]| {
+            mesh.indices
+                .extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
+        };
+        match jumped.len() {
+            0 => emit(&mut mesh, vtx.map(|p| index_of[p])),
+            2 => {
+                // 2つの辺に共通の頂点が、段差の片側に1つだけある頂点。
+                // 辺 e は頂点 e → e+1 なので、飛ばない辺 ne の反対の頂点は ne + 2
+                let ne = (0..3).find(|e| !jumped.contains(e)).unwrap_or(0);
+                let lone = (ne + 2) % 3;
+                // lone 番目の頂点の前後の辺: 辺 (lone−1) は lone に入る辺、辺 lone は lone から出る辺
+                let e_in = (lone + 2) % 3;
+                let e_out = lone;
+                // 辺の上の頂点のうち、指定した側（lone の側か、反対側か）のもの
+                let side = |e: usize, lone_side: bool| -> u32 {
+                    let (id, forward) = edges[e];
+                    let (start, end) = jump_vertex[&id];
+                    // 三角形の辺の向きで、lone は辺 e_out の始点・辺 e_in の終点
+                    let lone_is_start = (e == e_out) == forward;
+                    if lone_is_start == lone_side {
+                        start
+                    } else {
+                        end
+                    }
                 };
-                match jumped.len() {
-                    0 => emit(&mut mesh, vtx.map(|p| index_of[p])),
-                    2 => {
-                        // 2つの辺に共通の頂点が、段差の片側に1つだけある頂点。
-                        // 辺 e は頂点 e → e+1 なので、飛ばない辺 ne の反対の頂点は ne + 2
-                        let ne = (0..3).find(|e| !jumped.contains(e)).unwrap_or(0);
-                        let lone = (ne + 2) % 3;
-                        // lone 番目の頂点の前後の辺: 辺 (lone−1) は lone に入る辺、辺 lone は lone から出る辺
-                        let e_in = (lone + 2) % 3;
-                        let e_out = lone;
-                        // 辺の上の頂点のうち、指定した側（lone の側か、反対側か）のもの
-                        let side = |e: usize, lone_side: bool| -> u32 {
-                            let (id, forward) = edges[e];
-                            let (start, end) = jump_vertex[&id];
-                            // 三角形の辺の向きで、lone は辺 e_out の始点・辺 e_in の終点
-                            let lone_is_start = (e == e_out) == forward;
-                            if lone_is_start == lone_side { start } else { end }
-                        };
-                        let p = vtx[lone];
-                        let q = vtx[(lone + 1) % 3];
-                        let r = vtx[(lone + 2) % 3];
-                        // lone の側: 三角形 (lone, 辺 e_out の点, 辺 e_in の点)
-                        emit(&mut mesh, [index_of[p], side(e_out, true), side(e_in, true)]);
-                        // 反対側: 四角形 (辺 e_out の点, q, r, 辺 e_in の点)
-                        let (x, y) = (side(e_out, false), side(e_in, false));
-                        emit(&mut mesh, [x, index_of[q], index_of[r]]);
-                        emit(&mut mesh, [x, index_of[r], y]);
-                        if walls {
-                            let info = |e: usize| {
-                                let (id, forward) = edges[e];
-                                let jp = jumps[&id];
-                                let (k0, k1) = (id / 3, edge_end(id / 3, id % 3));
-                                let (u, v) = (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t);
-                                let lone_is_start = (e == e_out) == forward;
-                                let (near, far) =
-                                    if lone_is_start { (jp.before, jp.after) } else { (jp.after, jp.before) };
-                                (u, v, near, far)
-                            };
-                            wall_quads.push([info(e_out), info(e_in)]);
-                        }
-                    }
-                    1 => {
-                        // 段差の線が三角形の中で終わる（極のそばの急な所など）: 飛ぶ辺の上の点と向かいの頂点を結ぶ線で
-                        // 2つに分け、それぞれの側の値で描く（段差は向かいの頂点に向かって細くなる）。
-                        // 描かないと、そこだけ穴が空く
-                        let e = jumped[0];
+                let p = vtx[lone];
+                let q = vtx[(lone + 1) % 3];
+                let rr = vtx[(lone + 2) % 3];
+                // lone の側: 三角形 (lone, 辺 e_out の点, 辺 e_in の点)
+                emit(
+                    &mut mesh,
+                    [index_of[p], side(e_out, true), side(e_in, true)],
+                );
+                // 反対側: 四角形 (辺 e_out の点, q, r, 辺 e_in の点)
+                let (x, y) = (side(e_out, false), side(e_in, false));
+                emit(&mut mesh, [x, index_of[q], index_of[rr]]);
+                emit(&mut mesh, [x, index_of[rr], y]);
+                if walls {
+                    let info = |e: usize| {
                         let (id, forward) = edges[e];
-                        let (start, end) = jump_vertex[&id];
-                        // 三角形の辺 e は 頂点 e → e+1。格子の辺と同じ向きなら、頂点 e の側が始点の側
-                        let (near_p, near_q) = if forward { (start, end) } else { (end, start) };
-                        let (p, q, w) = (vtx[e], vtx[(e + 1) % 3], vtx[(e + 2) % 3]);
-                        emit(&mut mesh, [index_of[p], near_p, index_of[w]]);
-                        emit(&mut mesh, [near_q, index_of[q], index_of[w]]);
-                    }
-                    _ => {} // 3辺とも飛ぶ: 描かない
+                        let jp = jumps[&id];
+                        let (k0, k1) = (id.0 as usize, id.1 as usize);
+                        let (u, v) = (
+                            us[k0] + (us[k1] - us[k0]) * jp.t,
+                            vs[k0] + (vs[k1] - vs[k0]) * jp.t,
+                        );
+                        let lone_is_start = (e == e_out) == forward;
+                        let (near, far) = if lone_is_start {
+                            (jp.before, jp.after)
+                        } else {
+                            (jp.after, jp.before)
+                        };
+                        (u, v, near, far)
+                    };
+                    wall_quads.push([info(e_out), info(e_in)]);
                 }
             }
+            1 => {
+                // 段差の線が三角形の中で終わる（極のそばの急な所など）: 飛ぶ辺の上の点と向かいの頂点を結ぶ線で
+                // 2つに分け、それぞれの側の値で描く（段差は向かいの頂点に向かって細くなる）。
+                // 描かないと、そこだけ穴が空く
+                let e = jumped[0];
+                let (id, forward) = edges[e];
+                let (start, end) = jump_vertex[&id];
+                // 三角形の辺 e は 頂点 e → e+1。辺の名前と同じ向きなら、頂点 e の側が始点の側
+                let (near_p, near_q) = if forward { (start, end) } else { (end, start) };
+                let (p, q, w) = (vtx[e], vtx[(e + 1) % 3], vtx[(e + 2) % 3]);
+                emit(&mut mesh, [index_of[p], near_p, index_of[w]]);
+                emit(&mut mesh, [near_q, index_of[q], index_of[w]]);
+            }
+            _ => {} // 3辺とも飛ぶ: 描かない
         }
     }
     compute_normals(&mut mesh);
+    // 段差のある曲面は、頂点をまとめた粗い版にすると段差と壁が崩れるので、粗い版を作らない
+    mesh.keep_full = !jumps.is_empty();
 
     // 段差の壁: 段差の線に沿って、lone の側の縁と反対側の縁を結ぶ縦の四角形（頂点は共有しない）
     for [(u0, v0, n0, f0), (u1, v1, n1, f1)] in wall_quads {
@@ -406,7 +581,8 @@ pub fn explicit_surface_full(
         for (u, v, z) in [(u0, v0, n0), (u1, v1, n1), (u1, v1, f1), (u0, v0, f0)] {
             push(&mut mesh, u, v, z);
         }
-        mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         // 法線: 段差の線の向き × 縦の向き（どちら向きでも両面を描くので、明るさが合えばよい）
         let mut dir = [0.0; 3];
         dir[ua] = u1 - u0;
@@ -418,7 +594,9 @@ pub fn explicit_surface_full(
             dir[2] * up[0] - dir[0] * up[2],
             dir[0] * up[1] - dir[1] * up[0],
         ];
-        let len = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]).sqrt().max(1e-300);
+        let len = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2])
+            .sqrt()
+            .max(1e-300);
         for _ in 0..4 {
             mesh.normals.extend(nv.iter().map(|c| (c / len) as f32));
         }
@@ -426,8 +604,8 @@ pub fn explicit_surface_full(
     mesh
 }
 
-/// 格子の辺のうち、値が飛ぶものを探す（[`explicit_surface_full`] を参照）。
-/// 戻り値は 辺の番号（3 × 始点 + 向き）→ 飛ぶ所
+/// 辺 `edges`（頂点の番号の組。始点 → 終点）のうち、値が飛ぶものを探す（[`explicit_surface_full`] を参照）。
+/// 戻り値は 辺の番号（`edges` の中の位置）→ 飛ぶ所（位置 t は始点から終点へ）
 #[allow(clippy::too_many_arguments)]
 fn find_jumps(
     prog: &Program,
@@ -435,12 +613,14 @@ fn find_jumps(
     vs: &[f64],
     vals: &[C],
     hs: &[f64],
-    m: usize,
+    edges: &[(usize, usize)],
     height: &dyn Fn(C) -> f64,
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
 ) -> std::collections::HashMap<usize, Jump> {
-    find_jumps_with(prog, us, vs, vals, hs, m, height, threshold, usable, true)
+    find_jumps_with(
+        prog, us, vs, vals, hs, edges, height, threshold, usable, true,
+    )
 }
 
 /// [`find_jumps`] の本体。`early_exit` が偽なら、途中で候補を外さない（テストで結果を比べるため）
@@ -451,7 +631,7 @@ fn find_jumps_with(
     vs: &[f64],
     vals: &[C],
     hs: &[f64],
-    m: usize,
+    edges: &[(usize, usize)],
     height: &dyn Fn(C) -> f64,
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
@@ -473,27 +653,22 @@ fn find_jumps_with(
         first: f64,
     }
     let mut cands = Vec::new();
-    for j in 0..m {
-        for i in 0..m {
-            let k = j * m + i;
-            for e in 0..3 {
-                let (ok_i, ok_j) = (if e == 1 { true } else { i + 1 < m }, if e == 0 { true } else { j + 1 < m });
-                if !ok_i || !ok_j {
-                    continue;
-                }
-                let k1 = match e {
-                    0 => k + 1,
-                    1 => k + m,
-                    _ => k + m + 1,
-                };
-                if !usable(hs[k]) || !usable(hs[k1]) {
-                    continue;
-                }
-                let d = (hs[k1] - hs[k]).abs();
-                if d > threshold {
-                    cands.push(Cand { id: 3 * k + e, k0: k, k1, ta: 0.0, tb: 1.0, fa: vals[k], fb: vals[k1], first: d });
-                }
-            }
+    for (id, &(k, k1)) in edges.iter().enumerate() {
+        if !usable(hs[k]) || !usable(hs[k1]) {
+            continue;
+        }
+        let d = (hs[k1] - hs[k]).abs();
+        if d > threshold {
+            cands.push(Cand {
+                id,
+                k0: k,
+                k1,
+                ta: 0.0,
+                tb: 1.0,
+                fa: vals[k],
+                fb: vals[k1],
+                first: d,
+            });
         }
     }
     let mut mu = vec![0.0; cands.len()];
@@ -535,7 +710,7 @@ fn find_jumps_with(
         // 区間を 1/4096 にしても差が半分以上残っていれば、値が飛んでいる
         // （どちらかの側が定義されない所は段差とはみなさない）
         if d.is_finite() && d > 0.5 * c.first {
-            jumps.insert(c.id, Jump { t: 0.5 * (c.ta + c.tb), before: c.fa, after: c.fb });
+            jumps.insert(c.id, Jump { t: 0.5 * (c.ta + c.tb), before: c.fa, after: c.fb, first: c.first });
         }
     }
     jumps
@@ -2338,6 +2513,7 @@ pub fn merge(meshes: Vec<Mesh>, curve: bool) -> Mesh {
     let grid = meshes.iter().any(|m| !m.grid_coords.is_empty());
     let complex = meshes.iter().any(|m| !m.complex.is_empty());
     let lod = meshes.iter().any(|m| !m.lod.is_empty());
+    out.keep_full = meshes.iter().any(|m| m.keep_full);
     for m in meshes {
         if curve && !out.positions.is_empty() {
             out.positions.extend_from_slice(&[f32::NAN; 3]);
@@ -2850,7 +3026,8 @@ mod tests {
         // f = x + iy: 高さ |f| は円錐、色は偏角。y < 0 でも描かれる（Off なら実数の y = 0 の所だけ）
         let p = prog("x + i y", &["x", "y"]);
         let m = explicit_surface_with(&p, dom(), 10, 2, ComplexMode::Abs);
-        assert_eq!(m.positions.len(), 121 * 3);
+        // 円錐の先（原点）の周りは、形が急に変わるので細かくなる
+        assert!(m.positions.len() >= 121 * 3);
         assert_eq!(m.complex.len(), m.positions.len());
         for (q, c) in m.positions.chunks_exact(3).zip(m.complex.chunks_exact(3)) {
             let r = (q[0] * q[0] + q[1] * q[1]).sqrt();
@@ -2887,7 +3064,18 @@ mod tests {
         let clamped = |z: C| height(z, ComplexMode::Off).clamp(wlo, whi);
         let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
         let usable = |w: f64| w.is_finite();
-        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, m, &clamped, h * 0.03, &usable, early_exit);
+        let mut edges = Vec::new();
+        for j in 0..m {
+            for i in 0..m {
+                let k = j * m + i;
+                for (ok, k1) in [(i + 1 < m, k + 1), (j + 1 < m, k + m), (i + 1 < m && j + 1 < m, k + m + 1)] {
+                    if ok {
+                        edges.push((k, k1));
+                    }
+                }
+            }
+        }
+        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, &edges, &clamped, h * 0.03, &usable, early_exit);
         let mut out: Vec<(usize, f64)> = jumps.iter().map(|(&id, j)| (id, j.t)).collect();
         out.sort_by_key(|&(id, _)| id);
         out
@@ -3001,13 +3189,143 @@ mod tests {
         }
     }
 
+    /// 陽関数の三角形を (x, y) の平面に落としたもの
+    fn flat_tris(m: &Mesh) -> (Vec<[f64; 2]>, Vec<[u32; 3]>) {
+        let uv = m
+            .positions
+            .chunks_exact(3)
+            .map(|q| [q[0] as f64, q[1] as f64])
+            .collect();
+        (
+            uv,
+            m.indices
+                .chunks_exact(3)
+                .map(|t| [t[0], t[1], t[2]])
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn adaptive_mesh_is_conforming() {
+        // 細かくした所でも、辺の途中に別の頂点が乗らない（面に隙間が無い）
+        let d = Domain {
+            lo: [-5.0, -5.0, -5.0],
+            hi: [5.0, 5.0, 5.0],
+        };
+        for (src, mode) in [
+            ("gamma(x + i y)", ComplexMode::Abs),
+            ("1/(x^2+y^2)", ComplexMode::Off),
+            ("sqrt(4-x^2-y^2)", ComplexMode::Off),
+            ("tan(x) y", ComplexMode::Off),
+        ] {
+            let p = prog(src, &["x", "y"]);
+            let m = explicit_surface_with(&p, d, 60, 2, mode);
+            let (uv, tris) = flat_tris(&m);
+            crate::adaptive::tests::assert_conforming(&uv, &tris);
+            let uniform = explicit_surface_opt(&p, d, 60, 2, mode, false, false);
+            assert!(
+                m.indices.len() > uniform.indices.len(),
+                "{src}: 細かくなっていない"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_pole_reaches_top() {
+        // |Γ(x + iy)| の極は格子より細い。細かくすると、x = 0, −1, −2, −3 の極で表示範囲の上（z = 5）まで届き、
+        // x = −4 の極も見える（一様な格子では x = −3 は途中で切れ、x = −4 は高さ 1 にも届かなかった）
+        let d = Domain {
+            lo: [-5.0, -5.0, -5.0],
+            hi: [5.0, 5.0, 5.0],
+        };
+        let m = explicit_surface_with(
+            &prog("gamma(x + i y)", &["x", "y"]),
+            d,
+            150,
+            2,
+            ComplexMode::Abs,
+        );
+        let near = |x0: f64, z: f64| {
+            m.positions.chunks_exact(3).any(|q| {
+                ((q[0] as f64 - x0).powi(2) + (q[1] as f64).powi(2)).sqrt() < 0.4
+                    && q[2] as f64 >= z
+            })
+        };
+        for x0 in [0.0, -1.0, -2.0, -3.0] {
+            assert!(near(x0, 5.0), "x = {x0} の極が上まで届かない");
+        }
+        assert!(near(-4.0, 1.0), "x = −4 の極が見えない");
+        // 三角形の数は、一様な格子の 2 倍 + 3 万個以下
+        assert!(m.indices.len() / 3 <= 2 * 2 * 150 * 150 + 30_000);
+    }
+
+    #[test]
+    fn domain_edge_is_smooth() {
+        // sqrt(4 − x² − y²) の縁（三角形が 1 つだけの辺）は、円 r = 2 のすぐ近くまで来る（格子の間隔は 0.067）
+        let d = Domain {
+            lo: [-5.0, -5.0, -5.0],
+            hi: [5.0, 5.0, 5.0],
+        };
+        let m = explicit_surface(&prog("sqrt(4-x^2-y^2)", &["x", "y"]), d, 150, 2);
+        let mut count: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::new();
+        for t in m.indices.chunks_exact(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let mut worst = 0.0f64;
+        for (&(a, b), &c) in &count {
+            if c == 1 {
+                for k in [a, b] {
+                    let q = &m.positions[3 * k as usize..3 * k as usize + 3];
+                    let r = ((q[0] * q[0] + q[1] * q[1]) as f64).sqrt();
+                    worst = worst.max(2.0 - r);
+                }
+            }
+        }
+        assert!(worst < 0.02, "縁が円から {worst} 離れている");
+    }
+
+    #[test]
+    fn smooth_surface_is_not_refined() {
+        // なめらかな曲面は、一様な格子のまま（150 × 150 × 2 = 45,000 個の三角形）
+        let d = Domain {
+            lo: [-5.0, -5.0, -5.0],
+            hi: [5.0, 5.0, 5.0],
+        };
+        for src in ["sin(x) cos(y)", "x^2 - y^2"] {
+            let m = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2);
+            assert_eq!(m.indices.len() / 3, 45_000, "{src}");
+        }
+    }
+
     #[test]
     fn undefined_region_is_removed() {
         // x < 0 では sqrt(x) が実数にならないので、そこは三角形が無くなる
         let full = explicit_surface(&prog("0", &["x", "y"]), dom(), 10, 2);
         let half = explicit_surface(&prog("sqrt(x)", &["x", "y"]), dom(), 10, 2);
-        assert!(half.indices.len() < full.indices.len());
         assert!(!half.indices.is_empty());
+        // 平面に落とした面積: 全体は 2 × 2 = 4、x ≥ 0 の所だけなら 2（縁は細かくするので、ほぼ 2）
+        let (a_full, a_half) = (flat_area(&full), flat_area(&half));
+        assert!((a_full - 4.0).abs() < 1e-9);
+        assert!((a_half - 2.0).abs() < 0.03, "{a_half}");
+    }
+
+    /// 三角形を xy 平面に落とした面積の合計
+    fn flat_area(m: &Mesh) -> f64 {
+        let mut area = 0.0;
+        for t in m.indices.chunks_exact(3) {
+            let v = |k: u32| {
+                [
+                    m.positions[k as usize * 3] as f64,
+                    m.positions[k as usize * 3 + 1] as f64,
+                ]
+            };
+            let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+            area += ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.0;
+        }
+        area
     }
 
     #[test]

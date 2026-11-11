@@ -16,8 +16,11 @@ export interface GridUniforms {
   uGridColor: { value: THREE.Color }
   /** 線の濃さ（0〜1） */
   uGridStrength: { value: number }
-  /** 線の太さ（画素） */
+  /** 線の太さ（ふつうのときの画素密度での画素） */
   uGridWidth: { value: number }
+  /** 今の画素密度 ÷ ふつうのときの画素密度。動かしている間に画素密度を下げても、線の太さが変わって見えないようにする
+   *  （全部の曲面で同じものを共有する） */
+  uPixelScale: { value: number }
   /** 面の不透明度（0 なら格子線だけが見える） */
   uFillOpacity: { value: number }
   /** 1 なら複素数の偏角で色を付ける（頂点の complexValue を使う） */
@@ -29,8 +32,9 @@ export interface GridUniforms {
   uNoBackShade: { value: number }
 }
 
-export function createGridUniforms(): GridUniforms {
+export function createGridUniforms(pixelScale: { value: number } = { value: 1 }): GridUniforms {
   return {
+    uPixelScale: pixelScale,
     uGridSpacing: { value: new THREE.Vector3() },
     uGridColor: { value: new THREE.Color() },
     uGridStrength: { value: 0.75 },
@@ -54,6 +58,7 @@ uniform vec3 uGridSpacing;
 uniform vec3 uGridColor;
 uniform float uGridStrength;
 uniform float uGridWidth;
+uniform float uPixelScale;
 uniform float uFillOpacity;
 
 // 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（太さ uGridWidth 画素）
@@ -64,11 +69,13 @@ float gridLine(float coord, float spacing) {
   // 座標が変わらない面（例: 切り口のふた y = 0 の上の y）には線を引かない（0 / 0 で面全体が線になるのを防ぐ）
   if (w <= 0.0) return 0.0;
   float d = abs(fract(c - 0.5) - 0.5) / w;  // 一番近い線までの距離（画素）
-  float hw = 0.5 * uGridWidth;               // 太さの半分
-  float line = (1.0 - smoothstep(hw - 0.5, hw + 0.5, d)) * min(uGridWidth, 1.0);
+  // 今の画素密度での太さ（画素密度を下げている間は細くして、画面の上で同じ太さに見せる。1 画素より細い分は薄くする）
+  float width = uGridWidth * uPixelScale;
+  float hw = 0.5 * width;                    // 太さの半分
+  float line = (1.0 - smoothstep(hw - 0.5, hw + 0.5, d)) * min(width, 1.0);
   // 線が細かすぎて1画素に何本も入るときは、1本ずつ描くとちらつく（モアレ）ので、
   // 「線が画素を覆う割合」（= 太さ × 1画素あたりの本数）の濃さで一様に塗る
-  float coverage = min(uGridWidth * w, 1.0);
+  float coverage = min(width * w, 1.0);
   return mix(line, coverage, smoothstep(0.2, 0.5, w));
 }
 `

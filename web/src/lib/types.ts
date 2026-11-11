@@ -270,7 +270,12 @@ export interface PlotRequest {
   walls: boolean
   /** 媒介変数が4つ以上の図形の、面を描く所の分割数（1 なら範囲の両端だけ） */
   layers: number
+  /** そのほかの設定（ビットごと）。ビット 0（PLOT_NO_REFINE）: 形が急に変わる所を細かくしない（再生・ドラッグ中） */
+  flags: number
 }
+
+/** PlotRequest.flags のビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。止まったら細かく計算し直す） */
+export const PLOT_NO_REFINE = 1
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
 export interface CapRequest {

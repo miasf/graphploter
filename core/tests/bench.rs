@@ -64,6 +64,7 @@ fn run(src: &str, s: Setup) -> MeshResult {
         false,
         1,
         false,
+        0,
     )
     .unwrap_or_else(|_| panic!("{src} が計算できない"))
 }

@@ -29,7 +29,7 @@
     SliderStyle,
     Space,
   } from './lib/types'
-  import { GLOBAL_GROUP, OWN_GROUP } from './lib/types'
+  import { GLOBAL_GROUP, OWN_GROUP, PLOT_NO_REFINE } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -541,8 +541,9 @@
     const coarse = isCoarse()
     const preview = !coarse && !full ? budget.previewScale(item.id, sizes) : null
     const scale = coarse ? budget.scaleFor(item.id, sizes) : (preview ?? 1)
-    // 止まったときに細かく計算し直す式（2段階の表示の粗い版は、続けて細かく計算するので入れない）
-    if (coarse && scale < 1) coarseItems.add(item.id)
+    // 止まったときに細かく計算し直す式（2段階の表示の粗い版は、続けて細かく計算するので入れない）。
+    // 操作中は、形が急に変わる所を細かくしない（PLOT_NO_REFINE）ので、細かさを下げなかった式も計算し直す
+    if (coarse) coarseItems.add(item.id)
     else coarseItems.delete(item.id)
     lastScale.set(item.id, scale)
     // 粗くするときも、細かすぎない下限（陽関数など 20、陰関数 16）は保つ
@@ -593,6 +594,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
+      coarse ? PLOT_NO_REFINE : 0,
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1736,7 +1738,7 @@
               ['左ドラッグ', '回転'],
               ['右ドラッグ', '平行移動'],
               ['Shift + 左ドラッグ', '平行移動'],
-              ['ホイール・中ドラッグ', '拡大縮小'],
+              ['ホイール・中ドラッグ', '拡大縮小（B と同じ動き。中ドラッグは押した位置に向かう）'],
             ])}
             {@render modeCard('B', '操作 B（Google Earth 風）', [
               ['左ドラッグ', '平行移動'],

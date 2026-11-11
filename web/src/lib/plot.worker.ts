@@ -61,7 +61,7 @@ const shapes = new Map<number, { key: string; shape: Shape }>()
  */
 function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[]): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -238,6 +238,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.flat,
         req.layers,
         req.flatSlice,
+        req.flags,
       )
       wall = performance.now() - w0
       if (coordError && !r.param_name) {

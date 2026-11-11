@@ -10,6 +10,7 @@
 //!
 //! このファイルは、JavaScript から呼び出す関数（WASM の入口）だけを置く。
 
+pub mod adaptive;
 pub mod equation;
 pub mod eval;
 pub mod functions;
@@ -218,6 +219,9 @@ pub fn last_used_params() -> String {
     LAST_USED.with(|u| u.borrow().clone())
 }
 
+/// [`plot`] の `flags` のビット 0: 形が急に変わる所を細かくしない
+const FLAG_NO_REFINE: u32 = 1;
+
 /// 式を解析して、曲面（または曲線）を作る。
 ///
 /// - `domain`: 表示範囲 [横の最小, 横の最大, 奥の最小, 奥の最大, 縦の最小, 縦の最大]
@@ -241,6 +245,7 @@ pub fn last_used_params() -> String {
 /// - `flat_slice`: 2D 表示の描き方。true なら「切り口」（縦の座標 = 0 の平面との交わり）、
 ///   false なら「投影」（3次元の図形を真上から平面に押しつぶした形）
 /// - `layers`: 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（1 なら両端だけ）
+/// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する）
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -268,6 +273,7 @@ pub fn plot(
     flat: bool,
     layers: u32,
     flat_slice: bool,
+    flags: u32,
 ) -> Result<MeshResult, JsError> {
     let start = timing::now_ms();
     timing::reset();
@@ -350,6 +356,7 @@ pub fn plot(
         flat,
         flat_slice: flat && flat_slice,
         layers: layers.clamp(1, 12) as usize,
+        refine: flags & FLAG_NO_REFINE == 0,
         range: &range,
         view: space.view(perspective),
     };
@@ -419,6 +426,8 @@ struct Ctx<'a> {
     flat_slice: bool,
     /// 媒介変数が4つ以上の図形の、面を描く所の分割数（[`plot`] の `layers` を参照）
     layers: usize,
+    /// 形が急に変わる所を細かくするか（[`plot`] の `flags` を参照）
+    refine: bool,
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
     view: mesh::View,
@@ -525,7 +534,8 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.rotated_explicit = true;
         }
         P::Explicit { axis, prog, .. } => {
-            b.inner = mesh::explicit_surface_full(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls);
+            b.inner =
+                mesh::explicit_surface_opt(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls, ctx.refine);
         }
         P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_surface(prog, dom, ctx.implicit_resolution);
