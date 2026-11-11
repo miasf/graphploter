@@ -269,7 +269,7 @@ export class Viewer {
       x: number
       y: number
       id: number
-      mode: 'look' | 'right' | 'orbit'
+      mode: 'look' | 'right' | 'orbit' | 'zoom'
       pivot: THREE.Vector3
       /** 右ドラッグで拡大縮小するときに進む向き（押したときのカーソルの向き） */
       fwd: THREE.Vector3
@@ -287,9 +287,10 @@ export class Viewer {
           return
         }
         this.applyButtons() // 回転の感度を、マウスの操作モードのものに戻す（指で操作した後かもしれない）
-        // 操作 A（標準）も、パソコン用の調整（注視点の置き直し・Ctrl + ドラッグの見回し・中ドラッグの通り抜ける拡大縮小・
-        // 慣性の停止）を入れる前の、OrbitControls そのままの操作にする
-        if (this.controlMode === 'A') return
+        // 操作 A（標準）の回転・移動は、パソコン用の調整（注視点の置き直し・Ctrl + ドラッグの見回し・慣性の停止）を
+        // 入れる前の、OrbitControls そのままの操作にする。拡大縮小（中ドラッグ・ホイール）だけは B と同じ:
+        // 押した位置に向かって拡大縮小し、近づききったら図形を通り抜けて進む
+        if (this.controlMode === 'A' && e.button !== 1) return
         this.stopInertia() // 指を離した後の慣性の動きが残っていたら止める（新しい操作と混ざらないように）
         const look = e.button === 0 && (e.ctrlKey || e.metaKey) && !this.flat
         // 左ボタンの2回押し（0.35 秒以内・ほぼ同じ位置）
@@ -299,7 +300,8 @@ export class Viewer {
           Math.hypot(e.clientX - prevLeft.x, e.clientY - prevLeft.y) < 8
         if (e.button === 0) prevLeft = double ? { t: -1e9, x: 0, y: 0 } : { t: e.timeStamp, x: e.clientX, y: e.clientY }
         let mode: Drag['mode']
-        if (look) mode = 'look'
+        if (this.controlMode === 'A') mode = 'zoom' // 中ドラッグ
+        else if (look) mode = 'look'
         else if (e.button === 2) mode = 'right'
         else if (e.button === 0 && (double || e.shiftKey) && !this.flat) mode = 'orbit'
         // 左ドラッグ・中ドラッグ: 平行移動なので、OrbitControls に任せる。
@@ -335,9 +337,10 @@ export class Viewer {
         this.tiltAround(last.pivot, -dy * k)
         return
       }
-      // 右ドラッグ: 上下は拡大縮小（100 px で約 1.6 倍）、左右は回転（2D 表示では回さない）
+      // 右ドラッグ: 上下は拡大縮小（100 px で約 1.6 倍）、左右は回転（2D 表示では回さない）。
+      // 操作 A の中ドラッグは、上下の拡大縮小だけ
       this.zoomAround(last.pivot, Math.pow(0.995, dy), last.fwd)
-      if (!this.flat) {
+      if (last.mode === 'right' && !this.flat) {
         const angle = (-dx * Math.PI) / (this.container.clientWidth || 1)
         this.rotateAround(last.pivot, angle)
         last.fwd.applyAxisAngle(this.camera.up.clone().normalize(), angle) // 進む向きもカメラと一緒に回す
@@ -479,8 +482,7 @@ export class Viewer {
     this.renderer.domElement.addEventListener(
       'wheel',
       (e) => {
-        // 操作 A（標準）のホイールは、OrbitControls そのままの拡大縮小（画面の中央に向かう。滑らかにはしない）
-        if (this.controlMode === 'A') return
+        // 操作 A（標準）のホイールも B と同じ（目盛りの分をためて滑らかに動かす。図形を通り抜けて進める）
         e.preventDefault()
         e.stopImmediatePropagation() // OrbitControls には渡さない
         // 行・ページ単位のホイールは画素に直す
@@ -636,8 +638,33 @@ export class Viewer {
   private applyQuality() {
     const ratio = this.camMoving || this.busy ? this.quality.stage.ratio : this.basePixelRatio
     if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio)
+    this.applyLineScale(ratio / this.basePixelRatio)
     for (const p of this.plots.values()) this.applyLod(p)
     this.dirty = true
+  }
+
+  /** 格子線の太さの倍率（全部の曲面の材質で共有する。今の画素密度 ÷ ふつうのときの画素密度） */
+  private pixelScale = { value: 1 }
+
+  /**
+   * 画素密度を下げている間も、線が太って見えないようにする。
+   * 曲面の格子線はシェーダーで細くする。枠・方眼・軸の線（WebGL の線は 1 画素より細くできない）は、
+   * 1 画素のまま半透明にして、画面の上での濃さ（太さ × 濃さ）をそろえる
+   * （背景の色に近づけるのでは、曲面の手前にある線が白く太って見える）
+   */
+  private applyLineScale(scale: number) {
+    this.pixelScale.value = scale
+    const opacity = Math.min(1, scale)
+    this.frame.traverse((o) => {
+      if (!(o instanceof THREE.LineSegments)) return
+      const m = o.material as THREE.LineBasicMaterial
+      const transparent = opacity < 1
+      if (m.transparent !== transparent) {
+        m.transparent = transparent
+        m.needsUpdate = true
+      }
+      m.opacity = opacity
+    })
   }
 
   /** 場面の三角形の合計と、粗い版があるかを quality に伝える */
@@ -811,18 +838,22 @@ export class Viewer {
     const first = this.domain === null
     this.domain = { ...d }
 
-    // 範囲の外を切り落とす6枚の平面
+    // 範囲の外を切り落とす6枚の平面。ほんの少し（範囲の 1e-5 倍）外に置く: ちょうど端の高さにある平らな面
+    // （階段 z = ⌊x⌋/2 + ⌊y⌋/4 の z = 6 の段など）が、切る面と重なって、残る所と消える所の砂嵐のような模様になるため
+    const ex = (d.xmax - d.xmin) * 1e-5
+    const ey = (d.ymax - d.ymin) * 1e-5
+    const ez = (d.zmax - d.zmin) * 1e-5
     this.boxPlanes = [
-      new THREE.Plane(new THREE.Vector3(1, 0, 0), -d.xmin),
-      new THREE.Plane(new THREE.Vector3(-1, 0, 0), d.xmax),
-      new THREE.Plane(new THREE.Vector3(0, 1, 0), -d.ymin),
-      new THREE.Plane(new THREE.Vector3(0, -1, 0), d.ymax),
+      new THREE.Plane(new THREE.Vector3(1, 0, 0), -d.xmin + ex),
+      new THREE.Plane(new THREE.Vector3(-1, 0, 0), d.xmax + ex),
+      new THREE.Plane(new THREE.Vector3(0, 1, 0), -d.ymin + ey),
+      new THREE.Plane(new THREE.Vector3(0, -1, 0), d.ymax + ey),
     ]
     // 2D 表示では、図形は z = 0 の平面にあるので z の範囲では切らない
     if (!this.flat) {
       this.boxPlanes.push(
-        new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin),
-        new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax),
+        new THREE.Plane(new THREE.Vector3(0, 0, 1), -d.zmin + ez),
+        new THREE.Plane(new THREE.Vector3(0, 0, -1), d.zmax + ez),
       )
     }
     this.applyClipping()
@@ -875,6 +906,11 @@ export class Viewer {
   }
 
   private buildFrame(d: Domain) {
+    this.buildFrameLines(d)
+    this.applyLineScale(this.pixelScale.value) // 画素密度を下げている最中に作り直したときも、線の濃さを合わせる
+  }
+
+  private buildFrameLines(d: Domain) {
     // 古いものを片付ける
     this.frame.traverse((o) => {
       if (o instanceof THREE.LineSegments) {
@@ -1208,7 +1244,7 @@ export class Viewer {
 
   private setSurface(id: number, mesh: MeshData) {
     // 表と裏は1つの材質で描く（裏面はシェーダーで暗くする）
-    const grid = createGridUniforms()
+    const grid = createGridUniforms(this.pixelScale)
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
     group.add(new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes)))

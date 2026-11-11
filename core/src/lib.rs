@@ -10,6 +10,7 @@
 //!
 //! このファイルは、JavaScript から呼び出す関数（WASM の入口）だけを置く。
 
+pub mod adaptive;
 pub mod equation;
 pub mod eval;
 pub mod functions;
@@ -218,6 +219,11 @@ pub fn last_used_params() -> String {
     LAST_USED.with(|u| u.borrow().clone())
 }
 
+/// [`plot`] の `flags` のビット 0: 形が急に変わる所を細かくしない
+const FLAG_NO_REFINE: u32 = 1;
+/// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
+const FLAG_EDGES: u32 = 4;
+
 /// 式を解析して、曲面（または曲線）を作る。
 ///
 /// - `domain`: 表示範囲 [横の最小, 横の最大, 奥の最小, 奥の最大, 縦の最小, 縦の最大]
@@ -241,6 +247,8 @@ pub fn last_used_params() -> String {
 /// - `flat_slice`: 2D 表示の描き方。true なら「切り口」（縦の座標 = 0 の平面との交わり）、
 ///   false なら「投影」（3次元の図形を真上から平面に押しつぶした形）
 /// - `layers`: 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（1 なら両端だけ）
+/// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する）。
+///   ビット 2: 媒介変数が 3 つ以上の図形を、面ではなく辺だけで描く
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -268,6 +276,7 @@ pub fn plot(
     flat: bool,
     layers: u32,
     flat_slice: bool,
+    flags: u32,
 ) -> Result<MeshResult, JsError> {
     let start = timing::now_ms();
     timing::reset();
@@ -350,6 +359,8 @@ pub fn plot(
         flat,
         flat_slice: flat && flat_slice,
         layers: layers.clamp(1, 12) as usize,
+        refine: flags & FLAG_NO_REFINE == 0,
+        edges: flags & FLAG_EDGES != 0,
         range: &range,
         view: space.view(perspective),
     };
@@ -419,6 +430,10 @@ struct Ctx<'a> {
     flat_slice: bool,
     /// 媒介変数が4つ以上の図形の、面を描く所の分割数（[`plot`] の `layers` を参照）
     layers: usize,
+    /// 形が急に変わる所を細かくするか（[`plot`] の `flags` を参照）
+    refine: bool,
+    /// 媒介変数が 3 つ以上の図形を、辺だけで描くか（[`plot`] の `flags` を参照）
+    edges: bool,
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
     view: mesh::View,
@@ -525,7 +540,8 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.rotated_explicit = true;
         }
         P::Explicit { axis, prog, .. } => {
-            b.inner = mesh::explicit_surface_full(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls);
+            b.inner =
+                mesh::explicit_surface_opt(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls, ctx.refine);
         }
         P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_surface(prog, dom, ctx.implicit_resolution);
@@ -537,9 +553,18 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 媒介変数表示: n 次元の点を計算してから、回転・射影する
         P::Surface { sets, vars } => {
-            b.shape = Some(mesh::parametric_surface_nd(sets, (ctx.range)(&vars[0]), (ctx.range)(&vars[1]), ctx.resolution));
+            let tol = ctx.refine.then_some(ctx.size * 1e-3);
+            let (u, v) = ((ctx.range)(&vars[0]), (ctx.range)(&vars[1]));
+            b.shape = Some(mesh::parametric_surface_nd_opt(sets, u, v, ctx.resolution, tol));
         }
         // 立体は面が6枚になるので、1枚あたりを少し粗くする
+        // 辺だけ描く: 媒介変数を 1 つだけ動かした曲線（媒介変数の直方体の辺の像）
+        P::Volume { sets, vars } | P::Sheets { sets, vars } if ctx.edges => {
+            let r: Vec<(f64, f64)> = vars.iter().map(|v| (ctx.range)(v)).collect();
+            b.curve = true;
+            b.kind = format!("{} · 辺 {} 本", b.kind, vars.len() << (vars.len() - 1));
+            b.shape = Some(mesh::parametric_edges_nd(sets, &r, 400, ctx.size * 2e-4));
+        }
         P::Volume { sets, vars } => {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
             b.shape = Some(mesh::parametric_solid_nd(sets, r, (ctx.resolution * 2 / 3).max(2)));
@@ -614,7 +639,16 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = mesh::Field::new(prog, ranges, space.samples, dom).cap(dom, 2, 0.0, true, res2 / 2);
         }
         P::Surface { sets, vars } => {
-            b.shape = Some(mesh::parametric_surface_nd(sets, (ctx.range)(&vars[0]), (ctx.range)(&vars[1]), ctx.resolution));
+            let tol = ctx.refine.then_some(ctx.size * 1e-3);
+            let (u, v) = ((ctx.range)(&vars[0]), (ctx.range)(&vars[1]));
+            b.shape = Some(mesh::parametric_surface_nd_opt(sets, u, v, ctx.resolution, tol));
+        }
+        // 辺だけ描く: 媒介変数を 1 つだけ動かした曲線（媒介変数の直方体の辺の像）
+        P::Volume { sets, vars } | P::Sheets { sets, vars } if ctx.edges => {
+            let r: Vec<(f64, f64)> = vars.iter().map(|v| (ctx.range)(v)).collect();
+            b.curve = true;
+            b.kind = format!("{} · 辺 {} 本", b.kind, vars.len() << (vars.len() - 1));
+            b.shape = Some(mesh::parametric_edges_nd(sets, &r, 400, ctx.size * 2e-4));
         }
         P::Volume { sets, vars } => {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
@@ -717,18 +751,28 @@ impl CapSource {
     /// 平面「画面の `axis` 番目（0: 横, 1: 奥, 2: 縦）の座標 = `pos`」での切り口のふた。
     /// `keep_below` なら座標が `pos` 以下の側を残す（ふたは反対側を向く）。`n` は格子の1辺のマス数
     pub fn cap(&self, axis: u32, pos: f64, keep_below: bool, n: u32) -> Result<MeshResult, JsError> {
+        self.caps(axis as i32, pos, keep_below, n, 0)
+    }
+
+    /// 切り口のふた（`axis` が負なら切り口なし）と、範囲で重ねた立体の表示範囲の端のふた（`box_n` が 0 なら作らない。
+    /// 細かさは `box_n`）をまとめたもの。端のふたは、切り口で切り落とされる側を描かない
+    pub fn caps(&self, axis: i32, pos: f64, keep_below: bool, n: u32, box_n: u32) -> Result<MeshResult, JsError> {
         if axis > 2 {
             return Err(JsError::new("内部エラー: 切り口の軸の番号が違います"));
         }
         let start = timing::now_ms();
         timing::reset();
-        let mut inner = mesh::merge(
-            self.inner
-                .iter()
-                .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
-                .collect(),
-            false,
-        );
+        let cut = (axis >= 0).then_some((axis as usize, pos, keep_below));
+        let mut parts = Vec::new();
+        for f in &self.inner {
+            if let Some((a, p, k)) = cut {
+                parts.push(f.cap(self.dom, a, p, k, n.clamp(2, 1000) as usize));
+            }
+            if box_n > 0 && f.is_stacked() {
+                parts.push(f.box_caps(self.dom, box_n.clamp(2, 1000) as usize, cut));
+            }
+        }
+        let mut inner = mesh::merge(parts, false);
         let end = timing::now_ms();
         record_stats(&mut inner, start, end, end);
         Ok(MeshResult {

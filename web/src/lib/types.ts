@@ -179,6 +179,8 @@ export interface PlotItem extends PlotStyle {
   center?: number[]
   /** 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（無い・1 なら両端だけ） */
   layers?: number
+  /** 媒介変数が3つ以上の図形を、面ではなく辺だけで描くか（無ければ面） */
+  edges?: boolean
   /** 入っているフォルダの番号（無ければフォルダの外）。同じフォルダの式は、一覧で続けて並ぶ */
   folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
@@ -270,7 +272,14 @@ export interface PlotRequest {
   walls: boolean
   /** 媒介変数が4つ以上の図形の、面を描く所の分割数（1 なら範囲の両端だけ） */
   layers: number
+  /** そのほかの設定（ビットごと）。ビット 0（PLOT_NO_REFINE）: 形が急に変わる所を細かくしない（再生・ドラッグ中） */
+  flags: number
 }
+
+/** PlotRequest.flags のビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。止まったら細かく計算し直す） */
+export const PLOT_NO_REFINE = 1
+/** PlotRequest.flags のビット 2: 媒介変数が3つ以上の図形を、辺だけで描く */
+export const PLOT_EDGES = 4
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
 export interface CapRequest {

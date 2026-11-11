@@ -24,6 +24,8 @@ export interface SavedItem {
   center?: number[]
   /** 媒介変数が4つ以上の図形の、面を描く所の分割数（古い保存データには無い） */
   layers?: number
+  /** 媒介変数が3つ以上の図形を辺だけで描くか（古い保存データには無い。無ければ面） */
+  edges?: boolean
   /** 入っているフォルダの番号（古い保存データには無い） */
   folder?: number
 }

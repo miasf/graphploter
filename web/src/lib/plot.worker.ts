@@ -12,7 +12,7 @@ import init, {
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_NO_REFINE } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -53,7 +53,7 @@ function range(
  * 式・範囲・パラメータなど「点の計算に関わる入力」が同じなら、回転・表示する軸が変わっても
  * 式を計算し直さず、射影し直すだけで済む（回転のスライダーが軽く動く）。
  */
-const shapes = new Map<number, { key: string; shape: Shape }>()
+const shapes = new Map<number, { key: string; shape: Shape; refined: boolean }>()
 
 /**
  * 点の計算に関わる入力（回転は含めない）。
@@ -61,7 +61,7 @@ const shapes = new Map<number, { key: string; shape: Shape }>()
  */
 function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[]): string {
   const { source, domain, resolution, ranges, params, stacks, space } = req
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -131,13 +131,23 @@ function addStats(t: Tally, r: MeshResult, wall: number) {
   t.lod += l
 }
 
+/**
+ * 切り口のふたと、範囲で重ねた立体の表示範囲の端のふた（切り口が無くても作る。細かさは切り口のふたの半分）。
+ * どちらも無ければ null
+ */
 function makeCap(source: CapSource, cut: CutRequest, resolution: number, t?: Tally): CapData | null {
-  if (!cut) return null
   const w0 = performance.now()
-  const m = source.cap(cut.axis, cut.pos, cut.keepBelow, resolution)
+  const boxN = Math.max(8, Math.round(resolution / 2))
+  const m = cut
+    ? source.caps(cut.axis, cut.pos, cut.keepBelow, resolution, boxN)
+    : source.caps(-1, 0, false, resolution, boxN)
   const c0 = performance.now()
   // 配列は取り出して渡す（コピーは1回）
   const cap = { positions: m.take_positions(), normals: m.take_normals(), indices: m.take_indices() }
+  if (!cut && cap.indices.length === 0) {
+    m.free()
+    return null
+  }
   if (t) {
     t.copy += performance.now() - c0
     addStats(t, m, c0 - w0)
@@ -188,7 +198,10 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     let r: MeshResult | null = null
     let wall = 0 // 計算エンジンを呼んだ時間
     let reprojected = false // n 次元の点を使い回して、射影だけし直したか
-    if (cached && cached.key === key(cached.shape.view_dependent)) {
+    // 細かくしない依頼（再生・ドラッグ中）なら、細かくした点もそのまま使う（回転の再生で計算し直さない）。
+    // 細かくする依頼なら、細かくしないで計算した点は使わない（止まったときに細かく計算し直す）
+    const refine = (req.flags & PLOT_NO_REFINE) === 0
+    if (cached && cached.key === key(cached.shape.view_dependent) && (cached.refined || !refine)) {
       // 点は計算済み: 回転・射影だけし直す
       const w0 = performance.now()
       try {
@@ -238,6 +251,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.flat,
         req.layers,
         req.flatSlice,
+        req.flags,
       )
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
@@ -246,7 +260,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       }
       forget(itemId)
       const shape = r.take_shape()
-      if (shape) shapes.set(itemId, { key: key(shape.view_dependent), shape })
+      if (shape) shapes.set(itemId, { key: key(shape.view_dependent), shape, refined: refine })
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
     }
