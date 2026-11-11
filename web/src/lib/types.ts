@@ -1,5 +1,7 @@
 // アプリ全体で使うデータの形
 
+import type { Cost } from './budget'
+
 /** 表示範囲（直方体） */
 export interface Domain {
   xmin: number
@@ -296,6 +298,10 @@ export type PlotResponse =
       cap: CapData | null
       /** 計算担当の中での時間の内訳（ベンチマーク用） */
       timing: PlotTiming
+      /** 媒介変数表示の n 次元の点を使い回して、射影だけし直したか（細かさと関係ない時間なので、見積もりに数えない） */
+      reprojected: boolean
+      /** 計算時間が細かさの何乗に比例するか（budget.ts を参照） */
+      cost: Cost
     }
   | { requestId: number; ok: false; error: string }
 

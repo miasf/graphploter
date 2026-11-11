@@ -14,6 +14,7 @@
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
   import { lastBreakdown } from './lib/timings'
+  import { Budget } from './lib/budget'
   import type {
     ComplexMode,
     CutRequest,
@@ -105,7 +106,7 @@
       viewer?.setCut(cutRequest())
       loaded = true
       updateSpaceRangeErrors()
-      items.forEach(replot)
+      items.forEach((it) => replot(it))
     })()
     return () => viewer?.dispose()
   })
@@ -361,10 +362,17 @@
   }
 
   // ---- 操作中は粗く計算する ----
-  // スライダーや複素平面を動かしている間・回転を再生している間は、細かさを半分にして計算する
-  // （陰関数は 1/8 の計算量）。指を離したら、粗く計算した式だけを細かく計算し直す。
+  // スライダーや複素平面を動かしている間・回転を再生している間は、式ごとに測った計算時間から、
+  // 1回の計算が持ち時間（12 ms）に収まる細かさで計算する（lib/budget.ts。軽い式は細かいまま）。
+  // 指を離したら、粗く計算した式だけを細かく計算し直す。
   let pointerOnControl = false
   const coarseItems = new Set<number>()
+  /** 式ごとの計算時間の見積もり */
+  const budget = new Budget()
+  /** 式ごとの、最後の計算で細かさに掛けた倍率（切り口のふたも同じ倍率にする） */
+  const lastScale = new Map<number, number>()
+  /** 2段階の表示: 粗い版を出した後、続けて細かく計算する式 */
+  const fineNext = new Set<number>()
   const isCoarse = () => pointerOnControl || anyRotPlaying() || playingParams.length > 0 || playingSlices.length > 0
 
   function refine() {
@@ -388,7 +396,8 @@
     })
   }
 
-  async function replot(item: PlotItem) {
+  /** `full` なら、2段階の表示をせずに細かく計算する（2段階の表示の2回目） */
+  async function replot(item: PlotItem, full = false) {
     // 非表示の式は計算しない（表示したときに計算する）。パラメータの行は、ほかの式が使うので計算する
     if (!item.visible && !item.param) {
       item.stale = true
@@ -400,10 +409,12 @@
     }
     running.add(item.id)
     try {
-      await replotNow(item)
+      await replotNow(item, full)
     } finally {
       running.delete(item.id)
+      // 粗い版の計算中に新しい依頼が来ていたら、細かい計算はせずに、新しい依頼を（必要なら2段階で）計算する
       if (again.delete(item.id) && items.includes(item)) replot(item)
+      else if (fineNext.delete(item.id) && items.includes(item)) replot(item, true)
     }
   }
 
@@ -518,14 +529,25 @@
     paramsChanged([name], item)
   }
 
-  async function replotNow(item: PlotItem) {
+  async function replotNow(item: PlotItem, full = false) {
     if (!viewer) return
     const token = (latest.get(item.id) ?? 0) + 1
     latest.set(item.id, token)
     item.stale = false
+    fineNext.delete(item.id)
+    // 細かさに掛ける倍率。再生・ドラッグ中は持ち時間に収まる倍率。止まっているときは 1 だが、
+    // 細かい計算が長くかかりそうな式は、先に粗い版（preview）を出してから細かく計算し直す
+    const sizes = { res: resolution, ires: implicitResolution }
     const coarse = isCoarse()
-    if (coarse) coarseItems.add(item.id)
+    const preview = !coarse && !full ? budget.previewScale(item.id, sizes) : null
+    const scale = coarse ? budget.scaleFor(item.id, sizes) : (preview ?? 1)
+    // 止まったときに細かく計算し直す式（2段階の表示の粗い版は、続けて細かく計算するので入れない）
+    if (coarse && scale < 1) coarseItems.add(item.id)
     else coarseItems.delete(item.id)
+    lastScale.set(item.id, scale)
+    // 粗くするときも、細かすぎない下限（陽関数など 20、陰関数 16）は保つ
+    const scaled = (n: number, min: number) => (scale === 1 ? n : Math.min(n, Math.max(min, Math.round(n * scale))))
+    const used = { res: scaled(resolution, 20), ires: scaled(implicitResolution, 16) }
 
     // 数式入力欄の LaTeX を、計算エンジン用の式に変換する
     let source: string
@@ -559,8 +581,8 @@
       item.id,
       source,
       domain,
-      coarse ? Math.max(20, Math.round(resolution / 2)) : resolution,
-      coarse ? Math.max(16, Math.round(implicitResolution / 2)) : implicitResolution,
+      used.res,
+      used.ires,
       ranges,
       currentParams(),
       { ...space, ranges: spaceRanges, ...rotationOf(item) },
@@ -587,6 +609,7 @@
 
     item.error = undefined
     item.usedParams = res.usedParams
+    budget.record(item.id, res.ms, used, res.cost, res.reprojected)
 
     if (res.param) {
       // パラメータの定義（a = 1 など）: グラフは描かず、値を覚えてスライダーを出す
@@ -648,6 +671,11 @@
       ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
     item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
+    if (preview !== null) {
+      // 2段階の表示: 粗い版を出したので、続けて細かく計算する（終わったら1回だけ差し替える）
+      item.info += ' · 計算中'
+      fineNext.add(item.id)
+    }
     // 陽関数の値がどこでも実数にならない（複素数の関数）なら、色分けで描けることを知らせる
     if (!res.mesh.curve && res.mesh.indices.length === 0 && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
       item.info +=
@@ -814,6 +842,9 @@
   function removeItem(item: PlotItem) {
     viewer?.removePlot(item.id)
     lastBreakdown.delete(item.id)
+    budget.forget(item.id)
+    lastScale.delete(item.id)
+    fineNext.delete(item.id)
     delete playing[-item.id]
     items.splice(items.indexOf(item), 1)
     if (item.param) paramsChanged([item.param.name])
@@ -1300,8 +1331,9 @@
 
   /** 陰関数・範囲で重ねた立体の式（切り口のふたを計算担当が作る） */
   const capKinds = ['陰関数', '範囲で重ねた立体']
-  /** 切り口のふたの細かさ（陰関数の格子の2倍） */
-  const capResolution = () => (isCoarse() ? implicitResolution : implicitResolution * 2)
+  /** 切り口のふたの細かさ（陰関数の格子の2倍。再生・ドラッグ中は、その式の計算と同じ倍率を掛ける） */
+  const capResolution = (id: number) =>
+    Math.max(16, Math.round(implicitResolution * 2 * (isCoarse() ? (lastScale.get(id) ?? 0.5) : 1)))
   /** ふたの依頼の番号（古い結果を捨てるため） */
   const capToken = new Map<number, number>()
 
@@ -1316,7 +1348,7 @@
         .map(async (it) => {
           const token = (capToken.get(it.id) ?? 0) + 1
           capToken.set(it.id, token)
-          const res = await requestCap(it.id, req, capResolution())
+          const res = await requestCap(it.id, req, capResolution(it.id))
           if (capToken.get(it.id) === token) viewer?.setCap(it.id, res.cap, it)
         }),
     )

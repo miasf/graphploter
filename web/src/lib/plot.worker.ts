@@ -10,6 +10,7 @@ import init, {
   type Shape,
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
+import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse, PlotTiming } from './types'
 import { COMPLEX_MODE_ORDER } from './types'
 
@@ -96,6 +97,16 @@ function looksLikeDefinition(source: string): boolean {
   return !!m && !isReserved(m[1])
 }
 
+/**
+ * 計算時間が細かさの何乗に比例するか: 陰関数・範囲で重ねた立体は3乗、曲線（細かさによらず曲がり方で点を足す）はほぼ無関係、
+ * ほか（陽関数・媒介変数表示の曲面、2D 表示の陰関数の曲線・切り口の線）は2乗
+ */
+function costOf(kind: string, curve: boolean, flat: boolean): Cost {
+  if (!flat && !curve && /^(陰関数|範囲で重ねた立体)/.test(kind)) return 'volume'
+  if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
+  return 'surface'
+}
+
 function forget(itemId: number) {
   shapes.get(itemId)?.shape.free()
   shapes.delete(itemId)
@@ -175,6 +186,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const cached = shapes.get(itemId)
     let r: MeshResult | null = null
     let wall = 0 // 計算エンジンを呼んだ時間
+    let reprojected = false // n 次元の点を使い回して、射影だけし直したか
     if (cached && cached.key === key(cached.shape.view_dependent)) {
       // 点は計算済み: 回転・射影だけし直す
       const w0 = performance.now()
@@ -190,7 +202,10 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       } catch {
         r = null // 回転した陽関数で、回転が条件を外れた（陰関数として計算し直す）
       }
-      if (r) wall = performance.now() - w0
+      if (r) {
+        wall = performance.now() - w0
+        reprojected = true
+      }
     }
     if (!r) {
       const w0 = performance.now()
@@ -273,7 +288,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     r.free() // Rust 側のメモリを解放
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
-    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, param, cap, timing }
+    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     forget(itemId)
     res = { requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
