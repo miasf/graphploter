@@ -2160,7 +2160,8 @@ fn touch_candidates_dense(f: &[f32], n: usize) -> Vec<TouchCand> {
                 };
                 let row = m * (j + m * k);
                 // 4 点 p − e, p, p + e, p + 2e の値の列（連続した場所を順に読む）
-                let cols = [-1isize, 0, 1, 2].map(|d| &f[(row as isize + d * stride as isize) as usize + lo..][..hi - lo]);
+                // （lo を先に足す: row + d·stride だけだと、row = 0, d = −1 で途中が負になる）
+                let cols = [-1isize, 0, 1, 2].map(|d| &f[((row + lo) as isize + d * stride as isize) as usize..][..hi - lo]);
                 for (off, (((&w0, &w1), &w2), &w3)) in cols[0].iter().zip(cols[1]).zip(cols[2]).zip(cols[3]).enumerate() {
                     let p = [lo + off, j, k];
                     let get = |q: [usize; 3]| f[idx(q)];
