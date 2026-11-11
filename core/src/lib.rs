@@ -582,21 +582,18 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）。
         // 複素数の色分けをするときは、高さを |f|・Re f・Im f にして回す（色は偏角）
         P::Explicit { axis, prog, rotated: true, .. } => {
-            let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
-            let rho = (0..3)
-                .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            let (ua, va) = equation::others(*axis);
+            let ext = rotated_domain(space, dom);
             b.shape = Some(mesh::explicit_nd(
                 prog,
                 *axis,
                 space.axes,
                 &space.slice,
-                (c[ua] - rho, c[ua] + rho),
-                (c[va] - rho, c[va] + rho),
+                ext,
                 ctx.resolution,
                 ctx.complex_mode,
+                ctx.walls,
+                ctx.refine,
+                dom.hi[*axis] - dom.lo[*axis],
             ));
             b.rotated_explicit = true;
         }
@@ -659,6 +656,32 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Implicit { prog, .. } | P::Solid { prog, .. } => prog.uses_var_index(2),
         _ => false,
     };
+    // 回した陽関数: 回す前の形を n 次元の点で作り、回して射影してから平面に描く（plot・Shape::project）
+    if let P::Explicit { axis, prog, names, rotated: true } = plot {
+        if *axis == 2 || uses_vertical {
+            // 曲面を作り、射影した後で切り口の線か、押しつぶした形にする。
+            // z = f(x, y) を押しつぶした形は、回した後の高さで塗り分ける（格子線用の座標の3つ目が回した後の縦の座標）
+            let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
+            let mut b = build(plot, &ctx3)?;
+            b.kind = if ctx.flat_slice {
+                format!("{}の切り口", b.kind)
+            } else if *axis == 2 {
+                format!("{} の値で塗り分け", names[2])
+            } else {
+                format!("{}の投影", b.kind)
+            };
+            return Ok(b);
+        }
+        let other = if *axis == 0 { &names[1] } else { &names[0] };
+        let ext = rotated_domain(space, dom);
+        return Ok(Built {
+            kind: format!("{} = f({})", names[*axis], other),
+            curve: true,
+            shape: Some(mesh::explicit_curve_nd(prog, *axis, space.axes, &space.slice, ext, ctx.size * 1e-4)),
+            rotated_explicit: true,
+            ..Default::default()
+        });
+    }
     // 投影: 3次元の図形を作ってから、縦の座標を 0 にする（z = f(x, y) は値で塗り分ける）
     if !ctx.flat_slice && uses_vertical && !matches!(plot, P::Explicit { axis: 2, .. }) {
         let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
@@ -723,6 +746,17 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
     }
     Ok(b)
+}
+
+/// 回した陽関数を計算する範囲（表示中の座標で）: 回転の中心から表示範囲の角までの距離 ρ の、中心の周りの立方体。
+/// 回転は中心からの距離を変えないので、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）
+fn rotated_domain(space: &equation::Space, dom: mesh::Domain) -> mesh::Domain {
+    let c: Vec<f64> = space.axes.iter().map(|&a| space.center.get(a).copied().unwrap_or(0.0)).collect();
+    let rho = (0..3)
+        .map(|a| (dom.lo[a] - c[a]).abs().max((dom.hi[a] - c[a]).abs()).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    mesh::Domain { lo: [c[0] - rho, c[1] - rho, c[2] - rho], hi: [c[0] + rho, c[1] + rho, c[2] + rho] }
 }
 
 /// 媒介変数表示の、回転・射影する前の形（n 次元の点）。Worker が式ごとに持っておく
