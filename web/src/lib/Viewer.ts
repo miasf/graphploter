@@ -741,7 +741,12 @@ export class Viewer {
     // 視点が動いているコマだけ数える（スライダーだけのときは、計算待ちで描いていないだけのことが多い）。
     // 長すぎる間隔（タブが隠れていた など）は数えない
     const dt = now - this.lastTickAt
-    if (this.renderedLastTick && this.camMoving && dt <= 2500 && this.quality.frame(dt)) this.applyQuality()
+    // 形を差し替えたコマ（データの受け渡し・GPU への転送の時間）と、視点が跳んだコマは数えない。
+    // 数えると、回転の再生中に視点を動かしたり、2D / 3D を切り替えたりしただけで「描くのが遅い」とみなして
+    // 画素密度を一番下まで下げ、その段階を次の操作に持ち越してしまう
+    // （差し替えの処理はこの回までの間に、転送はその次に描くコマにかかるので、両方を外す）
+    const counted = this.renderedLastTick && !this.notMotionLastTick && !this.notMotion
+    if (counted && this.camMoving && dt <= 2500 && this.quality.frame(dt)) this.applyQuality()
     this.lastTickAt = now
     this.stepWheelZoom()
     // カメラが動いたか（慣性で動き続けている間も true）
@@ -772,9 +777,15 @@ export class Viewer {
     this.updateLabelSizes()
     this.updateStencilSides()
     this.renderedLastTick = true
+    this.notMotionLastTick = this.notMotion
+    this.notMotion = false
     this.renderer.render(this.scene, this.camera)
   }
   private renderedLastTick = false
+  /** 前に描いてから今までに、形の差し替え・視点の跳びがあったか（そのコマの時間は quality に数えない） */
+  private notMotion = false
+  /** 前の回に描いたコマが、形の差し替え・視点の跳びを含んでいたか */
+  private notMotionLastTick = false
 
   /**
    * 文字の画面上の大きさを、CSS ピクセルで一定にする。
@@ -888,6 +899,7 @@ export class Viewer {
   resetCamera() {
     this.wheelPending = 0
     this.dirty = true
+    this.notMotion = true // 視点が跳ぶだけ（2D / 3D の切り替えなど）
     const d = this.domain
     if (!d) return
     if (this.flat) {
@@ -1018,6 +1030,7 @@ export class Viewer {
   /** 式 id の曲面・曲線を設定（作り直し） */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
     this.sceneChanged = true
+    this.notMotion = true
     const old = this.plots.get(id)
     const kind = mesh.curve ? 'curve' : 'surface'
     // 同じ種類なら、材質（シェーダー）はそのまま使い、形のデータだけ差し替える。
@@ -1092,6 +1105,7 @@ export class Viewer {
     const p = this.plots.get(id)
     if (!p || p.kind !== 'surface') return
     this.dirty = true
+    this.notMotion = true
     if (p.cap) {
       p.cap.geometry.dispose()
       if (!cap || cap.indices.length === 0) {
