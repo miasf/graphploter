@@ -10,7 +10,8 @@ import init, {
   type Shape,
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
-import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse } from './types'
+import type { Cost } from './budget'
+import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse, PlotTiming } from './types'
 import { COMPLEX_MODE_ORDER } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -96,6 +97,16 @@ function looksLikeDefinition(source: string): boolean {
   return !!m && !isReserved(m[1])
 }
 
+/**
+ * 計算時間が細かさの何乗に比例するか: 陰関数・範囲で重ねた立体は3乗、曲線（細かさによらず曲がり方で点を足す）はほぼ無関係、
+ * ほか（陽関数・媒介変数表示の曲面、2D 表示の陰関数の曲線・切り口の線）は2乗
+ */
+function costOf(kind: string, curve: boolean, flat: boolean): Cost {
+  if (!flat && !curve && /^(陰関数|範囲で重ねた立体)/.test(kind)) return 'volume'
+  if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
+  return 'surface'
+}
+
 function forget(itemId: number) {
   shapes.get(itemId)?.shape.free()
   shapes.delete(itemId)
@@ -106,10 +117,31 @@ function forget(itemId: number) {
 /** 陰関数・範囲で重ねた立体の中身（切り口の位置だけが変わったとき、ふただけを作り直す）と、ふたの細かさ */
 const fields = new Map<number, { source: CapSource; resolution: number }>()
 
-function makeCap(source: CapSource, cut: CutRequest, resolution: number): CapData | null {
+/** 時間の内訳を数える入れ物（`PlotTiming` の eval, mesh, lod, copy） */
+type Tally = { eval: number; mesh: number; lod: number; copy: number }
+
+/**
+ * 計算エンジンの内訳 [式の計算, メッシュ, 粗い版, 点の数] を足す。`wall` は計算エンジンを呼んだ時間全体で、
+ * 計算エンジンの中で測れない分（引数・戻り値の受け渡し）はメッシュの時間に入れる
+ */
+function addStats(t: Tally, r: MeshResult, wall: number) {
+  const [e, , l] = r.stats
+  t.eval += e
+  t.mesh += Math.max(0, wall - e - l)
+  t.lod += l
+}
+
+function makeCap(source: CapSource, cut: CutRequest, resolution: number, t?: Tally): CapData | null {
   if (!cut) return null
+  const w0 = performance.now()
   const m = source.cap(cut.axis, cut.pos, cut.keepBelow, resolution)
-  const cap = { positions: m.positions, normals: m.normals, indices: m.indices }
+  const c0 = performance.now()
+  // 配列は取り出して渡す（コピーは1回）
+  const cap = { positions: m.take_positions(), normals: m.take_normals(), indices: m.take_indices() }
+  if (t) {
+    t.copy += performance.now() - c0
+    addStats(t, m, c0 - w0)
+  }
   m.free()
   return cap
 }
@@ -134,6 +166,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
 
   let res: PlotResponse
   const t0 = performance.now()
+  const tally: Tally = { eval: 0, mesh: 0, lod: 0, copy: 0 }
   const domainArr = new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax])
   try {
     const rangeNames = Object.keys(ranges)
@@ -153,8 +186,11 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
     const cached = shapes.get(itemId)
     let r: MeshResult | null = null
+    let wall = 0 // 計算エンジンを呼んだ時間
+    let reprojected = false // n 次元の点を使い回して、射影だけし直したか
     if (cached && cached.key === key(cached.shape.view_dependent)) {
       // 点は計算済み: 回転・射影だけし直す
+      const w0 = performance.now()
       try {
         r = cached.shape.project(
           domainArr,
@@ -167,8 +203,13 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       } catch {
         r = null // 回転した陽関数で、回転が条件を外れた（陰関数として計算し直す）
       }
+      if (r) {
+        wall = performance.now() - w0
+        reprojected = true
+      }
     }
     if (!r) {
+      const w0 = performance.now()
       r = plot(
         source,
         domainArr,
@@ -198,6 +239,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.layers,
         req.flatSlice,
       )
+      wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
         throw coordError // パラメータの定義ではなかった
@@ -208,8 +250,9 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
     }
+    addStats(tally, r, wall)
     const f = fields.get(itemId)
-    const cap = f ? makeCap(f.source, req.cut, f.resolution) : null
+    const cap = f ? makeCap(f.source, req.cut, f.resolution, tally) : null
     const vars = r.params.split(',').filter((s) => s !== '')
     // 曲面の格子線を引くための、媒介変数の範囲の長さ
     const span = (k: number) => {
@@ -218,13 +261,15 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       const rg = stacks[v] ?? (v in ranges ? rangeValues[rangeNames.indexOf(v)] : [0, 2 * Math.PI])
       return rg[1] - rg[0]
     }
+    const c0 = performance.now()
+    // 配列は取り出して渡す（getter だと Rust 側の clone と JavaScript への写しで2回コピーになる）
     const mesh = {
-      positions: r.positions,
-      normals: r.normals,
-      indices: r.indices,
-      lodIndices: r.lod_indices,
-      gridCoords: r.grid_coords,
-      complexValues: r.complex_values,
+      positions: r.take_positions(),
+      normals: r.take_normals(),
+      indices: r.take_indices(),
+      lodIndices: r.take_lod_indices(),
+      gridCoords: r.take_grid_coords(),
+      complexValues: r.take_complex_values(),
       curve: r.curve,
       solid: r.solid,
       heat: r.kind.includes('の値で塗り分け'),
@@ -237,12 +282,15 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
             ? { u: span(0), v: span(1), w: span(2) }
             : { u: span(0), v: span(1) },
     }
+    tally.copy += performance.now() - c0
     const kind = r.kind
     const usedParams = [...new Set([...r.used_params.split(',').filter((s) => s !== ''), ...rangeUsed])]
     const pv = r.param_value
     const param = r.param_name ? { name: r.param_name, re: pv[0], im: pv[1] } : null
     r.free() // Rust 側のメモリを解放
-    res = { requestId, ok: true, mesh, kind, ms: performance.now() - t0, usedParams, param, cap }
+    const total = performance.now() - t0
+    const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
+    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     forget(itemId)
     res = { requestId, ok: false, error: e instanceof Error ? e.message : String(e) }

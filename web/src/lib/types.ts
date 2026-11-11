@@ -1,5 +1,7 @@
 // アプリ全体で使うデータの形
 
+import type { Cost } from './budget'
+
 /** 表示範囲（直方体） */
 export interface Domain {
   xmin: number
@@ -294,5 +296,30 @@ export type PlotResponse =
       param: ({ name: string } & ParamValue) | null
       /** 切り口のふた（陰関数・範囲で重ねた立体を切っているときだけ） */
       cap: CapData | null
+      /** 計算担当の中での時間の内訳（ベンチマーク用） */
+      timing: PlotTiming
+      /** 媒介変数表示の n 次元の点を使い回して、射影だけし直したか（細かさと関係ない時間なので、見積もりに数えない） */
+      reprojected: boolean
+      /** 計算時間が細かさの何乗に比例するか（budget.ts を参照） */
+      cost: Cost
     }
   | { requestId: number; ok: false; error: string }
+
+/**
+ * 計算担当の中での時間の内訳（ミリ秒）。eval + mesh + lod + copy ≈ total
+ * （残りは範囲の式の計算や、計算エンジンへの引数の受け渡し）
+ */
+export type PlotTiming = {
+  /** 式の計算（切り口のふたの分を含む） */
+  eval: number
+  /** 式の計算と粗い版を除いた、メッシュを作る時間（射影し直しだけのときは射影の時間） */
+  mesh: number
+  /** 粗い版を作る時間 */
+  lod: number
+  /** 計算エンジンから配列を取り出す時間（WASM → JavaScript のコピー） */
+  copy: number
+  /** 依頼を受け取ってから返事を作り終えるまで */
+  total: number
+  /** 返事を送った時刻（performance.timeOrigin + performance.now()。画面側で受け渡しの時間を出すのに使う） */
+  sentAt: number
+}

@@ -2,6 +2,7 @@
 //!
 //! - `parser`    : 数式の文字列 → 構文木
 //! - `eval`      : 構文木 → 命令列、多数の点でまとめて計算（複素数）
+//! - `interval`  : 区間演算（箱の上で式の値が入る範囲。曲面の無い所を飛ばすのに使う）
 //! - `functions` : 組み込み関数の一覧
 //! - `special`   : 特殊関数の実装
 //! - `equation`  : 式の種類（陽関数・陰関数）の判定
@@ -12,9 +13,11 @@
 pub mod equation;
 pub mod eval;
 pub mod functions;
+pub mod interval;
 pub mod mesh;
 pub mod parser;
 pub mod special;
+pub mod timing;
 
 use wasm_bindgen::prelude::*;
 
@@ -128,6 +131,51 @@ impl MeshResult {
     pub fn lod_indices(&self) -> Vec<u32> {
         self.inner.lod.clone()
     }
+    // ---- 配列を取り出す（取り出せるのは1回だけ。取り出した後の getter は空を返す）----
+    // getter は Rust 側で clone() してから JavaScript の配列に写すのでコピーが2回になる。
+    // こちらは Rust 側の配列をそのまま渡すので、コピーは JavaScript の配列に写す1回だけ
+
+    /// 頂点座標を取り出す（Float32Array）
+    pub fn take_positions(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.positions)
+    }
+    /// 頂点の法線を取り出す（Float32Array）
+    pub fn take_normals(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.normals)
+    }
+    /// 三角形の頂点番号を取り出す（Uint32Array）
+    pub fn take_indices(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.inner.indices)
+    }
+    /// 粗い版の三角形の頂点番号を取り出す（Uint32Array）
+    pub fn take_lod_indices(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.inner.lod)
+    }
+    /// 格子線用の座標を取り出す（Float32Array）
+    pub fn take_grid_coords(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.grid_coords)
+    }
+    /// 複素数の色分けの値を取り出す（Float32Array）
+    pub fn take_complex_values(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.complex)
+    }
+    /// かかった時間の内訳 [式の計算 ms, メッシュ ms, 粗い版 ms, 計算した点の数,
+    /// 陰関数なら部分ごとの時間 × 4]（`mesh::Stats` を参照）
+    #[wasm_bindgen(getter)]
+    pub fn stats(&self) -> Vec<f64> {
+        let s = self.inner.stats;
+        let mut v = vec![s.eval_ms, s.mesh_ms, s.lod_ms, s.points];
+        v.extend_from_slice(&s.phases);
+        v
+    }
+}
+
+/// `start` から計った時間の内訳を `mesh.stats` に入れる。`lod_start` 〜 `end` が粗い版を作った時間。
+/// 式の計算の時間は、`start` の時点で `timing::reset` してから集めたもの
+fn record_stats(mesh: &mut mesh::Mesh, start: f64, lod_start: f64, end: f64) {
+    let (eval_ms, points) = timing::take();
+    let phases = mesh.stats.phases;
+    mesh.stats = mesh::Stats { eval_ms, mesh_ms: (lod_start - start - eval_ms).max(0.0), lod_ms: end - lod_start, points, phases };
 }
 
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
@@ -221,6 +269,8 @@ pub fn plot(
     layers: u32,
     flat_slice: bool,
 ) -> Result<MeshResult, JsError> {
+    let start = timing::now_ms();
+    timing::reset();
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -316,9 +366,11 @@ pub fn plot(
     };
     // 2D の切り口で、射影してから線にした媒介変数表示の曲面
     let curve = built.curve || (ctx.flat_slice && built.shape.is_some());
+    let lod_start = timing::now_ms();
     if !curve {
         mesh::add_cluster_lod(&mut inner);
     }
+    record_stats(&mut inner, start, lod_start, timing::now_ms());
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
     let explicit_used = (built.shape.is_some() && built.rotated_explicit).then(|| plot.used_params());
     Ok(MeshResult {
@@ -614,6 +666,8 @@ impl Shape {
         center: &[f64],
         perspective: f64,
     ) -> Result<MeshResult, JsError> {
+        let start = timing::now_ms();
+        timing::reset();
         let n = dims as usize;
         let rn = equation::rot_dims(n);
         if domain.len() != 6 || axes.len() != 3 || rotation.len() != rn * (rn - 1) / 2 || n != self.inner.dims {
@@ -632,6 +686,8 @@ impl Shape {
         if self.flat {
             inner = flat_finish(inner, self.curve, self.flat_slice);
         }
+        let end = timing::now_ms();
+        record_stats(&mut inner, start, end, end);
         Ok(MeshResult {
             inner,
             flat: self.flat,
@@ -664,14 +720,19 @@ impl CapSource {
         if axis > 2 {
             return Err(JsError::new("内部エラー: 切り口の軸の番号が違います"));
         }
+        let start = timing::now_ms();
+        timing::reset();
+        let mut inner = mesh::merge(
+            self.inner
+                .iter()
+                .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
+                .collect(),
+            false,
+        );
+        let end = timing::now_ms();
+        record_stats(&mut inner, start, end, end);
         Ok(MeshResult {
-            inner: mesh::merge(
-                self.inner
-                    .iter()
-                    .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
-                    .collect(),
-                false,
-            ),
+            inner,
             kind: String::new(),
             params: Vec::new(),
             curve: false,

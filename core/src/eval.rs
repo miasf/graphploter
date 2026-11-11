@@ -16,6 +16,7 @@
 //!   途中で実数に収まらない所（`sqrt` の中が負など）や、有限でない値が出た CHUNK だけ、複素数で計算し直す。
 //!   だから結果は複素数で計算したときと（丸め誤差を除いて）同じになる。
 
+use crate::interval::{Interval, Range};
 use crate::functions::Func;
 use crate::parser::{BinOp, Constant, Expr};
 use num_complex::Complex64 as C;
@@ -196,7 +197,14 @@ impl Code {
 
     /// `n` 個の点でまとめて計算して、結果を `sink` に渡す。`inputs[k]` は k 番目の変数の値の列
     /// （式に出てこない変数の列は空でもよい）
+    /// `run_inner` を呼び、かかった時間と点の数を記録する（[`crate::timing`]）
     fn run<S: Sink>(&self, inputs: &[&[f64]], n: usize, sink: &mut S) {
+        let t = crate::timing::now_ms();
+        self.run_inner(inputs, n, sink);
+        crate::timing::record_eval(crate::timing::now_ms() - t, n);
+    }
+
+    fn run_inner<S: Sink>(&self, inputs: &[&[f64]], n: usize, sink: &mut S) {
         let m = self.ops.len();
         // 命令ごとの作業領域（CHUNK 個ずつ）。定数は最初に1回だけ書き込む
         let mut re: Vec<f64> = Vec::new();
@@ -285,6 +293,72 @@ impl Code {
 
     /// 1つの CHUNK を実数だけで計算する。実数に収まらない所（`sqrt` の中が負など）や、
     /// 有限でない値が出たら false を返す（呼び出し側が複素数で計算し直す）
+    /// 区間演算（[`Program::eval_interval`]）。命令は [`Code::chunk_real`] と同じものを扱う。分からなければ None
+    fn interval(&self, boxes: &[Interval]) -> Option<Interval> {
+        use crate::interval as iv;
+        let mut regs: Vec<Interval> = Vec::with_capacity(self.ops.len());
+        for op in &self.ops {
+            let r = |k: usize| regs[k];
+            let v = match op {
+                Op::Const(c) => {
+                    if c.im != 0.0 || !c.re.is_finite() {
+                        return None;
+                    }
+                    Interval::point(c.re)
+                }
+                Op::Var(k) => boxes[*k],
+                Op::Neg(a) => iv::neg(r(*a))?,
+                Op::Bin(BinOp::Add, a, b) => iv::add(r(*a), r(*b))?,
+                Op::Bin(BinOp::Sub, a, b) => iv::sub(r(*a), r(*b))?,
+                Op::Bin(BinOp::Mul, a, b) => iv::mul(r(*a), r(*b))?,
+                Op::Bin(BinOp::Div, a, b) => iv::div(r(*a), r(*b))?,
+                Op::Bin(BinOp::Pow, a, b) => iv::pow(r(*a), r(*b))?,
+                Op::Call1(f, a) => {
+                    let x = r(*a);
+                    match f {
+                        Func::Sin => iv::sin(x)?,
+                        Func::Cos => iv::cos(x)?,
+                        Func::Tan => iv::tan(x)?,
+                        Func::Sec => iv::sec(x)?,
+                        Func::Csc => iv::csc(x)?,
+                        Func::Cot => iv::cot(x)?,
+                        Func::Asin => iv::asin(x)?,
+                        Func::Acos => iv::acos(x)?,
+                        Func::Atan => iv::atan(x)?,
+                        Func::Sinh => iv::sinh(x)?,
+                        Func::Cosh => iv::cosh(x)?,
+                        Func::Tanh => iv::tanh(x)?,
+                        Func::Asinh => iv::asinh(x)?,
+                        Func::Acosh => iv::acosh(x)?,
+                        Func::Atanh => iv::atanh(x)?,
+                        Func::Exp => iv::exp(x)?,
+                        Func::Ln => iv::ln(x)?,
+                        Func::Log10 => iv::log10(x)?,
+                        Func::Sqrt => iv::sqrt(x)?,
+                        Func::Abs => iv::abs(x)?,
+                        Func::Sinc => iv::sinc(x)?,
+                        Func::Floor => iv::floor(x)?,
+                        Func::Ceil => iv::ceil(x)?,
+                        Func::Round => iv::round(x)?,
+                        Func::Sign => iv::sign(x)?,
+                        Func::Re | Func::Conj => x,
+                        Func::Im => Interval::point(0.0),
+                        _ => return None,
+                    }
+                }
+                Op::Call2(f, a, b) => match f {
+                    Func::Min => iv::min(r(*a), r(*b))?,
+                    Func::Max => iv::max(r(*a), r(*b))?,
+                    // mod は値が飛ぶ所が多いので、最初は扱わない
+                    _ => return None,
+                },
+                Op::CallN(..) => return None,
+            };
+            regs.push(v);
+        }
+        Some(regs[self.outs[0]])
+    }
+
     fn chunk_real(&self, inputs: &[&[f64]], start: usize, len: usize, regs: &mut [f64]) -> bool {
         for (i, op) in self.ops.iter().enumerate() {
             let (done, rest) = regs.split_at_mut(i * CHUNK);
@@ -472,6 +546,24 @@ impl Program {
             }
         }
         self.code.run(inputs, n, &mut Out(out));
+    }
+
+    /// 区間演算が使える式か（定数がすべて実数で、関数が初等関数だけ。特殊関数・虚数の定数を使う式は使えない）
+    pub fn supports_interval(&self) -> bool {
+        self.code.real
+    }
+
+    /// 区間演算: `boxes[k]`（k 番目の変数の区間）の上で、式の値が入る区間（[`crate::interval`] を参照）。
+    /// 区間演算が使えない式は、すぐ `Unknown` を返す
+    pub fn eval_interval(&self, boxes: &[Interval]) -> Range {
+        assert_eq!(boxes.len(), self.vars.len());
+        if !self.code.real {
+            return Range::Unknown;
+        }
+        match self.code.interval(boxes) {
+            Some(i) => Range::Known(i),
+            None => Range::Unknown,
+        }
     }
 
     /// 実数だけの計算を使わない式にしたもの（テストで、結果を比べるのに使う）

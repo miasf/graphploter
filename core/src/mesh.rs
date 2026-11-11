@@ -35,6 +35,24 @@ pub struct Mesh {
     /// 粗い版の三角形の頂点番号（頂点は同じものを使う）。視点を動かしている間は、こちらを描いて軽くする。
     /// 三角形が少ないメッシュでは空（そのまま描く）
     pub lod: Vec<u32>,
+    /// 作るのにかかった時間の内訳（`lib.rs` の入口で記録する。メッシュを作る関数自体は 0 のまま）
+    pub stats: Stats,
+}
+
+/// メッシュを作るのにかかった時間の内訳（ミリ秒）
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Stats {
+    /// 式の計算（[`crate::timing`] で集めた時間）
+    pub eval_ms: f64,
+    /// 式の計算と粗い版を除いた、メッシュを作る時間（式の解析・射影を含む）
+    pub mesh_ms: f64,
+    /// 粗い版（`add_cluster_lod`）を作る時間
+    pub lod_ms: f64,
+    /// 式を計算した点の数
+    pub points: f64,
+    /// 陰関数（[`implicit_solid`]）のときだけ: 部分ごとの時間
+    /// [格子点での F の計算, 偽の交点と接する所の候補探し, セルの頂点, 辺の四角形と法線]（ほかは 0）
+    pub phases: [f64; 4],
 }
 
 /// 三角形がこれより多いメッシュには、視点を動かしている間に描く粗い版（[`Mesh::lod`]）を作る
@@ -422,7 +440,27 @@ fn find_jumps(
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
 ) -> std::collections::HashMap<usize, Jump> {
+    find_jumps_with(prog, us, vs, vals, hs, m, height, threshold, usable, true)
+}
+
+/// [`find_jumps`] の本体。`early_exit` が偽なら、途中で候補を外さない（テストで結果を比べるため）
+#[allow(clippy::too_many_arguments)]
+fn find_jumps_with(
+    prog: &Program,
+    us: &[f64],
+    vs: &[f64],
+    vals: &[C],
+    hs: &[f64],
+    m: usize,
+    height: &dyn Fn(C) -> f64,
+    threshold: f64,
+    usable: &dyn Fn(f64) -> bool,
+    early_exit: bool,
+) -> std::collections::HashMap<usize, Jump> {
     const ROUNDS: usize = 12;
+    // この回数だけ二分した後、差が最初の差の EARLY_KEEP 倍より小さい候補は外す
+    const EARLY_ROUND: usize = 3;
+    const EARLY_KEEP: f64 = 0.3;
     // 候補: 両端が使えて、高さの差が大きい辺
     struct Cand {
         id: usize,
@@ -461,7 +499,17 @@ fn find_jumps(
     let mut mu = vec![0.0; cands.len()];
     let mut mv = vec![0.0; cands.len()];
     let mut out = vec![C::new(0.0, 0.0); cands.len()];
-    for _ in 0..ROUNDS {
+    for round in 0..ROUNDS {
+        // 急なだけでなめらかな辺（z = x² − y² ではほとんどの辺が候補になる）は、二分すると差が縮んでいくので、
+        // 3 回二分した時点で差が最初の 0.3 倍より小さければ候補から外す（最後の判定は「0.5 倍より大きい」）。
+        // 段差のある辺は、二分しても差が縮まないので残る。差が有限でない（片側が定義されない）辺も、
+        // 最後の判定で外れるので、ここで外してよい
+        if early_exit && round == EARLY_ROUND {
+            cands.retain(|c| (height(c.fb) - height(c.fa)).abs() >= EARLY_KEEP * c.first);
+            mu.truncate(cands.len());
+            mv.truncate(cands.len());
+            out.truncate(cands.len());
+        }
         for (c, (a, b)) in cands.iter().zip(mu.iter_mut().zip(mv.iter_mut())) {
             let t = 0.5 * (c.ta + c.tb);
             *a = us[c.k0] + (us[c.k1] - us[c.k0]) * t;
@@ -544,6 +592,348 @@ pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
 /// そこで G(p) = max(min_r F, −max_r F) を作ると、領域の内側で G ≤ 0 になるので、G = 0 の面を作ればよい。
 /// min, max は、範囲をそれぞれ `samples` 等分した点での値から求める（近似）。
 pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize) -> Mesh {
+    implicit_solid_with(prog, dom, n, ranges, samples, false)
+}
+
+/// [`implicit_solid`] の本体。`all_blocks` なら区間演算を使わず、全部のブロックを「ある」にする（テストで比べるため）
+fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize, all_blocks: bool) -> Mesh {
+    // 表示範囲の外側に1マスずつ広げて計算する。Surface Nets 法は範囲の端で曲面が
+    // ギザギザに途切れるので、少しはみ出して作っておき、端は描画側で真っ直ぐ切り落とす。
+    let t_start = crate::timing::now_ms();
+    let n = n.max(2);
+    let mut dom = dom;
+    for ax in 0..3 {
+        let step = (dom.hi[ax] - dom.lo[ax]) / n as f64;
+        dom.lo[ax] -= step;
+        dom.hi[ax] += step;
+    }
+    let n = n + 2;
+    let m = n + 1; // 1辺の格子点の数
+
+    let combos = sample_combos(ranges, samples);
+    // 1. 格子を 1 辺 BLOCK マスのブロックに分け、区間演算で「曲面が無い」と分かったブロック（空のブロック）では
+    //    F を計算しない。あるブロックの格子点と、その周りの1点（隣の辺の傾き・接する所の判定に使う）で F を計算し、
+    //    f32 で保存する（[`SparseField`]）
+    let field = SparseField::build(prog, &combos, ranges, dom, n, all_blocks);
+    let idx = |i: usize, j: usize, k: usize| i + m * (j + m * k);
+
+    let t_field = crate::timing::now_ms();
+
+    // 1''. 符号は変わるが F = 0 になる点が無い辺（tan の極など、F が +∞ から −∞ へ飛ぶ所）。ここには面を張らない。
+    // 1'.  符号は変わらないが F = 0 に接している所（例: (x² + y² + z² − 1)² = 0）。
+    //      どちらも、あるブロックの中だけを調べる（空のブロックの辺は、区間演算が「F は 0 にならない」と保証する）。
+    //      ブロックごとに、値を周りの点ごと小さな配列に写してから調べる（1点ずつページを引かないように）
+    let mut sign_edges: Vec<SignEdge> = Vec::new();
+    let mut sign_ids: Vec<usize> = Vec::new();
+    let mut touch_cands: Vec<TouchCand> = Vec::new();
+    {
+        let mut buf = vec![f32::NAN; BLOCK_BUF * BLOCK_BUF * BLOCK_BUF];
+        let pt = |q: [usize; 3]| [0, 1, 2].map(|x| dom.at(x, q[x] as f64, n));
+        field.for_blocks(&mut buf, |buf, view, owned| {
+            for k in owned[2].clone() {
+                for j in owned[1].clone() {
+                    for i in owned[0].clone() {
+                        let q = [i, j, k];
+                        let l = view.at(q);
+                        for a in 0..3 {
+                            let st = view.strides[a];
+                            if q[a] + 1 >= m {
+                                continue;
+                            }
+                            let (f0, f1) = (buf[l], buf[l + st]);
+                            if (f0 < 0.0) != (f1 < 0.0) {
+                                if !f0.is_finite() || !f1.is_finite() {
+                                    continue;
+                                }
+                                // 安い判定: 同じ直線の上の隣の辺（p − e → p、q → q + e）の傾きと、この辺の傾きが同じ向きで、
+                                // 大きさも 4 倍以内なら、なめらかに 0 を横切っているだけなので調べない（ほとんどの辺はここで終わる）。
+                                // 奇数次の極（+∞ から −∞ へ飛ぶ）では、この辺の傾きが隣と逆向きになり、
+                                // 値が飛ぶ所では隣の傾きがほぼ 0 になるので、どちらもここを通らずに調べられる
+                                if q[a] >= 1 && q[a] + 2 < m {
+                                    let (fl, fr) = (buf[l - st], buf[l + 2 * st]);
+                                    let (sl, s, sr) = (f0 - fl, f1 - f0, fr - f1);
+                                    if sl * s > 0.0 && sr * s > 0.0 && s.abs() <= 4.0 * sl.abs().max(sr.abs()) {
+                                        continue;
+                                    }
+                                }
+                                let mut q1 = q;
+                                q1[a] += 1;
+                                sign_edges.push(SignEdge { p0: pt(q), p1: pt(q1), f0: f0 as f64, f1: f1 as f64 });
+                                sign_ids.push(3 * idx(i, j, k) + a);
+                            } else if ranges.is_empty() && q[a] >= 1 && q[a] + 2 <= n {
+                                let v = [buf[l - st], f0, f1, buf[l + 2 * st]];
+                                let around = || same_sign_around(|r| buf[view.at(r)], m, q, a);
+                                if let Some((s, outer)) = touch_candidate(v, around) {
+                                    touch_cands.push((3 * idx(i, j, k) + a, q, a, s, outer));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let not_zero: std::collections::HashSet<usize> = {
+        let mut sc = FieldScratch::default();
+        let flags = false_crossings(&mut |xyz| field_values_with(prog, &combos, xyz, &mut sc).to_vec(), &sign_edges);
+        sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+    };
+    let touch = if ranges.is_empty() { touch_search(prog, touch_cands, dom, n) } else { Default::default() };
+    let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
+    // 接するだけの辺を囲むセルに印を付ける。印の無いセル・辺は、接する所を調べずに済ませる
+    // （1つでも接する所があると全部のセルが遅い道を通る、ということにならないように）
+    let mut touch_cell = vec![false; if touch.is_empty() { 0 } else { n * n * n }];
+    for &id in touch.keys() {
+        let (a, mut q) = (id % 3, id / 3);
+        let mut p = [0; 3];
+        for x in p.iter_mut() {
+            *x = q % m;
+            q /= m;
+        }
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        for db in 0..2 {
+            for dc in 0..2 {
+                let mut s = p;
+                if s[b] < db || s[c] < dc {
+                    continue;
+                }
+                s[b] -= db;
+                s[c] -= dc;
+                if s.iter().all(|&x| x < n) {
+                    touch_cell[cell(s[0], s[1], s[2])] = true;
+                }
+            }
+        }
+    }
+    let marked = |i: usize, j: usize, k: usize| !touch_cell.is_empty() && touch_cell[cell(i, j, k)];
+    let t_touch = crate::timing::now_ms();
+
+    // 格子の辺 p → p + e_a の上で曲面と交わる位置 t（0〜1）と、F の符号（接するだけの所は None）。
+    // 接するだけの所は、印のあるセルに接する辺（near_touch）でだけ調べる
+    //    両端の値 f0, f1 を渡す版（cross_vals）と、格子から値を読む版（crossing）
+    let cross_vals = |f0: f32, f1: f32, p: [usize; 3], a: usize, near_touch: bool| -> Option<(f64, Option<bool>)> {
+        if !f0.is_finite() || !f1.is_finite() {
+            return None;
+        }
+        if (f0 < 0.0) != (f1 < 0.0) {
+            if !not_zero.is_empty() && not_zero.contains(&(3 * idx(p[0], p[1], p[2]) + a)) {
+                return None; // F が飛ぶだけで、0 になる点は無い
+            }
+            return Some(((f0 / (f0 - f1)) as f64, Some(f0 < 0.0)));
+        }
+        if !near_touch {
+            return None;
+        }
+        touch.get(&(3 * idx(p[0], p[1], p[2]) + a)).map(|&t| (t as f64, None))
+    };
+    let crossing = |p: [usize; 3], a: usize, near_touch: bool| {
+        let mut q = p;
+        q[a] += 1;
+        cross_vals(field.f(p), field.f(q), p, a, near_touch)
+    };
+
+    // 2. 曲面が通るセルに頂点を置く。位置は「辺の上で曲面と交わる点」の平均。
+    //    1つのセルを2枚以上の曲面が通るとき（近い曲面どうし）は、1つの頂点にまとめると曲面がくっつくので、
+    //    曲面ごとに頂点を分ける: 角のうち少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分け、
+    //    交わる辺はその少ないほうの符号の端の角の組に属させる（組ごとに曲面が1枚）。
+    //    接するだけの辺（符号が変わらない）は、まとめて1つの組にする。
+    //    cell_slots[vert[セル]][辺の番号] が、その辺に属する頂点
+    //
+    //    速くするため、格子点ごとの符号（1 で作ったもの）から、セルの8つの角の符号を1バイトにまとめる。
+    //    空のブロックのセルは見ない（区間演算が「曲面は無い」と保証する）。あるブロックごとに、値を小さな配列に
+    //    写してから見る（[`SparseField::for_blocks`]）
+    // セルの12本の辺の向き（0: x, 1: y, 2: z）
+    let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
+    let mut vert = vec![NONE; n * n * n];
+    let mut cell_slots: Vec<[u32; 12]> = Vec::new();
+    // 頂点を置いたセル（cell_slots と同じ順番）
+    let mut vert_cells: Vec<[usize; 3]> = Vec::new();
+    let mut mesh = Mesh::default();
+    let mut cbuf = vec![f32::NAN; BLOCK_BUF * BLOCK_BUF * BLOCK_BUF];
+    field.for_blocks(&mut cbuf, |buf, view, _| {
+    // セルの角 c の、data の中での位置のずれ
+    let [sx, sy, sz] = view.strides;
+    let corner_off: [usize; 8] = CORNERS.map(|d| d[0] * sx + d[1] * sy + d[2] * sz);
+    let cells = view.origin.map(|o| o..(o + BLOCK).min(n));
+    for k in cells[2].clone() {
+        for j in cells[1].clone() {
+            for i in cells[0].clone() {
+                let l = view.at([i, j, k]);
+                // セルの辺（角 base から向き a）の交わり。値はブロックの見え方から読む
+                let crossing = |base: [usize; 3], a: usize, near: bool| {
+                    let l0 = l + base[0] * sx + base[1] * sy + base[2] * sz;
+                    cross_vals(buf[l0], buf[l0 + view.strides[a]], [i + base[0], j + base[1], k + base[2]], a, near)
+                };
+                let mut mask = 0u8;
+                for (c, off) in corner_off.iter().enumerate() {
+                    mask |= ((buf[l + off] < 0.0) as u8) << c;
+                }
+                // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
+                let near_touch = marked(i, j, k);
+                if !near_touch && (mask == 0 || mask == 0xFF) {
+                    continue;
+                }
+                let corner_neg: [bool; 8] = std::array::from_fn(|c| mask >> c & 1 == 1);
+                let neg = mask.count_ones() as usize;
+                // 少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分ける
+                let minority = neg <= 4;
+                let mut group = [usize::MAX; 8];
+                let mut groups = 0;
+                for c in 0..8 {
+                    if corner_neg[c] != minority || group[c] != usize::MAX {
+                        continue;
+                    }
+                    // 角は8つなので、積む場所は固定の大きさで足りる（セルごとに Vec を作らない）
+                    let mut stack = [0usize; 8];
+                    let mut top = 1;
+                    stack[0] = c;
+                    group[c] = groups;
+                    while top > 0 {
+                        top -= 1;
+                        let x = stack[top];
+                        for [ca, cb] in EDGES {
+                            let y = if ca == x { cb } else if cb == x { ca } else { continue };
+                            if corner_neg[y] == minority && group[y] == usize::MAX {
+                                group[y] = groups;
+                                stack[top] = y;
+                                top += 1;
+                            }
+                        }
+                    }
+                    groups += 1;
+                }
+                // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
+                // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
+                let has_touch = near_touch
+                    && EDGES.iter().enumerate().any(|(e, &[ca, _])| {
+                        let a = edge_axis[e];
+                        let base = CORNERS[ca];
+                        matches!(crossing(base, a, true), Some((_, None)))
+                    });
+                if has_touch && groups > 0 {
+                    for g in group.iter_mut().filter(|g| **g != usize::MAX) {
+                        *g = 0;
+                    }
+                    groups = 1;
+                }
+                let touch_group = if groups > 0 { 0 } else { groups }; // 接するだけの辺の組
+                // 交わる辺ごとの組と、交わる点（セルの中の位置）。組ごとに足し合わせる
+                // （組は高々 8 個 + 接するだけの組。セルごとに Vec を作らないよう、固定の大きさにする）
+                let mut sums = [([0.0f64; 3], 0.0f64); 9];
+                let mut edge_group = [usize::MAX; 12];
+                for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
+                    let a = edge_axis[e];
+                    let base = CORNERS[ca];
+                    if let Some((t, sign)) = crossing(base, a, near_touch) {
+                        let g = match sign {
+                            Some(_) => group[if corner_neg[ca] == minority { ca } else { cb }],
+                            None => touch_group,
+                        };
+                        let mut q = [base[0] as f64, base[1] as f64, base[2] as f64];
+                        q[a] += t;
+                        edge_group[e] = g;
+                        let (sum, cnt) = &mut sums[g];
+                        for ax in 0..3 {
+                            sum[ax] += q[ax];
+                        }
+                        *cnt += 1.0;
+                    }
+                }
+                let mut ids = [NONE; 9];
+                for (g, (sum, cnt)) in sums.iter().enumerate().take(groups + 1) {
+                    if *cnt > 0.0 {
+                        let p = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
+                        ids[g] = mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
+                    }
+                }
+                if ids[..=groups].iter().all(|&v| v == NONE) {
+                    continue;
+                }
+                vert[cell(i, j, k)] = cell_slots.len() as u32;
+                cell_slots.push(edge_group.map(|g| if g == usize::MAX { NONE } else { ids[g] }));
+                vert_cells.push([i, j, k]);
+            }
+        }
+    }
+    });
+
+    let t_cells = crate::timing::now_ms();
+    // セルの中の辺の番号: 向き a、セルの角 (0/1) から見た始点の位置 base
+    let local_edge = |a: usize, base: [usize; 3]| -> usize {
+        EDGES
+            .iter()
+            .position(|&[ca, cb]| CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a)))
+            .unwrap_or(0)
+    };
+
+    // 3. 曲面と交わる格子の辺ごとに、周りの4セルの（その辺に属する）頂点を四角形でつなぐ
+    let mut touch_tris: Vec<u32> = Vec::new();
+    for a in 0..3 {
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        // 周りの4セル（b-c 平面で反時計回り）から見た、この辺の番号
+        let locals = [(1, 1), (0, 1), (0, 0), (1, 0)].map(|(db, dc)| {
+            let mut base = [0; 3];
+            base[b] = db;
+            base[c] = dc;
+            local_edge(a, base)
+        });
+        // 四角形を作るのは、周りの4セルすべてに頂点がある辺だけ。そこで、頂点を置いたセルごとに、
+        // そのセルが周りの4セルのうち (0, 0) の位置にある辺（セルの最小の角から向き a に出る辺）だけを見る
+        for &p in &vert_cells {
+            {
+                {
+                    // 辺 p → p + e_a。周りの4セルが全部格子内にある辺だけを見る（p[a] < n, p[b] < n, p[c] < n は満たしている）
+                    if p[b] == 0 || p[c] == 0 {
+                        continue;
+                    }
+                    // 符号の変わらない辺は、周りの4セルのどれかに印があるときだけ接する所を調べる
+                    let near_touch = !touch_cell.is_empty()
+                        && [(1, 1), (0, 1), (0, 0), (1, 0)].iter().any(|&(db, dc)| {
+                            let mut s = p;
+                            s[b] -= db;
+                            s[c] -= dc;
+                            marked(s[0], s[1], s[2])
+                        });
+                    let Some((_, sign)) = crossing(p, a, near_touch) else { continue };
+                    let mut around = [NONE; 4];
+                    for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)].iter().zip(locals).enumerate() {
+                        let mut s = p;
+                        s[b] -= db;
+                        s[c] -= dc;
+                        let slot = vert[cell(s[0], s[1], s[2])];
+                        if slot != NONE {
+                            around[q] = cell_slots[slot as usize][le];
+                        }
+                    }
+                    if around.contains(&NONE) {
+                        continue;
+                    }
+                    let [q0, q1, q2, q3] = around;
+                    match sign {
+                        // 法線が F の増える向きを向くように三角形の向きを決める
+                        Some(true) => mesh.indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]),
+                        Some(false) => mesh.indices.extend_from_slice(&[q0, q2, q1, q0, q3, q2]),
+                        // 接するだけの所は、後で向きをそろえる
+                        None => touch_tris.extend_from_slice(&[q0, q1, q2, q0, q2, q3]),
+                    }
+                }
+            }
+        }
+    }
+    if !touch_tris.is_empty() {
+        orient_consistently(&mesh.positions, &mut touch_tris);
+        mesh.indices.extend_from_slice(&touch_tris);
+    }
+
+    compute_normals(&mut mesh);
+    let t_end = crate::timing::now_ms();
+    mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
+    mesh
+}
+
+/// 速くする前の [`implicit_solid`]（テストで、出力が完全に同じことを確かめる）
+#[cfg(test)]
+fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize) -> Mesh {
     // 表示範囲の外側に1マスずつ広げて計算する。Surface Nets 法は範囲の端で曲面が
     // ギザギザに途切れるので、少しはみ出して作っておき、端は描画側で真っ直ぐ切り落とす。
     let n = n.max(2);
@@ -793,6 +1183,403 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
     mesh
 }
 
+/// 陰関数の格子のブロックの1辺のマス数
+const BLOCK: usize = 8;
+/// あるブロックの割合がこれを超えたら、ブロックごとの区間演算をやめて全部を「ある」にする（区間演算の時間が無駄になるため）
+const DENSE_FRACTION: f64 = 0.6;
+
+/// 陰関数の格子点での F の値を、要る所だけ持つもの（[`implicit_solid`] の 1）。
+///
+/// 格子（n マス、格子点は m = n + 1 個ずつ）を 1 辺 BLOCK マスのブロックに分け、区間演算で
+/// 「箱の上で F は 0 にならない」と分かったブロックを空にする。値は、あるブロックの格子点と、その周りの1点
+/// （隣の辺の傾き・接する所の判定に使う）だけで計算し、格子点 8 × 8 × 8 個ずつの「ページ」に分けて持つ。
+/// 区間演算が使えない式は、全部のブロックが「ある」になるだけで、同じ道を通る
+struct SparseField {
+    /// 1辺の格子点の数
+    m: usize,
+    /// 1辺のブロックの数と、ブロックごとの「ある」
+    nb: usize,
+    occupied: Vec<bool>,
+    /// 1辺のページの数と、ページの番号 → 値の置き場所（NONE なら持っていない）
+    np: usize,
+    pages: Vec<u32>,
+    /// 値。ページごとに 512 個ずつ。
+    /// 全部のブロックがあるとき（dense）は、ページに分けずに格子点の番号 i + m (j + m k) の順に持つ
+    /// （値を読むたびにページを引かずに済む）
+    vals: Vec<f32>,
+    dense: bool,
+}
+
+/// 1ページの格子点の数（8 × 8 × 8）
+const PAGE: usize = 512;
+/// ブロックの値の見え方（[`SparseField::for_blocks`]）。格子点 q の値は `data[v.at(q)]`
+#[derive(Clone, Copy)]
+struct BlockView {
+    /// ブロックの最小の角
+    origin: [usize; 3],
+    /// data の中で、最小の角の 1 点手前（origin − (1, 1, 1)）の位置（足し算は桁あふれを許す）
+    base: usize,
+    /// y, z の向きに 1 進んだときの、data の中での位置のずれ
+    strides: [usize; 3],
+}
+
+impl BlockView {
+    #[inline]
+    fn at(&self, q: [usize; 3]) -> usize {
+        let [sx, sy, sz] = self.strides;
+        self.base
+            .wrapping_add((q[0] + 1 - self.origin[0]) * sx)
+            .wrapping_add((q[1] + 1 - self.origin[1]) * sy)
+            .wrapping_add((q[2] + 1 - self.origin[2]) * sz)
+    }
+}
+
+/// ブロックごとに値を写す小さな配列の1辺（ブロックの 1 点手前から 1 + BLOCK + 3 点。辺の先の 2 点まで届く）
+const BLOCK_BUF: usize = BLOCK + 4;
+
+impl SparseField {
+    fn build(prog: &Program, combos: &[Vec<f64>], ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool) -> SparseField {
+        let m = n + 1;
+        let nb = n.div_ceil(BLOCK);
+        let occupied = if all_blocks { vec![true; nb * nb * nb] } else { block_occupancy(prog, ranges, dom, n, nb) };
+        let np = m.div_ceil(8);
+        let mut field =
+            SparseField { m, nb, occupied, np, pages: Vec::new(), vals: Vec::new(), dense: false };
+        // 全部のブロックがあるなら、密な格子にする（層ごとにまとめて計算する。速くする前と同じ）
+        if field.occupied.iter().all(|&o| o) {
+            field.dense = true;
+            field.vals = vec![0.0; m * m * m];
+            let mut xs = Vec::with_capacity(m * m);
+            let mut ys = Vec::with_capacity(m * m);
+            for j in 0..m {
+                for i in 0..m {
+                    xs.push(dom.at(0, i as f64, n));
+                    ys.push(dom.at(1, j as f64, n));
+                }
+            }
+            let mut zs = vec![0.0; m * m];
+            let mut scratch = FieldScratch::default();
+            for k in 0..m {
+                zs.fill(dom.at(2, k as f64, n));
+                let vals = field_values_with(prog, combos, [&xs, &ys, &zs], &mut scratch);
+                for (dst, &v) in field.vals[k * m * m..(k + 1) * m * m].iter_mut().zip(vals) {
+                    *dst = v as f32;
+                }
+            }
+            return field;
+        }
+        field.pages = vec![NONE; np * np * np];
+        // 要る格子点: あるブロックのセルの角と、その周りの1点
+        let all = false;
+        let mut need: Vec<bool> = Vec::new();
+        for bk in 0..nb {
+            for bj in 0..nb {
+                for bi in 0..nb {
+                    if !field.occupied[bi + nb * (bj + nb * bk)] {
+                        continue;
+                    }
+                    let span = |b: usize| (BLOCK * b).saturating_sub(1)..=(BLOCK * (b + 1)).min(n).saturating_add(1).min(m - 1);
+                    let (si, sj, sk) = (span(bi), span(bj), span(bk));
+                    // ページを用意する
+                    for pk in (*sk.start() / 8)..=(*sk.end() / 8) {
+                        for pj in (*sj.start() / 8)..=(*sj.end() / 8) {
+                            for pi in (*si.start() / 8)..=(*si.end() / 8) {
+                                let slot = &mut field.pages[pi + np * (pj + np * pk)];
+                                if *slot == NONE {
+                                    *slot = (field.vals.len() / PAGE) as u32;
+                                    field.vals.resize(field.vals.len() + PAGE, f32::NAN);
+                                    need.resize(field.vals.len(), all);
+                                }
+                            }
+                        }
+                    }
+                    if all {
+                        continue; // 全部のブロックがあるなら、格子の点は全部要る
+                    }
+                    // x の向きにはページの中で続いているので、まとめて印を付ける
+                    for k in sk.clone() {
+                        for j in sj.clone() {
+                            let mut i = *si.start();
+                            while i <= *si.end() {
+                                let run = (8 - (i & 7)).min(si.end() + 1 - i);
+                                let at = field.at([i, j, k]);
+                                need[at..at + run].fill(true);
+                                i += run;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 要る格子点で、まとめて F を計算する（1回に数万点ずつ）
+        const CHUNK_POINTS: usize = 1 << 15;
+        let mut spots: Vec<usize> = Vec::with_capacity(CHUNK_POINTS);
+        let mut cols: [Vec<f64>; 3] = Default::default();
+        let mut scratch = FieldScratch::default();
+        // 軸ごとの格子点の座標
+        let coord: [Vec<f64>; 3] = [0, 1, 2].map(|ax| (0..m).map(|q| dom.at(ax, q as f64, n)).collect());
+        let mut flush = |spots: &mut Vec<usize>, cols: &mut [Vec<f64>; 3], field: &mut SparseField| {
+            if spots.is_empty() {
+                return;
+            }
+            let vals = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut scratch);
+            for (&at, &v) in spots.iter().zip(vals) {
+                field.vals[at] = v as f32;
+            }
+            spots.clear();
+            for c in cols.iter_mut() {
+                c.clear();
+            }
+        };
+        for pk in 0..np {
+            for pj in 0..np {
+                for pi in 0..np {
+                    let slot = field.pages[pi + np * (pj + np * pk)];
+                    if slot == NONE {
+                        continue;
+                    }
+                    for l in 0..PAGE {
+                        let at = slot as usize * PAGE + l;
+                        let q = [8 * pi + (l & 7), 8 * pj + ((l >> 3) & 7), 8 * pk + (l >> 6)];
+                        if !need[at] || q.iter().any(|&x| x >= m) {
+                            continue;
+                        }
+                        spots.push(at);
+                        for ax in 0..3 {
+                            cols[ax].push(coord[ax][q[ax]]);
+                        }
+                        if spots.len() == CHUNK_POINTS {
+                            flush(&mut spots, &mut cols, &mut field);
+                        }
+                    }
+                }
+            }
+        }
+        flush(&mut spots, &mut cols, &mut field);
+        field
+    }
+
+    /// 格子点 q の値の置き場所（持っていなければ usize::MAX）
+    #[inline]
+    fn at(&self, q: [usize; 3]) -> usize {
+        if self.dense {
+            return q[0] + self.m * (q[1] + self.m * q[2]);
+        }
+        let slot = self.pages[(q[0] >> 3) + self.np * ((q[1] >> 3) + self.np * (q[2] >> 3))];
+        if slot == NONE {
+            return usize::MAX;
+        }
+        slot as usize * PAGE + (q[0] & 7) + 8 * ((q[1] & 7) + 8 * (q[2] & 7))
+    }
+
+    /// 格子点 q での F の値（持っていない点は NaN。あるブロックの角とその周りの1点は必ず持っている）
+    #[inline]
+    fn f(&self, q: [usize; 3]) -> f32 {
+        match self.at(q) {
+            usize::MAX => f32::NAN,
+            at => self.vals[at],
+        }
+    }
+
+    /// あるブロックごとに、`visit(data, view, 受け持つ格子点の範囲)` を呼ぶ。格子点 q の値は `data[view.at(q)]` で、
+    /// ブロックの格子点とその周り（最小の角の 1 点手前から 2 点先まで）が読める（格子の外・持っていない点は NaN）。
+    /// 密な格子なら全体の配列をそのまま渡し、ページに分けて持っているなら `buf`（BLOCK_BUF³ 個）に写して渡す。
+    /// 受け持つ格子点は、ブロックの最小の角の側の点（最後のブロックは格子の端まで）。格子の辺 p → p + e は、
+    /// 始点 p を受け持つブロックが調べる
+    fn for_blocks(&self, buf: &mut [f32], mut visit: impl FnMut(&[f32], BlockView, [std::ops::Range<usize>; 3])) {
+        let nb = self.nb;
+        let m = self.m;
+        for bk in 0..nb {
+            for bj in 0..nb {
+                for bi in 0..nb {
+                    if !self.occupied[bi + nb * (bj + nb * bk)] {
+                        continue;
+                    }
+                    let b = [bi, bj, bk];
+                    let origin = b.map(|x| BLOCK * x);
+                    let owned = b.map(|x| BLOCK * x..if x + 1 == nb { m } else { BLOCK * (x + 1) });
+                    if self.dense {
+                        // 全体の配列で、origin − (1, 1, 1) の位置（負になることがあるので、桁あふれを許して計算する）
+                        let strides = [1, m, m * m];
+                        let base = (origin[0] + m * (origin[1] + m * origin[2])).wrapping_sub(1 + m + m * m);
+                        visit(&self.vals, BlockView { origin, base, strides }, owned);
+                        continue;
+                    }
+                    // 値を写す（x の向きに続く所はまとめて写す）
+                    for lk in 0..BLOCK_BUF {
+                        for lj in 0..BLOCK_BUF {
+                            let row = &mut buf[BLOCK_BUF * (lj + BLOCK_BUF * lk)..][..BLOCK_BUF];
+                            let (j, k) = ((origin[1] + lj).wrapping_sub(1), (origin[2] + lk).wrapping_sub(1));
+                            if j >= m || k >= m {
+                                row.fill(f32::NAN);
+                                continue;
+                            }
+                            let mut li = 0;
+                            while li < BLOCK_BUF {
+                                let i = (origin[0] + li).wrapping_sub(1);
+                                if i >= m {
+                                    row[li] = f32::NAN;
+                                    li += 1;
+                                    continue;
+                                }
+                                // 同じページの中で続く点の数
+                                let run = (8 - (i & 7)).min(m - i).min(BLOCK_BUF - li);
+                                match self.at([i, j, k]) {
+                                    usize::MAX => row[li..li + run].fill(f32::NAN),
+                                    at => row[li..li + run].copy_from_slice(&self.vals[at..at + run]),
+                                }
+                                li += run;
+                            }
+                        }
+                    }
+                    visit(buf, BlockView { origin, base: 0, strides: [1, BLOCK_BUF, BLOCK_BUF * BLOCK_BUF] }, owned);
+                }
+            }
+        }
+    }
+
+    /// 値を持っている格子点の数（テスト・ベンチマーク用）
+    #[cfg(test)]
+    fn stored(&self) -> usize {
+        self.vals.len()
+    }
+}
+
+/// ブロックごとに、F = 0 の曲面があるかもしれないか（区間演算で 0 を含むか。分からなければ「ある」）。
+/// 範囲で重ねた立体は、箱 × 重ねる変数の範囲で調べる（0 ∉ F(B × R) なら G = max(min F, −max F) > 0 で境界は無い）。
+/// まず 2 ブロックおき（各軸で1つおき）のブロックで割合を見積もり、DENSE_FRACTION を超えたら全部を「ある」にする
+fn block_occupancy(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, nb: usize) -> Vec<bool> {
+    use crate::interval::Interval;
+    if !prog.supports_interval() {
+        return vec![true; nb * nb * nb];
+    }
+    let extra: Vec<Interval> = ranges.iter().map(|&(a, b)| Interval::new(a.min(b), a.max(b))).collect();
+    // セル [c0, c1) の箱で 0 を含むかもしれないか
+    let may_cross = |c0: [usize; 3], c1: [usize; 3]| {
+        let mut boxes: Vec<Interval> = (0..3)
+            .map(|ax| {
+                let (a, b) = (dom.at(ax, c0[ax] as f64, n), dom.at(ax, c1[ax].min(n) as f64, n));
+                Interval::new(a.min(b), a.max(b))
+            })
+            .collect();
+        boxes.extend_from_slice(&extra);
+        prog.eval_interval(&boxes).may_contain_zero()
+    };
+    // まず 2 ブロックおき（各軸で1つおき。全体の 1/8）のブロックで、あるブロックの割合を見積もる
+    let id = |b: [usize; 3]| b[0] + nb * (b[1] + nb * b[2]);
+    let test = |b: [usize; 3]| {
+        let c0 = b.map(|x| BLOCK * x);
+        may_cross(c0, c0.map(|c| c + BLOCK))
+    };
+    let mut occupied = vec![false; nb * nb * nb];
+    let mut known = vec![false; nb * nb * nb];
+    let (mut sampled, mut hit) = (0usize, 0usize);
+    for bk in (0..nb).step_by(2) {
+        for bj in (0..nb).step_by(2) {
+            for bi in (0..nb).step_by(2) {
+                let b = [bi, bj, bk];
+                let o = test(b);
+                occupied[id(b)] = o;
+                known[id(b)] = true;
+                sampled += 1;
+                hit += o as usize;
+            }
+        }
+    }
+    if hit as f64 > DENSE_FRACTION * sampled as f64 {
+        return vec![true; nb * nb * nb];
+    }
+    for bk in 0..nb {
+        for bj in 0..nb {
+            for bi in 0..nb {
+                let b = [bi, bj, bk];
+                if !known[id(b)] {
+                    occupied[id(b)] = test(b);
+                }
+            }
+        }
+    }
+    occupied
+}
+
+/// 両端で F の符号が違う格子の辺（[`false_crossings`] に渡す）
+struct SignEdge {
+    /// 両端の座標
+    p0: [f64; 3],
+    p1: [f64; 3],
+    /// 両端の F の値（符号が違う）
+    f0: f64,
+    f1: f64,
+}
+
+/// 符号の変わる辺のうち、F = 0 になる点が無いもの（F が +∞ から −∞ へ飛ぶ極や、値が飛ぶ所）を探す。
+/// 戻り値は辺ごとに「零点ではない」なら true。`eval` は点の列 (x, y, z) での F の値。
+///
+/// 1. 直線で補間した交点 t* = f₀/(f₀ − f₁) で F を計算し、|F(t*)| ≤ 0.25 min(|f₀|, |f₁|) なら本当の零点
+///    （ほとんどの辺はここで終わる）
+/// 2. 残った辺は、符号の変わる側を残す二分を 6 回行う。本当の零点なら、区間が 1/64 になると両端の |F| も
+///    縮む（なめらかなら約 1/64）。最後の両端の値 f_a, f_b が |f_a| + |f_b| ≥ 0.5 (|f₀| + |f₁|)（縮まなかった）なら
+///    「零点ではない」。途中で値が有限でなくなった辺も「零点ではない」
+///    （両端の小さいほうの値だけで比べると、零点が辺の端のすぐ近くにあるとき、端の値が変わらないので見誤る）
+///
+/// 計算は、全部の辺をまとめて行う
+fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignEdge]) -> Vec<bool> {
+    const ROUNDS: usize = 6;
+    let mut result = vec![false; edges.len()];
+    if edges.is_empty() {
+        return result;
+    }
+    let at = |e: &SignEdge, t: f64| [0, 1, 2].map(|x| e.p0[x] + (e.p1[x] - e.p0[x]) * t);
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    let fill = |cols: &mut [Vec<f64>; 3], pts: &mut dyn Iterator<Item = [f64; 3]>| {
+        for c in cols.iter_mut() {
+            c.clear();
+        }
+        for q in pts {
+            for x in 0..3 {
+                cols[x].push(q[x]);
+            }
+        }
+    };
+    // 1. 直線で補間した交点
+    fill(&mut cols, &mut edges.iter().map(|e| at(e, e.f0 / (e.f0 - e.f1))));
+    let v = eval([&cols[0], &cols[1], &cols[2]]);
+    // 残った辺: (辺の番号, ta, tb, fa, fb)
+    let mut rest: Vec<(usize, f64, f64, f64, f64)> = edges
+        .iter()
+        .enumerate()
+        .filter(|&(k, e)| !(v[k].abs() <= 0.25 * e.f0.abs().min(e.f1.abs())))
+        .map(|(k, e)| (k, 0.0, 1.0, e.f0, e.f1))
+        .collect();
+    // 2. 二分
+    for _ in 0..ROUNDS {
+        if rest.is_empty() {
+            break;
+        }
+        fill(&mut cols, &mut rest.iter().map(|&(k, ta, tb, _, _)| at(&edges[k], 0.5 * (ta + tb))));
+        let v = eval([&cols[0], &cols[1], &cols[2]]);
+        rest = rest
+            .into_iter()
+            .zip(v)
+            .filter_map(|((k, ta, tb, fa, fb), fm)| {
+                if !fm.is_finite() {
+                    result[k] = true;
+                    return None;
+                }
+                let t = 0.5 * (ta + tb);
+                Some(if (fm < 0.0) != (fa < 0.0) { (k, ta, t, fa, fm) } else { (k, t, tb, fm, fb) })
+            })
+            .collect();
+    }
+    for (k, _, _, fa, fb) in rest {
+        let e = &edges[k];
+        if fa.abs() + fb.abs() >= 0.5 * (e.f0.abs() + e.f1.abs()) {
+            result[k] = true;
+        }
+    }
+    result
+}
+
 /// 符号が変わらずに F = 0 に接している所を、格子の辺ごとに探す。
 /// 戻り値は 辺の番号（3 × 始点の番号 + 向き）→ 辺の上の位置 t（0〜1）。
 ///
@@ -801,43 +1588,69 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
 /// 三分探索で極小の位置を求め、その値がほぼ 0 なら「接している」とみなす。
 /// ただし、辺を囲む4つのセルの角に符号の変わる所があれば、符号の変わる曲面が通っているので候補にしない
 /// （`same_sign_around`。三分探索の前に外しても、結果は最後に外すのと同じ）。
+#[cfg(test)]
 fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collections::HashMap<usize, f32> {
-    const ROUNDS: usize = 16;
+    touch_search(prog, touch_candidates_dense(f, n), dom, n)
+}
+
+/// 接する所の候補: (辺の番号, 始点 p, 向き a, F の符号, 外側の |F| の平均)
+type TouchCand = (usize, [usize; 3], usize, f64, f64);
+
+/// 4 点 p − e, p, p + e, p + 2e の値 v から、辺 p → p + e が接する所の候補になるか（なるなら (F の符号, 外側の |F| の平均)）。
+/// `around` は辺を囲む4セルの角の符号がそろっているか（[`same_sign_around`]。必要なときだけ呼ぶ）
+fn touch_candidate(v: [f32; 4], around: impl FnOnce() -> bool) -> Option<(f64, f64)> {
+    // まず安い判定: 内側の2点が外側より 0 に近い（ほとんどの辺はここで終わる）
+    if !(v[1].abs() < v[0].abs() && v[2].abs() < v[3].abs()) {
+        return None;
+    }
+    if v.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    // 4点とも同じ側（0 は内側の2点だけ許す）
+    let s = v[0].signum();
+    if v[0] == 0.0 || v[3] * s <= 0.0 || v[1] * s < 0.0 || v[2] * s < 0.0 {
+        return None;
+    }
+    let g = v.map(|x| x.abs() as f64);
+    (g[1] + g[2] < 0.25 * (g[0] + g[3]) && around()).then_some((s as f64, 0.5 * (g[0] + g[3])))
+}
+
+/// 接する所の候補を、密な格子（全部の格子点の値 f）から集める（速くする前の版との比較用）
+#[cfg(test)]
+fn touch_candidates_dense(f: &[f32], n: usize) -> Vec<TouchCand> {
     let m = n + 1;
     let idx = |p: [usize; 3]| p[0] + m * (p[1] + m * p[2]);
-    // 候補: (辺の番号, 始点 p, 向き a, F の符号, 外側の |F| の平均)
-    let mut cands: Vec<(usize, [usize; 3], usize, f64, f64)> = Vec::new();
+    let mut cands: Vec<TouchCand> = Vec::new();
     for a in 0..3 {
         let stride = [1, m, m * m][a];
         for k in 0..m {
             for j in 0..m {
-                for i in 0..m {
-                    let p = [i, j, k];
-                    if p[a] < 1 || p[a] + 2 > n {
-                        continue;
-                    }
-                    let c = idx(p);
-                    let v = [f[c - stride], f[c], f[c + stride], f[c + 2 * stride]];
-                    // まず安い判定: 内側の2点が外側より 0 に近い
-                    if !(v[1].abs() < v[0].abs() && v[2].abs() < v[3].abs()) {
-                        continue;
-                    }
-                    if v.iter().any(|x| !x.is_finite()) {
-                        continue;
-                    }
-                    // 4点とも同じ側（0 は内側の2点だけ許す）
-                    let s = v[0].signum();
-                    if v[0] == 0.0 || v[3] * s <= 0.0 || v[1] * s < 0.0 || v[2] * s < 0.0 {
-                        continue;
-                    }
-                    let g = v.map(|x| x.abs() as f64);
-                    if g[1] + g[2] < 0.25 * (g[0] + g[3]) && same_sign_around(f, m, p, a) {
-                        cands.push((3 * c + a, p, a, s as f64, 0.5 * (g[0] + g[3])));
+                // 辺の始点 p は 1 ≤ p[a] ≤ n − 2。y, z の向きなら行ごと飛ばし、x の向きなら i の範囲を狭める
+                let (lo, hi) = match a {
+                    0 => (1, n - 1),
+                    1 if (1..n - 1).contains(&j) => (0, m),
+                    2 if (1..n - 1).contains(&k) => (0, m),
+                    _ => continue,
+                };
+                let row = m * (j + m * k);
+                // 4 点 p − e, p, p + e, p + 2e の値の列（連続した場所を順に読む）
+                let cols = [-1isize, 0, 1, 2].map(|d| &f[(row as isize + d * stride as isize) as usize + lo..][..hi - lo]);
+                for (off, (((&w0, &w1), &w2), &w3)) in cols[0].iter().zip(cols[1]).zip(cols[2]).zip(cols[3]).enumerate() {
+                    let p = [lo + off, j, k];
+                    let get = |q: [usize; 3]| f[idx(q)];
+                    if let Some((s, outer)) = touch_candidate([w0, w1, w2, w3], || same_sign_around(get, m, p, a)) {
+                        cands.push((3 * idx(p) + a, p, a, s, outer));
                     }
                 }
             }
         }
     }
+    cands
+}
+
+/// 接する所の候補を三分探索で確かめる（[`find_touches`] を参照）
+fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) -> std::collections::HashMap<usize, f32> {
+    const ROUNDS: usize = 16;
     if cands.is_empty() {
         return Default::default();
     }
@@ -901,7 +1714,7 @@ fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collec
 /// 辺 p → p + e_a を囲む4つのセルの角（合わせて 18 個の格子点）の符号が、すべて同じか。
 /// 符号の変わる角が近くにあれば、そこは符号の変わる曲面が通っている（例: 格子の平面にちょうど接する球の極）ので、
 /// 接するだけの所として扱わない。格子の外の点と、有限でない点は見ない。
-fn same_sign_around(f: &[f32], m: usize, p: [usize; 3], a: usize) -> bool {
+fn same_sign_around(f: impl Fn([usize; 3]) -> f32, m: usize, p: [usize; 3], a: usize) -> bool {
     let (b, c) = ((a + 1) % 3, (a + 2) % 3);
     let mut sign = None;
     for da in 0..2 {
@@ -914,7 +1727,7 @@ fn same_sign_around(f: &[f32], m: usize, p: [usize; 3], a: usize) -> bool {
                 if q.iter().any(|&x| x < 0 || x >= m as i64) {
                     continue;
                 }
-                let v = f[q[0] as usize + m * (q[1] as usize + m * q[2] as usize)];
+                let v = f([q[0] as usize, q[1] as usize, q[2] as usize]);
                 if !v.is_finite() {
                     continue;
                 }
@@ -1003,33 +1816,57 @@ fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
 
 /// 点 (xs, ys, zs) での F の値。範囲で重ねる立体なら G = max(min F, −max F)（[`implicit_solid`] を参照）。
 /// `combos` は範囲で動かす変数の値の組（[`sample_combos`]）。範囲が無ければ `[[]]`
-fn field_values(prog: &Program, combos: &[Vec<f64>], [xs, ys, zs]: [&[f64]; 3]) -> Vec<f64> {
+fn field_values(prog: &Program, combos: &[Vec<f64>], xyz: [&[f64]; 3]) -> Vec<f64> {
+    field_values_with(prog, combos, xyz, &mut FieldScratch::default()).to_vec()
+}
+
+/// [`field_values`] の作業用の配列（層ごとに作り直さず、使い回す）
+#[derive(Default)]
+struct FieldScratch {
+    out: Vec<C>,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+    extra: Vec<Vec<f64>>,
+    result: Vec<f64>,
+}
+
+/// [`field_values`] と同じ値を、作業用の配列 `sc` を使い回して計算する（結果は `sc` の中）
+fn field_values_with<'a>(prog: &Program, combos: &[Vec<f64>], [xs, ys, zs]: [&[f64]; 3], sc: &'a mut FieldScratch) -> &'a [f64] {
     let len = xs.len();
-    let mut out = vec![C::new(0.0, 0.0); len];
+    sc.out.resize(len, C::new(0.0, 0.0));
+    sc.result.clear();
     if combos.len() == 1 && combos[0].is_empty() {
-        prog.eval_batch(&[xs, ys, zs], &mut out);
-        return out.iter().map(|v| as_real(*v)).collect();
+        prog.eval_batch(&[xs, ys, zs], &mut sc.out);
+        sc.result.extend(sc.out.iter().map(|v| as_real(*v)));
+        return &sc.result;
     }
     // 範囲の各点で F を計算して、最小値と最大値をとる
-    let mut lo = vec![f64::INFINITY; len];
-    let mut hi = vec![f64::NEG_INFINITY; len];
-    let mut extra = vec![vec![0.0; len]; combos.first().map_or(0, |c| c.len())];
+    sc.lo.clear();
+    sc.lo.resize(len, f64::INFINITY);
+    sc.hi.clear();
+    sc.hi.resize(len, f64::NEG_INFINITY);
+    sc.extra.resize(combos.first().map_or(0, |c| c.len()), Vec::new());
+    for arr in sc.extra.iter_mut() {
+        arr.resize(len, 0.0);
+    }
     for combo in combos {
-        for (arr, &v) in extra.iter_mut().zip(combo) {
+        for (arr, &v) in sc.extra.iter_mut().zip(combo) {
             arr.fill(v);
         }
         let mut inputs: Vec<&[f64]> = vec![xs, ys, zs];
-        inputs.extend(extra.iter().map(|a| a.as_slice()));
-        prog.eval_batch(&inputs, &mut out);
+        inputs.extend(sc.extra.iter().map(|a| a.as_slice()));
+        prog.eval_batch(&inputs, &mut sc.out);
         for p in 0..len {
-            let v = as_real(out[p]);
+            let v = as_real(sc.out[p]);
             if v.is_finite() {
-                lo[p] = lo[p].min(v);
-                hi[p] = hi[p].max(v);
+                sc.lo[p] = sc.lo[p].min(v);
+                sc.hi[p] = sc.hi[p].max(v);
             }
         }
     }
-    (0..len).map(|p| if lo[p].is_finite() { lo[p].max(-hi[p]) } else { f64::NAN }).collect()
+    let (lo, hi) = (&sc.lo, &sc.hi);
+    sc.result.extend((0..len).map(|p| if lo[p].is_finite() { lo[p].max(-hi[p]) } else { f64::NAN }));
+    &sc.result
 }
 
 /// 陰関数・範囲で重ねた立体の「中身」。切り口のふたを作るのに使う
@@ -1703,6 +2540,37 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
         prog.eval_batch(&[&xs, &ys, &zs], &mut out);
     }
     let f: Vec<f64> = out.iter().map(|v| as_real(*v)).collect();
+    // 符号は変わるが F = 0 になる点が無い辺（tan(x) = y の極の縦線など。[`false_crossings`]）。
+    // 辺の番号は 2 × 小さいほうの格子点 + (縦なら 1)
+    let not_zero: std::collections::HashSet<usize> = {
+        let mut ids = Vec::new();
+        let mut edges = Vec::new();
+        for k in 0..m * m {
+            let (i, j) = (k % m, k / m);
+            for (dir, k1) in [(0, (i + 1 < m).then_some(k + 1)), (1, (j + 1 < m).then_some(k + m))] {
+                let Some(k1) = k1 else { continue };
+                let (f0, f1) = (f[k], f[k1]);
+                if (f0 < 0.0) != (f1 < 0.0) && f0.is_finite() && f1.is_finite() {
+                    edges.push(SignEdge { p0: [xs[k], ys[k], 0.0], p1: [xs[k1], ys[k1], 0.0], f0, f1 });
+                    ids.push(2 * k + dir);
+                }
+            }
+        }
+        let two = prog.vars().len() == 2;
+        let mut buf = Vec::new();
+        let mut eval = |[x, y, z]: [&[f64]; 3]| {
+            buf.resize(x.len(), C::new(0.0, 0.0));
+            if two {
+                prog.eval_batch(&[x, y], &mut buf);
+            } else {
+                prog.eval_batch(&[x, y, z], &mut buf);
+            }
+            buf.iter().map(|v| as_real(*v)).collect()
+        };
+        let flags = false_crossings(&mut eval, &edges);
+        ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+    };
+    let edge_id = |ka: usize, kb: usize| 2 * ka.min(kb) + (ka.abs_diff(kb) == m) as usize;
     let mut pts: Vec<f32> = Vec::new();
     for j in 0..n {
         for i in 0..n {
@@ -1717,8 +2585,11 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
             for e in 0..4 {
                 let (a, b) = (e, (e + 1) % 4);
                 if (v[a] < 0.0) != (v[b] < 0.0) {
-                    let t = v[a] / (v[a] - v[b]);
                     let (ka, kb) = (ks[a], ks[b]);
+                    if !not_zero.is_empty() && not_zero.contains(&edge_id(ka, kb)) {
+                        continue; // F が飛ぶだけで、0 になる点は無い
+                    }
+                    let t = v[a] / (v[a] - v[b]);
                     cross.push([xs[ka] + (xs[kb] - xs[ka]) * t, ys[ka] + (ys[kb] - ys[ka]) * t]);
                 }
             }
@@ -1994,6 +2865,44 @@ mod tests {
         assert!(m.positions.chunks_exact(3).all(|q| (q[2] - q[1]).abs() < 1e-6));
     }
 
+    /// `explicit_surface_full` と同じ入力で `find_jumps_with` を呼び、(辺の番号, 位置 t) を番号順に並べたもの
+    fn jumps_of(src: &str, early_exit: bool) -> Vec<(usize, f64)> {
+        let p = prog(src, &["x", "y"]);
+        // 範囲を少しずらして、極 x = 0 が格子の点にも二分の点にもならないようにする
+        // （値が有限でない点を踏むと、その辺は段差とみなされない）
+        let dom = Domain { lo: [-4.93, -4.93, -5.0], hi: [5.07, 5.07, 5.0] };
+        let n = 60;
+        let m = n + 1;
+        let (mut us, mut vs) = (Vec::new(), Vec::new());
+        for j in 0..m {
+            for i in 0..m {
+                us.push(dom.at(0, i as f64, n));
+                vs.push(dom.at(1, j as f64, n));
+            }
+        }
+        let mut vals = vec![C::new(0.0, 0.0); m * m];
+        p.eval_batch(&[&us, &vs], &mut vals);
+        let h = dom.hi[2] - dom.lo[2];
+        let (wlo, whi) = (dom.lo[2] - h, dom.hi[2] + h);
+        let clamped = |z: C| height(z, ComplexMode::Off).clamp(wlo, whi);
+        let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+        let usable = |w: f64| w.is_finite();
+        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, m, &clamped, h * 0.03, &usable, early_exit);
+        let mut out: Vec<(usize, f64)> = jumps.iter().map(|(&id, j)| (id, j.t)).collect();
+        out.sort_by_key(|&(id, _)| id);
+        out
+    }
+
+    #[test]
+    fn jumps_unchanged_by_early_exit() {
+        // 途中で候補を外しても、見つかる段差（辺と位置）は外さないときと同じ
+        for src in ["floor(2x)", "tan(x) y", "1/x + 1/y", "floor(x) + floor(y)", "sign(x) + y"] {
+            let (fast, full) = (jumps_of(src, true), jumps_of(src, false));
+            assert!(!full.is_empty(), "{src}: 段差が見つからない");
+            assert_eq!(fast, full, "{src}");
+        }
+    }
+
     #[test]
     fn steps() {
         // floor(2x) の段差: 段差の所で三角形を切り分けるので、どの三角形も段差をまたがない
@@ -2218,6 +3127,144 @@ mod tests {
             }
         }
         (count.values().filter(|&&c| c == 1).count(), count.values().filter(|&&c| c >= 3).count())
+    }
+
+    #[test]
+    fn implicit_mesh_unchanged() {
+        // 速くした implicit_solid と、速くする前の版（implicit_solid_reference）の出力（頂点・三角形の集合）が同じ。
+        // F が飛ぶ所（tan の極など）は、その後で面を張らないようにしたので（implicit_pole_is_not_a_surface）、ここでは比べない
+        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let cases: Vec<(&str, Vec<&str>, Domain, usize, Vec<(f64, f64)>)> = vec![
+            ("x^2+y^2+z^2-4.01", AXES.to_vec(), big, 40, vec![]),
+            ("x^2+y^2+z^2-4", AXES.to_vec(), big, 40, vec![]),
+            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", AXES.to_vec(), big, 40, vec![]),
+            ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", AXES.to_vec(), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40, vec![]),
+            ("(x^2 + y^2 + z^2 - 0.49)^2", AXES.to_vec(), dom(), 30, vec![]),
+            ("x y^2", AXES.to_vec(), dom(), 21, vec![]),
+            ("x^2 + y^2 + z^2 - r^2", vec!["x", "y", "z", "r"], dom(), 30, vec![(0.3, 0.7)]),
+        ];
+        for (src, vars, d, n, ranges) in cases {
+            let p = prog(src, &vars);
+            let a = implicit_solid(&p, d, n, &ranges, 8);
+            let b = implicit_solid_reference(&p, d, n, &ranges, 8);
+            assert!(!a.indices.is_empty(), "{src}");
+            // 空のブロックを飛ばすようにして（S9）、頂点の順番はブロックの順になったので、集合で比べる
+            assert!(mesh_sets(&a) == mesh_sets(&b), "{src}: 頂点・三角形の集合が違う");
+        }
+    }
+
+    /// 頂点のうち、極の平面 x = c の近く（|x − c| < h）で |g(x) − z| > 2 のもの（極の上の偽の面）の数
+    fn fake_pole_vertices(m: &Mesh, poles: &[f64], h: f64, g: impl Fn(f64) -> f64) -> usize {
+        m.positions
+            .chunks_exact(3)
+            .filter(|q| {
+                let (x, z) = (q[0] as f64, q[2] as f64);
+                poles.iter().any(|c| (x - c).abs() < h) && (g(x) - z).abs() > 2.0
+            })
+            .count()
+    }
+
+    #[test]
+    fn implicit_pole_is_not_a_surface() {
+        // tan(x) = z の極 x = ±π/2, ±3π/2 では F が +∞ から −∞ へ飛ぶ。そこに偽の面を張らない（変更前は頂点の約半分）
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let h = 10.0 / 80.0;
+        let poles: Vec<f64> = [-1.5, -0.5, 0.5, 1.5].iter().map(|k| k * std::f64::consts::PI).collect();
+        let m = implicit_surface(&prog("tan(x) - z", &AXES), d, 80);
+        assert!(m.positions.len() / 3 > 10_000, "本当の曲面は残る");
+        assert_eq!(fake_pole_vertices(&m, &poles, h, f64::tan), 0);
+        // 1/x = z（x の範囲をずらして、極 x = 0 が格子の点にならないようにする）
+        let d = Domain { lo: [-4.95, -5.0, -5.0], hi: [5.05, 5.0, 5.0] };
+        let m = implicit_surface(&prog("1/x - z", &AXES), d, 80);
+        assert!(m.positions.len() / 3 > 5_000, "本当の曲面は残る");
+        assert_eq!(fake_pole_vertices(&m, &[0.0], h, |x| 1.0 / x), 0);
+        // 2D 表示の陰関数の曲線 tan(x) = y にも、極の縦線を描かない
+        let c = implicit_curve_2d(&prog("tan(x) - y", &["x", "y"]), Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 200);
+        let near_pole = c
+            .positions
+            .chunks_exact(3)
+            .filter(|q| q[0].is_finite() && poles.iter().any(|p| (q[0] as f64 - p).abs() < 0.05) && ((q[0] as f64).tan() - q[1] as f64).abs() > 2.0)
+            .count();
+        assert_eq!(near_pole, 0, "極の縦線");
+        assert!(c.positions.len() > 300, "本当の曲線は残る");
+    }
+
+    #[test]
+    fn steep_root_is_still_a_surface() {
+        // 急なだけで本当に 0 になる所は、今までどおり面を張る（頂点の数が、極の判定をしない版と同じ）
+        let d = Domain { lo: [-2.0; 3], hi: [2.0; 3] };
+        for src in ["x^3 - z", "x^(1/3) - z", "1000 (x^2+y^2+z^2-1)", "exp(5x) - z - 1"] {
+            let p = prog(src, &AXES);
+            let a = implicit_surface(&p, d, 40);
+            let b = implicit_solid_reference(&p, d, 40, &[], 0);
+            assert!(!a.indices.is_empty(), "{src}");
+            assert_eq!(a.positions.len(), b.positions.len(), "{src}");
+        }
+        // z (x² + y²) = 1 は、z 軸に向かって伸びる本当の曲面。頂点の数が 95% 以上残る
+        let p = prog("z (x^2+y^2) - 1", &AXES);
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let (a, b) = (implicit_surface(&p, d, 80), implicit_solid_reference(&p, d, 80, &[], 0));
+        assert!(a.positions.len() as f64 >= 0.95 * b.positions.len() as f64, "{} / {}", a.positions.len(), b.positions.len());
+    }
+
+    /// 頂点の集合と三角形の集合（位置を丸めて並べ替えたもの。順番によらずに比べる）
+    fn mesh_sets(m: &Mesh) -> (Vec<[i64; 3]>, Vec<[[i64; 3]; 3]>) {
+        let key = |v: u32| {
+            let q = &m.positions[3 * v as usize..3 * v as usize + 3];
+            [0, 1, 2].map(|x| (q[x] as f64 * 1e5).round() as i64)
+        };
+        let mut verts: Vec<[i64; 3]> = (0..m.positions.len() as u32 / 3).map(key).collect();
+        verts.sort();
+        let mut tris: Vec<[[i64; 3]; 3]> = m
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                // 向きは保ったまま、回して一番小さい頂点を先頭にする
+                let k = [key(t[0]), key(t[1]), key(t[2])];
+                let r = (0..3).min_by_key(|&r| k[r]).unwrap();
+                [k[r], k[(r + 1) % 3], k[(r + 2) % 3]]
+            })
+            .collect();
+        tris.sort();
+        (verts, tris)
+    }
+
+    #[test]
+    fn sparse_equals_dense() {
+        // 区間演算で空のブロックを飛ばしても、全部のブロックを計算したときと頂点・三角形の集合が同じ
+        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let cases: Vec<(&str, Vec<&str>, Domain, usize, Vec<(f64, f64)>)> = vec![
+            ("x^2+y^2+z^2-4", AXES.to_vec(), big, 80, vec![]),
+            ("x^2+y^2+z^2-4.01", AXES.to_vec(), big, 80, vec![]),
+            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", AXES.to_vec(), big, 60, vec![]),
+            ("(sqrt(x^2+y^2)-3)^2+z^2-0.04", AXES.to_vec(), big, 120, vec![]),
+            ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", AXES.to_vec(), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40, vec![]),
+            ("(x^2 + y^2 + z^2 - 0.49)^2", AXES.to_vec(), dom(), 30, vec![]),
+            ("z (x^2+y^2) - 1", AXES.to_vec(), big, 80, vec![]),
+            ("x^2 + y^2 + z^2 - r^2", vec!["x", "y", "z", "r"], dom(), 30, vec![(0.3, 0.7)]),
+        ];
+        for (src, vars, d, n, ranges) in cases {
+            let p = prog(src, &vars);
+            let sparse = implicit_solid_with(&p, d, n, &ranges, 8, false);
+            let dense = implicit_solid_with(&p, d, n, &ranges, 8, true);
+            assert!(!sparse.indices.is_empty(), "{src}");
+            assert!(mesh_sets(&sparse) == mesh_sets(&dense), "{src}: 頂点・三角形の集合が違う");
+        }
+    }
+
+    #[test]
+    fn sparse_field_saves_memory() {
+        // 球（細かさ 200）で、F の値を持つ点が、密な格子（203³ 点）の 1/5 以下
+        let p = prog("x^2+y^2+z^2-4.01", &AXES);
+        let d = Domain { lo: [-5.0 - 0.05; 3], hi: [5.0 + 0.05; 3] }; // implicit_solid と同じく 1 マス広げた範囲
+        let n = 202;
+        let field = SparseField::build(&p, &[vec![]], &[], d, n, false);
+        let dense = (n + 1).pow(3);
+        assert!(field.stored() * 5 <= dense, "{} / {dense}", field.stored());
+        // 区間演算が使えない式は、全部を持つ
+        let g = prog("abs(gamma(x + i y)) - z", &AXES);
+        let field = SparseField::build(&g, &[vec![]], &[], Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 40, false);
+        assert!(field.stored() >= 41usize.pow(3));
     }
 
     #[test]
@@ -2483,5 +3530,3 @@ mod tests {
         println!("媒介変数表示の曲面 n = 400: {:?}, 点 {}", t.elapsed(), shape.points.len() / 3);
     }
 }
-
-
