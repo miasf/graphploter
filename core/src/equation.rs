@@ -1103,11 +1103,35 @@ mod tests {
         let Plot::Explicit { axis, prog, rotated: true, .. } = compile_with("z = 1", &ps, &sp).unwrap() else {
             panic!("陽関数のまま回す")
         };
-        let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, (-3.0, 3.0), (-3.0, 3.0), 6, crate::mesh::ComplexMode::Off);
+        let dom = Domain { lo: [-3.0; 3], hi: [3.0; 3] };
+        let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, dom, 6, crate::mesh::ComplexMode::Off, false, false, 6.0);
         let m = project(&shape, &sp.view(0.0), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
         assert!(!m.positions.is_empty());
         for q in m.positions.chunks_exact(3) {
             assert!((q[1] + 1.0).abs() < 1e-6, "y = {}", q[1]);
+        }
+    }
+
+    #[test]
+    fn rotated_explicit_keeps_jumps() {
+        use crate::mesh::{explicit_nd, project, Domain};
+        // 階段 z = floor(x) を xy で回しても（z は変わらない）、段差をまたぐ三角形を作らない
+        let ps = Params::new();
+        let mut sp = Space::standard();
+        sp.rotation[0] = 0.4; // 組 (0,1) = xy
+        let Plot::Explicit { axis, prog, rotated: true, .. } = compile_with("z = floor(x)", &ps, &sp).unwrap() else {
+            panic!("陽関数のまま回す")
+        };
+        let dom = Domain { lo: [-6.0; 3], hi: [6.0; 3] };
+        let shape = explicit_nd(&prog, axis, sp.axes, &sp.slice, dom, 40, crate::mesh::ComplexMode::Off, false, true, 6.0);
+        assert!(shape.keep_full);
+        let m = project(&shape, &sp.view(0.0), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
+        assert!(m.keep_full);
+        assert!(!m.indices.is_empty());
+        for t in m.indices.chunks_exact(3) {
+            let z = [t[0], t[1], t[2]].map(|k| m.positions[k as usize * 3 + 2]);
+            let spread = z.iter().cloned().fold(f32::MIN, f32::max) - z.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread < 0.5, "段差をまたぐ三角形: {z:?}");
         }
     }
 

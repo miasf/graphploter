@@ -272,6 +272,23 @@ pub fn explicit_surface_opt(
     walls: bool,
     refine: bool,
 ) -> Mesh {
+    explicit_surface_scaled(prog, dom, n, axis, mode, walls, refine, dom.hi[axis] - dom.lo[axis])
+}
+
+/// [`explicit_surface_opt`] で、段差・細かくする量の目安にする高さ `h` を別に指定するもの。
+/// 回した陽関数は表示範囲より広い範囲で計算するので、目安は表示範囲の高さのままにする
+/// （計算する範囲の高さにすると、階段の低い段差を段差とみなさなくなる）
+#[allow(clippy::too_many_arguments)]
+fn explicit_surface_scaled(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    axis: usize,
+    mode: ComplexMode,
+    walls: bool,
+    refine: bool,
+    h: f64,
+) -> Mesh {
     let n = n.max(2);
     let m = n + 1; // 1辺の頂点数
     let (ua, va) = others(axis);
@@ -294,7 +311,6 @@ pub fn explicit_surface_opt(
     // はみ出た部分は描画側（Three.js のクリッピング）で切り落とす。
     // 範囲の外の値は、範囲の少し外（wlo, whi）にそろえて描く（極の近くで頂点を捨てると、その周りの三角形が
     // 抜けて穴が空くため）。はみ出た部分は描画側で切り落とされるので見えない
-    let h = dom.hi[axis] - dom.lo[axis];
     let (wlo, whi) = (dom.lo[axis] - h, dom.hi[axis] + h);
     let usable = |w: f64| w.is_finite();
     let clamped = |z: C| height(z, mode).clamp(wlo, whi);
@@ -2828,6 +2844,8 @@ pub struct NdShape {
     /// 点は、一様な格子の点（曲面ごとに m × m 個）を先に全部並べ、細かくして足した点をその後ろに並べる。
     /// 三角形はこの一覧を使う（粗い版は、今までどおり一様な格子の点を間引いて作る）。None なら一様な格子の三角形
     pub tris: Option<(usize, Vec<u32>)>,
+    /// 段差のある陽関数を回したもの。射影したメッシュの [`Mesh::keep_full`] にする（まとめると段差が崩れる）
+    pub keep_full: bool,
 }
 
 /// 格子線を引かない成分の印（シェーダーはこれより小さい値の成分には線を引かない）
@@ -2886,7 +2904,7 @@ pub fn parametric_surface_nd_opt(
         grid.extend_from_slice(&grid1);
     }
     let Some(tol) = tol.filter(|t| *t > 0.0 && dims > 0) else {
-        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None };
+        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false };
     };
     // 曲面ごとに細かくする。足した点は、全部の曲面の一様な格子の点の後ろに並べる
     let base = sets.len() * m * m;
@@ -2933,11 +2951,11 @@ pub fn parametric_surface_nd_opt(
         tris.extend(r.tris.iter().flat_map(|t| t.map(map)));
     }
     if !refined_any {
-        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None };
+        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false };
     }
     points.extend_from_slice(&extra_points);
     grid.extend_from_slice(&extra_grid);
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)) }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)), keep_full: false }
 }
 
 /// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
@@ -2986,7 +3004,7 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
         }
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new(), tris: None }
+    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new(), tris: None, keep_full: false }
 }
 
 /// 媒介変数が4つ以上の図形の、面の枚数と、1枚の格子のマス数。
@@ -3067,16 +3085,19 @@ pub fn parametric_sheets_nd(sets: &[Vec<Program>], r: &[(f64, f64)], div: usize,
             }
         }
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
 /// 回転が表示中の座標どうしだけのときに、媒介変数表示 (u, v, f(u, v)) と同じように回すために使う。
 ///
 /// - `axes`: 表示中の3つの座標の番号、`base`: 各座標の値（表示していない座標は断面の値）
-/// - `u`, `v`: 残り2つの座標を動かす範囲
+/// - `dom`: 計算する範囲（表示中の座標で。回しても表示範囲が欠けないよう、表示範囲より広くする）
+/// - `h`: 段差・細かくする量の目安にする高さ（表示範囲の高さ）
 ///
-/// 格子線用の座標には、u, v の値そのもの（元の座標の値）を入れる。回転しても、格子線は元の座標の
+/// 回さないときと同じ [`explicit_surface_scaled`] で作るので、値が飛ぶ所（階段の段差など）は切り分けて
+/// 描き（`walls` なら壁も）、急に変わる所は細かくし（`refine`）、高さは `dom` の上下の端で切る。
+/// 格子線用の座標には、残り2つの座標の値そのもの（元の座標の値）を入れる。回転しても、格子線は元の座標の
 /// きりの良い値の所に引かれる。
 #[allow(clippy::too_many_arguments)]
 pub fn explicit_nd(
@@ -3084,42 +3105,68 @@ pub fn explicit_nd(
     axis: usize,
     axes: [usize; 3],
     base: &[f64],
-    u: (f64, f64),
-    v: (f64, f64),
+    dom: Domain,
     n: usize,
     mode: ComplexMode,
+    walls: bool,
+    refine: bool,
+    h: f64,
 ) -> NdShape {
-    let n = n.max(2);
-    let m = n + 1;
-    let (ua, va) = others(axis);
+    let mesh = explicit_surface_scaled(prog, dom, n, axis, mode, walls, refine, h);
+    mesh_to_nd(&mesh, axes, base, Some(axis))
+}
+
+/// 表示中の座標で作ったメッシュを、n 次元の点（表示していない座標は `base` の値）の形にする。
+/// 曲面（`surface` が Some(高さの軸)）なら、三角形は [`NdShape::tris`] にそのまま入れ（一様な格子の点は無い）、
+/// 格子線用の座標には高さでない2つの座標の値を入れる。None なら曲線（NaN は線の切れ目）
+fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize>) -> NdShape {
     let d = base.len();
-    let mut us = Vec::with_capacity(m * m);
-    let mut vs = Vec::with_capacity(m * m);
-    let mut grid = Vec::with_capacity(m * m * 2);
-    for j in 0..m {
-        for i in 0..m {
-            let (a, b) = (u.0 + (u.1 - u.0) * i as f64 / n as f64, v.0 + (v.1 - v.0) * j as f64 / n as f64);
-            us.push(a);
-            vs.push(b);
-            grid.extend_from_slice(&[a as f32, b as f32]);
+    let count = mesh.positions.len() / 3;
+    let mut points = Vec::with_capacity(count * d);
+    for q in mesh.positions.chunks_exact(3) {
+        if q.iter().all(|v| v.is_finite()) {
+            let mut p = base.to_vec();
+            for k in 0..3 {
+                p[axes[k]] = q[k] as f64;
+            }
+            points.extend_from_slice(&p);
+        } else {
+            points.extend(std::iter::repeat_n(f64::NAN, d));
         }
     }
-    let mut vals = vec![C::new(0.0, 0.0); m * m];
-    prog.eval_batch(&[&us, &vs], &mut vals);
-    let mut points = Vec::with_capacity(m * m * d);
-    let mut complex = Vec::new();
-    for k in 0..m * m {
-        let mut p = base.to_vec();
-        p[axes[ua]] = us[k];
-        p[axes[va]] = vs[k];
-        // 複素数の色分けをするなら、高さは |f|・Re f・Im f（色は偏角）
-        p[axes[axis]] = height(vals[k], mode);
-        points.extend_from_slice(&p);
-        if mode != ComplexMode::Off {
-            complex.extend_from_slice(&complex_attr(vals[k]));
+    let Some(axis) = surface else {
+        return NdShape { dims: d, points, keep_full: mesh.keep_full, ..Default::default() };
+    };
+    let (ua, va) = others(axis);
+    let grid: Vec<f32> = mesh.positions.chunks_exact(3).flat_map(|q| [q[ua], q[va]]).collect();
+    NdShape {
+        dims: d,
+        points,
+        // 一様な格子の点は無い（m は 2 にしておく。0 個の点を m × m 個ずつ見ても何もしない）
+        grid: Some((2, grid)),
+        solid: false,
+        complex: mesh.complex.clone(),
+        tris: Some((0, mesh.indices.clone())),
+        keep_full: mesh.keep_full,
+    }
+}
+
+/// 2D 表示の、回した `y = f(x)`（`x = f(y)`）の曲線を n 次元の点として計算する（`dom` は計算する範囲）。
+/// 回さないときと同じ [`explicit_curve_2d`] で作るので、値が飛ぶ所では線を切る
+pub fn explicit_curve_nd(prog: &Program, axis: usize, axes: [usize; 3], base: &[f64], dom: Domain, tol: f64) -> NdShape {
+    let mut mesh = explicit_curve_2d(prog, axis, dom, tol);
+    // 極の近くのとても大きな値は、回すと横にも大きくはみ出す。計算する範囲の外は形が見えないので、
+    // 範囲の何倍かの所にそろえる（f32 にしたとき無限大にならないように）
+    let (lo, hi) = (dom.lo[axis], dom.hi[axis]);
+    let r = 100.0 * (hi - lo);
+    for q in mesh.positions.chunks_exact_mut(3) {
+        if q[axis].is_finite() {
+            q[axis] = q[axis].clamp((lo - r) as f32, (hi + r) as f32);
         }
     }
-    NdShape { dims: d, points, grid: Some((m, grid)), solid: false, complex, tris: None }
+    let mut base = base.to_vec();
+    base[axes[2]] = 0.0; // 2D 表示では縦の座標は 0
+    mesh_to_nd(&mesh, axes, &base, None)
 }
 
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
@@ -3158,7 +3205,7 @@ pub fn parametric_edges_nd(sets: &[Vec<Program>], r: &[(f64, f64)], n: usize, to
             }
         }
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false }
 }
 
 pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: f64) -> NdShape {
@@ -3171,7 +3218,7 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         let set = ProgramSet::new(progs);
         points.extend(curve_nd(&|ts: &[f64]| eval_nd(&set, &[ts], ts.len()), progs.len(), t, n, tol));
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false }
 }
 
 /// 1本の曲線の点（適応サンプリング）。`eval` は媒介変数の値の列から、d 次元の点を並べたものを計算する
@@ -3334,6 +3381,7 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
             solid,
             complex: Vec::new(),
             tris: Some((base, Vec::new())),
+            keep_full: shapes.iter().any(|s| s.keep_full),
         };
         let (mut base_at, mut extra_at) = (0usize, base);
         let mut extra = (Vec::new(), Vec::new(), Vec::new());
@@ -3371,7 +3419,15 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
         return Some(out);
     }
     let mut out =
-        NdShape { dims, points: Vec::new(), grid: m.map(|m| (m, Vec::new())), solid, complex: Vec::new(), tris: None };
+        NdShape {
+            dims,
+            points: Vec::new(),
+            grid: m.map(|m| (m, Vec::new())),
+            solid,
+            complex: Vec::new(),
+            tris: None,
+            keep_full: shapes.iter().any(|s| s.keep_full),
+        };
     for s in shapes {
         if m.is_none() && !out.points.is_empty() {
             out.points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
@@ -3790,6 +3846,7 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
         }
     }
     compute_normals(&mut mesh);
+    mesh.keep_full = shape.keep_full;
     mesh
 }
 
@@ -4049,7 +4106,8 @@ mod tests {
     fn rotated_explicit_keeps_complex_colors() {
         // 回した陽関数（表示中の座標どうしの回転）でも、高さを |f| にして色分けの値を持つ
         let p = prog("(x + i y)^2", &["x", "y"]);
-        let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], (-1.0, 1.0), (-1.0, 1.0), 4, ComplexMode::Abs);
+        let dom = Domain { lo: [-1.0, -1.0, -10.0], hi: [1.0, 1.0, 10.0] };
+        let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], dom, 4, ComplexMode::Abs, false, false, 20.0);
         assert_eq!(shape.complex.len(), shape.points.len()); // 3次元の点1つにつき3つ
         for q in shape.points.chunks_exact(3) {
             assert!((q[2] - (q[0] * q[0] + q[1] * q[1])).abs() < 1e-9); // |(x+iy)²| = x² + y²

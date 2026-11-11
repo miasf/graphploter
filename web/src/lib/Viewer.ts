@@ -604,7 +604,8 @@ export class Viewer {
 
   /**
    * スライダーを動かしている間など、グラフが次々に変わる間は true にする。
-   * その間も、視点を動かしているときと同じ段階で描く（1コマの時間は、カメラが動いているコマだけで数える）
+   * その間は操作の最中とみなす（段階を引き継ぐ）が、視点が止まっていれば元の画素密度・そのままの版で描く
+   * （applyQuality を参照。1コマの時間は、カメラが動いているコマだけで数える）
    */
   setBusy(on: boolean) {
     if (this.busy === on) return
@@ -632,11 +633,14 @@ export class Viewer {
   }
 
   /**
-   * 今の段階の描き方にする。操作の最中でなければ、元の画素密度・そのままの版
-   * （止まったら1回描き直す）
+   * 今の段階の描き方にする。視点が動いていなければ、元の画素密度・そのままの版
+   * （止まったら1回描き直す）。
+   * スライダー・回転の再生でグラフの形が変わっているだけ（視点は止まっている）ときも、画素密度は下げない。
+   * 軸・枠・方眼は動かないのにぼやけて見えるうえ、遅いのは計算なので、描くのを軽くしても速くならない
+   * （粗い版にしないのと同じ理由）
    */
   private applyQuality() {
-    const ratio = this.camMoving || this.busy ? this.quality.stage.ratio : this.basePixelRatio
+    const ratio = this.camMoving ? this.quality.stage.ratio : this.basePixelRatio
     if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio)
     this.applyLineScale(ratio / this.basePixelRatio)
     for (const p of this.plots.values()) this.applyLod(p)
