@@ -29,6 +29,9 @@ pub struct MeshResult {
     kind: String,
     params: Vec<String>,
     curve: bool,
+    /// 射影する前の形が曲線か（2D の切り口では、曲面も射影した後で線になるので `curve` は true になる。
+    /// 射影し直すときは、元の種類で切り口の線にするか決める）
+    shape_curve: bool,
     used_params: Vec<String>,
     /// パラメータの定義なら (名前, 値)
     param: Option<(String, num_complex::Complex64)>,
@@ -104,7 +107,7 @@ impl MeshResult {
             explicit_used: self.explicit_used.clone(),
             kind: self.kind.clone(),
             params: self.params.clone(),
-            curve: self.curve,
+            curve: self.shape_curve,
             used_params: self.used_params.clone(),
         })
     }
@@ -413,6 +416,7 @@ pub fn plot(
         kind: built.kind,
         params: plot.param_vars(),
         curve,
+        shape_curve: built.curve,
         used_params: plot.used_params(),
         param: match &plot {
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
@@ -583,13 +587,18 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // 複素数の色分けをするときは、高さを |f|・Re f・Im f にして回す（色は偏角）
         P::Explicit { axis, prog, rotated: true, .. } => {
             let ext = rotated_domain(space, dom);
+            // 広げた範囲でも、表示範囲と同じくらいの格子の間隔にする（同じ分割数のままだと粗くなり、段差の縁が崩れる）。
+            // 重くなりすぎないよう、2 倍までにする
+            let (ua, va) = equation::others(*axis);
+            let width = (dom.hi[ua] - dom.lo[ua]).max(dom.hi[va] - dom.lo[va]);
+            let k = ((ext.hi[ua] - ext.lo[ua]) / width).clamp(1.0, 2.0);
             b.shape = Some(mesh::explicit_nd(
                 prog,
                 *axis,
                 space.axes,
                 &space.slice,
                 ext,
-                ctx.resolution,
+                (ctx.resolution as f64 * k).round() as usize,
                 ctx.complex_mode,
                 ctx.walls,
                 ctx.refine,
@@ -828,6 +837,7 @@ impl Shape {
             kind: self.kind.clone(),
             params: self.params.clone(),
             curve: self.curve || self.flat_slice,
+            shape_curve: self.curve,
             used_params: self.used_params.clone(),
             param: None,
         })
@@ -875,6 +885,7 @@ impl CapSource {
             kind: String::new(),
             params: Vec::new(),
             curve: false,
+            shape_curve: false,
             used_params: Vec::new(),
             param: None,
             shape: None,
