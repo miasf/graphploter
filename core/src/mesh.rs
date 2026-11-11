@@ -3623,11 +3623,13 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
             for (a, b) in pairs {
                 // 長さの無い線（ちょうど 0 になる格子点で、2 つの辺の交わる点が同じになった所。floor の段など）は描かない。
                 // 描くと、描画側が「長さの無い曲線 = 点」とみなして丸を付ける
-                if cross[a] == cross[b] {
+                // （比べるのは画面に渡す f32 に丸めた後: f64 では別でも、丸めると同じ点になることがある）
+                let (pa, pb) = (cross[a].map(|v| v as f32), cross[b].map(|v| v as f32));
+                if pa == pb {
                     continue;
                 }
-                pts.extend_from_slice(&[cross[a][0] as f32, cross[a][1] as f32, 0.0]);
-                pts.extend_from_slice(&[cross[b][0] as f32, cross[b][1] as f32, 0.0]);
+                pts.extend_from_slice(&[pa[0], pa[1], 0.0]);
+                pts.extend_from_slice(&[pb[0], pb[1], 0.0]);
                 pts.extend_from_slice(&[f32::NAN; 3]);
             }
         }
@@ -4930,11 +4932,14 @@ mod tests {
     #[test]
     fn flat_slice_has_no_zero_length_segments() {
         // floor の段: ちょうど 0 になる格子点で、長さの無い線（描画側では丸に見える）を作らない
-        let p = prog("floor(x)/2 + floor(y)/4", &["x", "y"]);
-        let m = implicit_curve_2d(&p, Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] }, 320);
-        assert!(!m.positions.is_empty());
-        for seg in m.positions.chunks_exact(9) {
-            assert!(seg[0..3] != seg[3..6], "長さの無い線 {:?}", &seg[0..3]);
+        // 鞍形 (x² − y²)/4 の切り口 x = ±y も、格子点をちょうど通る（細かさによっては、f32 に丸めると同じ点になる）
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        for (src, n) in [("floor(x)/2 + floor(y)/4", 320), ("(x^2 - y^2)/4", 320), ("(x^2 - y^2)/4", 1200)] {
+            let m = implicit_curve_2d(&prog(src, &["x", "y"]), d, n);
+            assert!(!m.positions.is_empty());
+            for seg in m.positions.chunks_exact(9) {
+                assert!(seg[0..3] != seg[3..6], "{src}（{n}）: 長さの無い線 {:?}", &seg[0..3]);
+            }
         }
     }
 
