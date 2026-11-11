@@ -113,11 +113,13 @@ pub(crate) fn powi(a: Interval, e: i32) -> Iv {
         return increasing(a, |x| x.powi(e));
     }
     let (l, h) = (a.lo.powi(e), a.hi.powi(e));
-    if a.contains(0.0) {
-        Interval::new(0.0, l.max(h)).widen()
-    } else {
-        Interval::new(l.min(h), l.max(h)).widen()
-    }
+    nonneg(if a.contains(0.0) { Interval::new(0.0, l.max(h)).widen() } else { Interval::new(l.min(h), l.max(h)).widen() })
+}
+
+/// 値が 0 以上と分かっている区間で、丸めの分だけ広げて負になった下の端を 0 に戻す
+/// （sqrt((x²)) などが、0 をまたぐ箱で「分からない」にならないように）
+fn nonneg(a: Iv) -> Iv {
+    a.map(|a| Interval::new(a.lo.max(0.0), a.hi))
 }
 
 /// 実数乗 a^b（計算エンジンと同じ場合分け: 整数乗、または 0 以上の数の実数乗）
@@ -231,7 +233,7 @@ pub(crate) fn cosh(a: Interval) -> Iv {
 }
 
 pub(crate) fn abs(a: Interval) -> Iv {
-    even(a, f64::abs)
+    nonneg(even(a, f64::abs))
 }
 
 /// 丸め・符号（単調に増える。値は飛ぶが、両端の値の間に収まる）
@@ -268,10 +270,12 @@ pub(crate) fn log10(a: Interval) -> Iv {
 }
 
 pub(crate) fn sqrt(a: Interval) -> Iv {
-    if a.lo < 0.0 {
+    // 丸めの分だけ広げて負になっただけの下の端（x² + y² で 0 をまたぐ箱など）は 0 とみなす
+    // （そこで本当に負の値になっても、値は √(ほぼ 0) の実部 0 で、区間に入る）
+    if a.lo < -1e-9 * (a.hi.abs() + 1.0) {
         return None;
     }
-    increasing(a, f64::sqrt)
+    increasing(Interval::new(a.lo.max(0.0), a.hi), f64::sqrt)
 }
 
 /// 定義域 [−1, 1]（はみ出せば分からない）
@@ -428,6 +432,10 @@ mod tests {
         assert!(!p.eval_interval(&b(3.0, 4.0)).may_contain_zero(), "原点から離れた箱");
         assert!(p.eval_interval(&b(1.0, 1.5)).may_contain_zero(), "球の面をまたぐ箱");
         assert!(!p.eval_interval(&b(-0.5, 0.5)).may_contain_zero(), "球の中の箱");
+        // 0 をまたぐ箱での sqrt(x² + y²)（丸めの分だけ広げて x² の下の端が負になると「分からない」になっていた）
+        let t = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.04");
+        assert!(!t.eval_interval(&b(-0.2, 0.2)).may_contain_zero(), "トーラスの軸の上の箱");
+        assert!(!prog("sqrt(abs(x)) + 1").eval_interval(&b(-0.2, 0.2)).may_contain_zero());
     }
 
     #[test]

@@ -242,6 +242,8 @@ pub fn last_used_params() -> String {
 
 /// [`plot`] の `flags` のビット 0: 形が急に変わる所を細かくしない
 const FLAG_NO_REFINE: u32 = 1;
+/// [`plot`] の `flags` のビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる）
+const FLAG_THOROUGH: u32 = 2;
 /// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
 const FLAG_EDGES: u32 = 4;
 
@@ -268,7 +270,9 @@ const FLAG_EDGES: u32 = 4;
 /// - `flat_slice`: 2D 表示の描き方。true なら「切り口」（縦の座標 = 0 の平面との交わり）、
 ///   false なら「投影」（3次元の図形を真上から平面に押しつぶした形）
 /// - `layers`: 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（1 なら両端だけ）
-/// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する）。
+/// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する。
+///   陰関数の、格子より小さい図形を細かく作り直すこともしない）。
+///   ビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる）。
 ///   ビット 2: 媒介変数が 3 つ以上の図形を、面ではなく辺だけで描く
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
@@ -382,6 +386,13 @@ pub fn plot(
         flat_slice: flat && flat_slice,
         layers: layers.clamp(1, 12) as usize,
         refine: flags & FLAG_NO_REFINE == 0,
+        implicit_refine: if flags & FLAG_NO_REFINE != 0 {
+            mesh::Refine::Off
+        } else if flags & FLAG_THOROUGH != 0 {
+            mesh::Refine::Thorough
+        } else {
+            mesh::Refine::Normal
+        },
         edges: flags & FLAG_EDGES != 0,
         range: &range,
         view: space.view(perspective),
@@ -498,6 +509,8 @@ struct Ctx<'a> {
     layers: usize,
     /// 形が急に変わる所を細かくするか（[`plot`] の `flags` を参照）
     refine: bool,
+    /// 陰関数で、格子より小さい図形を細かく作り直すか（[`plot`] の `flags` を参照）
+    implicit_refine: mesh::Refine,
     /// 媒介変数が 3 つ以上の図形を、辺だけで描くか（[`plot`] の `flags` を参照）
     edges: bool,
     range: &'a dyn Fn(&str) -> (f64, f64),
@@ -612,7 +625,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 mesh::explicit_surface_opt(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls, ctx.refine);
         }
         P::Implicit { prog, .. } => {
-            b.inner = mesh::implicit_surface(prog, dom, ctx.implicit_resolution);
+            b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
         }
         P::Solid { prog, ranges, .. } => {

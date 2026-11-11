@@ -29,7 +29,7 @@
     SliderStyle,
     Space,
   } from './lib/types'
-  import { GLOBAL_GROUP, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE } from './lib/types'
+  import { GLOBAL_GROUP, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -63,6 +63,8 @@
   let domain = $state<Domain>({ xmin: -10, xmax: 10, ymin: -10, ymax: 10, zmin: -6, zmax: 6 })
   let resolution = $state(150)
   let implicitResolution = $state(80)
+  /** 陰関数で、格子より小さい図形を念入りに探す（⚙ の設定。遅くなる） */
+  let findSmall = $state(false)
   let domainError = $state('')
   /** 遠近感（0: 平行投影 〜 100: 強い透視投影） */
   let perspective = $state(41)
@@ -144,6 +146,7 @@
       domain,
       resolution,
       implicitResolution,
+      findSmall: findSmall || undefined,
       perspective,
       dark,
       space,
@@ -162,6 +165,7 @@
     domain = s.domain
     resolution = s.resolution
     implicitResolution = s.implicitResolution
+    findSmall = s.findSmall ?? false
     perspective = s.perspective
     dark = s.dark
     // 古い保存データ・壊れた共有リンクでも動くよう、次元に合わせて配列の長さをそろえる
@@ -605,7 +609,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : 0) | (item.edges ? PLOT_EDGES : 0),
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1701,6 +1705,11 @@
                 onchange={() => replotAll(0)}
               />
             </div>
+            <label class="check-row">
+              <input type="checkbox" checked={findSmall} onchange={(e) => { findSmall = e.currentTarget.checked; replotAll(0) }} />
+              陰関数の細かい図形を念入りに探す（遅くなる）
+            </label>
+            <p class="note">格子より小さい図形（小さい球・細い輪など）は、オフでもある程度探して細かく描きます。オンにすると、探す手間と細かさの上限を上げます。</p>
 
 
           {:else if settingsCat === 'look'}

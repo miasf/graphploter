@@ -274,7 +274,10 @@ export interface PlotRequest {
   walls: boolean
   /** 媒介変数が4つ以上の図形の、面を描く所の分割数（1 なら範囲の両端だけ） */
   layers: number
-  /** そのほかの設定（ビットごと）。ビット 0（PLOT_NO_REFINE）: 形が急に変わる所を細かくしない（再生・ドラッグ中） */
+  /**
+   * そのほかの設定（ビットごと）。ビット 0（PLOT_NO_REFINE）: 形が急に変わる所を細かくしない（再生・ドラッグ中）。
+   * ビット 1（PLOT_THOROUGH）: 陰関数の小さい図形を念入りに探す。ビット 2（PLOT_EDGES）: 辺だけで描く
+   */
   flags: number
   /**
    * 重い陰関数の F の計算を、いくつかの Worker に分けるときの段階（無ければふつうに計算する）。
@@ -290,6 +293,8 @@ export type FieldStageResponse =
 
 /** PlotRequest.flags のビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。止まったら細かく計算し直す） */
 export const PLOT_NO_REFINE = 1
+/** PlotRequest.flags のビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる。⚙ の設定） */
+export const PLOT_THOROUGH = 2
 /** PlotRequest.flags のビット 2: 媒介変数が3つ以上の図形を、辺だけで描く */
 export const PLOT_EDGES = 4
 

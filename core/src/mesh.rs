@@ -1011,11 +1011,35 @@ pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
 /// そこで G(p) = max(min_r F, −max_r F) を作ると、領域の内側で G ≤ 0 になるので、G = 0 の面を作ればよい。
 /// min, max は、範囲をそれぞれ `samples` 等分した点での値から求める（近似）。
 pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize) -> Mesh {
-    implicit_solid_with(prog, dom, n, ranges, samples, false)
+    implicit_solid_opt(prog, dom, n, ranges, samples, Refine::Normal)
+}
+
+/// [`implicit_solid`] で、格子より小さい図形を探して細かく作り直すか（`refine`）を選ぶ版
+pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize, refine: Refine) -> Mesh {
+    implicit_solid_with(prog, dom, n, ranges, samples, false, refine)
+}
+
+/// 陰関数で、格子より小さい図形（小さい球・細い輪など）を探して、その所だけ細かく作り直すか（[`refine_components`]）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refine {
+    /// 作り直さない（再生・ドラッグ中。速さを優先する）
+    Off,
+    /// ふつう（探す手間と細かさに上限がある）
+    Normal,
+    /// 念入りに探す（区間演算の回数の上限なし、8 倍の細かさまで。遅くなる）
+    Thorough,
 }
 
 /// [`implicit_solid`] の本体。`all_blocks` なら区間演算を使わず、全部のブロックを「ある」にする（テストで比べるため）
-fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize, all_blocks: bool) -> Mesh {
+fn implicit_solid_with(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    ranges: &[(f64, f64)],
+    samples: usize,
+    all_blocks: bool,
+    refine: Refine,
+) -> Mesh {
     // 表示範囲の外側に1マスずつ広げて計算する。Surface Nets 法は範囲の端で曲面が
     // ギザギザに途切れるので、少しはみ出して作っておき、端は描画側で真っ直ぐ切り落とす。
     let t_start = crate::timing::now_ms();
@@ -1199,6 +1223,8 @@ fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f6
     // 頂点を置いたセル（cell_slots と同じ順番）
     let mut vert_cells: Vec<[usize; 3]> = Vec::new();
     let mut mesh = Mesh::default();
+    // 頂点ごとの、頂点を置いたセルの番号（4 の細分で使う）
+    let mut vertex_cell: Vec<u32> = Vec::new();
     let mut cbuf = vec![f32::NAN; BLOCK_BUF * BLOCK_BUF * BLOCK_BUF];
     field.for_blocks(&mut cbuf, |buf, view, _| {
     // セルの角 c の、data の中での位置のずれ
@@ -1294,6 +1320,7 @@ fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f6
                     if *cnt > 0.0 {
                         let p = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
                         ids[g] = mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
+                        vertex_cell.push(cell(i, j, k) as u32);
                     }
                 }
                 if ids[..=groups].iter().all(|&v| v == NONE) {
@@ -1376,6 +1403,10 @@ fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f6
     }
 
     compute_normals(&mut mesh);
+    // 4. 格子より小さい図形（見落とした・角ばった所）を探して、その所だけ細かく作り直す
+    if refine != Refine::Off && ranges.is_empty() {
+        refine_components(prog, &combos, dom, n, &field, &mut mesh, &vertex_cell, refine == Refine::Thorough);
+    }
     // 粗い版（視点を動かしている間に描く）: F の格子を間引いて作り直す
     if let Some(k) = lod_stride(mesh.indices.len() / 3) {
         let mut sc = FieldScratch::default();
@@ -1487,29 +1518,29 @@ fn coarse_nets(
         Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
     };
     let pos = |p: [f64; 3]| [0, 1, 2].map(|a| dom.at(a, p[a] * k as f64, n));
-    nets_on_grid(nc, &cell_ok, &|c| vals[at(c)] < 0.0, &cross, &pos)
+    nets_on_grid([nc; 3], &cell_ok, &|c| vals[at(c)] < 0.0, &cross, &pos)
 }
 
-/// Surface Nets（1 辺 `nc` マスの格子）。`cell_ok` が偽のセルは見ない。`neg(角)` は角の F が負か、
+/// Surface Nets（`dims` マスの格子）。`cell_ok` が偽のセルは見ない。`neg(角)` は角の F が負か、
 /// `cross(p, a)` は辺 p → p + e_a の交わる位置と始点の符号（負なら true）。`pos` は格子の座標から空間の座標へ。
 /// 1 つのセルを 2 枚以上の曲面が通るときは、細かい版と同じく、少ないほうの符号の角の組ごとに頂点を分ける
 /// （分けないと、鞍の形の面で 4 つの三角形が 1 本の辺に集まる）
 fn nets_on_grid(
-    nc: usize,
+    dims: [usize; 3],
     cell_ok: &dyn Fn([usize; 3]) -> bool,
     neg: &dyn Fn([usize; 3]) -> bool,
     cross: &dyn Fn([usize; 3], usize) -> Option<(f64, bool)>,
     pos: &dyn Fn([f64; 3]) -> [f64; 3],
 ) -> Mesh {
-    let cell = |c: [usize; 3]| c[0] + nc * (c[1] + nc * c[2]);
+    let cell = |c: [usize; 3]| c[0] + dims[0] * (c[1] + dims[1] * c[2]);
     let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
-    let mut vert = vec![NONE; nc * nc * nc];
+    let mut vert = vec![NONE; dims[0] * dims[1] * dims[2]];
     let mut slots: Vec<[u32; 12]> = Vec::new();
     let mut cells: Vec<[usize; 3]> = Vec::new();
     let mut mesh = Mesh::default();
-    for z in 0..nc {
-        for y in 0..nc {
-            for x in 0..nc {
+    for z in 0..dims[2] {
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
                 let c = [x, y, z];
                 if !cell_ok(c) {
                     continue;
@@ -1613,6 +1644,539 @@ fn nets_on_grid(
     }
     compute_normals(&mut mesh);
     mesh
+}
+
+/// 1 つの成分のブロックの数の上限（超えたら、その成分は細かくしない）
+const REFINE_MAX_COMPONENT_BLOCKS: usize = 64;
+/// 細かく作り直すブロックの数の合計の上限（細かさを上げてやり直した分も数える）
+const REFINE_MAX_BLOCKS: usize = 512;
+/// 細かく作り直して足す三角形の数の合計の上限
+const REFINE_MAX_TRIANGLES: usize = 150_000;
+/// 「曲面の無い所」を確かめる区間演算の回数の上限（ふつう。念入りなら上限なし）
+const REFINE_INTERVAL_BUDGET: usize = 200_000;
+/// 細かい格子で F を計算する点の数の合計の上限（ふつう / 念入り）
+const REFINE_POINT_BUDGET: [usize; 2] = [4_000_000, 32_000_000];
+/// 1 つの成分の細かい格子（成分を囲む直方体）の格子点の数の上限
+const REFINE_MAX_GRID: usize = 8_000_000;
+/// 辺でつながる頂点どうしの法線のなす角がこれ（35°）を超えたら「角ばっている」。値は cos 35°
+const REFINE_COS: f32 = 0.819;
+
+/// 陰関数の 4: 格子より小さい図形（小さい球、細い輪、細い管）が消える・角ばるのを直す。
+///
+/// 1. 疑わしいブロックを集める
+///    - (a) 区間演算が使える式: 「F = 0 があるかもしれない」のに頂点が 1 つも無いブロック。
+///      箱を 8 等分して区間演算をやり直すことを 3 段まで繰り返し、どの小箱も 0 を含まなくなったら外す
+///    - (b) 区間演算が使えない式: 周り（±2 点）の符号が全部同じなのに、|F| < 0.87 |∇F| h の格子点があるブロック
+///      （∇F は格子の値の中心差分）。見落としはあり得る
+///    - (c) 曲面はあるが角ばっているブロック: 辺でつながる頂点どうしの法線のなす角が 35° を超える
+/// 2. 疑わしいブロックを、面・辺・角で接するものどうし、および同じメッシュの成分でつながるものどうしで、成分に分ける
+///    （大きい曲面につながったものは、ブロックが多すぎて 4 の上限で諦める）
+/// 3. 小さい成分から順に、ブロックを 2 倍の細かさで作り直す（[`refine_blocks`]）。成分の外側の面の上に
+///    符号の変わる辺があれば、その向こうのブロックを成分に足してやり直す。作り直した形が、まだ空か角ばっていれば
+///    4 倍（念入りなら 8 倍まで）でもう一度
+/// 4. 成分の中の元の三角形を捨て、細かい三角形に差し替える。成分の外側の面を曲面が横切らないので、
+///    継ぎ目は無い（元の三角形が成分の内と外にまたがっていたら、念のため差し替えない）
+#[allow(clippy::too_many_arguments)]
+fn refine_components(
+    prog: &Program,
+    combos: &[Vec<f64>],
+    dom: Domain,
+    n: usize,
+    field: &SparseField,
+    mesh: &mut Mesh,
+    vertex_cell: &[u32],
+    thorough: bool,
+) {
+    use std::collections::{HashMap, HashSet};
+    let nb = field.nb;
+    let bid = |b: [usize; 3]| b[0] + nb * (b[1] + nb * b[2]);
+    let unbid = |id: usize| [id % nb, (id / nb) % nb, id / (nb * nb)];
+    let block_of_cell = |c: usize| bid([c % n, (c / n) % n, c / (n * n)].map(|x| (x / BLOCK).min(nb - 1)));
+    let vblock: Vec<usize> = vertex_cell.iter().map(|&c| block_of_cell(c as usize)).collect();
+    let mut has_vert = vec![false; nb * nb * nb];
+    for &b in &vblock {
+        has_vert[b] = true;
+    }
+    let mut suspect = vec![false; nb * nb * nb];
+
+    // (b) の判定: 格子点 q で |F| < 0.87 |∇F| h（∇F は中心差分）なのに、周り（±2 点）の符号が全部同じ
+    let m = n + 1;
+    let near_zero = |q: [usize; 3]| -> bool {
+        let f = |q: [usize; 3]| field.f(q);
+        if q.iter().any(|&x| x == 0 || x + 1 >= m) {
+            return false;
+        }
+        let v = f(q);
+        if !v.is_finite() {
+            return false;
+        }
+        let mut g2 = 0.0f32;
+        for a in 0..3 {
+            let (mut lo, mut hi) = (q, q);
+            lo[a] -= 1;
+            hi[a] += 1;
+            let d = 0.5 * (f(hi) - f(lo));
+            g2 += d * d;
+        }
+        if g2.is_nan() || v * v >= 0.87 * 0.87 * g2 {
+            return false;
+        }
+        let neg = v < 0.0;
+        let r = |x: usize| x.saturating_sub(2)..=(x + 2).min(m - 1);
+        r(q[2]).all(|k| r(q[1]).all(|j| r(q[0]).all(|i| f([i, j, k]).is_nan() || (f([i, j, k]) < 0.0) == neg)))
+    };
+    // 1 (a), (b)
+    if prog.supports_interval() {
+        let mut budget = if thorough { usize::MAX } else { REFINE_INTERVAL_BUDGET };
+        for id in 0..nb * nb * nb {
+            if !field.occupied[id] || has_vert[id] {
+                continue;
+            }
+            let b = unbid(id);
+            let lo = [0, 1, 2].map(|a| dom.at(a, (BLOCK * b[a]) as f64, n));
+            let hi = [0, 1, 2].map(|a| dom.at(a, (BLOCK * (b[a] + 1)).min(n) as f64, n));
+            if !zero_in_box(prog, lo, hi, 3, &mut budget) {
+                continue;
+            }
+            // 曲面のあるブロックの隣では、区間演算の広がりすぎ（曲面がすぐそばを通るだけ）がよく起きるので、
+            // 格子点の値にも (b) の兆しがあるときだけ疑う（大きい曲面のすぐそばの小さい図形は見落とし得る）
+            let by_surface = (0..27).any(|d| {
+                let q = [0, 1, 2].map(|a| (b[a] + d / [1, 3, 9][a] % 3).wrapping_sub(1));
+                q.iter().all(|&x| x < nb) && has_vert[bid(q)]
+            });
+            if by_surface {
+                let span = |a: usize| BLOCK * b[a]..(BLOCK * (b[a] + 1)).min(m);
+                let hint = span(2).any(|k| span(1).any(|j| span(0).any(|i| near_zero([i, j, k]))));
+                if !hint {
+                    continue;
+                }
+            }
+            suspect[id] = true;
+        }
+    } else if field.dense {
+        // 密な格子: 先に配列を直接読んで |F| < 0.87 |∇F| だけを安く確かめる（ほとんどの点はここで終わる）
+        let v = &field.vals;
+        let (sy, sz) = (m, m * m);
+        for k in 1..m - 1 {
+            for j in 1..m - 1 {
+                for i in 1..m - 1 {
+                    let l = i + sy * j + sz * k;
+                    let f = v[l];
+                    let (gx, gy, gz) = (v[l + 1] - v[l - 1], v[l + sy] - v[l - sy], v[l + sz] - v[l - sz]);
+                    // 0.87² / 4 ≈ 0.19（中心差分の 1/2 を含める）
+                    if (f * f).partial_cmp(&(0.19 * (gx * gx + gy * gy + gz * gz))) != Some(std::cmp::Ordering::Less) {
+                        continue;
+                    }
+                    if near_zero([i, j, k]) {
+                        suspect[bid([i, j, k].map(|x| (x / BLOCK).min(nb - 1)))] = true;
+                    }
+                }
+            }
+        }
+    }
+    // 1 (c)
+    let nrm = &mesh.normals;
+    let dotn = |a: u32, b: u32| {
+        let (a, b) = (a as usize * 3, b as usize * 3);
+        nrm[a] * nrm[b] + nrm[a + 1] * nrm[b + 1] + nrm[a + 2] * nrm[b + 2]
+    };
+    for t in mesh.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if dotn(a, b) < REFINE_COS {
+                suspect[vblock[a as usize]] = true;
+                suspect[vblock[b as usize]] = true;
+            }
+        }
+    }
+    if !suspect.iter().any(|&s| s) {
+        return;
+    }
+
+    // 2. 成分に分ける（ブロックの union-find）
+    let mut parent: Vec<usize> = (0..nb * nb * nb).collect();
+    fn root(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let union = |p: &mut Vec<usize>, a: usize, b: usize| {
+        let (ra, rb) = (root(p, a), root(p, b));
+        if ra != rb {
+            p[ra] = rb;
+        }
+    };
+    for t in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| vblock[t[k] as usize]);
+        union(&mut parent, a, b);
+        union(&mut parent, a, c);
+    }
+    for id in 0..nb * nb * nb {
+        if !suspect[id] {
+            continue;
+        }
+        let b = unbid(id);
+        for dz in 0..3 {
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    let d = [dx, dy, dz];
+                    let q = [0, 1, 2].map(|a| (b[a] + d[a]).wrapping_sub(1));
+                    if q.iter().all(|&x| x < nb) && suspect[bid(q)] {
+                        union(&mut parent, id, bid(q));
+                    }
+                }
+            }
+        }
+    }
+    let mut groups: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
+    for id in 0..nb * nb * nb {
+        if suspect[id] || has_vert[id] {
+            let g = groups.entry(root(&mut parent, id)).or_default();
+            g.0.push(id);
+            g.1 |= suspect[id];
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = groups.into_values().filter(|(_, s)| *s).map(|(b, _)| b).collect();
+    groups.retain(|g| g.len() <= REFINE_MAX_COMPONENT_BLOCKS);
+    if groups.is_empty() {
+        return;
+    }
+    groups.sort_by_key(|g| (g.len(), g[0]));
+
+    // 3. 小さい成分から順に作り直す
+    let mut budget = RefineBudget {
+        blocks: REFINE_MAX_BLOCKS,
+        points: REFINE_POINT_BUDGET[thorough as usize],
+    };
+    let max_r = if thorough { 8 } else { 4 };
+    // ブロックごとの、頂点を持つ三角形（差し替えるときに、内と外にまたがらないかを見る）
+    let mut block_tris: HashMap<usize, Vec<u32>> = HashMap::new();
+    for (ti, t) in mesh.indices.chunks_exact(3).enumerate() {
+        let bs = [0, 1, 2].map(|k| vblock[t[k] as usize]);
+        for (k, &b) in bs.iter().enumerate() {
+            if !bs[..k].contains(&b) {
+                block_tris.entry(b).or_default().push(ti as u32);
+            }
+        }
+    }
+    let mut replaced: HashSet<usize> = HashSet::new();
+    let mut drop_tri = vec![false; mesh.indices.len() / 3];
+    let mut parts: Vec<Mesh> = Vec::new();
+    let mut added = 0usize;
+    for group in groups {
+        let mut blocks: HashSet<usize> = group.into_iter().collect();
+        let mut best: Option<(Mesh, HashSet<usize>)> = None;
+        let mut r = 2;
+        while r <= max_r {
+            let Some(fine) = refine_blocks(prog, combos, dom, n, field, &mut blocks, r, &mut budget) else { break };
+            let done = !fine.indices.is_empty() && !is_angular(&fine);
+            if !fine.indices.is_empty() {
+                best = Some((fine, blocks.clone()));
+            }
+            if done {
+                break;
+            }
+            r *= 2;
+        }
+        let Some((fine, blocks)) = best else { continue };
+        if blocks.iter().any(|b| replaced.contains(b)) || added + fine.indices.len() / 3 > REFINE_MAX_TRIANGLES {
+            continue;
+        }
+        // 元の三角形のうち、成分の中のもの。内と外にまたがるものがあれば差し替えない
+        let mut inside: Vec<u32> = Vec::new();
+        let mut mixed = false;
+        for b in &blocks {
+            for &ti in block_tris.get(b).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let t = &mesh.indices[3 * ti as usize..3 * ti as usize + 3];
+                if t.iter().all(|&v| blocks.contains(&vblock[v as usize])) {
+                    inside.push(ti);
+                } else {
+                    mixed = true;
+                }
+            }
+        }
+        if mixed {
+            continue;
+        }
+        for ti in inside {
+            drop_tri[ti as usize] = true;
+        }
+        added += fine.indices.len() / 3;
+        replaced.extend(blocks);
+        parts.push(fine);
+    }
+    if parts.is_empty() {
+        return;
+    }
+
+    // 4. 差し替える（使われなくなった頂点は除く）
+    let old = std::mem::take(mesh);
+    let mut remap = vec![NONE; old.positions.len() / 3];
+    let mut out = Mesh { stats: old.stats, ..Mesh::default() };
+    for (ti, t) in old.indices.chunks_exact(3).enumerate() {
+        if drop_tri[ti] {
+            continue;
+        }
+        for &v in t {
+            let v = v as usize;
+            if remap[v] == NONE {
+                remap[v] = (out.positions.len() / 3) as u32;
+                out.positions.extend_from_slice(&old.positions[3 * v..3 * v + 3]);
+            }
+            out.indices.push(remap[v]);
+        }
+    }
+    for part in parts {
+        let base = (out.positions.len() / 3) as u32;
+        out.positions.extend_from_slice(&part.positions);
+        out.indices.extend(part.indices.iter().map(|&v| v + base));
+    }
+    compute_normals(&mut out);
+    *mesh = out;
+}
+
+/// 箱 [lo, hi] の上で F = 0 になるかもしれないか（区間演算）。`depth` 段まで 8 等分して確かめ、どこかの小箱が
+/// 0 を含むかもしれなければ true。区間演算の回数が `budget` を使い切ったら false（疑わしいままにしない）
+fn zero_in_box(prog: &Program, lo: [f64; 3], hi: [f64; 3], depth: usize, budget: &mut usize) -> bool {
+    use crate::interval::Interval;
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let boxes: Vec<Interval> = (0..3).map(|a| Interval::new(lo[a].min(hi[a]), lo[a].max(hi[a]))).collect();
+    if !prog.eval_interval(&boxes).may_contain_zero() {
+        return false;
+    }
+    if depth == 0 {
+        return true;
+    }
+    let mid = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
+    CORNERS.iter().any(|c| {
+        let l = [0, 1, 2].map(|a| if c[a] == 0 { lo[a] } else { mid[a] });
+        let h = [0, 1, 2].map(|a| if c[a] == 0 { mid[a] } else { hi[a] });
+        zero_in_box(prog, l, h, depth - 1, budget)
+    })
+}
+
+/// 辺でつながる頂点どうしの法線のなす角が、どこかで 35° を超えるか
+fn is_angular(mesh: &Mesh) -> bool {
+    let nrm = &mesh.normals;
+    let dotn = |a: u32, b: u32| {
+        let (a, b) = (a as usize * 3, b as usize * 3);
+        nrm[a] * nrm[b] + nrm[a + 1] * nrm[b + 1] + nrm[a + 2] * nrm[b + 2]
+    };
+    mesh.indices.chunks_exact(3).any(|t| dotn(t[0], t[1]) < REFINE_COS || dotn(t[1], t[2]) < REFINE_COS || dotn(t[2], t[0]) < REFINE_COS)
+}
+
+/// 細かく作り直す手間の残り（[`refine_components`]）
+struct RefineBudget {
+    blocks: usize,
+    points: usize,
+}
+
+/// ブロックの集まり `blocks`（元の格子の 1 辺 BLOCK マスのブロックの番号）を、`r` 倍の細かさの格子で作り直す。
+/// 成分の外側の面の上に符号の変わる辺があれば、その向こうのブロックを `blocks` に足してやり直す。
+/// 上限（ブロックの数・点の数・格子の大きさ）を超えたら None
+#[allow(clippy::too_many_arguments)]
+fn refine_blocks(
+    prog: &Program,
+    combos: &[Vec<f64>],
+    dom: Domain,
+    n: usize,
+    field: &SparseField,
+    blocks: &mut std::collections::HashSet<usize>,
+    r: usize,
+    budget: &mut RefineBudget,
+) -> Option<Mesh> {
+    let nb = field.nb;
+    let unbid = |id: usize| [id % nb, (id / nb) % nb, id / (nb * nb)];
+    let bid = |b: [usize; 3]| b[0] + nb * (b[1] + nb * b[2]);
+    // ブロックの、元の格子のセルの範囲
+    let span = |b: usize| (BLOCK * b, (BLOCK * (b + 1)).min(n));
+    // 成分の外側の面（ブロック b の向き a・側 side の面。向こうのブロックが成分の外）の上の格子の辺で、
+    // `changes(点, 向き)` が真のものがあれば、向こうのブロックを返す。`scale` は格子の細かさ（元の格子なら 1）、
+    // `origin` は格子の原点（元の格子のセル）
+    let outward = |blocks: &std::collections::HashSet<usize>, scale: usize, origin: [usize; 3], changes: &dyn Fn([usize; 3], usize) -> bool| {
+        let mut grow: Vec<usize> = Vec::new();
+        for &id in blocks.iter() {
+            let b = unbid(id);
+            let fs = |a: usize| {
+                let (s, e) = span(b[a]);
+                ((s - origin[a]) * scale, (e - origin[a]) * scale)
+            };
+            for a in 0..3 {
+                for side in 0..2 {
+                    let Some(nbr) = (if side == 0 { b[a].checked_sub(1) } else { Some(b[a] + 1).filter(|&x| x < nb) }) else {
+                        continue;
+                    };
+                    let mut q = b;
+                    q[a] = nbr;
+                    if blocks.contains(&bid(q)) || grow.contains(&bid(q)) {
+                        continue;
+                    }
+                    let plane = if side == 0 { fs(a).0 } else { fs(a).1 };
+                    let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+                    let ((us, ue), (vs, ve)) = (fs(u), fs(v));
+                    let crossed = (us..=ue).any(|x| {
+                        (vs..=ve).any(|y| {
+                            let mut p = [0; 3];
+                            p[a] = plane;
+                            p[u] = x;
+                            p[v] = y;
+                            (x < ue && changes(p, u)) || (y < ve && changes(p, v))
+                        })
+                    });
+                    if crossed {
+                        grow.push(bid(q));
+                    }
+                }
+            }
+        }
+        grow
+    };
+    // まず元の格子の値で、外側の面を曲面が横切らないかを見る（細かい格子で計算する前に、大きい曲面につながった成分を除く）
+    loop {
+        if blocks.len() > REFINE_MAX_COMPONENT_BLOCKS {
+            return None;
+        }
+        let coarse = |p: [usize; 3], a: usize| {
+            let mut q = p;
+            q[a] += 1;
+            let (f0, f1) = (field.f(p), field.f(q));
+            f0.is_finite() && f1.is_finite() && (f0 < 0.0) != (f1 < 0.0)
+        };
+        let grow = outward(blocks, 1, [0; 3], &coarse);
+        if grow.is_empty() {
+            break;
+        }
+        blocks.extend(grow);
+    }
+    loop {
+        if blocks.len() > REFINE_MAX_COMPONENT_BLOCKS || blocks.len() > budget.blocks {
+            return None;
+        }
+        // 成分を囲む直方体（ブロックの番号の範囲 b0..b1）と、その細かい格子
+        let mut b0 = [usize::MAX; 3];
+        let mut b1 = [0; 3];
+        for &id in blocks.iter() {
+            let b = unbid(id);
+            for a in 0..3 {
+                b0[a] = b0[a].min(b[a]);
+                b1[a] = b1[a].max(b[a] + 1);
+            }
+        }
+        let c0 = [0, 1, 2].map(|a| span(b0[a]).0);
+        let c1 = [0, 1, 2].map(|a| span(b1[a] - 1).1);
+        let dims = [0, 1, 2].map(|a| (c1[a] - c0[a]) * r);
+        let pts = dims.map(|d| d + 1);
+        if pts[0] * pts[1] * pts[2] > REFINE_MAX_GRID {
+            return None;
+        }
+        let at = |q: [usize; 3]| q[0] + pts[0] * (q[1] + pts[1] * q[2]);
+        // ブロック b の、細かい格子点の範囲（両端を含む）
+        let fine_span = |b: [usize; 3], a: usize| {
+            let (s, e) = span(b[a]);
+            ((s - c0[a]) * r, (e - c0[a]) * r)
+        };
+        // 直方体の中のブロックが成分に入っているか
+        let bd = [0, 1, 2].map(|a| b1[a] - b0[a]);
+        let mut inside = vec![false; bd[0] * bd[1] * bd[2]];
+        for &id in blocks.iter() {
+            let b = unbid(id);
+            inside[(b[0] - b0[0]) + bd[0] * ((b[1] - b0[1]) + bd[1] * (b[2] - b0[2]))] = true;
+        }
+        // 計算する格子点
+        let mut need = vec![false; pts[0] * pts[1] * pts[2]];
+        for &id in blocks.iter() {
+            let b = unbid(id);
+            let [(x0, x1), (y0, y1), (z0, z1)] = [0, 1, 2].map(|a| fine_span(b, a));
+            for z in z0..=z1 {
+                for y in y0..=y1 {
+                    let row = at([x0, y, z]);
+                    need[row..=row + (x1 - x0)].fill(true);
+                }
+            }
+        }
+        let list: Vec<usize> = (0..need.len()).filter(|&l| need[l]).collect();
+        if list.len() > budget.points {
+            return None;
+        }
+        budget.points -= list.len();
+        budget.blocks -= blocks.len();
+        let coord = |l: usize, a: usize| {
+            let q = [l % pts[0], (l / pts[0]) % pts[1], l / (pts[0] * pts[1])];
+            dom.at(a, c0[a] as f64 + q[a] as f64 / r as f64, n)
+        };
+        let mut vals = vec![f32::NAN; need.len()];
+        let mut sc = FieldScratch::default();
+        for part in list.chunks(FIELD_CHUNK) {
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| part.iter().map(|&l| coord(l, a)).collect());
+            let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
+            for (&l, &x) in part.iter().zip(v) {
+                vals[l] = x as f32;
+            }
+        }
+        // 成分の外側の面の上に、符号の変わる辺があるか。あれば向こうのブロックを足してやり直す
+        let changes = |p: [usize; 3], a: usize| {
+            let mut q = p;
+            q[a] += 1;
+            let (f0, f1) = (vals[at(p)], vals[at(q)]);
+            f0.is_finite() && f1.is_finite() && (f0 < 0.0) != (f1 < 0.0)
+        };
+        let grow = outward(blocks, r, c0, &changes);
+        if !grow.is_empty() {
+            blocks.extend(grow);
+            continue;
+        }
+
+        // 符号は変わるが F = 0 になる点が無い辺（極など）には面を張らない（[`false_crossings`]）
+        let mut sign_edges: Vec<SignEdge> = Vec::new();
+        let mut sign_ids: Vec<usize> = Vec::new();
+        let point = |l: usize| [0, 1, 2].map(|a| coord(l, a));
+        for &l in &list {
+            let p = [l % pts[0], (l / pts[0]) % pts[1], l / (pts[0] * pts[1])];
+            for a in 0..3 {
+                if p[a] + 1 >= pts[a] {
+                    continue;
+                }
+                let st = [1, pts[0], pts[0] * pts[1]][a];
+                let (f0, f1) = (vals[l], vals[l + st]);
+                if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) {
+                    continue;
+                }
+                // なめらかに 0 を横切っているだけの辺は調べない（[`implicit_solid`] の 1'' と同じ判定）
+                if p[a] >= 1 && p[a] + 2 < pts[a] {
+                    let (fl, fr) = (vals[l - st], vals[l + 2 * st]);
+                    let (sl, s, sr) = (f0 - fl, f1 - f0, fr - f1);
+                    if sl * s > 0.0 && sr * s > 0.0 && s.abs() <= 4.0 * sl.abs().max(sr.abs()) {
+                        continue;
+                    }
+                }
+                sign_edges.push(SignEdge { p0: point(l), p1: point(l + st), f0: f0 as f64, f1: f1 as f64 });
+                sign_ids.push(3 * l + a);
+            }
+        }
+        let not_zero: std::collections::HashSet<usize> = {
+            let flags = false_crossings(&mut |xyz| field_values_with(prog, combos, xyz, &mut sc).to_vec(), &sign_edges);
+            sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+        };
+        let cell_ok = |c: [usize; 3]| {
+            let b = [0, 1, 2].map(|a| ((c0[a] + c[a] / r) / BLOCK).min(nb - 1) - b0[a]);
+            inside[b[0] + bd[0] * (b[1] + bd[1] * b[2])]
+        };
+        let cross = |p: [usize; 3], a: usize| -> Option<(f64, bool)> {
+            let mut q = p;
+            q[a] += 1;
+            let (f0, f1) = (vals[at(p)], vals[at(q)]);
+            if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) || not_zero.contains(&(3 * at(p) + a)) {
+                return None;
+            }
+            Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
+        };
+        let pos = |p: [f64; 3]| [0, 1, 2].map(|a| dom.at(a, c0[a] as f64 + p[a] / r as f64, n));
+        return Some(nets_on_grid(dims, &cell_ok, &|c| vals[at(c)] < 0.0, &cross, &pos));
+    }
 }
 
 /// 速くする前の [`implicit_solid`]（テストで、出力が完全に同じことを確かめる）
@@ -4918,12 +5482,115 @@ mod tests {
         ];
         for (src, vars, d, n, ranges) in cases {
             let p = prog(src, &vars);
-            let a = implicit_solid(&p, d, n, &ranges, 8);
+            let a = implicit_solid_opt(&p, d, n, &ranges, 8, Refine::Off);
             let b = implicit_solid_reference(&p, d, n, &ranges, 8);
             assert!(!a.indices.is_empty(), "{src}");
             // 空のブロックを飛ばすようにして（S9）、頂点の順番はブロックの順になったので、集合で比べる
             assert!(mesh_sets(&a) == mesh_sets(&b), "{src}: 頂点・三角形の集合が違う");
         }
+    }
+
+    /// メッシュのつながった成分の数（頂点を三角形でつないだもの）
+    fn components(m: &Mesh) -> usize {
+        let nv = m.positions.len() / 3;
+        let mut p: Vec<usize> = (0..nv).collect();
+        fn root(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                p[x] = p[p[x]];
+                x = p[x];
+            }
+            x
+        }
+        for t in m.indices.chunks_exact(3) {
+            for k in 1..3 {
+                let (a, b) = (root(&mut p, t[0] as usize), root(&mut p, t[k] as usize));
+                p[a] = b;
+            }
+        }
+        let used: std::collections::HashSet<usize> = m.indices.iter().map(|&v| root(&mut p, v as usize)).collect();
+        used.len()
+    }
+
+    /// 中心 c・半径 r の球の頂点の数と、|中心からの距離 − r| の最大
+    fn sphere_fit(m: &Mesh, c: f64, r: f64) -> (usize, f64) {
+        let err = m
+            .positions
+            .chunks_exact(3)
+            .map(|q| (q.iter().map(|&v| (v as f64 - c).powi(2)).sum::<f64>().sqrt() - r).abs())
+            .fold(0.0, f64::max);
+        (m.positions.len() / 3, err)
+    }
+
+    #[test]
+    fn small_sphere_is_found() {
+        // 範囲 ±10・細かさ 80（h = 0.25）で、格子より小さい球。細分しないと、半径 0.1 の球は頂点が 0 個
+        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let small = prog("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.01", &AXES);
+        assert_eq!(implicit_solid_opt(&small, d, 80, &[], 0, Refine::Off).positions.len(), 0);
+        let m = implicit_surface(&small, d, 80);
+        let (count, err) = sphere_fit(&m, 0.12, 0.1);
+        assert!(count >= 20, "頂点 {count} 個");
+        assert!(err < 0.02, "半径のずれ {err}");
+        assert_eq!(bad_edges(&m), (0, 0));
+        assert_eq!(components(&m), 1);
+        // 半径 0.3 の球（細分しないと頂点 26 個）
+        let mid = prog("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.09", &AXES);
+        let before = implicit_solid_opt(&mid, d, 80, &[], 0, Refine::Off).positions.len() / 3;
+        let m = implicit_surface(&mid, d, 80);
+        let (count, err) = sphere_fit(&m, 0.12, 0.3);
+        assert!(count >= 100, "頂点 {count} 個（細分しないと {before} 個）");
+        assert!(err < 0.03, "半径のずれ {err}");
+        assert_eq!(bad_edges(&m), (0, 0));
+    }
+
+    #[test]
+    fn small_sphere_without_intervals_is_found() {
+        // 区間演算が使えない式（複素数を通る式）でも、勾配からの見積もりで見つける。|exp(i x)| = 1
+        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let p = prog("abs(exp(i x)) ((x-0.12)^2+(y-0.12)^2+(z-0.12)^2) - 0.04", &AXES);
+        assert!(!p.supports_interval());
+        let before = implicit_solid_opt(&p, d, 80, &[], 0, Refine::Off).positions.len() / 3;
+        let m = implicit_surface(&p, d, 80);
+        let (count, err) = sphere_fit(&m, 0.12, 0.2);
+        assert!(count >= 50 && count > 2 * before, "頂点 {count} 個（細分しないと {before} 個）");
+        assert!(err < 0.03, "半径のずれ {err}");
+        assert_eq!(bad_edges(&m), (0, 0));
+    }
+
+    #[test]
+    fn thin_torus_is_closed() {
+        // 管の半径 0.05、h = 0.125。つながった 1 つの閉じた曲面になる
+        let p = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.0025", &AXES);
+        let m = implicit_surface(&p, Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 80);
+        assert_eq!(bad_edges(&m), (0, 0));
+        assert_eq!(components(&m), 1);
+    }
+
+    #[test]
+    fn refinement_never_cracks() {
+        // 大きい球と小さい球を掛け合わせた式・近い 2 つの球で、縁の辺が無い
+        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        for (src, d, n) in [
+            ("(x^2+y^2+z^2-4) ((x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.01)", big, 80),
+            ("(x^2+y^2+z^2-4) ((x-2.6)^2+(y-0.1)^2+(z-0.1)^2-0.0225)", big, 80),
+            ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40),
+        ] {
+            let m = implicit_surface(&prog(src, &AXES), d, n);
+            assert_eq!(bad_edges(&m).0, 0, "{src}");
+        }
+    }
+
+    #[test]
+    fn flags_bit0_skips_refinement() {
+        // 細分しないなら、細分を足す前（S9）と同じ結果
+        let p = prog("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.09", &AXES);
+        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let off = implicit_solid_opt(&p, d, 80, &[], 0, Refine::Off);
+        let s9 = implicit_solid_with(&p, d, 80, &[], 0, false, Refine::Off);
+        assert_eq!(off.positions, s9.positions);
+        assert_eq!(off.indices, s9.indices);
+        assert_eq!(off.positions.len() / 3, 26);
+        assert!(implicit_surface(&p, d, 80).positions.len() / 3 > 26);
     }
 
     /// 頂点のうち、極の平面 x = c の近く（|x − c| < h）で |g(x) − z| > 2 のもの（極の上の偽の面）の数
@@ -5018,8 +5685,8 @@ mod tests {
         ];
         for (src, vars, d, n, ranges) in cases {
             let p = prog(src, &vars);
-            let sparse = implicit_solid_with(&p, d, n, &ranges, 8, false);
-            let dense = implicit_solid_with(&p, d, n, &ranges, 8, true);
+            let sparse = implicit_solid_with(&p, d, n, &ranges, 8, false, Refine::Off);
+            let dense = implicit_solid_with(&p, d, n, &ranges, 8, true, Refine::Off);
             assert!(!sparse.indices.is_empty(), "{src}");
             assert!(mesh_sets(&sparse) == mesh_sets(&dense), "{src}: 頂点・三角形の集合が違う");
         }
