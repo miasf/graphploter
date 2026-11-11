@@ -581,9 +581,37 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
 
     // 1'. 符号は変わらないが F = 0 に接している所（例: (x² + y² + z² − 1)² = 0）を探す
     let touch = if ranges.is_empty() { find_touches(prog, &f, dom, n) } else { Default::default() };
+    let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
+    // 接するだけの辺を囲むセルに印を付ける。印の無いセル・辺は、接する所を調べずに済ませる
+    // （1つでも接する所があると全部のセルが遅い道を通る、ということにならないように）
+    let mut touch_cell = vec![false; if touch.is_empty() { 0 } else { n * n * n }];
+    for &id in touch.keys() {
+        let (a, mut q) = (id % 3, id / 3);
+        let mut p = [0; 3];
+        for x in p.iter_mut() {
+            *x = q % m;
+            q /= m;
+        }
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        for db in 0..2 {
+            for dc in 0..2 {
+                let mut s = p;
+                if s[b] < db || s[c] < dc {
+                    continue;
+                }
+                s[b] -= db;
+                s[c] -= dc;
+                if s.iter().all(|&x| x < n) {
+                    touch_cell[cell(s[0], s[1], s[2])] = true;
+                }
+            }
+        }
+    }
+    let marked = |i: usize, j: usize, k: usize| !touch_cell.is_empty() && touch_cell[cell(i, j, k)];
 
-    // 格子の辺 p → p + e_a の上で曲面と交わる位置 t（0〜1）と、F の符号（接するだけの所は None）
-    let crossing = |p: [usize; 3], a: usize| -> Option<(f64, Option<bool>)> {
+    // 格子の辺 p → p + e_a の上で曲面と交わる位置 t（0〜1）と、F の符号（接するだけの所は None）。
+    // 接するだけの所は、印のあるセルに接する辺（near_touch）でだけ調べる
+    let crossing = |p: [usize; 3], a: usize, near_touch: bool| -> Option<(f64, Option<bool>)> {
         let mut q = p;
         q[a] += 1;
         let (f0, f1) = (f[idx(p[0], p[1], p[2])], f[idx(q[0], q[1], q[2])]);
@@ -593,7 +621,7 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
         if (f0 < 0.0) != (f1 < 0.0) {
             return Some(((f0 / (f0 - f1)) as f64, Some(f0 < 0.0)));
         }
-        if touch.is_empty() {
+        if !near_touch {
             return None;
         }
         touch.get(&(3 * idx(p[0], p[1], p[2]) + a)).map(|&t| (t as f64, None))
@@ -605,7 +633,6 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
     //    交わる辺はその少ないほうの符号の端の角の組に属させる（組ごとに曲面が1枚）。
     //    接するだけの辺（符号が変わらない）は、まとめて1つの組にする。
     //    cell_slots[vert[セル]][辺の番号] が、その辺に属する頂点
-    let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
     let mut vert = vec![NONE; n * n * n];
     let mut cell_slots: Vec<[u32; 12]> = Vec::new();
     let mut mesh = Mesh::default();
@@ -615,7 +642,8 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                 let corner_neg = CORNERS.map(|d| f[idx(i + d[0], j + d[1], k + d[2])] < 0.0);
                 // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
                 let neg = corner_neg.iter().filter(|&&b| b).count();
-                if touch.is_empty() && (neg == 0 || neg == 8) {
+                let near_touch = marked(i, j, k);
+                if !near_touch && (neg == 0 || neg == 8) {
                     continue;
                 }
                 // 少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分ける
@@ -641,11 +669,11 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                 }
                 // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
                 // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
-                let has_touch = !touch.is_empty()
+                let has_touch = near_touch
                     && EDGES.iter().any(|&[ca, cb]| {
                         let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
                         let base = CORNERS[ca];
-                        matches!(crossing([i + base[0], j + base[1], k + base[2]], a), Some((_, None)))
+                        matches!(crossing([i + base[0], j + base[1], k + base[2]], a, true), Some((_, None)))
                     });
                 if has_touch && groups > 0 {
                     for g in group.iter_mut().filter(|g| **g != usize::MAX) {
@@ -659,7 +687,7 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                 for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
                     let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
                     let base = CORNERS[ca];
-                    if let Some((t, sign)) = crossing([i + base[0], j + base[1], k + base[2]], a) {
+                    if let Some((t, sign)) = crossing([i + base[0], j + base[1], k + base[2]], a, near_touch) {
                         let g = match sign {
                             Some(_) => group[if corner_neg[ca] == minority { ca } else { cb }],
                             None => touch_group,
@@ -722,7 +750,15 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
                     if p[a] >= n || p[b] == 0 || p[b] >= n || p[c] == 0 || p[c] >= n {
                         continue;
                     }
-                    let Some((_, sign)) = crossing(p, a) else { continue };
+                    // 符号の変わらない辺は、周りの4セルのどれかに印があるときだけ接する所を調べる
+                    let near_touch = !touch_cell.is_empty()
+                        && [(1, 1), (0, 1), (0, 0), (1, 0)].iter().any(|&(db, dc)| {
+                            let mut s = p;
+                            s[b] -= db;
+                            s[c] -= dc;
+                            marked(s[0], s[1], s[2])
+                        });
+                    let Some((_, sign)) = crossing(p, a, near_touch) else { continue };
                     let mut around = [NONE; 4];
                     for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)].iter().zip(locals).enumerate() {
                         let mut s = p;
@@ -763,6 +799,8 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
 /// 辺 p → q（= p + e）について、|F| が p−e から p へ減り、q から q+e へ増えていて、
 /// 内側の2点の |F| が外側の2点よりずっと小さければ、その間に |F| の極小がある。
 /// 三分探索で極小の位置を求め、その値がほぼ 0 なら「接している」とみなす。
+/// ただし、辺を囲む4つのセルの角に符号の変わる所があれば、符号の変わる曲面が通っているので候補にしない
+/// （`same_sign_around`。三分探索の前に外しても、結果は最後に外すのと同じ）。
 fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collections::HashMap<usize, f32> {
     const ROUNDS: usize = 16;
     let m = n + 1;
@@ -793,7 +831,7 @@ fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collec
                         continue;
                     }
                     let g = v.map(|x| x.abs() as f64);
-                    if g[1] + g[2] < 0.25 * (g[0] + g[3]) {
+                    if g[1] + g[2] < 0.25 * (g[0] + g[3]) && same_sign_around(f, m, p, a) {
                         cands.push((3 * c + a, p, a, s as f64, 0.5 * (g[0] + g[3])));
                     }
                 }
@@ -858,6 +896,37 @@ fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collec
         }
     }
     touch
+}
+
+/// 辺 p → p + e_a を囲む4つのセルの角（合わせて 18 個の格子点）の符号が、すべて同じか。
+/// 符号の変わる角が近くにあれば、そこは符号の変わる曲面が通っている（例: 格子の平面にちょうど接する球の極）ので、
+/// 接するだけの所として扱わない。格子の外の点と、有限でない点は見ない。
+fn same_sign_around(f: &[f32], m: usize, p: [usize; 3], a: usize) -> bool {
+    let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+    let mut sign = None;
+    for da in 0..2 {
+        for db in -1i64..=1 {
+            for dc in -1i64..=1 {
+                let mut q = [p[0] as i64, p[1] as i64, p[2] as i64];
+                q[a] += da;
+                q[b] += db;
+                q[c] += dc;
+                if q.iter().any(|&x| x < 0 || x >= m as i64) {
+                    continue;
+                }
+                let v = f[q[0] as usize + m * (q[1] as usize + m * q[2] as usize)];
+                if !v.is_finite() {
+                    continue;
+                }
+                // 符号の判定はメッシュを作る所と同じ（f < 0 かどうか）
+                let neg = v < 0.0;
+                if *sign.get_or_insert(neg) != neg {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// 三角形の向き（表裏）をそろえる。辺を共有する三角形どうしが、その辺を逆向きにたどるように裏返していく。
@@ -2137,6 +2206,37 @@ mod tests {
         assert!((view.apply(&[1.0, 0.0, 0.0, 2.0])[0] - 2.0).abs() < 1e-12); // 手前（w = 2）は大きく
         assert!((view.apply(&[1.0, 0.0, 0.0, -4.0])[0] - 0.5).abs() < 1e-12); // 奥（w = −4）は小さく
         assert!(view.apply(&[1.0, 0.0, 0.0, 5.0])[0].is_nan()); // 視点より後ろは描かない
+    }
+
+    /// 三角形が1つだけの辺（縁）の数と、3つ以上の三角形が集まる辺（重なり）の数
+    fn bad_edges(m: &Mesh) -> (usize, usize) {
+        let mut count = std::collections::HashMap::new();
+        for t in m.indices.chunks_exact(3) {
+            for e in 0..3 {
+                let (u, v) = (t[e], t[(e + 1) % 3]);
+                *count.entry((u.min(v), u.max(v))).or_insert(0usize) += 1;
+            }
+        }
+        (count.values().filter(|&&c| c == 1).count(), count.values().filter(|&&c| c >= 3).count())
+    }
+
+    #[test]
+    fn sphere_tangent_to_grid_is_closed() {
+        // 範囲 ±5・細かさ 80 では y = 2 などが格子の座標になり、球の6つの極が格子の平面にちょうど接する。
+        // 符号の変わる曲面なので、接するだけの所として扱わず、閉じた曲面になる
+        let p = prog("x^2+y^2+z^2-4", &AXES);
+        let m = implicit_surface(&p, Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 80);
+        assert!(!m.indices.is_empty());
+        assert_eq!(bad_edges(&m), (0, 0));
+    }
+
+    #[test]
+    fn torus_tangent_to_grid_is_closed() {
+        // z = ±0.2 の円が格子の平面に接するトーラス（表示範囲の端にはかからない）
+        let p = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.04", &AXES);
+        let m = implicit_surface(&p, Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 200);
+        assert!(!m.indices.is_empty());
+        assert_eq!(bad_edges(&m), (0, 0));
     }
 
     #[test]
