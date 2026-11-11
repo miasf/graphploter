@@ -3480,10 +3480,27 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
     }
 }
 
+/// 2D の線分 a–b が、長さが無い・とても短い（大きさ `scale` の 10⁻⁶ 倍以下）か。
+/// 描画側は、ほぼ同じ点だけの線を「点」とみなして丸を付けるので、そうした線は描かない。
+/// 回した曲面の切り口では、格子点をちょうど通る所で、ちょうど同じではない（f32 の誤差ほど違う）点の組ができる
+fn too_short(a: [f32; 3], b: [f32; 3], scale: f32) -> bool {
+    let d: f32 = (0..3).map(|c| (a[c] - b[c]).abs()).sum();
+    d <= 1e-6 * scale || a == b
+}
+
 /// 2D 表示の「切り口」: 曲面のメッシュと、平面「縦の座標 = `level`」の交わりの線（曲線のメッシュ）。
 /// 三角形ごとに、平面をまたぐ2つの辺の上の点を結ぶ。線分どうしの間は NaN で切る
 pub fn slice_mesh(mesh: &Mesh, level: f32) -> Mesh {
     let p = &mesh.positions;
+    // メッシュの大きさ（とても短い線を捨てる目安）
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for q in p.chunks_exact(3).filter(|q| q.iter().all(|v| v.is_finite())) {
+        for c in 0..3 {
+            lo[c] = lo[c].min(q[c]);
+            hi[c] = hi[c].max(q[c]);
+        }
+    }
+    let scale = (0..3).map(|c| (hi[c] - lo[c]).max(0.0)).sum::<f32>();
     let at = |k: u32| {
         let k = k as usize * 3;
         [p[k], p[k + 1], p[k + 2]]
@@ -3500,8 +3517,8 @@ pub fn slice_mesh(mesh: &Mesh, level: f32) -> Mesh {
                 pts.push([0, 1, 2].map(|c| if c == 2 { level } else { v[a][c] + (v[b][c] - v[a][c]) * s }));
             }
         }
-        // 長さの無い線は描かない（描画側が点とみなして丸を付ける）
-        if pts.len() == 2 && pts[0] != pts[1] {
+        // 長さの無い線・とても短い線は描かない（描画側が点とみなして丸を付ける）
+        if pts.len() == 2 && !too_short(pts[0], pts[1], scale) {
             out.extend_from_slice(&pts[0]);
             out.extend_from_slice(&pts[1]);
             out.extend_from_slice(&[f32::NAN; 3]);
@@ -3596,6 +3613,7 @@ pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> 
 /// `prog` の変数は (横, 奥, 縦) の3つか、縦の無い (横, 奥) の2つ（`z = f(x, y)` の切り口 f = 0 など）
 pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     let n = n.max(2);
+    let scale = ((dom.hi[0] - dom.lo[0]) + (dom.hi[1] - dom.lo[1])) as f32;
     let m = n + 1;
     let mut xs = Vec::with_capacity(m * m);
     let mut ys = Vec::with_capacity(m * m);
@@ -3681,7 +3699,7 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
                 // 描くと、描画側が「長さの無い曲線 = 点」とみなして丸を付ける
                 // （比べるのは画面に渡す f32 に丸めた後: f64 では別でも、丸めると同じ点になることがある）
                 let (pa, pb) = (cross[a].map(|v| v as f32), cross[b].map(|v| v as f32));
-                if pa == pb {
+                if too_short([pa[0], pa[1], 0.0], [pb[0], pb[1], 0.0], scale) {
                     continue;
                 }
                 pts.extend_from_slice(&[pa[0], pa[1], 0.0]);
@@ -4997,6 +5015,30 @@ mod tests {
             assert!(!m.positions.is_empty());
             for seg in m.positions.chunks_exact(9) {
                 assert!(seg[0..3] != seg[3..6], "{src}（{n}）: 長さの無い線 {:?}", &seg[0..3]);
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_slice_has_no_tiny_segments() {
+        // 回した階段の切り口: 格子点をちょうど通る所で、ほぼ同じ点の組（描画側では丸に見える）を作らない
+        let p = prog("floor(x)/2 + floor(y)/4", &["x", "y"]);
+        let base = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let ext = Domain { lo: [-15.5; 3], hi: [15.5; 3] };
+        for deg in [0.5f64, 30.0, 82.6, 133.9] {
+            let a = deg.to_radians();
+            let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], ext, 200, ComplexMode::Off, true, false, 12.0);
+            let view = View {
+                rows: [(0.0, vec![a.cos(), -a.sin(), 0.0]), (0.0, vec![a.sin(), a.cos(), 0.0]), (0.0, vec![0.0, 0.0, 1.0])],
+                center: [0.0; 3],
+                hidden: Vec::new(),
+                dist: 0.0,
+            };
+            let m = slice_mesh(&project(&shape, &view, base), 0.0);
+            assert!(!m.positions.is_empty());
+            for seg in m.positions.chunks_exact(9) {
+                let d: f32 = (0..3).map(|c| (seg[c] - seg[3 + c]).abs()).sum();
+                assert!(d > 1e-4, "{deg}°: とても短い線 {:?}", &seg[0..6]);
             }
         }
     }
