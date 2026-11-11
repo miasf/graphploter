@@ -872,15 +872,24 @@ fn shape_report() {
 }
 
 /// ふつうの `cargo test` で動く小さい確かめ（速い陽関数の正解だけ）。
-/// 回転なしで、欠け（1 箱）が 0.5% 以下。以後のステップで、直した式をここに足していく
+/// 欠け（1 箱）が 0.5% 以下。以後のステップで、直した式をここに足していく
 #[test]
 fn shape_regression() {
-    for f in ["sin(x) cos(y)", "floor(x y / 4)", "1/(x y)", "sqrt(36 - x^2 - y^2)", "tan(x + y)"] {
-        let (r, _) = mesh(&format!("z = {f}"), Rot::None, IRES);
-        let reference = reference_explicit(f, Rot::None).unwrap();
+    let cases = [
+        ("sin(x) cos(y)", Rot::None),
+        ("floor(x y / 4)", Rot::None),
+        ("1/(x y)", Rot::None),
+        ("sqrt(36 - x^2 - y^2)", Rot::None),
+        ("tan(x + y)", Rot::None),
+        // S18: 表示中の座標どうしの回転で、極の近くの面が欠けない（xy 回転は M が回転行列そのものなので、陽関数の正解が使える）
+        ("1/(x y)", Rot::Xy),
+    ];
+    for (f, rot) in cases {
+        let (r, _) = mesh(&format!("z = {f}"), rot, IRES);
+        let reference = reference_explicit(f, rot).unwrap();
         let got = voxels_of_mesh(&r.positions(), &r.indices());
         let m = miss(&reference, &got, 1);
-        assert!(m <= 0.5, "z = {f} の欠けが {m:.3}%（0.5% 以下のはず）");
+        assert!(m <= 0.5, "z = {f}（{}）の欠けが {m:.3}%（0.5% 以下のはず）", rot.label());
     }
 }
 
