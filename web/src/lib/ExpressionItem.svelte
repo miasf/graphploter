@@ -2,6 +2,7 @@
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
   import { joinTuple, splitTuple } from './latex'
+  import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
@@ -396,15 +397,10 @@
           {/each}
         </div>
         {#if tab === 'look'}
-        <label class="row">
+        <div class="row wrap">
           <span class="label">色</span>
-          <input
-            class="color"
-            type="color"
-            value={item.color}
-            oninput={(e) => onColor(e.currentTarget.value)}
-          />
-        </label>
+          <ColorPicker value={item.color} onChange={onColor} />
+        </div>
           {#if isCurve}
           <div class="sliders">
             <span class="label">{isComplexPoint ? "点の大きさ" : "線の太さ"}</span>
@@ -808,6 +804,9 @@
     align-items: center;
     gap: 10px;
   }
+  .row.wrap {
+    flex-wrap: wrap;
+  }
   .label {
     color: var(--muted);
   }
@@ -829,14 +828,6 @@
     align-items: center;
     gap: 6px;
     color: var(--text);
-    cursor: pointer;
-  }
-  .color {
-    width: 32px;
-    height: 22px;
-    padding: 0;
-    border: none;
-    background: none;
     cursor: pointer;
   }
   .components {
