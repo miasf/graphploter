@@ -2493,6 +2493,40 @@ pub fn explicit_nd(
 /// 最初に `n` 等分して計算し、曲がっている所・途切れる所だけを細かく分け直す（適応サンプリング）。
 /// 曲線が途切れる所には NaN の点が入る。`tol` は「直線で結んだときのずれ」の許容量（n 次元の距離）。
 /// 回転して3次元に射影しても距離は縮むだけなので、射影した後もこの許容量に収まる。
+/// 多変数の図形（媒介変数 k 個、範囲 `r`）の辺だけ: 媒介変数を 1 つだけ動かし、残りを範囲の両端のどちらかに
+/// 固定した曲線を、全部の組み合わせで作る（k · 2^(k−1) 本。4 個なら正八胞体の辺 32 本）。
+/// 曲線は曲がっている所だけ細かく計算する（[`parametric_curve_nd`] と同じ）。曲線どうしの間は NaN で切る
+pub fn parametric_edges_nd(sets: &[Vec<Program>], r: &[(f64, f64)], n: usize, tol: f64) -> NdShape {
+    let k = r.len();
+    let dims = sets.first().map_or(0, |p| p.len());
+    let mut points = Vec::new();
+    let empty: &[f64] = &[];
+    for progs in sets {
+        let set = ProgramSet::new(progs);
+        for a in 0..k {
+            let others: Vec<usize> = (0..k).filter(|&c| c != a).collect();
+            for bits in 0..1usize << others.len() {
+                let fixed: Vec<(usize, f64)> = others
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &c)| (c, if bits >> j & 1 == 0 { r[c].0 } else { r[c].1 }))
+                    .collect();
+                let bound = set.bind(&fixed);
+                if !points.is_empty() {
+                    points.extend(std::iter::repeat_n(f64::NAN, dims)); // 辺どうしの間で線を切る
+                }
+                let eval = |ts: &[f64]| {
+                    let mut inputs = vec![empty; k];
+                    inputs[a] = ts;
+                    eval_nd(&bound, &inputs, ts.len())
+                };
+                points.extend(curve_nd(&eval, dims, r[a], n, tol));
+            }
+        }
+    }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None }
+}
+
 pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: f64) -> NdShape {
     let dims = sets.first().map_or(0, |p| p.len());
     let mut points = Vec::new();
@@ -3525,6 +3559,35 @@ mod tests {
         let z = |k: u32| mm.positions[3 * k as usize + 2];
         let flat = mm.indices.chunks_exact(3).filter(|t| t.iter().all(|&k| z(k) == 1.0)).count();
         assert_eq!(flat, mb.indices.len() / 3);
+    }
+
+    #[test]
+    fn tesseract_has_32_edges() {
+        // (t₁, t₂, t₃, t₄) の辺は 32 本、媒介変数 3 つなら 12 本（NaN で区切られた曲線の数）
+        let curves = |s: &NdShape| {
+            let d = s.dims;
+            let mut count = 0;
+            let mut inside = false;
+            for p in s.points.chunks_exact(d) {
+                let ok = p.iter().all(|v| v.is_finite());
+                if ok && !inside {
+                    count += 1;
+                }
+                inside = ok;
+            }
+            count
+        };
+        let names = ["t1", "t2", "t3", "t4"];
+        let p4: Vec<Program> = ["t_1", "t_2", "t_3", "t_4"].iter().map(|v| prog(v, &names)).collect();
+        let s = parametric_edges_nd(&[p4], &[(-1.0, 1.0); 4], 400, 1e-3);
+        assert_eq!(curves(&s), 32);
+        // 頂点はどれも、座標が ±1 か、1 つの座標だけが範囲の中
+        for p in s.points.chunks_exact(4).filter(|p| p[0].is_finite()) {
+            assert!(p.iter().filter(|v| (v.abs() - 1.0).abs() > 1e-12).count() <= 1, "{p:?}");
+        }
+        let names = ["u", "v", "t"];
+        let p3: Vec<Program> = ["u cos(v)", "u sin(v)", "t"].iter().map(|e| prog(e, &names)).collect();
+        assert_eq!(curves(&parametric_edges_nd(&[p3], &[(0.0, 1.0), (0.0, 6.0), (0.0, 1.0)], 400, 1e-3)), 12);
     }
 
     #[test]

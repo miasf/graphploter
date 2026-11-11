@@ -261,11 +261,18 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
       },
       {
         label: '正八胞体（4次元の立方体）の回転',
-        // 辺 32 本: 1つの座標を t で動かし、残りの3つは ±1 のすべての組み合わせ（リスト）
-        items: [0, 1, 2, 3].map((k) => ({
-          latex: `\\left(${[0, 1, 2, 3].map((j) => (j === k ? 't' : '\\left[-1,1\\right]')).join(',')}\\right)`,
-          options: { color: '#2d70b3', lineWidth: 2.5, ranges: { t: ['-1', '1'] as [string, string] } },
-        })),
+        // 辺 32 本: (t₁, t₂, t₃, t₄) を「辺だけ描く」で、1つの媒介変数だけを動かした線（残りは ±1）にする
+        items: [
+          {
+            latex: '\\left(t_1,t_2,t_3,t_4\\right)',
+            options: {
+              color: '#2d70b3',
+              lineWidth: 2.5,
+              edges: true,
+              ranges: Object.fromEntries([1, 2, 3, 4].map((k) => [`t${k}`, ['-1', '1'] as [string, string]])),
+            },
+          },
+        ],
         view: { dims: 4, rotation: { [XW]: 20, [YZ]: 20 }, perspective: 40, half: 2.5, play: XW },
       },
     ],

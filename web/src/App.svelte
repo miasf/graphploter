@@ -29,7 +29,7 @@
     SliderStyle,
     Space,
   } from './lib/types'
-  import { GLOBAL_GROUP, OWN_GROUP, PLOT_NO_REFINE } from './lib/types'
+  import { GLOBAL_GROUP, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE } from './lib/types'
   import { Viewer } from './lib/Viewer'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -130,6 +130,7 @@
         complexMode: it.complexMode,
         walls: it.walls,
         layers: it.layers,
+        edges: it.edges || undefined,
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
@@ -594,7 +595,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      coarse ? PLOT_NO_REFINE : 0,
+      (coarse ? PLOT_NO_REFINE : 0) | (item.edges ? PLOT_EDGES : 0),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -900,6 +901,11 @@
 
   function setLayers(item: PlotItem, layers: number) {
     item.layers = Math.max(1, Math.round(layers))
+    schedule(item, 0)
+  }
+
+  function setEdges(item: PlotItem, on: boolean) {
+    item.edges = on
     schedule(item, 0)
   }
 
@@ -1445,6 +1451,7 @@
             onComplexMode={(m) => setComplexMode(item, m)}
             onWalls={(on) => setWalls(item, on)}
             onLayers={(n) => setLayers(item, n)}
+            onEdges={(on) => setEdges(item, on)}
             onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}

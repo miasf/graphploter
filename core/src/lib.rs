@@ -221,6 +221,8 @@ pub fn last_used_params() -> String {
 
 /// [`plot`] の `flags` のビット 0: 形が急に変わる所を細かくしない
 const FLAG_NO_REFINE: u32 = 1;
+/// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
+const FLAG_EDGES: u32 = 4;
 
 /// 式を解析して、曲面（または曲線）を作る。
 ///
@@ -245,7 +247,8 @@ const FLAG_NO_REFINE: u32 = 1;
 /// - `flat_slice`: 2D 表示の描き方。true なら「切り口」（縦の座標 = 0 の平面との交わり）、
 ///   false なら「投影」（3次元の図形を真上から平面に押しつぶした形）
 /// - `layers`: 媒介変数が4つ以上の図形で、固定する媒介変数の範囲を何等分した所に面を描くか（1 なら両端だけ）
-/// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する）
+/// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する）。
+///   ビット 2: 媒介変数が 3 つ以上の図形を、面ではなく辺だけで描く
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -357,6 +360,7 @@ pub fn plot(
         flat_slice: flat && flat_slice,
         layers: layers.clamp(1, 12) as usize,
         refine: flags & FLAG_NO_REFINE == 0,
+        edges: flags & FLAG_EDGES != 0,
         range: &range,
         view: space.view(perspective),
     };
@@ -428,6 +432,8 @@ struct Ctx<'a> {
     layers: usize,
     /// 形が急に変わる所を細かくするか（[`plot`] の `flags` を参照）
     refine: bool,
+    /// 媒介変数が 3 つ以上の図形を、辺だけで描くか（[`plot`] の `flags` を参照）
+    edges: bool,
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
     view: mesh::View,
@@ -552,6 +558,13 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_surface_nd_opt(sets, u, v, ctx.resolution, tol));
         }
         // 立体は面が6枚になるので、1枚あたりを少し粗くする
+        // 辺だけ描く: 媒介変数を 1 つだけ動かした曲線（媒介変数の直方体の辺の像）
+        P::Volume { sets, vars } | P::Sheets { sets, vars } if ctx.edges => {
+            let r: Vec<(f64, f64)> = vars.iter().map(|v| (ctx.range)(v)).collect();
+            b.curve = true;
+            b.kind = format!("{} · 辺 {} 本", b.kind, vars.len() << (vars.len() - 1));
+            b.shape = Some(mesh::parametric_edges_nd(sets, &r, 400, ctx.size * 2e-4));
+        }
         P::Volume { sets, vars } => {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
             b.shape = Some(mesh::parametric_solid_nd(sets, r, (ctx.resolution * 2 / 3).max(2)));
@@ -629,6 +642,13 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let tol = ctx.refine.then_some(ctx.size * 1e-3);
             let (u, v) = ((ctx.range)(&vars[0]), (ctx.range)(&vars[1]));
             b.shape = Some(mesh::parametric_surface_nd_opt(sets, u, v, ctx.resolution, tol));
+        }
+        // 辺だけ描く: 媒介変数を 1 つだけ動かした曲線（媒介変数の直方体の辺の像）
+        P::Volume { sets, vars } | P::Sheets { sets, vars } if ctx.edges => {
+            let r: Vec<(f64, f64)> = vars.iter().map(|v| (ctx.range)(v)).collect();
+            b.curve = true;
+            b.kind = format!("{} · 辺 {} 本", b.kind, vars.len() << (vars.len() - 1));
+            b.shape = Some(mesh::parametric_edges_nd(sets, &r, 400, ctx.size * 2e-4));
         }
         P::Volume { sets, vars } => {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];

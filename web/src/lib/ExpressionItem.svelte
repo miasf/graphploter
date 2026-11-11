@@ -25,6 +25,7 @@
     onWalls: (on: boolean) => void
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
+    onEdges: (on: boolean) => void
     /** 次元を n にする（「次元を 5 にする」ボタン・成分を足したとき） */
     onSetDims: (n: number) => void
     onLineWidth: (width: number) => void
@@ -84,6 +85,7 @@
     onComplexMode,
     onWalls,
     onLayers,
+    onEdges,
     onSetDims,
     onLineWidth,
     onRange,
@@ -162,9 +164,11 @@
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
   /** 複素平面の点（1 + 2i、複素数のパラメータ c など）。曲線と同じく線の太さ（点の大きさ）を選べる */
   const isComplexPoint = $derived(/^複素平面の点/.test(item.kind ?? ''))
-  const isCurve = $derived(item.params.length === 1 || isComplexPoint)
+  /** 媒介変数が3つ以上の図形を、辺だけで描いている（線として描く） */
+  const isEdges = $derived(item.params.length >= 3 && (item.edges ?? false))
+  const isCurve = $derived(item.params.length === 1 || isComplexPoint || isEdges)
   /** 媒介変数表示の曲面・立体（格子線を媒介変数に沿って引く） */
-  const isSurface = $derived(item.params.length >= 2)
+  const isSurface = $derived(item.params.length >= 2 && !isEdges)
   /** 媒介変数が4つ以上の図形（媒介変数を2つずつ動かした面の集まり） */
   const isSheets = $derived(item.params.length >= 4)
   /** 媒介変数ごとの格子線の分割数の設定の名前（立体なら3つ目は w。面の集まりは、どの面も同じ分割にする） */
@@ -444,7 +448,13 @@
             </span>
           </div>
 
-          {#if isSheets}
+          {#if item.params.length >= 3}
+            <label class="check">
+              <input type="checkbox" checked={item.edges ?? false} onchange={(e) => onEdges(e.currentTarget.checked)} />
+              辺だけ描く（媒介変数を1つだけ動かした線。範囲の直方体の辺の像）
+            </label>
+          {/if}
+          {#if isSheets && !isEdges}
             <div class="sliders">
               <span class="label">中の面</span>
               <input
