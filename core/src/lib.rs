@@ -129,11 +129,42 @@ impl MeshResult {
     pub fn lod_indices(&self) -> Vec<u32> {
         self.inner.lod.clone()
     }
-    /// かかった時間の内訳 [式の計算 ms, メッシュ ms, 粗い版 ms, 計算した点の数]（`mesh::Stats` を参照）
+    // ---- 配列を取り出す（取り出せるのは1回だけ。取り出した後の getter は空を返す）----
+    // getter は Rust 側で clone() してから JavaScript の配列に写すのでコピーが2回になる。
+    // こちらは Rust 側の配列をそのまま渡すので、コピーは JavaScript の配列に写す1回だけ
+
+    /// 頂点座標を取り出す（Float32Array）
+    pub fn take_positions(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.positions)
+    }
+    /// 頂点の法線を取り出す（Float32Array）
+    pub fn take_normals(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.normals)
+    }
+    /// 三角形の頂点番号を取り出す（Uint32Array）
+    pub fn take_indices(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.inner.indices)
+    }
+    /// 粗い版の三角形の頂点番号を取り出す（Uint32Array）
+    pub fn take_lod_indices(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.inner.lod)
+    }
+    /// 格子線用の座標を取り出す（Float32Array）
+    pub fn take_grid_coords(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.grid_coords)
+    }
+    /// 複素数の色分けの値を取り出す（Float32Array）
+    pub fn take_complex_values(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.complex)
+    }
+    /// かかった時間の内訳 [式の計算 ms, メッシュ ms, 粗い版 ms, 計算した点の数,
+    /// 陰関数なら部分ごとの時間 × 4]（`mesh::Stats` を参照）
     #[wasm_bindgen(getter)]
     pub fn stats(&self) -> Vec<f64> {
         let s = self.inner.stats;
-        vec![s.eval_ms, s.mesh_ms, s.lod_ms, s.points]
+        let mut v = vec![s.eval_ms, s.mesh_ms, s.lod_ms, s.points];
+        v.extend_from_slice(&s.phases);
+        v
     }
 }
 
@@ -141,7 +172,8 @@ impl MeshResult {
 /// 式の計算の時間は、`start` の時点で `timing::reset` してから集めたもの
 fn record_stats(mesh: &mut mesh::Mesh, start: f64, lod_start: f64, end: f64) {
     let (eval_ms, points) = timing::take();
-    mesh.stats = mesh::Stats { eval_ms, mesh_ms: (lod_start - start - eval_ms).max(0.0), lod_ms: end - lod_start, points };
+    let phases = mesh.stats.phases;
+    mesh.stats = mesh::Stats { eval_ms, mesh_ms: (lod_start - start - eval_ms).max(0.0), lod_ms: end - lod_start, points, phases };
 }
 
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。

@@ -136,7 +136,8 @@ function makeCap(source: CapSource, cut: CutRequest, resolution: number, t?: Tal
   const w0 = performance.now()
   const m = source.cap(cut.axis, cut.pos, cut.keepBelow, resolution)
   const c0 = performance.now()
-  const cap = { positions: m.positions, normals: m.normals, indices: m.indices }
+  // 配列は取り出して渡す（コピーは1回）
+  const cap = { positions: m.take_positions(), normals: m.take_normals(), indices: m.take_indices() }
   if (t) {
     t.copy += performance.now() - c0
     addStats(t, m, c0 - w0)
@@ -261,13 +262,14 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       return rg[1] - rg[0]
     }
     const c0 = performance.now()
+    // 配列は取り出して渡す（getter だと Rust 側の clone と JavaScript への写しで2回コピーになる）
     const mesh = {
-      positions: r.positions,
-      normals: r.normals,
-      indices: r.indices,
-      lodIndices: r.lod_indices,
-      gridCoords: r.grid_coords,
-      complexValues: r.complex_values,
+      positions: r.take_positions(),
+      normals: r.take_normals(),
+      indices: r.take_indices(),
+      lodIndices: r.take_lod_indices(),
+      gridCoords: r.take_grid_coords(),
+      complexValues: r.take_complex_values(),
       curve: r.curve,
       solid: r.solid,
       heat: r.kind.includes('の値で塗り分け'),

@@ -156,8 +156,15 @@ fn bench_report() {
         ("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2 = 0.04".into(), 10.0, 80),
         ("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2 = 0.09".into(), 10.0, 80),
     ];
+    let mut phases = Vec::new();
     for (f, r, n) in &implicit {
-        row(f, *n, &best(f, Setup::new(*r, 150, *n)));
+        let res = best(f, Setup::new(*r, 150, *n));
+        row(f, *n, &res);
+        phases.push((f.clone(), *n, res.stats()[4..8].to_vec()));
+    }
+    println!("\n陰関数の部分ごとの時間（ms）: F の計算 / 接する所の候補探し / セルの頂点 / 辺の四角形と法線\n");
+    for (f, n, p) in phases {
+        println!("- {f}（{n}）: {:.2} / {:.2} / {:.2} / {:.2}", p[0], p[1], p[2], p[3]);
     }
 
     println!("\n## 媒介変数表示（「メッシュ」は n 次元の点を計算した後の射影を含む。射影だけの時間は別の列）\n");
