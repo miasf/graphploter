@@ -3,15 +3,21 @@
 
 import init, {
   eval_range,
+  field_chunks,
+  field_mode_chunks,
+  field_mode_given,
+  field_mode_plan,
+  field_mode_reset,
   last_used_params,
   plot,
+  take_field_values,
   type CapSource,
   type MeshResult,
   type Shape,
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
-import type { CapData, CapRequest, CapResponse, CutRequest, PlotRequest, PlotResponse, PlotTiming } from './types'
+import type { CapData, CapRequest, CapResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
 import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_NO_REFINE } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -193,6 +199,58 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       coordError = e
       coord = { ranges: space.ranges.flatMap(() => [NaN, NaN]), slice: [...space.slice] }
     }
+    const callPlot = () =>
+      plot(
+        source,
+        domainArr,
+        resolution,
+        implicitResolution,
+        rangeNames.join(','),
+        new Float64Array(rangeValues.flat()),
+        Object.keys(params).join(','),
+        new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
+        Object.entries(params)
+          .filter(([, p]) => p.complex)
+          .map(([k]) => k)
+          .join(','),
+        space.dims,
+        new Uint32Array(space.axes),
+        new Float64Array(coord.slice),
+        new Float64Array(coord.ranges),
+        Object.keys(stacks).join(','),
+        new Float64Array(Object.values(stacks).flat()),
+        space.samples,
+        new Float64Array(space.rotation),
+        new Float64Array(space.center),
+        space.perspective,
+        Math.max(0, COMPLEX_MODE_ORDER.indexOf(req.complexMode)),
+        req.walls,
+        req.flat,
+        req.layers,
+        req.flatSlice,
+        req.flags,
+      )
+    // 重い陰関数の F の計算を分ける途中の段階（計画・一部の計算）: メッシュは作らず、結果だけ返す
+    if (req.field && req.field.mode !== 'given') {
+      const w0 = performance.now()
+      let stage: FieldStageResponse
+      try {
+        if (req.field.mode === 'plan') field_mode_plan()
+        else field_mode_chunks(req.field.from, req.field.to)
+        callPlot().free()
+        stage =
+          req.field.mode === 'plan'
+            ? { requestId, ok: true, chunks: field_chunks(), values: null, ms: performance.now() - w0 }
+            : { requestId, ok: true, chunks: 0, values: take_field_values(), ms: performance.now() - w0 }
+      } catch (e) {
+        field_mode_reset()
+        stage = { requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+      self.postMessage(stage, { transfer: stage.ok && stage.values ? [stage.values.buffer as ArrayBuffer] : [] })
+      return
+    }
+    // ほかの Worker が計算した F の値を使ってメッシュを作る
+    if (req.field?.mode === 'given') field_mode_given(req.field.values)
     const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
     const cached = shapes.get(itemId)
     let r: MeshResult | null = null
@@ -223,36 +281,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     }
     if (!r) {
       const w0 = performance.now()
-      r = plot(
-        source,
-        domainArr,
-        resolution,
-        implicitResolution,
-        rangeNames.join(','),
-        new Float64Array(rangeValues.flat()),
-        Object.keys(params).join(','),
-        new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im])),
-        Object.entries(params)
-          .filter(([, p]) => p.complex)
-          .map(([k]) => k)
-          .join(','),
-        space.dims,
-        new Uint32Array(space.axes),
-        new Float64Array(coord.slice),
-        new Float64Array(coord.ranges),
-        Object.keys(stacks).join(','),
-        new Float64Array(Object.values(stacks).flat()),
-        space.samples,
-        new Float64Array(space.rotation),
-        new Float64Array(space.center),
-        space.perspective,
-        Math.max(0, COMPLEX_MODE_ORDER.indexOf(req.complexMode)),
-        req.walls,
-        req.flat,
-        req.layers,
-        req.flatSlice,
-        req.flags,
-      )
+      r = callPlot()
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
@@ -309,6 +338,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
     res = { requestId, ok: true, mesh, kind, ms: total, usedParams, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
+    field_mode_reset()
     forget(itemId)
     res = { requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
   }
