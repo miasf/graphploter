@@ -437,7 +437,27 @@ fn find_jumps(
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
 ) -> std::collections::HashMap<usize, Jump> {
+    find_jumps_with(prog, us, vs, vals, hs, m, height, threshold, usable, true)
+}
+
+/// [`find_jumps`] の本体。`early_exit` が偽なら、途中で候補を外さない（テストで結果を比べるため）
+#[allow(clippy::too_many_arguments)]
+fn find_jumps_with(
+    prog: &Program,
+    us: &[f64],
+    vs: &[f64],
+    vals: &[C],
+    hs: &[f64],
+    m: usize,
+    height: &dyn Fn(C) -> f64,
+    threshold: f64,
+    usable: &dyn Fn(f64) -> bool,
+    early_exit: bool,
+) -> std::collections::HashMap<usize, Jump> {
     const ROUNDS: usize = 12;
+    // この回数だけ二分した後、差が最初の差の EARLY_KEEP 倍より小さい候補は外す
+    const EARLY_ROUND: usize = 3;
+    const EARLY_KEEP: f64 = 0.3;
     // 候補: 両端が使えて、高さの差が大きい辺
     struct Cand {
         id: usize,
@@ -476,7 +496,17 @@ fn find_jumps(
     let mut mu = vec![0.0; cands.len()];
     let mut mv = vec![0.0; cands.len()];
     let mut out = vec![C::new(0.0, 0.0); cands.len()];
-    for _ in 0..ROUNDS {
+    for round in 0..ROUNDS {
+        // 急なだけでなめらかな辺（z = x² − y² ではほとんどの辺が候補になる）は、二分すると差が縮んでいくので、
+        // 3 回二分した時点で差が最初の 0.3 倍より小さければ候補から外す（最後の判定は「0.5 倍より大きい」）。
+        // 段差のある辺は、二分しても差が縮まないので残る。差が有限でない（片側が定義されない）辺も、
+        // 最後の判定で外れるので、ここで外してよい
+        if early_exit && round == EARLY_ROUND {
+            cands.retain(|c| (height(c.fb) - height(c.fa)).abs() >= EARLY_KEEP * c.first);
+            mu.truncate(cands.len());
+            mv.truncate(cands.len());
+            out.truncate(cands.len());
+        }
         for (c, (a, b)) in cands.iter().zip(mu.iter_mut().zip(mv.iter_mut())) {
             let t = 0.5 * (c.ta + c.tb);
             *a = us[c.k0] + (us[c.k1] - us[c.k0]) * t;
@@ -2007,6 +2037,44 @@ mod tests {
         // 高さ = Im f = y
         let m = explicit_surface_with(&p, dom(), 4, 2, ComplexMode::Im);
         assert!(m.positions.chunks_exact(3).all(|q| (q[2] - q[1]).abs() < 1e-6));
+    }
+
+    /// `explicit_surface_full` と同じ入力で `find_jumps_with` を呼び、(辺の番号, 位置 t) を番号順に並べたもの
+    fn jumps_of(src: &str, early_exit: bool) -> Vec<(usize, f64)> {
+        let p = prog(src, &["x", "y"]);
+        // 範囲を少しずらして、極 x = 0 が格子の点にも二分の点にもならないようにする
+        // （値が有限でない点を踏むと、その辺は段差とみなされない）
+        let dom = Domain { lo: [-4.93, -4.93, -5.0], hi: [5.07, 5.07, 5.0] };
+        let n = 60;
+        let m = n + 1;
+        let (mut us, mut vs) = (Vec::new(), Vec::new());
+        for j in 0..m {
+            for i in 0..m {
+                us.push(dom.at(0, i as f64, n));
+                vs.push(dom.at(1, j as f64, n));
+            }
+        }
+        let mut vals = vec![C::new(0.0, 0.0); m * m];
+        p.eval_batch(&[&us, &vs], &mut vals);
+        let h = dom.hi[2] - dom.lo[2];
+        let (wlo, whi) = (dom.lo[2] - h, dom.hi[2] + h);
+        let clamped = |z: C| height(z, ComplexMode::Off).clamp(wlo, whi);
+        let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+        let usable = |w: f64| w.is_finite();
+        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, m, &clamped, h * 0.03, &usable, early_exit);
+        let mut out: Vec<(usize, f64)> = jumps.iter().map(|(&id, j)| (id, j.t)).collect();
+        out.sort_by_key(|&(id, _)| id);
+        out
+    }
+
+    #[test]
+    fn jumps_unchanged_by_early_exit() {
+        // 途中で候補を外しても、見つかる段差（辺と位置）は外さないときと同じ
+        for src in ["floor(2x)", "tan(x) y", "1/x + 1/y", "floor(x) + floor(y)", "sign(x) + y"] {
+            let (fast, full) = (jumps_of(src, true), jumps_of(src, false));
+            assert!(!full.is_empty(), "{src}: 段差が見つからない");
+            assert_eq!(fast, full, "{src}");
+        }
     }
 
     #[test]
