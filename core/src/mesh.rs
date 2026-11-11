@@ -1276,8 +1276,8 @@ fn nets_on_grid(
                         let mut q = CORNERS[ca].map(|v| v as f64);
                         q[a] += t;
                         edge_group[e] = g;
-                        for ax in 0..3 {
-                            sums[g].0[ax] += q[ax];
+                        for (sum, v) in sums[g].0.iter_mut().zip(q) {
+                            *sum += v;
                         }
                         sums[g].1 += 1.0;
                     }
