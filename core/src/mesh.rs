@@ -481,10 +481,16 @@ pub fn explicit_surface_opt(
     let flip = (ua + 1) % 3 != va;
     let mut wall_quads: Vec<[(f64, f64, C, C); 2]> = Vec::new();
 
+    // 段差の無い三角形（表示範囲の上端・下端で切ってから描く）
+    let mut plain: Vec<[usize; 3]> = Vec::new();
     // 3頂点とも使える三角形だけ残す
     for t in &r.tris {
         let vtx = [t[0] as usize, t[1] as usize, t[2] as usize];
         if vtx.iter().any(|&p| index_of[p] == NONE) {
+            // 頂点の一部だけが定義される三角形: 定義域の縁を求めて、定義される部分を描く（後でまとめて）
+            if vtx.iter().any(|&p| index_of[p] != NONE) {
+                plain.push(vtx);
+            }
             continue;
         }
         // 各辺 (p→q) の辺の名前（番号の小さい頂点が先）と、向き（三角形の辺の向きと同じなら true）
@@ -504,7 +510,7 @@ pub fn explicit_surface_opt(
                 .extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
         };
         match jumped.len() {
-            0 => emit(&mut mesh, vtx.map(|p| index_of[p])),
+            0 => plain.push(vtx), // 表示範囲の上端・下端で切るものがあるので、後でまとめて描く
             2 => {
                 // 2つの辺に共通の頂点が、段差の片側に1つだけある頂点。
                 // 辺 e は頂点 e → e+1 なので、飛ばない辺 ne の反対の頂点は ne + 2
@@ -573,6 +579,7 @@ pub fn explicit_surface_opt(
             _ => {} // 3辺とも飛ぶ: 描かない
         }
     }
+    clip_to_height_range(prog, &mut mesh, &plain, &us, &vs, &vals, &index_of, axis, mode, (dom.lo[axis], dom.hi[axis]), flip, &push);
     compute_normals(&mut mesh);
     // 段差のある曲面は、頂点をまとめた粗い版にすると段差と壁が崩れるので、粗い版を作らない
     mesh.keep_full = !jumps.is_empty();
@@ -604,6 +611,225 @@ pub fn explicit_surface_opt(
         }
     }
     mesh
+}
+
+/// 陽関数の段差の無い三角形 `tris`（細かくした格子の頂点の番号）を、定義域の縁と、表示範囲の高さ `[lo, hi]` の
+/// 上端・下端で切って描く。
+/// 1. 頂点の一部だけが定義される三角形は、定義される頂点と定義されない頂点を結ぶ辺の上で、定義域の縁を二分法で求め、
+///    定義される部分の多角形を描く（捨てると、定義域の縁の近くに穴が空く。`1/sqrt(1 - x^2 - y^2)` の上端の近くなど）
+/// 2. 上端・下端を横切る辺の交わる点を、実際の関数で二分法で求めて、範囲の中の部分だけを描く。急な斜面が表示範囲の端を
+///    横切る所（`1/sqrt(1 - x^2 - y^2)` の上端の円など）も、格子の細かさに関係なくなめらかな縁になる。
+///    範囲の外に出た部分は描かない（描画側でも切り落とされる部分）。上端と下端の両方を横切る多角形はそのまま描く。
+///
+/// 辺の上に求めた点は、辺を共有する隣の三角形と同じものを使うので、継ぎ目に隙間はできない
+#[allow(clippy::too_many_arguments)]
+fn clip_to_height_range(
+    prog: &Program,
+    mesh: &mut Mesh,
+    tris: &[[usize; 3]],
+    us: &[f64],
+    vs: &[f64],
+    vals: &[C],
+    index_of: &[u32],
+    axis: usize,
+    mode: ComplexMode,
+    (lo, hi): (f64, f64),
+    flip: bool,
+    push: &dyn Fn(&mut Mesh, f64, f64, C) -> u32,
+) {
+    // 点の一覧（元の頂点の後ろに、辺の上に求めた点を足していく）
+    let mut pu = us.to_vec();
+    let mut pv = vs.to_vec();
+    let mut pval = vals.to_vec();
+    let mut pid: Vec<u32> = index_of.to_vec();
+    let mut level: Vec<Option<f64>> = vec![None; us.len()]; // 端の高さにちょうど置く点
+    let defined = |val: &C| height(*val, mode).is_finite();
+    // 辺 (a, b) の上で、条件 inside が成り立つ側（a の側）と成り立たない側の境目を、二分法でまとめて求めて点を足す
+    let bisect = |pairs: &[(usize, usize)],
+                      inside: &dyn Fn(&C) -> bool,
+                      at: &dyn Fn(usize) -> Option<f64>,
+                      pu: &mut Vec<f64>,
+                      pv: &mut Vec<f64>,
+                      pval: &mut Vec<C>,
+                      pid: &mut Vec<u32>,
+                      level: &mut Vec<Option<f64>>|
+     -> Vec<usize> {
+        let n = pairs.len();
+        let (mut ta, mut tb) = (vec![0.0f64; n], vec![1.0f64; n]);
+        let mut za: Vec<C> = pairs.iter().map(|&(a, _)| pval[a]).collect();
+        let (mut mu, mut mv) = (vec![0.0; n], vec![0.0; n]);
+        let mut out = vec![C::new(0.0, 0.0); n];
+        for _ in 0..30 {
+            for (k, &(a, b)) in pairs.iter().enumerate() {
+                let t = 0.5 * (ta[k] + tb[k]);
+                mu[k] = pu[a] + (pu[b] - pu[a]) * t;
+                mv[k] = pv[a] + (pv[b] - pv[a]) * t;
+            }
+            prog.eval_batch(&[&mu, &mv], &mut out);
+            for k in 0..n {
+                let t = 0.5 * (ta[k] + tb[k]);
+                if inside(&out[k]) {
+                    ta[k] = t;
+                    za[k] = out[k];
+                } else {
+                    tb[k] = t;
+                }
+            }
+        }
+        let mut ids = Vec::with_capacity(n);
+        for (k, &(a, b)) in pairs.iter().enumerate() {
+            pu.push(pu[a] + (pu[b] - pu[a]) * ta[k]);
+            pv.push(pv[a] + (pv[b] - pv[a]) * ta[k]);
+            pval.push(za[k]);
+            pid.push(NONE);
+            level.push(at(k));
+            ids.push(pu.len() - 1);
+        }
+        ids
+    };
+
+    // 1. 定義域の縁
+    let mut edge_pt: crate::adaptive::HashMap<(usize, usize), usize> = Default::default();
+    let mut todo: Vec<(usize, usize)> = Vec::new();
+    for t in tris {
+        for e in 0..3 {
+            let (a, b) = (t[e], t[(e + 1) % 3]);
+            for (i, o) in [(a, b), (b, a)] {
+                if defined(&vals[i]) && !defined(&vals[o]) && !edge_pt.contains_key(&(i, o)) {
+                    edge_pt.insert((i, o), usize::MAX);
+                    todo.push((i, o));
+                }
+            }
+        }
+    }
+    if !todo.is_empty() {
+        let ids = bisect(&todo, &|v| defined(v), &|_| None, &mut pu, &mut pv, &mut pval, &mut pid, &mut level);
+        for (pair, id) in todo.iter().zip(ids) {
+            edge_pt.insert(*pair, id);
+        }
+    }
+    // 定義される部分の多角形（点の番号。向きは元の三角形と同じ）
+    // 面積がほとんど 0 の多角形（x + iy のように線の上でしか定義されない式の、縁の細い切れ端）は描かない
+    let area = |poly: &[usize], pu: &[f64], pv: &[f64]| {
+        let mut a = 0.0;
+        for e in 0..poly.len() {
+            let (p, q) = (poly[e], poly[(e + 1) % poly.len()]);
+            a += pu[p] * pv[q] - pu[q] * pv[p];
+        }
+        0.5 * a.abs()
+    };
+    let polys: Vec<Vec<usize>> = tris
+        .iter()
+        .map(|t| {
+            let mut poly = Vec::with_capacity(4);
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                let (da, db) = (defined(&vals[a]), defined(&vals[b]));
+                if da {
+                    poly.push(a);
+                }
+                if da != db {
+                    poly.push(edge_pt[&if da { (a, b) } else { (b, a) }]);
+                }
+            }
+            (poly, area(t, &pu, &pv))
+        })
+        .filter(|(p, whole)| p.len() >= 3 && area(p, &pu, &pv) > 1e-6 * whole)
+        .map(|(p, _)| p)
+        .collect();
+
+    // 2. 上端・下端で切る
+    let h = |val: &C| height(*val, mode);
+    // 点の位置: 0 = 範囲の中、1 = 上端より上（定義されない点も）、-1 = 下端より下
+    let side = |val: &C| {
+        let v = h(val);
+        if !v.is_finite() || v > hi { 1i8 } else if v < lo { -1 } else { 0 }
+    };
+    let outside_of = |poly: &[usize], pval: &[C]| -> i8 {
+        let s: Vec<i8> = poly.iter().map(|&k| side(&pval[k])).collect();
+        if !s.contains(&0) || (s.contains(&1) && s.contains(&-1)) {
+            0 // 全部外（描画側で切り落とされる）か、上下の両方に出る（そのまま描く）
+        } else {
+            s.iter().copied().find(|&x| x != 0).unwrap_or(0)
+        }
+    };
+    let mut cut_pt: crate::adaptive::HashMap<(usize, usize), usize> = Default::default();
+    let mut todo: Vec<(usize, usize)> = Vec::new();
+    let mut todo_level: Vec<f64> = Vec::new();
+    for poly in &polys {
+        let out = outside_of(poly, &pval);
+        if out == 0 {
+            continue;
+        }
+        for e in 0..poly.len() {
+            let (a, b) = (poly[e], poly[(e + 1) % poly.len()]);
+            for (i, o) in [(a, b), (b, a)] {
+                if side(&pval[i]) == 0 && side(&pval[o]) == out && !cut_pt.contains_key(&(i, o)) {
+                    cut_pt.insert((i, o), usize::MAX);
+                    todo.push((i, o));
+                    todo_level.push(if out > 0 { hi } else { lo });
+                }
+            }
+        }
+    }
+    if !todo.is_empty() {
+        // 上端・下端の両方の辺をまとめて二分する（中の側の条件は、辺ごとの高さで決める）
+        let (up, down): (Vec<usize>, Vec<usize>) = (0..todo.len()).partition(|&k| todo_level[k] == hi);
+        for (group, inside) in [(up, &(|v: &C| h(v).is_finite() && h(v) <= hi) as &dyn Fn(&C) -> bool), (down, &|v: &C| h(v).is_finite() && h(v) >= lo)] {
+            if group.is_empty() {
+                continue;
+            }
+            let pairs: Vec<(usize, usize)> = group.iter().map(|&k| todo[k]).collect();
+            let lv = todo_level[group[0]];
+            let ids = bisect(&pairs, inside, &|_| Some(lv), &mut pu, &mut pv, &mut pval, &mut pid, &mut level);
+            for (pair, id) in pairs.iter().zip(ids) {
+                cut_pt.insert(*pair, id);
+            }
+        }
+    }
+
+    // 3. 描く
+    let mut vid = |k: usize, mesh: &mut Mesh| -> u32 {
+        if pid[k] == NONE {
+            let v = push(mesh, pu[k], pv[k], pval[k]);
+            if let Some(l) = level[k] {
+                mesh.positions[3 * v as usize + axis] = l as f32; // ちょうど端の高さに置く
+            }
+            pid[k] = v;
+        }
+        pid[k]
+    };
+    for poly in &polys {
+        let out = outside_of(poly, &pval);
+        let kept: Vec<usize> = if out == 0 {
+            let s: Vec<i8> = poly.iter().map(|&k| side(&pval[k])).collect();
+            if !s.contains(&0) && !(s.contains(&1) && s.contains(&-1)) {
+                continue; // 全部が上端より上（または下端より下）: 見えない
+            }
+            poly.clone()
+        } else {
+            let mut kept = Vec::with_capacity(poly.len() + 1);
+            for e in 0..poly.len() {
+                let (a, b) = (poly[e], poly[(e + 1) % poly.len()]);
+                let (sa, sb) = (side(&pval[a]) == 0, side(&pval[b]) == 0);
+                if sa {
+                    kept.push(a);
+                }
+                if sa != sb {
+                    kept.push(cut_pt[&if sa { (a, b) } else { (b, a) }]);
+                }
+            }
+            kept
+        };
+        if kept.len() < 3 {
+            continue;
+        }
+        let ids: Vec<u32> = kept.iter().map(|&k| vid(k, mesh)).collect();
+        for k in 1..ids.len() - 1 {
+            let t = [ids[0], ids[k], ids[k + 1]];
+            mesh.indices.extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
+        }
+    }
 }
 
 /// 辺 `edges`（頂点の番号の組。始点 → 終点）のうち、値が飛ぶものを探す（[`explicit_surface_full`] を参照）。
@@ -3724,8 +3950,9 @@ mod tests {
     #[test]
     fn steps() {
         // floor(2x) の段差: 段差の所で三角形を切り分けるので、どの三角形も段差をまたがない
-        // （3頂点の値がすべて同じ整数）。段差の縁は x = 0.5 k の線の上にそろう
-        let d = Domain { lo: [-1.0; 3], hi: [1.0; 3] };
+        // （3頂点の値がすべて同じ整数）。段差の縁は x = 0.5 k の線の上にそろう。
+        // 高さの範囲は値（−2〜1）が全部入る広さにする（範囲の外の段は描かないので）
+        let d = Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 2.0] };
         let p = prog("floor(2x)", &["x", "y"]);
         let m = explicit_surface(&p, d, 13, 2);
         assert!(!m.indices.is_empty());
@@ -3793,7 +4020,8 @@ mod tests {
     #[test]
     fn complex_pole_has_no_holes() {
         // Re(1/(x + iy)) は原点の極で +∞ から −∞ に飛ぶ。範囲の外の値は範囲の少し外にそろえて描くので、
-        // 極の周りに穴が空かない（平面に落とした面積が、表示範囲の面積 4 にほぼ等しい）
+        // 極の周りに穴が空かない。表示範囲の高さ ±3 の外に出る所（|x/(x² + y²)| > 3: 半径 1/6 の円 2 つ）は
+        // 上端・下端で切って描かないので、平面に落とした面積は 4 − 2π/36 以上（穴があればこれより小さくなる）
         let d = Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 3.0] };
         let p = prog("1 / (x + i y)", &["x", "y"]);
         let m = explicit_surface_full(&p, d, 40, 2, ComplexMode::Re, false);
@@ -3803,7 +4031,8 @@ mod tests {
             let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
             area += ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.0;
         }
-        assert!((area - 4.0).abs() < 0.02, "面積 {area}");
+        let visible = 4.0 - 2.0 * std::f64::consts::PI / 36.0;
+        assert!(area > visible - 0.02 && area < 4.0 + 1e-9, "面積 {area}");
         // 色分け用の値は頂点ごとに3つ
         assert_eq!(m.complex.len(), m.positions.len());
     }
@@ -3918,11 +4147,42 @@ mod tests {
     }
 
     #[test]
+    fn rim_is_cut_exactly_at_the_top() {
+        // 1/sqrt(1 − x² − y²) は表示範囲の上端 z = 6 を、半径 √(1 − 1/36) の円で横切る。
+        // 上端で切った縁の点は、格子の細かさに関係なく、この円のすぐ近くにある（切れ込み・トゲが無い）
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let m = explicit_surface(&prog("1/sqrt(1 - x^2 - y^2)", &["x", "y"]), d, 150, 2);
+        let r0 = (1.0f64 - 1.0 / 36.0).sqrt();
+        let rim: Vec<f64> = m
+            .positions
+            .chunks_exact(3)
+            .filter(|q| q[2] == 6.0)
+            .map(|q| ((q[0] * q[0] + q[1] * q[1]) as f64).sqrt())
+            .collect();
+        assert!(rim.len() > 50, "{}", rim.len());
+        assert!(rim.iter().all(|r| (r - r0).abs() < 1e-4), "{:?}", rim.iter().map(|r| r - r0).fold(0.0f64, |a, b| a.max(b.abs())));
+        // 上端より上の頂点は描かない
+        assert!(m.indices.iter().all(|&k| m.positions[3 * k as usize + 2] <= 6.0));
+        // 穴が無い: 三角形が 1 つだけの辺（縁）は、上端の円の上だけにある（定義域の縁 r = 1 の近くの三角形も描くので、
+        // 上端のすぐ下に切れ込みができない）
+        let mut count: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        for t in m.indices.chunks_exact(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let z = |k: u32| m.positions[3 * k as usize + 2];
+        let holes = count.iter().filter(|&(&(a, b), &c)| c == 1 && !(z(a) == 6.0 && z(b) == 6.0)).count();
+        assert_eq!(holes, 0);
+    }
+
+    #[test]
     fn smooth_surface_is_not_refined() {
-        // なめらかな曲面は、一様な格子のまま（150 × 150 × 2 = 45,000 個の三角形）
+        // なめらかな曲面は、一様な格子のまま（150 × 150 × 2 = 45,000 個の三角形）。
+        // 表示範囲の上端・下端で切られないよう、高さの範囲は値より広くする（x² − y² は ±25）
         let d = Domain {
-            lo: [-5.0, -5.0, -5.0],
-            hi: [5.0, 5.0, 5.0],
+            lo: [-5.0, -5.0, -30.0],
+            hi: [5.0, 5.0, 30.0],
         };
         for src in ["sin(x) cos(y)", "x^2 - y^2"] {
             let m = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2);

@@ -494,6 +494,10 @@ pub(crate) mod tests {
         }
         for &(a, b) in count.keys() {
             let (p, r) = (uv[a as usize], uv[b as usize]);
+            // ほとんど長さの無い辺（定義域の縁の点が格子の点のすぐそばにある所）は、中点が端と区別できないので調べない
+            if (p[0] - r[0]).hypot(p[1] - r[1]) < 1e-6 {
+                continue;
+            }
             let m = [0.5 * (p[0] + r[0]), 0.5 * (p[1] + r[1])];
             assert!(!at.contains_key(&q(m)), "辺 {p:?}–{r:?} の途中に頂点がある");
         }
