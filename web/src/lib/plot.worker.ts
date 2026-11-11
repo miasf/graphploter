@@ -282,6 +282,9 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       normals: r.take_normals(),
       indices: r.take_indices(),
       lodIndices: r.take_lod_indices(),
+      lod: r.has_lod_mesh
+        ? { positions: r.take_lod_positions(), normals: r.take_lod_normals(), indices: r.take_lod_mesh_indices() }
+        : null,
       gridCoords: r.take_grid_coords(),
       complexValues: r.take_complex_values(),
       curve: r.curve,
@@ -319,6 +322,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
+        ...capTransfer(res.mesh.lod),
         ...capTransfer(res.cap),
       ]
     : []

@@ -136,6 +136,24 @@ impl MeshResult {
     // getter は Rust 側で clone() してから JavaScript の配列に写すのでコピーが2回になる。
     // こちらは Rust 側の配列をそのまま渡すので、コピーは JavaScript の配列に写す1回だけ
 
+    /// 自分の頂点を持つ粗い版（陰関数）があるか
+    #[wasm_bindgen(getter)]
+    pub fn has_lod_mesh(&self) -> bool {
+        self.inner.lod_mesh.is_some()
+    }
+    /// 自分の頂点を持つ粗い版の頂点座標を取り出す（無ければ空）
+    pub fn take_lod_positions(&mut self) -> Vec<f32> {
+        self.inner.lod_mesh.as_mut().map(|m| std::mem::take(&mut m.positions)).unwrap_or_default()
+    }
+    /// 自分の頂点を持つ粗い版の法線を取り出す（無ければ空）
+    pub fn take_lod_normals(&mut self) -> Vec<f32> {
+        self.inner.lod_mesh.as_mut().map(|m| std::mem::take(&mut m.normals)).unwrap_or_default()
+    }
+    /// 自分の頂点を持つ粗い版の三角形を取り出す（無ければ空）
+    pub fn take_lod_mesh_indices(&mut self) -> Vec<u32> {
+        self.inner.lod_mesh.as_mut().map(|m| std::mem::take(&mut m.indices)).unwrap_or_default()
+    }
+
     /// 頂点座標を取り出す（Float32Array）
     pub fn take_positions(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.inner.positions)

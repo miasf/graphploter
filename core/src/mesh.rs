@@ -37,6 +37,8 @@ pub struct Mesh {
     pub lod: Vec<u32>,
     /// 粗い版（頂点をまとめる [`add_cluster_lod`]）を作らない（段差のある陽関数など、まとめると形が崩れるもの）
     pub keep_full: bool,
+    /// 自分の頂点を持つ粗い版（陰関数。F の格子を間引いて作り直したもの）。[`Mesh::lod`] とはどちらか一方
+    pub lod_mesh: Option<Box<Mesh>>,
     /// 作るのにかかった時間の内訳（`lib.rs` の入口で記録する。メッシュを作る関数自体は 0 のまま）
     pub stats: Stats,
 }
@@ -85,7 +87,7 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// 薄い板の表と裏がくっつくことは少ない
 pub fn add_cluster_lod(mesh: &mut Mesh) {
     let tris = mesh.indices.len() / 3;
-    if !mesh.lod.is_empty() || mesh.keep_full || tris <= LOD_MIN_TRIANGLES {
+    if !mesh.lod.is_empty() || mesh.keep_full || mesh.lod_mesh.is_some() || tris <= LOD_MIN_TRIANGLES {
         return;
     }
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
@@ -1101,8 +1103,242 @@ fn implicit_solid_with(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f6
     }
 
     compute_normals(&mut mesh);
+    // 粗い版（視点を動かしている間に描く）: F の格子を間引いて作り直す
+    if let Some(k) = lod_stride(mesh.indices.len() / 3) {
+        let mut sc = FieldScratch::default();
+        let mut eval = |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
+        let lod = coarse_nets(&field, dom, n, k, &not_zero, &mut eval);
+        if !lod.indices.is_empty() {
+            mesh.lod_mesh = Some(Box::new(lod));
+        }
+    }
     let t_end = crate::timing::now_ms();
     mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
+    mesh
+}
+
+/// 陰関数の粗い版の、格子の間引き方: 三角形が `tris` 個のメッシュなら、三角形の数（間引くと 1/k² になる）が
+/// 4 万個以下になる最小の k（2 か 4）。粗い版が要らない（三角形が少ない）なら None
+fn lod_stride(tris: usize) -> Option<usize> {
+    if tris <= LOD_MIN_TRIANGLES {
+        return None;
+    }
+    Some(if tris / 4 <= 40_000 { 2 } else { 4 })
+}
+
+/// 陰関数の粗い版: 計算済みの F の格子（`field`。範囲を外に 1 マス広げた `n` マスの格子）を `k` 個おきに間引いた格子で、
+/// Surface Nets をもう一度走らせる（F はほとんど計算し直さない）。k はブロックの 1 辺（8 マス）を割り切るので、
+/// 粗いセルはどれも 1 つのブロックの中にあり、空のブロックのセルは見なくてよい。
+/// 格子の端（マス数が k の倍数でない所）の点など、持っていない値だけを `eval` で計算する。
+/// 細かい版で「零点ではない」とされた辺（`not_zero`）を含む粗い辺には面を張らない。接するだけの所は探さない
+fn coarse_nets(
+    field: &SparseField,
+    dom: Domain,
+    n: usize,
+    k: usize,
+    not_zero: &std::collections::HashSet<usize>,
+    eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>,
+) -> Mesh {
+    let m = n + 1;
+    let nc = n.div_ceil(k);
+    let mc = nc + 1;
+    let at = |q: [usize; 3]| q[0] + mc * (q[1] + mc * q[2]);
+    let nb = field.nb;
+    let block_of = |c: [usize; 3]| c.map(|x| (x * k / BLOCK).min(nb - 1));
+    let cell_ok = |c: [usize; 3]| {
+        let b = block_of(c);
+        field.occupied[b[0] + nb * (b[1] + nb * b[2])]
+    };
+    // 粗い格子の値（持っていない点は NaN）
+    let mut vals = vec![f32::NAN; mc * mc * mc];
+    for z in 0..mc {
+        for y in 0..mc {
+            for x in 0..mc {
+                let q = [x * k, y * k, z * k];
+                if q.iter().all(|&v| v < m) {
+                    vals[at([x, y, z])] = field.f(q);
+                }
+            }
+        }
+    }
+    // 見るセルの角で、値を持っていない点を計算する
+    let mut missing: Vec<usize> = Vec::new();
+    let mut seen = vec![false; mc * mc * mc];
+    for z in 0..nc {
+        for y in 0..nc {
+            for x in 0..nc {
+                if !cell_ok([x, y, z]) {
+                    continue;
+                }
+                for c in CORNERS {
+                    let l = at([x + c[0], y + c[1], z + c[2]]);
+                    if vals[l].is_nan() && !seen[l] {
+                        seen[l] = true;
+                        missing.push(l);
+                    }
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let coord = |l: usize, a: usize| {
+            let q = [l % mc, (l / mc) % mc, l / (mc * mc)];
+            dom.at(a, (q[a] * k) as f64, n)
+        };
+        let xs: Vec<f64> = missing.iter().map(|&l| coord(l, 0)).collect();
+        let ys: Vec<f64> = missing.iter().map(|&l| coord(l, 1)).collect();
+        let zs: Vec<f64> = missing.iter().map(|&l| coord(l, 2)).collect();
+        for (&l, v) in missing.iter().zip(eval([&xs, &ys, &zs])) {
+            vals[l] = v as f32;
+        }
+    }
+    let fine = |i: usize, j: usize, kk: usize| i + m * (j + m * kk);
+    // 粗い辺 p → p + e_a に、細かい版で「零点ではない」とされた辺が含まれるか
+    let bad_edge = |p: [usize; 3], a: usize| {
+        if not_zero.is_empty() {
+            return false;
+        }
+        (0..k).any(|t| {
+            let mut q = p.map(|v| v * k);
+            q[a] += t;
+            q.iter().all(|&v| v < m) && not_zero.contains(&(3 * fine(q[0], q[1], q[2]) + a))
+        })
+    };
+    let cross = |p: [usize; 3], a: usize| -> Option<(f64, bool)> {
+        let mut q = p;
+        q[a] += 1;
+        let (f0, f1) = (vals[at(p)], vals[at(q)]);
+        if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) || bad_edge(p, a) {
+            return None;
+        }
+        Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
+    };
+    let pos = |p: [f64; 3]| [0, 1, 2].map(|a| dom.at(a, p[a] * k as f64, n));
+    nets_on_grid(nc, &cell_ok, &|c| vals[at(c)] < 0.0, &cross, &pos)
+}
+
+/// Surface Nets（1 辺 `nc` マスの格子）。`cell_ok` が偽のセルは見ない。`neg(角)` は角の F が負か、
+/// `cross(p, a)` は辺 p → p + e_a の交わる位置と始点の符号（負なら true）。`pos` は格子の座標から空間の座標へ。
+/// 1 つのセルを 2 枚以上の曲面が通るときは、細かい版と同じく、少ないほうの符号の角の組ごとに頂点を分ける
+/// （分けないと、鞍の形の面で 4 つの三角形が 1 本の辺に集まる）
+fn nets_on_grid(
+    nc: usize,
+    cell_ok: &dyn Fn([usize; 3]) -> bool,
+    neg: &dyn Fn([usize; 3]) -> bool,
+    cross: &dyn Fn([usize; 3], usize) -> Option<(f64, bool)>,
+    pos: &dyn Fn([f64; 3]) -> [f64; 3],
+) -> Mesh {
+    let cell = |c: [usize; 3]| c[0] + nc * (c[1] + nc * c[2]);
+    let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
+    let mut vert = vec![NONE; nc * nc * nc];
+    let mut slots: Vec<[u32; 12]> = Vec::new();
+    let mut cells: Vec<[usize; 3]> = Vec::new();
+    let mut mesh = Mesh::default();
+    for z in 0..nc {
+        for y in 0..nc {
+            for x in 0..nc {
+                let c = [x, y, z];
+                if !cell_ok(c) {
+                    continue;
+                }
+                let corner = |d: [usize; 3]| [x + d[0], y + d[1], z + d[2]];
+                let corner_neg: [bool; 8] = std::array::from_fn(|i| neg(corner(CORNERS[i])));
+                let count = corner_neg.iter().filter(|&&b| b).count();
+                if count == 0 || count == 8 {
+                    continue;
+                }
+                let minority = count <= 4;
+                let mut group = [usize::MAX; 8];
+                let mut groups = 0;
+                for i in 0..8 {
+                    if corner_neg[i] != minority || group[i] != usize::MAX {
+                        continue;
+                    }
+                    let mut stack = vec![i];
+                    group[i] = groups;
+                    while let Some(a) = stack.pop() {
+                        for [ca, cb] in EDGES {
+                            let b = if ca == a { cb } else if cb == a { ca } else { continue };
+                            if corner_neg[b] == minority && group[b] == usize::MAX {
+                                group[b] = groups;
+                                stack.push(b);
+                            }
+                        }
+                    }
+                    groups += 1;
+                }
+                let mut sums = [([0.0f64; 3], 0.0f64); 8];
+                let mut edge_group = [usize::MAX; 12];
+                for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
+                    let a = edge_axis[e];
+                    if let Some((t, _)) = cross(corner(CORNERS[ca]), a) {
+                        let g = group[if corner_neg[ca] == minority { ca } else { cb }];
+                        let mut q = CORNERS[ca].map(|v| v as f64);
+                        q[a] += t;
+                        edge_group[e] = g;
+                        for ax in 0..3 {
+                            sums[g].0[ax] += q[ax];
+                        }
+                        sums[g].1 += 1.0;
+                    }
+                }
+                let mut ids = [NONE; 8];
+                for g in 0..groups {
+                    let (sum, cnt) = sums[g];
+                    if cnt > 0.0 {
+                        ids[g] = mesh.push_vertex(pos([x as f64 + sum[0] / cnt, y as f64 + sum[1] / cnt, z as f64 + sum[2] / cnt]));
+                    }
+                }
+                if ids.iter().all(|&v| v == NONE) {
+                    continue;
+                }
+                vert[cell(c)] = slots.len() as u32;
+                slots.push(edge_group.map(|g| if g == usize::MAX { NONE } else { ids[g] }));
+                cells.push(c);
+            }
+        }
+    }
+    let local_edge = |a: usize, base: [usize; 3]| -> usize {
+        EDGES
+            .iter()
+            .position(|&[ca, cb]| CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a)))
+            .unwrap_or(0)
+    };
+    for a in 0..3 {
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        let around = [(1, 1), (0, 1), (0, 0), (1, 0)];
+        let locals = around.map(|(db, dc)| {
+            let mut base = [0; 3];
+            base[b] = db;
+            base[c] = dc;
+            local_edge(a, base)
+        });
+        for &p in &cells {
+            if p[b] == 0 || p[c] == 0 {
+                continue;
+            }
+            let Some((_, sign)) = cross(p, a) else { continue };
+            let mut q = [NONE; 4];
+            for (i, ((db, dc), le)) in around.iter().zip(locals).enumerate() {
+                let mut s = p;
+                s[b] -= db;
+                s[c] -= dc;
+                let slot = vert[cell(s)];
+                if slot != NONE {
+                    q[i] = slots[slot as usize][le];
+                }
+            }
+            if q.contains(&NONE) {
+                continue;
+            }
+            if sign {
+                mesh.indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
+            } else {
+                mesh.indices.extend_from_slice(&[q[0], q[2], q[1], q[0], q[3], q[2]]);
+            }
+        }
+    }
+    compute_normals(&mut mesh);
     mesh
 }
 
@@ -2668,7 +2904,35 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
 }
 
 /// いくつかのメッシュを1つにまとめる（リストで複数の図形になったとき）。曲線なら間に NaN を入れて線を切る
-pub fn merge(meshes: Vec<Mesh>, curve: bool) -> Mesh {
+pub fn merge(mut meshes: Vec<Mesh>, curve: bool) -> Mesh {
+    // 自分の頂点を持つ粗い版（陰関数）があれば、粗い版どうしもつなげる。粗い版の無いメッシュは、
+    // そのまま（三角形の番号の粗い版があればそれ）を粗い版として使う
+    let lod_mesh = if !curve && meshes.iter().any(|m| m.lod_mesh.is_some()) {
+        let parts = meshes
+            .iter_mut()
+            .map(|m| match m.lod_mesh.take() {
+                Some(l) => *l,
+                None => Mesh {
+                    positions: m.positions.clone(),
+                    normals: m.normals.clone(),
+                    indices: if m.lod.is_empty() { m.indices.clone() } else { m.lod.clone() },
+                    ..Default::default()
+                },
+            })
+            .collect();
+        Some(Box::new(merge(parts, false)))
+    } else {
+        None
+    };
+    let mut out = merge_inner(meshes, curve);
+    if lod_mesh.is_some() {
+        out.lod = Vec::new();
+        out.lod_mesh = lod_mesh;
+    }
+    out
+}
+
+fn merge_inner(meshes: Vec<Mesh>, curve: bool) -> Mesh {
     let mut out = Mesh::default();
     let grid = meshes.iter().any(|m| !m.grid_coords.is_empty());
     let complex = meshes.iter().any(|m| !m.complex.is_empty());
@@ -2807,6 +3071,7 @@ fn grid_tris(m: usize, count: usize) -> Vec<u32> {
 
 /// 縦の座標を 0 にして平らにする（2D 表示）。曲面の法線はすべて +縦 の向きにする
 pub fn flatten(mesh: &mut Mesh, curve: bool) {
+    mesh.lod_mesh = None; // 平らにした後の粗い版は作らない（2D 表示は軽い）
     for p in mesh.positions.chunks_exact_mut(3) {
         if p[2].is_finite() {
             p[2] = 0.0;
@@ -4177,8 +4442,11 @@ mod tests {
         let small = project(&parametric_surface_nd(&[progs3(["u", "v", "0"], &["u", "v"])], (0.0, 1.0), (0.0, 1.0), 50), &View::identity(3), dom());
         assert!(small.lod.is_empty());
 
-        // 陰関数（格子でないメッシュ）: 頂点をまとめた粗い版。球の表面から離れない
+        // 格子でないメッシュ: 頂点をまとめた粗い版。球の表面から離れない
+        // （陰関数はふつう格子を間引いて作り直した粗い版 lod_mesh を持つので、ここではそれを外して試す）
         let mut sphere = implicit_surface(&prog("x^2 + y^2 + z^2 - 0.64", &AXES), dom(), 160);
+        assert!(sphere.lod_mesh.is_some());
+        sphere.lod_mesh = None;
         let tris = sphere.indices.len() / 3;
         assert!(tris > LOD_MIN_TRIANGLES);
         add_cluster_lod(&mut sphere);
@@ -4198,6 +4466,46 @@ mod tests {
         let merged = merge(vec![small, sphere], false);
         assert!(!merged.lod.is_empty() && merged.lod.iter().all(|&k| k < merged.positions.len() as u32 / 3));
         assert!(merged.lod.len() < merged.indices.len() && n0 > 0);
+    }
+
+    /// 3 つ以上の三角形に使われる辺の数
+    fn crowded_edges(m: &Mesh) -> usize {
+        let mut count: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        for t in m.indices.chunks_exact(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        count.values().filter(|&&c| c > 2).count()
+    }
+
+    #[test]
+    fn implicit_lod_is_manifold() {
+        // 陰関数の粗い版は、F の格子を間引いて作り直す。頂点をまとめる方法と違い、3 つ以上の三角形が集まる辺ができない
+        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        for (src, n) in [("x^2 + y^2 + z^2 - 16.3", 150), ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", 80)] {
+            let m = implicit_surface(&prog(src, &AXES), big, n);
+            let lod = m.lod_mesh.as_ref().expect("粗い版が無い");
+            let tris = lod.indices.len() / 3;
+            assert!((20_000..=45_000).contains(&tris), "{src}: {tris}");
+            assert_eq!(crowded_edges(lod), 0, "{src}");
+            assert!(lod.indices.iter().all(|&k| (k as usize) < lod.positions.len() / 3));
+            assert_eq!(lod.normals.len(), lod.positions.len());
+        }
+        // 球の粗い版の頂点は、球の表面の近く
+        let m = implicit_surface(&prog("x^2 + y^2 + z^2 - 16.3", &AXES), big, 150);
+        let lod = m.lod_mesh.unwrap();
+        for q in lod.positions.chunks_exact(3) {
+            let r = ((q[0] * q[0] + q[1] * q[1] + q[2] * q[2]) as f64).sqrt();
+            assert!((r - 16.3f64.sqrt()).abs() < 0.1, "{r}");
+        }
+        // 小さいメッシュには作らない。リストでまとめると粗い版もまとまる
+        assert!(implicit_surface(&prog("x^2 + y^2 + z^2 - 4", &AXES), big, 40).lod_mesh.is_none());
+        let a = implicit_surface(&prog("x^2 + y^2 + z^2 - 16.3", &AXES), big, 150);
+        let b = implicit_surface(&prog("x^2 + y^2 + z^2 - 4", &AXES), big, 40);
+        let (la, nb) = (a.lod_mesh.as_ref().unwrap().indices.len(), b.indices.len());
+        let merged = merge(vec![a, b], false);
+        assert_eq!(merged.lod_mesh.as_ref().unwrap().indices.len(), la + nb);
     }
 
     #[test]

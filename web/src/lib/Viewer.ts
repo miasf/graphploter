@@ -1232,8 +1232,19 @@ export class Viewer {
     // 複素数の色分けをしないときも、シェーダーが読む属性は用意しておく（使わないので位置で代用）
     geo.setAttribute('complexValue', mesh.complexValues.length > 0 ? new THREE.BufferAttribute(mesh.complexValues, 3) : pos)
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
+    // 粗い版（陰関数）: 自分の頂点を持つ。格子線用の座標・複素数の値は位置で代用する（陰関数はもともとそう）
+    if (mesh.lod && mesh.lod.indices.length > 0) {
+      const lod = new THREE.BufferGeometry()
+      const lp = new THREE.BufferAttribute(mesh.lod.positions, 3)
+      lod.setAttribute('position', lp)
+      lod.setAttribute('normal', new THREE.BufferAttribute(mesh.lod.normals, 3))
+      lod.setAttribute('gridCoord', lp)
+      lod.setAttribute('complexValue', lp)
+      lod.setIndex(new THREE.BufferAttribute(mesh.lod.indices, 1))
+      geo.userData.lod = lod
+    }
     // 粗い版: 頂点のデータは同じものを使い、三角形の頂点番号だけが違う
-    if (mesh.lodIndices.length > 0) {
+    else if (mesh.lodIndices.length > 0) {
       const lod = new THREE.BufferGeometry()
       for (const name of Object.keys(geo.attributes)) lod.setAttribute(name, geo.attributes[name])
       lod.setIndex(new THREE.BufferAttribute(mesh.lodIndices, 1))

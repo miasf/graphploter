@@ -214,6 +214,8 @@ export interface MeshData {
   indices: Uint32Array
   /** 粗い版の三角形の頂点番号（視点を動かしている間に描く。空なら indices をそのまま描く） */
   lodIndices: Uint32Array
+  /** 自分の頂点を持つ粗い版（陰関数。F の格子を間引いて作り直したもの）。無ければ null */
+  lod: CapData | null
   /** 格子線用の座標（空なら positions を使う） */
   gridCoords: Float32Array
   /** 複素数の色分け: 頂点ごとの (Re w / |w|, Im w / |w|, log₂|w|)。空なら単色 */
