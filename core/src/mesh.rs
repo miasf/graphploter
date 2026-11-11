@@ -2190,6 +2190,10 @@ pub struct NdShape {
     pub solid: bool,
     /// 複素数の色分けをするなら、点ごとの (Re w/|w|, Im w/|w|, log₂|w|)（[`Mesh::complex`] と同じ）。しないなら空
     pub complex: Vec<f32>,
+    /// 曲面を細かくした（[`crate::adaptive`]）なら、(一様な格子の点の数, 三角形)。
+    /// 点は、一様な格子の点（曲面ごとに m × m 個）を先に全部並べ、細かくして足した点をその後ろに並べる。
+    /// 三角形はこの一覧を使う（粗い版は、今までどおり一様な格子の点を間引いて作る）。None なら一様な格子の三角形
+    pub tris: Option<(usize, Vec<u32>)>,
 }
 
 /// 格子線を引かない成分の印（シェーダーはこれより小さい値の成分には線を引かない）
@@ -2213,6 +2217,20 @@ fn dist(a: &[f64], b: &[f64]) -> f64 {
 
 /// 媒介変数表示の曲面を、`n × n` マスの格子で計算する。`sets` の1つ1つが1枚の曲面（n 次元の成分の式）
 pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64), n: usize) -> NdShape {
+    parametric_surface_nd_opt(sets, u, v, n, None)
+}
+
+/// [`parametric_surface_nd`] で、`tol` があれば、急に曲がる所・定義域の縁を細かくする（[`crate::adaptive`]）。
+/// 分けるのは、斜辺の中点の点と、斜辺の両端の点の中点との n 次元の距離が `tol` を超える三角形と、
+/// 頂点・中点で定義される所とされない所が混ざる三角形。回転は距離を変えず、射影は距離を縮めるだけなので、
+/// 回した・射影した後もこの許容量に収まる。2 回分けてもずれが半分にならない所（飛びの疑い）は、それ以上分けない
+pub fn parametric_surface_nd_opt(
+    sets: &[Vec<Program>],
+    u: (f64, f64),
+    v: (f64, f64),
+    n: usize,
+    tol: Option<f64>,
+) -> NdShape {
     let n = n.max(2);
     let m = n + 1;
     let mut us = Vec::with_capacity(m * m);
@@ -2233,7 +2251,59 @@ pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64)
         ProgramSet::new(progs).eval_points(&[&us, &vs], m * m, &mut points);
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new() }
+    let Some(tol) = tol.filter(|t| *t > 0.0 && dims > 0) else {
+        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None };
+    };
+    // 曲面ごとに細かくする。足した点は、全部の曲面の一様な格子の点の後ろに並べる
+    let base = sets.len() * m * m;
+    let (mut extra_points, mut extra_grid, mut tris) = (Vec::new(), Vec::new(), Vec::new());
+    let mut refined_any = false;
+    for (s, progs) in sets.iter().enumerate() {
+        let set = ProgramSet::new(progs);
+        let first: Vec<Vec<f64>> = points[s * m * m * dims..(s + 1) * m * m * dims].chunks_exact(dims).map(|p| p.to_vec()).collect();
+        let mut eval = |a: &[f64], b: &[f64]| {
+            let mut out = Vec::with_capacity(a.len() * dims);
+            set.eval_points(&[a, b], a.len(), &mut out);
+            out.chunks_exact(dims).map(|p| p.to_vec()).collect::<Vec<_>>()
+        };
+        let mut decide = |c: &crate::adaptive::Candidate<Vec<f64>>| -> Option<f64> {
+            let pts = [c.vals[0], c.vals[1], c.vals[2], c.mid];
+            let defined = pts.iter().filter(|p| finite(p)).count();
+            if defined == 0 {
+                return None;
+            }
+            if defined < 4 {
+                return Some(f64::INFINITY); // 定義域の縁
+            }
+            let e = c.mid.iter().zip(c.vals[0].iter().zip(c.vals[1])).map(|(&q, (&a, &b))| (q - 0.5 * (a + b)).powi(2)).sum::<f64>().sqrt();
+            if e <= tol {
+                return None;
+            }
+            let grand = c.history[1];
+            if grand.is_finite() && e > 0.5 * grand {
+                return None;
+            }
+            Some(e)
+        };
+        let limits = crate::adaptive::Limits { passes: 6, max_new_triangles: (2 * n * n).max(30_000) };
+        let r = crate::adaptive::refine(n, u, v, first, &mut eval, &mut decide, limits);
+        if r.uv.len() > m * m {
+            refined_any = true;
+        }
+        let offset = base + extra_points.len() / dims;
+        for (p, w) in r.uv[m * m..].iter().zip(&r.vals[m * m..]) {
+            extra_points.extend_from_slice(w);
+            extra_grid.extend_from_slice(&[(p[0] - u.0) as f32, (p[1] - v.0) as f32]);
+        }
+        let map = |k: u32| if (k as usize) < m * m { (s * m * m) as u32 + k } else { (offset + k as usize - m * m) as u32 };
+        tris.extend(r.tris.iter().flat_map(|t| t.map(map)));
+    }
+    if !refined_any {
+        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None };
+    }
+    points.extend_from_slice(&extra_points);
+    grid.extend_from_slice(&extra_grid);
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)) }
 }
 
 /// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
@@ -2282,7 +2352,7 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
         }
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new() }
+    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new(), tris: None }
 }
 
 /// 媒介変数が4つ以上の図形の、面の枚数と、1枚の格子のマス数。
@@ -2363,7 +2433,7 @@ pub fn parametric_sheets_nd(sets: &[Vec<Program>], r: &[(f64, f64)], div: usize,
             }
         }
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new() }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -2415,7 +2485,7 @@ pub fn explicit_nd(
             complex.extend_from_slice(&complex_attr(vals[k]));
         }
     }
-    NdShape { dims: d, points, grid: Some((m, grid)), solid: false, complex }
+    NdShape { dims: d, points, grid: Some((m, grid)), solid: false, complex, tris: None }
 }
 
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
@@ -2433,7 +2503,7 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
         let set = ProgramSet::new(progs);
         points.extend(curve_nd(&|ts: &[f64]| eval_nd(&set, &[ts], ts.len()), progs.len(), t, n, tol));
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new() }
+    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None }
 }
 
 /// 1本の曲線の点（適応サンプリング）。`eval` は媒介変数の値の列から、d 次元の点を並べたものを計算する
@@ -2554,18 +2624,91 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
     if shapes.iter().any(|s| s.dims != dims || s.solid != solid || s.grid.as_ref().map(|g| g.0) != m) {
         return None;
     }
-    let mut out = NdShape { dims, points: Vec::new(), grid: m.map(|m| (m, Vec::new())), solid, complex: Vec::new() };
+    let complex = shapes.iter().any(|s| !s.complex.is_empty());
+    // 細かくした曲面があれば、一様な格子の点を全部先に並べ、足した点をその後ろに並べ直す（[`NdShape::tris`]）
+    if let (Some(m), true) = (m, shapes.iter().any(|s| s.tris.is_some())) {
+        let gd = if solid { 3 } else { 2 };
+        let count = |s: &NdShape| s.points.len() / dims.max(1);
+        let base_of = |s: &NdShape| s.tris.as_ref().map_or(count(s), |t| t.0);
+        let base: usize = shapes.iter().map(base_of).sum();
+        let mut out = NdShape {
+            dims,
+            points: Vec::new(),
+            grid: Some((m, Vec::new())),
+            solid,
+            complex: Vec::new(),
+            tris: Some((base, Vec::new())),
+        };
+        let (mut base_at, mut extra_at) = (0usize, base);
+        let mut extra = (Vec::new(), Vec::new(), Vec::new());
+        for s in &shapes {
+            let (c, b) = (count(s), base_of(s));
+            let grid = &s.grid.as_ref().map_or(&[][..], |g| &g.1[..]);
+            let cx = |k: usize| -> [f32; 3] {
+                if s.complex.is_empty() { [0.0; 3] } else { [s.complex[3 * k], s.complex[3 * k + 1], s.complex[3 * k + 2]] }
+            };
+            let (o, g) = out.grid.as_mut().map(|g| (&mut out.points, &mut g.1)).unwrap();
+            o.extend_from_slice(&s.points[..b * dims]);
+            g.extend_from_slice(&grid[..b * gd]);
+            extra.0.extend_from_slice(&s.points[b * dims..]);
+            extra.1.extend_from_slice(&grid[b * gd..]);
+            if complex {
+                for k in 0..b {
+                    out.complex.extend_from_slice(&cx(k));
+                }
+                for k in b..c {
+                    extra.2.extend_from_slice(&cx(k));
+                }
+            }
+            let map = |k: u32| if (k as usize) < b { (base_at + k as usize) as u32 } else { (extra_at + k as usize - b) as u32 };
+            let tris = &mut out.tris.as_mut().unwrap().1;
+            match &s.tris {
+                Some((_, t)) => tris.extend(t.iter().map(|&k| map(k))),
+                None => tris.extend(grid_tris(m, b).into_iter().map(map)),
+            }
+            base_at += b;
+            extra_at += c - b;
+        }
+        out.points.extend_from_slice(&extra.0);
+        out.grid.as_mut().unwrap().1.extend_from_slice(&extra.1);
+        out.complex.extend_from_slice(&extra.2);
+        return Some(out);
+    }
+    let mut out =
+        NdShape { dims, points: Vec::new(), grid: m.map(|m| (m, Vec::new())), solid, complex: Vec::new(), tris: None };
     for s in shapes {
         if m.is_none() && !out.points.is_empty() {
             out.points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
         }
         out.points.extend_from_slice(&s.points);
-        out.complex.extend_from_slice(&s.complex);
+        if complex {
+            if s.complex.is_empty() {
+                out.complex.extend(std::iter::repeat_n(0.0, s.points.len() / dims.max(1) * 3));
+            } else {
+                out.complex.extend_from_slice(&s.complex);
+            }
+        }
         if let (Some((_, g)), Some((_, sg))) = (out.grid.as_mut(), s.grid) {
             g.extend_from_slice(&sg);
         }
     }
     Some(out)
+}
+
+/// 一様な格子（m × m 個の点が `count / m²` 枚）の三角形。[`project`] と同じ並び・向き
+fn grid_tris(m: usize, count: usize) -> Vec<u32> {
+    let n = m - 1;
+    let mut out = Vec::with_capacity(count / (m * m) * n * n * 6);
+    for base in (0..count).step_by(m * m) {
+        for j in 0..n {
+            for i in 0..n {
+                let a = (base + j * m + i) as u32;
+                let (b, c, e) = (a + 1, a + m as u32, a + m as u32 + 1);
+                out.extend_from_slice(&[a, b, e, a, e, c]);
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2868,10 +3011,15 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
             mesh.grid_coords.extend_from_slice(&[g[0], g[1], if shape.solid { g[2] } else { p[2] as f32 }]);
         }
     }
-    // 曲面ごとに m × m 個の点が並んでいる。立体は6枚ずつ
+    // 曲面ごとに m × m 個の点が並んでいる。立体は6枚ずつ。
+    // 細かくした曲面は、一様な格子の点（base 個）の後ろに足した点が並び、三角形は tris を使う
     let per = if shape.solid { 6 * m * m } else { m * m };
+    let (grid_count, tris) = match &shape.tris {
+        Some((base, t)) => (*base, Some(t)),
+        None => (count, None),
+    };
     // 粗い版: 格子の点を stride 個おきに使う（最後の行・列は必ず入れるので、面の端は変わらない）
-    let quads = count / (m * m) * n * n;
+    let quads = tris.map_or(grid_count / (m * m) * n * n, |t| t.len() / 6);
     let stride = if 2 * quads > LOD_MIN_TRIANGLES {
         ((2 * quads) as f64 / LOD_TARGET_TRIANGLES as f64).sqrt().ceil() as usize
     } else {
@@ -2884,7 +3032,15 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     } else {
         Vec::new()
     };
-    for start in (0..count).step_by(per) {
+    if let Some(t) = tris {
+        for tri in t.chunks_exact(3) {
+            let v = [index_of[tri[0] as usize], index_of[tri[1] as usize], index_of[tri[2] as usize]];
+            if !v.contains(&NONE) {
+                mesh.indices.extend_from_slice(&v);
+            }
+        }
+    }
+    for start in (0..grid_count).step_by(per) {
         let first = mesh.indices.len();
         let lod_first = mesh.lod.len();
         for base in (start..start + per).step_by(m * m) {
@@ -2900,6 +3056,9 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
                         }
                     }
                 }
+            }
+            if tris.is_some() {
+                continue; // 三角形は tris から作った
             }
             for j in 0..n {
                 for i in 0..n {
@@ -3298,6 +3457,85 @@ mod tests {
             let m = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2);
             assert_eq!(m.indices.len() / 3, 45_000, "{src}");
         }
+    }
+
+    #[test]
+    fn parametric_bump_is_refined() {
+        // 格子より細い山 exp(−200 (u² + v²))（山の頂上が格子の点からずれる範囲）。細かくすると、山の上の点が増えて頂上に届く
+        let p = progs3(["u", "v", "exp(-200 (u^2 + v^2))"], &["u", "v"]);
+        let r = (-5.03, 4.97);
+        let tol = 3f64.sqrt() * 10.0 * 1e-3; // 表示範囲 ±5 の対角線の 10⁻³ 倍（lib.rs と同じ）
+        let uniform = parametric_surface_nd(std::slice::from_ref(&p), r, r, 150);
+        let fine = parametric_surface_nd_opt(&[p], r, r, 150, Some(tol));
+        let high = |s: &NdShape| s.points.chunks_exact(3).filter(|q| q[2] > 0.1).count();
+        let top = |s: &NdShape| s.points.chunks_exact(3).map(|q| q[2]).fold(0.0, f64::max);
+        assert!(high(&uniform) < 20, "{}", high(&uniform));
+        assert!(high(&fine) >= 40, "{}", high(&fine));
+        assert!(top(&fine) >= 0.9, "{}", top(&fine));
+        // 射影した曲面にも、細かくした三角形が使われる
+        let m = project(&fine, &View::identity(3), Domain { lo: [-5.0; 3], hi: [5.0; 3] });
+        assert!(m.indices.len() / 3 > 2 * 150 * 150);
+    }
+
+    #[test]
+    fn parametric_adaptive_is_conforming() {
+        // 媒介変数の平面 (u, v) の上で、細かくした三角形の継ぎ目に隙間が無い（リストで 2 枚にしても）
+        let bump = progs3(["u", "v", "exp(-200 (u^2 + v^2))"], &["u", "v"]);
+        let edge = progs3(["u", "v", "sqrt(1 - u^2 - v^2)"], &["u", "v"]);
+        let s = parametric_surface_nd_opt(&[bump, edge], (-2.0, 2.0), (-2.0, 2.0), 40, Some(0.01));
+        let (base, tris) = s.tris.clone().expect("細かくなっていない");
+        assert_eq!(base, 2 * 41 * 41);
+        let grid = &s.grid.as_ref().unwrap().1;
+        // 2 枚の曲面の点は (u, v) が重なるので、1 枚ずつ調べる（三角形は曲面の順に並ぶ）
+        let count = s.points.len() / 3;
+        let mut sheet = vec![usize::MAX; count];
+        for t in tris.chunks_exact(3) {
+            let k = t.iter().map(|&k| k as usize).find(|&k| k < base).map_or(usize::MAX, |k| k / (41 * 41));
+            for &v in t {
+                sheet[v as usize] = sheet[v as usize].min(k);
+            }
+        }
+        for which in 0..2 {
+            let uv: Vec<[f64; 2]> = (0..count).map(|k| [grid[2 * k] as f64, grid[2 * k + 1] as f64]).collect();
+            let mine: Vec<[u32; 3]> = tris
+                .chunks_exact(3)
+                .filter(|t| t.iter().all(|&k| sheet[k as usize] == which))
+                .map(|t| [t[0], t[1], t[2]])
+                .collect();
+            assert!(mine.len() >= 2 * 40 * 40 / 4);
+            crate::adaptive::tests::assert_conforming(&uv, &mine);
+        }
+    }
+
+    #[test]
+    fn merge_refined_and_uniform_shapes() {
+        // 細かくした曲面と一様な曲面をつなげても、三角形の数と点の対応がそのまま
+        let bump = progs3(["u", "v", "exp(-200 (u^2 + v^2))"], &["u", "v"]);
+        let plane = progs3(["u", "v", "1"], &["u", "v"]);
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let a = parametric_surface_nd_opt(&[bump], (-2.03, 1.97), (-2.03, 1.97), 30, Some(0.01));
+        let b = parametric_surface_nd(&[plane], (-2.0, 2.0), (-2.0, 2.0), 30);
+        assert!(a.tris.is_some() && b.tris.is_none());
+        let (ma, mb) = (project(&a, &View::identity(3), d), project(&b, &View::identity(3), d));
+        let merged = merge_shapes(vec![a, b]).unwrap();
+        let mm = project(&merged, &View::identity(3), d);
+        assert_eq!(mm.indices.len(), ma.indices.len() + mb.indices.len());
+        assert_eq!(mm.positions.len(), ma.positions.len() + mb.positions.len());
+        // 平面 z = 1 の三角形は、z = 1 の点だけでできている
+        let z = |k: u32| mm.positions[3 * k as usize + 2];
+        let flat = mm.indices.chunks_exact(3).filter(|t| t.iter().all(|&k| z(k) == 1.0)).count();
+        assert_eq!(flat, mb.indices.len() / 3);
+    }
+
+    #[test]
+    fn smooth_torus_is_not_refined() {
+        // ふつうのトーラスは、一様な格子のまま（点の数も同じ）
+        let torus = progs3(["(3 + cos v) cos u", "(3 + cos v) sin u", "sin v"], &["u", "v"]);
+        let tau = std::f64::consts::TAU;
+        let tol = 3f64.sqrt() * 10.0 * 1e-3;
+        let s = parametric_surface_nd_opt(&[torus], (0.0, tau), (0.0, tau), 150, Some(tol));
+        assert!(s.tris.is_none());
+        assert_eq!(s.points.len(), 151 * 151 * 3);
     }
 
     #[test]

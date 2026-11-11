@@ -547,7 +547,9 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 媒介変数表示: n 次元の点を計算してから、回転・射影する
         P::Surface { sets, vars } => {
-            b.shape = Some(mesh::parametric_surface_nd(sets, (ctx.range)(&vars[0]), (ctx.range)(&vars[1]), ctx.resolution));
+            let tol = ctx.refine.then_some(ctx.size * 1e-3);
+            let (u, v) = ((ctx.range)(&vars[0]), (ctx.range)(&vars[1]));
+            b.shape = Some(mesh::parametric_surface_nd_opt(sets, u, v, ctx.resolution, tol));
         }
         // 立体は面が6枚になるので、1枚あたりを少し粗くする
         P::Volume { sets, vars } => {
@@ -624,7 +626,9 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = mesh::Field::new(prog, ranges, space.samples, dom).cap(dom, 2, 0.0, true, res2 / 2);
         }
         P::Surface { sets, vars } => {
-            b.shape = Some(mesh::parametric_surface_nd(sets, (ctx.range)(&vars[0]), (ctx.range)(&vars[1]), ctx.resolution));
+            let tol = ctx.refine.then_some(ctx.size * 1e-3);
+            let (u, v) = ((ctx.range)(&vars[0]), (ctx.range)(&vars[1]));
+            b.shape = Some(mesh::parametric_surface_nd_opt(sets, u, v, ctx.resolution, tol));
         }
         P::Volume { sets, vars } => {
             let r = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1]), (ctx.range)(&vars[2])];
