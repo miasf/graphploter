@@ -131,13 +131,23 @@ function addStats(t: Tally, r: MeshResult, wall: number) {
   t.lod += l
 }
 
+/**
+ * 切り口のふたと、範囲で重ねた立体の表示範囲の端のふた（切り口が無くても作る。細かさは切り口のふたの半分）。
+ * どちらも無ければ null
+ */
 function makeCap(source: CapSource, cut: CutRequest, resolution: number, t?: Tally): CapData | null {
-  if (!cut) return null
   const w0 = performance.now()
-  const m = source.cap(cut.axis, cut.pos, cut.keepBelow, resolution)
+  const boxN = Math.max(8, Math.round(resolution / 2))
+  const m = cut
+    ? source.caps(cut.axis, cut.pos, cut.keepBelow, resolution, boxN)
+    : source.caps(-1, 0, false, resolution, boxN)
   const c0 = performance.now()
   // 配列は取り出して渡す（コピーは1回）
   const cap = { positions: m.take_positions(), normals: m.take_normals(), indices: m.take_indices() }
+  if (!cut && cap.indices.length === 0) {
+    m.free()
+    return null
+  }
   if (t) {
     t.copy += performance.now() - c0
     addStats(t, m, c0 - w0)

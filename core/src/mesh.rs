@@ -2082,9 +2082,41 @@ impl Field {
         Field { prog: prog.clone(), combos, negative }
     }
 
+    /// 範囲で重ねた立体か（ふつうの陰関数は、どちらの側が中身か決まっていない）
+    pub fn is_stacked(&self) -> bool {
+        self.combos.iter().any(|c| !c.is_empty())
+    }
+
+    /// 表示範囲の 6 つの面での切り口（中身がはみ出す所をふさぐふた）。面からほんの少し（対角線の 1e-4 倍）内側に作る
+    /// （面のちょうど上だと、描画側の切り落としの誤差で点々に欠けるため）。
+    /// `clip` = (軸, 位置, 位置以下を残すか) があれば、その切り口で切り落とされる側は描かない
+    pub fn box_caps(&self, dom: Domain, n: usize, clip: Option<(usize, f64, bool)>) -> Mesh {
+        let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
+        let eps = size * 1e-4;
+        let mut parts = Vec::new();
+        for a in 0..3 {
+            parts.push(self.cap_clipped(dom, a, dom.lo[a] + eps, false, n, clip));
+            parts.push(self.cap_clipped(dom, a, dom.hi[a] - eps, true, n, clip));
+        }
+        merge(parts, false)
+    }
+
     /// 平面「`axis` 番目の座標 = `pos`」での切り口（中身の部分）を、`n × n` マスの格子で三角形にする。
     /// 法線は、切り落とした側（`keep_below` なら座標が大きい側）を向く
     pub fn cap(&self, dom: Domain, axis: usize, pos: f64, keep_below: bool, n: usize) -> Mesh {
+        self.cap_clipped(dom, axis, pos, keep_below, n, None)
+    }
+
+    /// [`Field::cap`] で、`clip` = (軸, 位置, 位置以下を残すか) の平面で切り落とされる側を除いたもの
+    fn cap_clipped(
+        &self,
+        dom: Domain,
+        axis: usize,
+        pos: f64,
+        keep_below: bool,
+        n: usize,
+        clip: Option<(usize, f64, bool)>,
+    ) -> Mesh {
         let n = n.max(2);
         let m = n + 1;
         let (ua, va) = others(axis);
@@ -2122,6 +2154,12 @@ impl Field {
                             poly.push([0, 1, 2].map(|x| pp[x] + (pq[x] - pp[x]) * t));
                         }
                     }
+                    if let Some((ca, cpos, below)) = clip {
+                        poly = clip_poly(&poly, ca, cpos, below);
+                        if poly.len() < 3 {
+                            continue;
+                        }
+                    }
                     let base = mesh.positions.len() as u32 / 3;
                     for p in &poly {
                         mesh.push_vertex(*p);
@@ -2144,6 +2182,24 @@ impl Field {
         mesh.normals = (0..mesh.positions.len() / 3).flat_map(|_| nrm).collect();
         mesh
     }
+}
+
+/// 凸多角形 `poly` のうち、平面「`axis` 番目の座標 = `pos`」の残す側（`below` なら pos 以下）の部分
+fn clip_poly(poly: &[[f64; 3]], axis: usize, pos: f64, below: bool) -> Vec<[f64; 3]> {
+    let side = |p: &[f64; 3]| if below { pos - p[axis] } else { p[axis] - pos }; // 残す側で正
+    let mut out = Vec::with_capacity(poly.len() + 1);
+    for k in 0..poly.len() {
+        let (p, q) = (poly[k], poly[(k + 1) % poly.len()]);
+        let (sp, sq) = (side(&p), side(&q));
+        if sp >= 0.0 {
+            out.push(p);
+        }
+        if (sp >= 0.0) != (sq >= 0.0) {
+            let t = sp / (sp - sq);
+            out.push([0, 1, 2].map(|x| p[x] + (q[x] - p[x]) * t));
+        }
+    }
+    out
 }
 
 /// 範囲 `ranges` の中から、計算に使う点の組を作る。各範囲を等分し、組の総数は 4096 個まで
@@ -3588,6 +3644,55 @@ mod tests {
         let names = ["u", "v", "t"];
         let p3: Vec<Program> = ["u cos(v)", "u sin(v)", "t"].iter().map(|e| prog(e, &names)).collect();
         assert_eq!(curves(&parametric_edges_nd(&[p3], &[(0.0, 1.0), (0.0, 6.0), (0.0, 1.0)], 400, 1e-3)), 12);
+    }
+
+    #[test]
+    fn box_caps_cover_the_faces() {
+        // x² + y² + z² = a² を a の範囲で重ねた立体（中身の詰まった球）の、表示範囲 ±5 の面のふた
+        let p = prog("x^2 + y^2 + z^2 - a^2", &["x", "y", "z", "a"]);
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let area_of = |m: &Mesh, axis: usize, at: f64| {
+            let mut area = 0.0;
+            for t in m.indices.chunks_exact(3) {
+                let v = |k: u32| [0, 1, 2].map(|x| m.positions[3 * k as usize + x] as f64);
+                let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+                if [a, b, c].iter().all(|q| (q[axis] - at).abs() < 0.01) {
+                    let (e1, e2) = ([0, 1, 2].map(|x| b[x] - a[x]), [0, 1, 2].map(|x| c[x] - a[x]));
+                    area += 0.5 * (e1[(axis + 1) % 3] * e2[(axis + 2) % 3] - e1[(axis + 2) % 3] * e2[(axis + 1) % 3]).abs();
+                }
+            }
+            area
+        };
+        // 半径 10 の球は箱を丸ごと含む: どの面も全体（100）がふさがる
+        let f = Field::new(&p, &[(0.0, 10.0)], 24, d);
+        assert!(f.is_stacked());
+        let m = f.box_caps(d, 40, None);
+        for axis in 0..3 {
+            for at in [-5.0, 5.0] {
+                let a = area_of(&m, axis, at);
+                assert!((a - 100.0).abs() < 3.0, "面 {axis} {at}: {a}");
+            }
+        }
+        // 外向きの法線
+        for (q, nrm) in m.positions.chunks_exact(3).zip(m.normals.chunks_exact(3)) {
+            let axis = (0..3).find(|&a| nrm[a] != 0.0).unwrap();
+            assert!((q[axis].abs() - 5.0).abs() < 0.01);
+            assert_eq!(nrm[axis].signum(), q[axis].signum());
+        }
+        // 半径 6: 各面のふたは半径 √11 の円
+        let m = Field::new(&p, &[(0.0, 6.0)], 24, d).box_caps(d, 80, None);
+        for axis in 0..3 {
+            let a = area_of(&m, axis, 5.0);
+            assert!((a - 11.0 * std::f64::consts::PI).abs() < 0.05 * 11.0 * std::f64::consts::PI, "{a}");
+        }
+        // 面に届かない（半径 4）なら空
+        assert!(Field::new(&p, &[(0.0, 4.0)], 24, d).box_caps(d, 40, None).indices.is_empty());
+        // 切り口 x ≤ 0 を残すなら、x > 0 の部分は描かない（x = 5 の面は無くなり、ほかの面は半分）
+        let m = f.box_caps(d, 40, Some((0, 0.0, true)));
+        assert!(m.positions.chunks_exact(3).all(|q| q[0] <= 1e-9));
+        assert!((area_of(&m, 1, 5.0) - 50.0).abs() < 2.0);
+        // ふつうの陰関数は、範囲で重ねた立体ではない
+        assert!(!Field::new(&prog("x^2 + y^2 + z^2 - 4", &AXES), &[], 0, d).is_stacked());
     }
 
     #[test]

@@ -751,18 +751,28 @@ impl CapSource {
     /// 平面「画面の `axis` 番目（0: 横, 1: 奥, 2: 縦）の座標 = `pos`」での切り口のふた。
     /// `keep_below` なら座標が `pos` 以下の側を残す（ふたは反対側を向く）。`n` は格子の1辺のマス数
     pub fn cap(&self, axis: u32, pos: f64, keep_below: bool, n: u32) -> Result<MeshResult, JsError> {
+        self.caps(axis as i32, pos, keep_below, n, 0)
+    }
+
+    /// 切り口のふた（`axis` が負なら切り口なし）と、範囲で重ねた立体の表示範囲の端のふた（`box_n` が 0 なら作らない。
+    /// 細かさは `box_n`）をまとめたもの。端のふたは、切り口で切り落とされる側を描かない
+    pub fn caps(&self, axis: i32, pos: f64, keep_below: bool, n: u32, box_n: u32) -> Result<MeshResult, JsError> {
         if axis > 2 {
             return Err(JsError::new("内部エラー: 切り口の軸の番号が違います"));
         }
         let start = timing::now_ms();
         timing::reset();
-        let mut inner = mesh::merge(
-            self.inner
-                .iter()
-                .map(|f| f.cap(self.dom, axis as usize, pos, keep_below, n.clamp(2, 1000) as usize))
-                .collect(),
-            false,
-        );
+        let cut = (axis >= 0).then_some((axis as usize, pos, keep_below));
+        let mut parts = Vec::new();
+        for f in &self.inner {
+            if let Some((a, p, k)) = cut {
+                parts.push(f.cap(self.dom, a, p, k, n.clamp(2, 1000) as usize));
+            }
+            if box_n > 0 && f.is_stacked() {
+                parts.push(f.box_caps(self.dom, box_n.clamp(2, 1000) as usize, cut));
+            }
+        }
+        let mut inner = mesh::merge(parts, false);
         let end = timing::now_ms();
         record_stats(&mut inner, start, end, end);
         Ok(MeshResult {
