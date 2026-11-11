@@ -4137,6 +4137,81 @@ pub fn explicit_nd(
     mesh_to_nd(&mesh, axes, base, Some(axis))
 }
 
+/// 傾いた座標系の陽関数 t = g(u, v)（[`crate::equation::Plot::Tilted`]）の曲面を、表示中の座標で作る。
+///
+/// 表示範囲の 8 つの角を (u, v, t) = (q·e₁, q·e₂, q·e₃) に移し、それを囲む直方体を「計算する範囲」にして、
+/// 回さない陽関数と同じ [`explicit_surface_scaled`] で作る（段差の切り分け・壁・急な所の細分・定義域の縁がそのまま効く）。
+/// 計算する範囲の u, v の幅の大きいほうが、表示範囲の一番長い辺の k 倍なら、分割数を k 倍にする（1 ≤ k ≤ 2）。
+/// 段差・細分の目安の高さは、表示範囲の一番短い辺の長さ。
+/// 頂点と法線は q = u e₁ + v e₂ + t e₃ で表示中の座標に移す。
+/// `color` があれば、頂点の (u, v) で計算して複素数の色分けにする（段差の縁の頂点は、同じ (u, v) の 2 つが同じ色になる）。
+/// 格子線用の座標は、`grid` があればその 2 つの 1 次式（元の座標の値）、無ければ (u, v)。3 つ目は表示中の縦の座標
+#[allow(clippy::too_many_arguments)]
+pub fn explicit_tilted(
+    prog: &Program,
+    color: Option<&Program>,
+    frame: [[f64; 3]; 3],
+    grid: Option<[[f64; 3]; 2]>,
+    dom: Domain,
+    n: usize,
+    walls: bool,
+    refine: bool,
+) -> Mesh {
+    let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for corner in 0..8 {
+        let q = [0, 1, 2].map(|a| if (corner >> a) & 1 == 0 { dom.lo[a] } else { dom.hi[a] });
+        for k in 0..3 {
+            let x = dot(q, frame[k]);
+            lo[k] = lo[k].min(x);
+            hi[k] = hi[k].max(x);
+        }
+    }
+    let ext = Domain { lo, hi };
+    let edges = [0, 1, 2].map(|a| dom.hi[a] - dom.lo[a]);
+    let longest = edges.iter().cloned().fold(0.0, f64::max);
+    let shortest = edges.iter().cloned().fold(f64::INFINITY, f64::min);
+    let k = ((hi[0] - lo[0]).max(hi[1] - lo[1]) / longest).clamp(1.0, 2.0);
+    let mut mesh = explicit_surface_scaled(
+        prog,
+        ext,
+        (n as f64 * k).round() as usize,
+        2,
+        ComplexMode::Off,
+        walls,
+        refine,
+        shortest,
+    );
+    let uvt: Vec<[f64; 3]> =
+        mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let to_q = |p: [f64; 3]| [0, 1, 2].map(|a| p[0] * frame[0][a] + p[1] * frame[1][a] + p[2] * frame[2][a]);
+    mesh.positions = uvt.iter().flat_map(|&p| to_q(p).map(|v| v as f32)).collect();
+    let normals: Vec<f32> = mesh
+        .normals
+        .chunks_exact(3)
+        .flat_map(|nv| to_q([nv[0] as f64, nv[1] as f64, nv[2] as f64]).map(|v| v as f32))
+        .collect();
+    mesh.normals = normals;
+    let lin = |c: [f64; 3], p: [f64; 3]| (c[0] + c[1] * p[0] + c[2] * p[1]) as f32;
+    mesh.grid_coords = uvt
+        .iter()
+        .zip(mesh.positions.chunks_exact(3))
+        .flat_map(|(&p, q)| match grid {
+            Some([g1, g2]) => [lin(g1, p), lin(g2, p), q[2]],
+            None => [p[0] as f32, p[1] as f32, q[2]],
+        })
+        .collect();
+    if let Some(cp) = color {
+        let us: Vec<f64> = uvt.iter().map(|p| p[0]).collect();
+        let vs: Vec<f64> = uvt.iter().map(|p| p[1]).collect();
+        let mut vals = vec![C::new(0.0, 0.0); uvt.len()];
+        cp.eval_batch(&[&us, &vs], &mut vals);
+        mesh.complex = vals.into_iter().flat_map(complex_attr).collect();
+    }
+    mesh
+}
+
 /// 表示中の座標で作ったメッシュを、n 次元の点（表示していない座標は `base` の値）の形にする。
 /// 曲面（`surface` が Some(高さの軸)）なら、三角形は [`NdShape::tris`] にそのまま入れ（一様な格子の点は無い）、
 /// 格子線用の座標には高さでない2つの座標の値を入れる。None なら曲線（NaN は線の切れ目）

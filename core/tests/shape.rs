@@ -19,7 +19,7 @@
 
 use graph_core::{equation, eval, plot, MeshResult};
 use num_complex::Complex64 as C;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// 表示範囲（x, y, z の下端・上端）。z の端を 6 でなく 6.4 にするのは、`floor` などの整数の値の面が、
@@ -32,7 +32,56 @@ const RES: u32 = 150;
 /// 陰関数の細かさ（既定）
 const IRES: u32 = 80;
 
-type Voxels = HashSet<(i32, i32, i32)>;
+/// 箱の集まり（128³ 個の箱ごとに、入っているかどうか）
+#[derive(Clone)]
+struct Voxels {
+    bits: Vec<bool>,
+    len: usize,
+}
+
+impl Voxels {
+    fn new() -> Voxels {
+        Voxels { bits: vec![false; (N * N * N) as usize], len: 0 }
+    }
+
+    fn index((x, y, z): (i32, i32, i32)) -> usize {
+        ((x * N + y) * N + z) as usize
+    }
+
+    fn insert(&mut self, k: (i32, i32, i32)) {
+        let i = Voxels::index(k);
+        if !self.bits[i] {
+            self.bits[i] = true;
+            self.len += 1;
+        }
+    }
+
+    fn contains(&self, k: (i32, i32, i32)) -> bool {
+        self.bits[Voxels::index(k)]
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (i32, i32, i32)> + '_ {
+        self.bits.iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| {
+            let i = i as i32;
+            (i / (N * N), (i / N) % N, i % N)
+        })
+    }
+
+    /// ほかの集まりの箱を全部足す
+    fn extend(&mut self, other: &Voxels) {
+        for k in other.iter() {
+            self.insert(k);
+        }
+    }
+}
 
 /// a 番目の軸の箱の大きさ
 fn vs(a: usize) -> f64 {
@@ -105,17 +154,26 @@ impl Rot {
 
     /// 回転を設定した 3 次元の空間（式をコンパイルするため）
     fn space(self) -> equation::Space {
-        let mut s = equation::Space::basic(3, [0, 1, 2], vec![0.0; 3]);
-        s.rotation = self.angles();
-        s
+        space_with(&self.angles())
     }
+}
+
+/// 回転角（5 次元の 10 個の組）を設定した 3 次元の空間
+fn space_with(angles: &[f64]) -> equation::Space {
+    let mut s = equation::Space::basic(3, [0, 1, 2], vec![0.0; 3]);
+    s.rotation = angles.to_vec();
+    s
 }
 
 // ---- メッシュ ----
 
 /// 画面と同じ入口でメッシュを作る（壁は描かない）。かかった時間（ms）も返す
 fn mesh(src: &str, rot: Rot, ires: u32) -> (MeshResult, f64) {
-    let rotation = rot.angles();
+    mesh_opt(src, &rot.angles(), ires, false, 0)
+}
+
+/// [`mesh`] で、回転角（5 次元の 10 個の組）・壁・複素数の色分け（`ComplexMode::from_u32` の番号）を指定するもの
+fn mesh_opt(src: &str, rotation: &[f64], ires: u32, walls: bool, complex_mode: u32) -> (MeshResult, f64) {
     let t = Instant::now();
     let r = plot(
         src,
@@ -134,11 +192,11 @@ fn mesh(src: &str, rot: Rot, ires: u32) -> (MeshResult, f64) {
         "",
         &[],
         16,
-        &rotation,
+        rotation,
         &[0.0; 5],
         0.0,
-        0,
-        false,
+        complex_mode,
+        walls,
         false,
         1,
         false,
@@ -221,17 +279,12 @@ fn miss(a: &Voxels, b: &Voxels, tol: i32) -> f64 {
     if a.is_empty() {
         return 0.0;
     }
-    let idx = |x: i32, y: i32, z: i32| ((x * N + y) * N + z) as usize;
-    let mut dense = vec![false; (N * N * N) as usize];
-    for &(x, y, z) in b {
-        dense[idx(x, y, z)] = true;
-    }
-    let near = |&(x, y, z): &(i32, i32, i32)| {
+    let near = |(x, y, z): (i32, i32, i32)| {
         for dx in -tol..=tol {
             for dy in -tol..=tol {
                 for dz in -tol..=tol {
                     let (i, j, k) = (x + dx, y + dy, z + dz);
-                    if (0..N).contains(&i) && (0..N).contains(&j) && (0..N).contains(&k) && dense[idx(i, j, k)] {
+                    if (0..N).contains(&i) && (0..N).contains(&j) && (0..N).contains(&k) && b.contains((i, j, k)) {
                         return true;
                     }
                 }
@@ -239,7 +292,7 @@ fn miss(a: &Voxels, b: &Voxels, tol: i32) -> f64 {
         }
         false
     };
-    let missing = a.iter().filter(|v| !near(v)).count();
+    let missing = a.iter().filter(|&v| !near(v)).count();
     100.0 * missing as f64 / a.len() as f64
 }
 
@@ -349,20 +402,27 @@ fn reference_explicit(f: &str, rot: Rot) -> Option<Voxels> {
         }
     }
     let mut r = Explicit { prog: &prog, minv, out: Voxels::new() };
+    let mut segs: Vec<Seg> = Vec::with_capacity(2 * nu * nv);
     for j in 0..nv {
         for i in 0..nu {
             let a = [us[i], vs_[j], h[j * nu + i]];
             r.add(a);
             if i + 1 < nu {
-                r.fill(a, [us[i + 1], vs_[j], h[j * nu + i + 1]], 0);
+                segs.push((a, [us[i + 1], vs_[j], h[j * nu + i + 1]], 0));
             }
             if j + 1 < nv {
-                r.fill(a, [us[i], vs_[j + 1], h[(j + 1) * nu + i]], 0);
+                segs.push((a, [us[i], vs_[j + 1], h[(j + 1) * nu + i]], 0));
             }
         }
     }
+    r.fill(segs);
     Some(r.out)
 }
+
+/// 隣どうしの点 (u, v, f) の組と、これまでに二分した回数
+type Seg = ([f64; 3], [f64; 3], u32);
+/// 定義域の縁を探す途中の組: (定義される端, 縁の近くの定義される点, 定義されない点, 二分した回数)
+type Edge = ([f64; 3], [f64; 3], [f64; 3], u32);
 
 /// 陽関数の正解を作る途中の状態
 struct Explicit<'a> {
@@ -372,11 +432,13 @@ struct Explicit<'a> {
 }
 
 impl Explicit<'_> {
-    /// (u, v) での f
-    fn f(&self, u: f64, v: f64) -> f64 {
-        let mut o = [C::new(0.0, 0.0)];
-        self.prog.eval_batch(&[&[u], &[v]], &mut o);
-        eval::as_real(o[0])
+    /// 点 (u, v) ごとの f（まとめて計算する）
+    fn eval(&self, uv: &[(f64, f64)]) -> Vec<f64> {
+        let us: Vec<f64> = uv.iter().map(|p| p.0).collect();
+        let vs: Vec<f64> = uv.iter().map(|p| p.1).collect();
+        let mut o = vec![C::new(0.0, 0.0); uv.len()];
+        self.prog.eval_batch(&[&us, &vs], &mut o);
+        o.into_iter().map(eval::as_real).collect()
     }
 
     /// 点 (u, v, f) を表示中の座標に移したもの
@@ -392,49 +454,61 @@ impl Explicit<'_> {
         }
     }
 
-    fn mid(&self, a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-        let (u, v) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
-        [u, v, self.f(u, v)]
-    }
-
-    /// 隣どうしの点 a, b の間を埋める（`depth` はこれまでに二分した回数）
-    fn fill(&mut self, a: [f64; 3], b: [f64; 3], depth: u32) {
-        match (a[2].is_nan(), b[2].is_nan()) {
-            (true, true) => {}
-            (false, true) | (true, false) => {
-                // 定義される側へ 8 回二分して、縁の近くの定義される点を探す
-                let (good, mut bad) = if a[2].is_nan() { (b, a) } else { (a, b) };
-                let mut g = good;
-                for _ in 0..8 {
-                    let m = self.mid(g, bad);
-                    if m[2].is_nan() {
-                        bad = m;
-                    } else {
-                        g = m;
+    /// 隣どうしの点の間を埋める。二分する所を段ごとにまとめて計算する
+    fn fill(&mut self, mut segs: Vec<Seg>) {
+        let mid_uv = |a: [f64; 3], b: [f64; 3]| ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
+        while !segs.is_empty() {
+            // 二分する組と、片方が定義されない組（縁を探す）に分ける
+            let mut split: Vec<Seg> = Vec::new();
+            let mut edges: Vec<Edge> = Vec::new();
+            for (a, b, depth) in segs.drain(..) {
+                match (a[2].is_nan(), b[2].is_nan()) {
+                    (true, true) => {}
+                    (false, true) => edges.push((a, a, b, depth)),
+                    (true, false) => edges.push((b, b, a, depth)),
+                    (false, false) => {
+                        let (sa, sb) = (scaled(self.q(a)), scaled(self.q(b)));
+                        let dist = (0..3).map(|k| (sa[k] - sb[k]).powi(2)).sum::<f64>().sqrt();
+                        // 近い・両方が表示範囲の同じ側の外（見えない）・8 回二分しても離れたまま（飛び）なら、それ以上分けない
+                        let outside =
+                            (0..3).any(|k| (sa[k] < 0.0 && sb[k] < 0.0) || (sa[k] >= N as f64 && sb[k] >= N as f64));
+                        if dist > 0.5 && !outside && depth < 8 {
+                            split.push((a, b, depth));
+                        }
                     }
                 }
-                if g != good {
-                    self.add(g);
-                    self.fill(good, g, depth);
+            }
+            // 定義される側へ 8 回二分して、縁の近くの定義される点を探す
+            for _ in 0..8 {
+                if edges.is_empty() {
+                    break;
+                }
+                let fm = self.eval(&edges.iter().map(|e| mid_uv(e.1, e.2)).collect::<Vec<_>>());
+                for (e, f) in edges.iter_mut().zip(fm) {
+                    let (u, v) = mid_uv(e.1, e.2);
+                    if f.is_nan() {
+                        e.2 = [u, v, f];
+                    } else {
+                        e.1 = [u, v, f];
+                    }
                 }
             }
-            (false, false) => {
-                let (sa, sb) = (scaled(self.q(a)), scaled(self.q(b)));
-                let dist = (0..3).map(|k| (sa[k] - sb[k]).powi(2)).sum::<f64>().sqrt();
-                if dist <= 0.5 {
-                    return;
+            for (good, g, _, depth) in edges {
+                if g != good {
+                    self.add(g);
+                    segs.push((good, g, depth));
                 }
-                // 両方が表示範囲の同じ側の外なら、見えない
-                if (0..3).any(|k| (sa[k] < 0.0 && sb[k] < 0.0) || (sa[k] >= N as f64 && sb[k] >= N as f64)) {
-                    return;
-                }
-                if depth >= 8 {
-                    return;
-                }
-                let m = self.mid(a, b);
+            }
+            if split.is_empty() {
+                continue;
+            }
+            let fm = self.eval(&split.iter().map(|s| mid_uv(s.0, s.1)).collect::<Vec<_>>());
+            for ((a, b, depth), f) in split.into_iter().zip(fm) {
+                let (u, v) = mid_uv(a, b);
+                let m = [u, v, f];
                 self.add(m);
-                self.fill(a, m, depth + 1);
-                self.fill(m, b, depth + 1);
+                segs.push((a, m, depth + 1));
+                segs.push((m, b, depth + 1));
             }
         }
     }
@@ -464,9 +538,14 @@ fn inverse(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
 /// 3 つの軸それぞれについて、箱の中心を通る 128² 本の線の上で、1 箱あたり 12 点の間隔で F を計算し、
 /// 符号が変わる所を 24 回二分する。|F| が最初（両端の大きいほう）の 10⁻³ 倍より小さくなったものだけを零点とする（極・飛びを除く）
 fn reference_implicit(src: &str, rot: Rot) -> Voxels {
+    reference_implicit_at(src, &rot.angles())
+}
+
+/// [`reference_implicit`] で、回転角（5 次元の 10 個の組）を指定するもの
+fn reference_implicit_at(src: &str, angles: &[f64]) -> Voxels {
     let (l, r) = src.split_once('=').unwrap_or((src, "0"));
     let f = format!("({l}) - ({r}) = 0");
-    let prog = match equation::compile_with(&f, &eval::Params::new(), &rot.space()) {
+    let prog = match equation::compile_with(&f, &eval::Params::new(), &space_with(angles)) {
         Ok(equation::Plot::Implicit { prog, .. }) => prog,
         _ => panic!("{f} が陰関数にならない"),
     };
@@ -490,7 +569,11 @@ fn reference_implicit(src: &str, rot: Rot) -> Voxels {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    parts.into_iter().flatten().collect()
+    let mut out = Voxels::new();
+    for p in &parts {
+        out.extend(p);
+    }
+    out
 }
 
 /// 軸 a に平行で、ほかの 2 軸の箱 (i, j) の中心（を少しずらした所）を通る線の上の零点を、`out` に足す
@@ -872,24 +955,39 @@ fn shape_report() {
 }
 
 /// ふつうの `cargo test` で動く小さい確かめ（速い陽関数の正解だけ）。
-/// 欠け（1 箱）が 0.5% 以下。以後のステップで、直した式をここに足していく
+/// 欠け（1 箱）が決めた値（0.5%・1%）以下。以後のステップで、直した式をここに足していく
 #[test]
 fn shape_regression() {
     let cases = [
-        ("sin(x) cos(y)", Rot::None),
-        ("floor(x y / 4)", Rot::None),
-        ("1/(x y)", Rot::None),
-        ("sqrt(36 - x^2 - y^2)", Rot::None),
-        ("tan(x + y)", Rot::None),
+        ("sin(x) cos(y)", Rot::None, 0.5),
+        ("floor(x y / 4)", Rot::None, 0.5),
+        ("1/(x y)", Rot::None, 0.5),
+        ("sqrt(36 - x^2 - y^2)", Rot::None, 0.5),
+        ("tan(x + y)", Rot::None, 0.5),
         // S18: 表示中の座標どうしの回転で、極の近くの面が欠けない（xy 回転は M が回転行列そのものなので、陽関数の正解が使える）
-        ("1/(x y)", Rot::Xy),
+        ("1/(x y)", Rot::Xy, 0.5),
+        // S19: 表示していない w が絡む回転でも、傾いた座標系の陽関数として描く
+        ("1/(x y)", Rot::Xw, 1.0),
+        ("floor(x y / 4)", Rot::Xw, 1.0),
+        ("sqrt(36 - x^2 - y^2)", Rot::Xw, 1.0),
     ];
-    for (f, rot) in cases {
-        let (r, _) = mesh(&format!("z = {f}"), rot, IRES);
-        let reference = reference_explicit(f, rot).unwrap();
-        let got = voxels_of_mesh(&r.positions(), &r.indices());
-        let m = miss(&reference, &got, 1);
-        assert!(m <= 0.5, "z = {f}（{}）の欠けが {m:.3}%（0.5% 以下のはず）", rot.label());
+    // 式ごとに別のスレッドで（デバッグビルドでも時間がかからないように）
+    let results: Vec<(String, f64, f64)> = std::thread::scope(|s| {
+        let handles: Vec<_> = cases
+            .iter()
+            .map(|&(f, rot, limit)| {
+                s.spawn(move || {
+                    let (r, _) = mesh(&format!("z = {f}"), rot, IRES);
+                    let reference = reference_explicit(f, rot).unwrap();
+                    let got = voxels_of_mesh(&r.positions(), &r.indices());
+                    (format!("z = {f}（{}）", rot.label()), miss(&reference, &got, 1), limit)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (label, m, limit) in results {
+        assert!(m <= limit, "{label} の欠けが {m:.3}%（{limit}% 以下のはず）");
     }
 }
 
@@ -900,7 +998,10 @@ fn measure_tools() {
     let v = voxels_of_mesh(&pos, &[0, 1, 2]);
     assert!(!v.is_empty());
     assert_eq!(miss(&v, &v, 1), 0.0);
-    let far: Voxels = v.iter().map(|&(x, y, z)| (x, y, z + 2)).collect();
+    let mut far = Voxels::new();
+    for (x, y, z) in v.iter() {
+        far.insert((x, y, z + 2));
+    }
     assert_eq!(miss(&v, &far, 1), 100.0);
     assert_eq!(miss(&v, &far, 3), 0.0);
     // 破片: 離れた 2 つの三角形
@@ -911,4 +1012,120 @@ fn measure_tools() {
     let inv = inverse(m).unwrap();
     let p = mul(inv, mul(m, [1.0, 2.0, 3.0]));
     assert!((p[0] - 1.0).abs() < 1e-12 && (p[1] - 2.0).abs() < 1e-12 && (p[2] - 3.0).abs() < 1e-12);
+}
+
+// ---- 傾いた座標系の陽関数（計画 S19）----
+
+/// 2 つのメッシュの箱の集合の食い違い（両向きの miss の大きいほう、1 箱）
+fn mesh_diff(a: &MeshResult, b: &MeshResult) -> f64 {
+    let va = voxels_of_mesh(&a.positions(), &a.indices());
+    let vb = voxels_of_mesh(&b.positions(), &b.indices());
+    assert!(!va.is_empty() && !vb.is_empty());
+    miss(&va, &vb, 1).max(miss(&vb, &va, 1))
+}
+
+#[test]
+fn tilted_matches_rewritten() {
+    // xw 0.6 rad の z = floor(x) + sin(y) は、w = 0 の断面で z = floor(x cos 0.6) + sin(y)
+    let (a, _) = mesh("z = floor(x) + sin(y)", Rot::Xw, IRES);
+    assert!(a.kind().contains("回したもの") && !a.kind().contains("陰関数"), "{}", a.kind());
+    let (b, _) = mesh("z = floor(0.8253356149 x) + sin(y)", Rot::None, IRES);
+    let d = mesh_diff(&a, &b);
+    assert!(d <= 0.5, "xw の食い違い {d:.3}%");
+    // zw 0.6 rad の z = x y / 4 は、z = x y / (4 cos 0.6)
+    let (a, _) = mesh("z = x y / 4", Rot::Zw, IRES);
+    let (b, _) = mesh("z = x y / (4 * 0.8253356149)", Rot::None, IRES);
+    let d = mesh_diff(&a, &b);
+    assert!(d <= 0.5, "zw の食い違い {d:.3}%");
+}
+
+#[test]
+fn tilted_frame() {
+    // 乱数（線形合同法）で 20 通りの回転
+    let mut seed: u64 = 12345;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+    };
+    let f = "sin(x) cos(y) + x/3";
+    let fp = explicit_prog(f);
+    let mut checked = 0;
+    for _ in 0..20 {
+        let angles: Vec<f64> = (0..10).map(|_| rnd() * 1.5).collect();
+        let space = space_with(&angles);
+        let r = space.rotation_matrix().unwrap();
+        let plot = equation::compile_with(&format!("z = {f}"), &eval::Params::new(), &space).unwrap();
+        let equation::Plot::Tilted { prog, frame, grid, .. } = &plot else {
+            continue; // 傾きすぎ（陰関数のまま）
+        };
+        checked += 1;
+        let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        for i in 0..3 {
+            for j in 0..3 {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((dot(frame[i], frame[j]) - want).abs() < 1e-9, "正規直交でない");
+            }
+        }
+        let (e1, e2) = (frame[0], frame[1]);
+        let cross = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        assert!(dot(cross, frame[2]) > 0.999, "右手系でない");
+        // p_k = L_k · q（中心・断面は 0）。f が使う x, y の L_k は e₃ に垂直
+        let lk = |k: usize| [r[0][k], r[1][k], r[2][k]];
+        for k in [0, 1] {
+            assert!(dot(lk(k), frame[2]).abs() <= 1e-9);
+        }
+        // メッシュの頂点を元の座標に戻すと、z = f(x, y) に乗っている（表示範囲の外の、高さをそろえた頂点は除く）
+        let dom = graph_core::mesh::Domain { lo: [DOMAIN[0], DOMAIN[2], DOMAIN[4]], hi: [DOMAIN[1], DOMAIN[3], DOMAIN[5]] };
+        let m = graph_core::mesh::explicit_tilted(prog, None, *frame, *grid, dom, 60, false, true);
+        assert!(!m.indices.is_empty());
+        let mut worst: f64 = 0.0;
+        for q in m.positions.chunks_exact(3) {
+            let q = [q[0] as f64, q[1] as f64, q[2] as f64];
+            if (0..3).any(|a| q[a] < DOMAIN[2 * a] || q[a] > DOMAIN[2 * a + 1]) {
+                continue;
+            }
+            let p = [dot(lk(0), q), dot(lk(1), q), dot(lk(2), q)];
+            let mut o = [C::new(0.0, 0.0)];
+            fp.eval_batch(&[&[p[0]], &[p[1]]], &mut o);
+            worst = worst.max((p[2] - o[0].re).abs());
+        }
+        assert!(worst < 1e-4, "元の座標で z = f(x, y) から {worst} ずれる");
+    }
+    assert!(checked >= 15, "傾いた陽関数になった回転が {checked} 通りしかない");
+}
+
+#[test]
+fn tilted_falls_back() {
+    // 4 次元の z = x y w を zw に回すと、f が 3 つの独立な向きを使うので陰関数のまま
+    let mut sp = equation::Space::basic(4, [0, 1, 2], vec![0.0; 4]);
+    sp.rotation[7] = 0.6;
+    assert!(matches!(equation::compile_with("z = x y w", &eval::Params::new(), &sp).unwrap(), equation::Plot::Implicit { .. }));
+    // 3 次元の z = x^2 を xw に 90° 回すと、L_x = 0 になる（w = 0 の断面では x = 0 なので、平面 z = 0）
+    let mut angles = vec![0.0; 10];
+    angles[2] = std::f64::consts::FRAC_PI_2;
+    let (r, _) = mesh_opt("z = x^2", &angles, IRES, false, 0);
+    assert!(!r.indices().is_empty());
+    let reference = reference_implicit_at("z = x^2", &angles);
+    let got = voxels_of_mesh(&r.positions(), &r.indices());
+    let m = miss(&reference, &got, 1);
+    assert!(m <= 2.0, "欠け {m:.3}%");
+}
+
+#[test]
+fn tilted_walls_and_colors() {
+    // 壁をオンにすると、回しても壁が出る
+    let rot = Rot::Xw.angles();
+    let (plain, _) = mesh_opt("z = floor(x)", &rot, IRES, false, 0);
+    let (walled, _) = mesh_opt("z = floor(x)", &rot, IRES, true, 0);
+    assert!(walled.indices().len() > plain.indices().len());
+    // 複素数の色分け（高さ |f|）も残る
+    let (c, _) = mesh_opt("z = (x + i y)^2 / 10", &rot, IRES, false, 1);
+    assert!(c.kind().contains("回したもの"), "{}", c.kind());
+    assert!(!c.positions().is_empty());
+    assert_eq!(c.complex_values().len(), c.positions().len());
+    // リストの中でも同じ道を通る
+    let (l, _) = mesh("z = floor(x) + [0, 2]", Rot::Xw, IRES);
+    assert!(l.kind().contains("回したもの") && !l.kind().contains("陰関数"), "{}", l.kind());
+    let (one, _) = mesh("z = floor(x)", Rot::Xw, IRES);
+    assert!(l.indices().len() > one.indices().len());
 }

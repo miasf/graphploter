@@ -624,6 +624,20 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner =
                 mesh::explicit_surface_opt(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls, ctx.refine);
         }
+        // 表示していない座標が絡む回転をした陽関数: 傾いた座標系の陽関数として作る。
+        // 回転が変わるたびに計算し直す（点は使い回さない）。切り口のふたの元は作らない（回さない陽関数と同じ）
+        P::Tilted { prog, color, frame, grid, .. } => {
+            b.inner = mesh::explicit_tilted(
+                prog,
+                color.as_ref(),
+                *frame,
+                *grid,
+                dom,
+                ctx.resolution,
+                ctx.walls,
+                ctx.refine,
+            );
+        }
         P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
@@ -677,6 +691,8 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // y = f(x, z) などの f の変数は、残り2つの表示中の座標（2つ目が縦）
         P::Explicit { prog, .. } => prog.uses_var_index(1),
         P::Implicit { prog, .. } | P::Solid { prog, .. } => prog.uses_var_index(2),
+        // 傾いた座標系の陽関数は、3 次元の曲面を作ってから押しつぶす（2D の切り口では、この道にならない）
+        P::Tilted { .. } => true,
         _ => false,
     };
     // 回した陽関数: 回す前の形を n 次元の点で作り、回して射影してから平面に描く（plot・Shape::project）
@@ -770,7 +786,8 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.curve = true;
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
+        // 傾いた座標系の陽関数は、上の投影の道で作る
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } => {}
     }
     Ok(b)
 }
@@ -812,7 +829,7 @@ impl Shape {
     /// 回転・表示する軸・表示範囲を変えて、もう一度3次元に射影する（式は計算し直さない）。
     /// 引数の意味は [`plot`] と同じ。
     /// 回転した陽関数で、新しい回転が「表示中の座標どうし」でなくなったときは
-    /// "RECOMPUTE" というエラーを返す（陰関数として計算し直す必要がある）
+    /// "RECOMPUTE" というエラーを返す（傾いた座標系の陽関数・陰関数として計算し直す必要がある）
     pub fn project(
         &self,
         domain: &[f64],
