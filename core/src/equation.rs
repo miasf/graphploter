@@ -55,6 +55,10 @@ pub struct Space {
     pub lift_param: bool,
     /// 複素数のパラメータ（スライダーを複素平面にしたもの）の名前。これを使った定数の式は複素平面の点になる
     pub complex_params: Vec<String>,
+    /// 2D 表示の切り口を描くか。そうなら、縦の座標を使う陽関数（z = f(x, y) など）を回したときは、
+    /// 点を計算して回すのではなく、陰関数として計算し直す（式から直接、縦の座標 = 0 の曲線を求める。
+    /// 0 に接するだけの所も見つけられ、格子点の誤差でできる余計な線も出ない）
+    pub flat_slice: bool,
 }
 
 impl Space {
@@ -77,6 +81,7 @@ impl Space {
             complex_height: None,
             lift_param: false,
             complex_params: Vec::new(),
+            flat_slice: false,
         }
     }
 
@@ -462,10 +467,14 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         r.collect_vars(&mut used);
         if space.rotation_keeps_shown(&used) {
             if let Some(p) = find_explicit(&l, &r, &shown, &consts)? {
-                return Ok(match p {
-                    Plot::Explicit { axis, names, prog, .. } => Plot::Explicit { axis, names, prog, rotated: true },
-                    other => other,
-                });
+                // 2D の切り口で縦の座標を使う陽関数は、陰関数として計算し直す（Space::flat_slice を参照）
+                let vertical = matches!(&p, Plot::Explicit { axis, prog, .. } if *axis == 2 || prog.uses_var_index(1));
+                if !(space.flat_slice && vertical) {
+                    return Ok(match p {
+                        Plot::Explicit { axis, names, prog, .. } => Plot::Explicit { axis, names, prog, rotated: true },
+                        other => other,
+                    });
+                }
             }
         }
     }
@@ -1133,6 +1142,40 @@ mod tests {
             let spread = z.iter().cloned().fold(f32::MIN, f32::max) - z.iter().cloned().fold(f32::MAX, f32::min);
             assert!(spread < 0.5, "段差をまたぐ三角形: {z:?}");
         }
+    }
+
+    #[test]
+    fn rotated_explicit_flat_slice_is_implicit() {
+        // 2D の切り口では、回した z = f(x, y) を陰関数として計算し直す（0 に接するだけの所も見つけられる）
+        let ps = Params::new();
+        let mut sp = Space::standard();
+        sp.rotation[0] = 0.4; // xy
+        sp.flat_slice = true;
+        let Plot::Implicit { prog, from: Some(_) } = compile_with("z = x^2 + y^2", &ps, &sp).unwrap() else {
+            panic!("陰関数として計算し直す")
+        };
+        let d = crate::mesh::Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let m = crate::mesh::implicit_curve_2d(&prog, d, 320);
+        // 原点の1点だけ
+        assert_eq!(m.positions.len(), 9, "{:?}", m.positions);
+        assert!(m.positions[0].abs() < 1e-3 && m.positions[1].abs() < 1e-3);
+        // 回した階段: 線は段の縁（回す前の座標 x' か y' が整数）の上にきっちり乗る（格子に対して斜めでも、ぎざぎざにならない）
+        let Plot::Implicit { prog, .. } = compile_with("z = floor(x)/2 + floor(y)/4", &ps, &sp).unwrap() else { panic!() };
+        let m = crate::mesh::implicit_curve_2d(&prog, d, 320);
+        assert!(m.positions.len() > 100);
+        let (c, s) = (0.4f64.cos(), 0.4f64.sin());
+        for q in m.positions.chunks_exact(3).filter(|q| q[0].is_finite()) {
+            let (x, y) = (q[0] as f64, q[1] as f64);
+            // 回す前の座標（xy で 0.4 回したものを戻す）
+            let (u, v) = (c * x + s * y, -s * x + c * y);
+            let off = |a: f64| (a - a.round()).abs();
+            assert!(off(u).min(off(v)) < 2e-3, "段の縁から外れた点 ({x}, {y}) → ({u}, {v})");
+        }
+        // y = f(x)（縦の座標を使わない）は、今までどおり陽関数のまま回す
+        assert!(matches!(compile_with("y = x^2", &ps, &sp).unwrap(), Plot::Explicit { rotated: true, .. }));
+        // 切り口でなければ、陽関数のまま回す
+        sp.flat_slice = false;
+        assert!(matches!(compile_with("z = x^2 + y^2", &ps, &sp).unwrap(), Plot::Explicit { rotated: true, .. }));
     }
 
     #[test]
