@@ -51,7 +51,7 @@ pub struct Stats {
     /// 式を計算した点の数
     pub points: f64,
     /// 陰関数（[`implicit_solid`]）のときだけ: 部分ごとの時間
-    /// [格子点での F の計算, 接する所の候補探し, セルの頂点, 辺の四角形と法線]（ほかは 0）
+    /// [格子点での F の計算, 偽の交点と接する所の候補探し, セルの頂点, 辺の四角形と法線]（ほかは 0）
     pub phases: [f64; 4],
 }
 
@@ -606,6 +606,7 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
     let m = n + 1; // 1辺の格子点の数
     let idx = |i: usize, j: usize, k: usize| i + m * (j + m * k);
 
+    let combos = sample_combos(ranges, samples);
     // 1. 格子点で F を計算（メモリ節約のため z の層ごとに計算し、f32 で保存）。
     //    同時に、格子点ごとの符号（f < 0 なら 1）を1バイトで持っておく（2 で使う）
     let mut f = vec![0.0f32; m * m * m];
@@ -620,7 +621,6 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
             }
         }
         let mut zs = vec![0.0; m * m];
-        let combos = sample_combos(ranges, samples);
         let mut scratch = FieldScratch::default();
         for k in 0..m {
             zs.fill(dom.at(2, k as f64, n));
@@ -635,6 +635,66 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
     }
 
     let t_field = crate::timing::now_ms();
+    // 格子の列 (j, k)（x の向きの1行）の符号: 0 = 負の点が無い, 1 = 全部負, 2 = 混ざっている
+    let row_sign: Vec<u8> = neg
+        .chunks_exact(m)
+        .map(|row| {
+            let cnt = row.iter().map(|&b| b as usize).sum::<usize>();
+            if cnt == 0 { 0 } else if cnt == m { 1 } else { 2 }
+        })
+        .collect();
+
+    // 1''. 符号は変わるが F = 0 になる点が無い辺（tan の極など、F が +∞ から −∞ へ飛ぶ所）。ここには面を張らない
+    let not_zero: std::collections::HashSet<usize> = {
+        let mut ids = Vec::new();
+        let mut edges = Vec::new();
+        for a in 0..3 {
+            let stride = [1, m, m * m][a];
+            for k in 0..m {
+                for j in 0..m {
+                    // 辺の両端の行がまるごと同じ符号なら、その行に符号の変わる辺は無い
+                    let r0 = j + m * k;
+                    let r1 = match a {
+                        0 => r0,
+                        1 if j + 1 < m => r0 + 1,
+                        2 if k + 1 < m => r0 + m,
+                        _ => continue,
+                    };
+                    if row_sign[r0] != 2 && row_sign[r0] == row_sign[r1] {
+                        continue;
+                    }
+                    for i in 0..m - (a == 0) as usize {
+                        let c = idx(i, j, k);
+                        let (f0, f1) = (f[c], f[c + stride]);
+                        if neg[c] == neg[c + stride] || !f0.is_finite() || !f1.is_finite() {
+                            continue;
+                        }
+                        let mut q = [i, j, k];
+                        // 安い判定: 同じ直線の上の隣の辺（p − e → p、q → q + e）の傾きと、この辺の傾きが同じ向きで、
+                        // 大きさも 4 倍以内なら、なめらかに 0 を横切っているだけなので調べない（ほとんどの辺はここで終わる）。
+                        // 奇数次の極（+∞ から −∞ へ飛ぶ）では、この辺の傾きが隣と逆向きになり、
+                        // 値が飛ぶ所では隣の傾きがほぼ 0 になるので、どちらもここを通らずに調べられる
+                        if q[a] >= 1 && q[a] + 2 < m {
+                            let (fl, fr) = (f[c - stride], f[c + 2 * stride]);
+                            let (sl, s, sr) = (f0 - fl, f1 - f0, fr - f1);
+                            if sl * s > 0.0 && sr * s > 0.0 && s.abs() <= 4.0 * sl.abs().max(sr.abs()) {
+                                continue;
+                            }
+                        }
+                        let pt = |q: [usize; 3]| [0, 1, 2].map(|x| dom.at(x, q[x] as f64, n));
+                        let a0 = pt(q);
+                        q[a] += 1;
+                        edges.push(SignEdge { p0: a0, p1: pt(q), f0: f0 as f64, f1: f1 as f64 });
+                        ids.push(3 * c + a);
+                    }
+                }
+            }
+        }
+        let mut sc = FieldScratch::default();
+        let flags = false_crossings(&mut |xyz| field_values_with(prog, &combos, xyz, &mut sc).to_vec(), &edges);
+        ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+    };
+
     // 1'. 符号は変わらないが F = 0 に接している所（例: (x² + y² + z² − 1)² = 0）を探す
     let touch = if ranges.is_empty() { find_touches(prog, &f, dom, n) } else { Default::default() };
     let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
@@ -676,6 +736,9 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
             return None;
         }
         if (f0 < 0.0) != (f1 < 0.0) {
+            if !not_zero.is_empty() && not_zero.contains(&(3 * idx(p[0], p[1], p[2]) + a)) {
+                return None; // F が飛ぶだけで、0 になる点は無い
+            }
             return Some(((f0 / (f0 - f1)) as f64, Some(f0 < 0.0)));
         }
         if !near_touch {
@@ -694,14 +757,6 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
     //    速くするため、格子点ごとの符号（1 で作った neg）から、セルの8つの角の符号を1バイトにまとめる。
     //    格子の列（x の向きの1行）ごとに「負の点があるか・全部負か」を先に調べ、セルの列の周りの4本の列が
     //    同じ符号でそろっていて、印のあるセルも無ければ、その列のセルは丸ごと飛ばす
-    // 格子の列 (j, k) の符号: 0 = 負の点が無い, 1 = 全部負, 2 = 混ざっている
-    let row_sign: Vec<u8> = neg
-        .chunks_exact(m)
-        .map(|row| {
-            let cnt = row.iter().map(|&b| b as usize).sum::<usize>();
-            if cnt == 0 { 0 } else if cnt == m { 1 } else { 2 }
-        })
-        .collect();
     // セルの12本の辺の向き（0: x, 1: y, 2: z）
     let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
     let mut vert = vec![NONE; n * n * n];
@@ -1133,6 +1188,84 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
 
     compute_normals(&mut mesh);
     mesh
+}
+
+/// 両端で F の符号が違う格子の辺（[`false_crossings`] に渡す）
+struct SignEdge {
+    /// 両端の座標
+    p0: [f64; 3],
+    p1: [f64; 3],
+    /// 両端の F の値（符号が違う）
+    f0: f64,
+    f1: f64,
+}
+
+/// 符号の変わる辺のうち、F = 0 になる点が無いもの（F が +∞ から −∞ へ飛ぶ極や、値が飛ぶ所）を探す。
+/// 戻り値は辺ごとに「零点ではない」なら true。`eval` は点の列 (x, y, z) での F の値。
+///
+/// 1. 直線で補間した交点 t* = f₀/(f₀ − f₁) で F を計算し、|F(t*)| ≤ 0.25 min(|f₀|, |f₁|) なら本当の零点
+///    （ほとんどの辺はここで終わる）
+/// 2. 残った辺は、符号の変わる側を残す二分を 6 回行う。本当の零点なら、区間が 1/64 になると両端の |F| も
+///    縮む（なめらかなら約 1/64）。最後の両端の値 f_a, f_b が |f_a| + |f_b| ≥ 0.5 (|f₀| + |f₁|)（縮まなかった）なら
+///    「零点ではない」。途中で値が有限でなくなった辺も「零点ではない」
+///    （両端の小さいほうの値だけで比べると、零点が辺の端のすぐ近くにあるとき、端の値が変わらないので見誤る）
+///
+/// 計算は、全部の辺をまとめて行う
+fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignEdge]) -> Vec<bool> {
+    const ROUNDS: usize = 6;
+    let mut result = vec![false; edges.len()];
+    if edges.is_empty() {
+        return result;
+    }
+    let at = |e: &SignEdge, t: f64| [0, 1, 2].map(|x| e.p0[x] + (e.p1[x] - e.p0[x]) * t);
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    let fill = |cols: &mut [Vec<f64>; 3], pts: &mut dyn Iterator<Item = [f64; 3]>| {
+        for c in cols.iter_mut() {
+            c.clear();
+        }
+        for q in pts {
+            for x in 0..3 {
+                cols[x].push(q[x]);
+            }
+        }
+    };
+    // 1. 直線で補間した交点
+    fill(&mut cols, &mut edges.iter().map(|e| at(e, e.f0 / (e.f0 - e.f1))));
+    let v = eval([&cols[0], &cols[1], &cols[2]]);
+    // 残った辺: (辺の番号, ta, tb, fa, fb)
+    let mut rest: Vec<(usize, f64, f64, f64, f64)> = edges
+        .iter()
+        .enumerate()
+        .filter(|&(k, e)| !(v[k].abs() <= 0.25 * e.f0.abs().min(e.f1.abs())))
+        .map(|(k, e)| (k, 0.0, 1.0, e.f0, e.f1))
+        .collect();
+    // 2. 二分
+    for _ in 0..ROUNDS {
+        if rest.is_empty() {
+            break;
+        }
+        fill(&mut cols, &mut rest.iter().map(|&(k, ta, tb, _, _)| at(&edges[k], 0.5 * (ta + tb))));
+        let v = eval([&cols[0], &cols[1], &cols[2]]);
+        rest = rest
+            .into_iter()
+            .zip(v)
+            .filter_map(|((k, ta, tb, fa, fb), fm)| {
+                if !fm.is_finite() {
+                    result[k] = true;
+                    return None;
+                }
+                let t = 0.5 * (ta + tb);
+                Some(if (fm < 0.0) != (fa < 0.0) { (k, ta, t, fa, fm) } else { (k, t, tb, fm, fb) })
+            })
+            .collect();
+    }
+    for (k, _, _, fa, fb) in rest {
+        let e = &edges[k];
+        if fa.abs() + fb.abs() >= 0.5 * (e.f0.abs() + e.f1.abs()) {
+            result[k] = true;
+        }
+    }
+    result
 }
 
 /// 符号が変わらずに F = 0 に接している所を、格子の辺ごとに探す。
@@ -2077,6 +2210,37 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
         prog.eval_batch(&[&xs, &ys, &zs], &mut out);
     }
     let f: Vec<f64> = out.iter().map(|v| as_real(*v)).collect();
+    // 符号は変わるが F = 0 になる点が無い辺（tan(x) = y の極の縦線など。[`false_crossings`]）。
+    // 辺の番号は 2 × 小さいほうの格子点 + (縦なら 1)
+    let not_zero: std::collections::HashSet<usize> = {
+        let mut ids = Vec::new();
+        let mut edges = Vec::new();
+        for k in 0..m * m {
+            let (i, j) = (k % m, k / m);
+            for (dir, k1) in [(0, (i + 1 < m).then_some(k + 1)), (1, (j + 1 < m).then_some(k + m))] {
+                let Some(k1) = k1 else { continue };
+                let (f0, f1) = (f[k], f[k1]);
+                if (f0 < 0.0) != (f1 < 0.0) && f0.is_finite() && f1.is_finite() {
+                    edges.push(SignEdge { p0: [xs[k], ys[k], 0.0], p1: [xs[k1], ys[k1], 0.0], f0, f1 });
+                    ids.push(2 * k + dir);
+                }
+            }
+        }
+        let two = prog.vars().len() == 2;
+        let mut buf = Vec::new();
+        let mut eval = |[x, y, z]: [&[f64]; 3]| {
+            buf.resize(x.len(), C::new(0.0, 0.0));
+            if two {
+                prog.eval_batch(&[x, y], &mut buf);
+            } else {
+                prog.eval_batch(&[x, y, z], &mut buf);
+            }
+            buf.iter().map(|v| as_real(*v)).collect()
+        };
+        let flags = false_crossings(&mut eval, &edges);
+        ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+    };
+    let edge_id = |ka: usize, kb: usize| 2 * ka.min(kb) + (ka.abs_diff(kb) == m) as usize;
     let mut pts: Vec<f32> = Vec::new();
     for j in 0..n {
         for i in 0..n {
@@ -2091,8 +2255,11 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
             for e in 0..4 {
                 let (a, b) = (e, (e + 1) % 4);
                 if (v[a] < 0.0) != (v[b] < 0.0) {
-                    let t = v[a] / (v[a] - v[b]);
                     let (ka, kb) = (ks[a], ks[b]);
+                    if !not_zero.is_empty() && not_zero.contains(&edge_id(ka, kb)) {
+                        continue; // F が飛ぶだけで、0 になる点は無い
+                    }
+                    let t = v[a] / (v[a] - v[b]);
                     cross.push([xs[ka] + (xs[kb] - xs[ka]) * t, ys[ka] + (ys[kb] - ys[ka]) * t]);
                 }
             }
@@ -2634,7 +2801,8 @@ mod tests {
 
     #[test]
     fn implicit_mesh_unchanged() {
-        // 速くした implicit_solid と、速くする前の版（implicit_solid_reference）の出力が、頂点の位置・法線・三角形の順番まで同じ
+        // 速くした implicit_solid と、速くする前の版（implicit_solid_reference）の出力が、頂点の位置・法線・三角形の順番まで同じ。
+        // F が飛ぶ所（tan の極など）は、その後で面を張らないようにしたので（implicit_pole_is_not_a_surface）、ここでは比べない
         let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
         let cases: Vec<(&str, Vec<&str>, Domain, usize, Vec<(f64, f64)>)> = vec![
             ("x^2+y^2+z^2-4.01", AXES.to_vec(), big, 40, vec![]),
@@ -2643,7 +2811,6 @@ mod tests {
             ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", AXES.to_vec(), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40, vec![]),
             ("(x^2 + y^2 + z^2 - 0.49)^2", AXES.to_vec(), dom(), 30, vec![]),
             ("x y^2", AXES.to_vec(), dom(), 21, vec![]),
-            ("tan(x) - z", AXES.to_vec(), big, 40, vec![]),
             ("x^2 + y^2 + z^2 - r^2", vec!["x", "y", "z", "r"], dom(), 30, vec![(0.3, 0.7)]),
         ];
         for (src, vars, d, n, ranges) in cases {
@@ -2655,6 +2822,60 @@ mod tests {
             assert_eq!(a.normals, b.normals, "{src}: 法線");
             assert_eq!(a.indices, b.indices, "{src}: 三角形");
         }
+    }
+
+    /// 頂点のうち、極の平面 x = c の近く（|x − c| < h）で |g(x) − z| > 2 のもの（極の上の偽の面）の数
+    fn fake_pole_vertices(m: &Mesh, poles: &[f64], h: f64, g: impl Fn(f64) -> f64) -> usize {
+        m.positions
+            .chunks_exact(3)
+            .filter(|q| {
+                let (x, z) = (q[0] as f64, q[2] as f64);
+                poles.iter().any(|c| (x - c).abs() < h) && (g(x) - z).abs() > 2.0
+            })
+            .count()
+    }
+
+    #[test]
+    fn implicit_pole_is_not_a_surface() {
+        // tan(x) = z の極 x = ±π/2, ±3π/2 では F が +∞ から −∞ へ飛ぶ。そこに偽の面を張らない（変更前は頂点の約半分）
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let h = 10.0 / 80.0;
+        let poles: Vec<f64> = [-1.5, -0.5, 0.5, 1.5].iter().map(|k| k * std::f64::consts::PI).collect();
+        let m = implicit_surface(&prog("tan(x) - z", &AXES), d, 80);
+        assert!(m.positions.len() / 3 > 10_000, "本当の曲面は残る");
+        assert_eq!(fake_pole_vertices(&m, &poles, h, f64::tan), 0);
+        // 1/x = z（x の範囲をずらして、極 x = 0 が格子の点にならないようにする）
+        let d = Domain { lo: [-4.95, -5.0, -5.0], hi: [5.05, 5.0, 5.0] };
+        let m = implicit_surface(&prog("1/x - z", &AXES), d, 80);
+        assert!(m.positions.len() / 3 > 5_000, "本当の曲面は残る");
+        assert_eq!(fake_pole_vertices(&m, &[0.0], h, |x| 1.0 / x), 0);
+        // 2D 表示の陰関数の曲線 tan(x) = y にも、極の縦線を描かない
+        let c = implicit_curve_2d(&prog("tan(x) - y", &["x", "y"]), Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 200);
+        let near_pole = c
+            .positions
+            .chunks_exact(3)
+            .filter(|q| q[0].is_finite() && poles.iter().any(|p| (q[0] as f64 - p).abs() < 0.05) && ((q[0] as f64).tan() - q[1] as f64).abs() > 2.0)
+            .count();
+        assert_eq!(near_pole, 0, "極の縦線");
+        assert!(c.positions.len() > 300, "本当の曲線は残る");
+    }
+
+    #[test]
+    fn steep_root_is_still_a_surface() {
+        // 急なだけで本当に 0 になる所は、今までどおり面を張る（頂点の数が、極の判定をしない版と同じ）
+        let d = Domain { lo: [-2.0; 3], hi: [2.0; 3] };
+        for src in ["x^3 - z", "x^(1/3) - z", "1000 (x^2+y^2+z^2-1)", "exp(5x) - z - 1"] {
+            let p = prog(src, &AXES);
+            let a = implicit_surface(&p, d, 40);
+            let b = implicit_solid_reference(&p, d, 40, &[], 0);
+            assert!(!a.indices.is_empty(), "{src}");
+            assert_eq!(a.positions.len(), b.positions.len(), "{src}");
+        }
+        // z (x² + y²) = 1 は、z 軸に向かって伸びる本当の曲面。頂点の数が 95% 以上残る
+        let p = prog("z (x^2+y^2) - 1", &AXES);
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let (a, b) = (implicit_surface(&p, d, 80), implicit_solid_reference(&p, d, 80, &[], 0));
+        assert!(a.positions.len() as f64 >= 0.95 * b.positions.len() as f64, "{} / {}", a.positions.len(), b.positions.len());
     }
 
     #[test]
