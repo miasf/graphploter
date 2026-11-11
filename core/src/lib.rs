@@ -387,7 +387,7 @@ pub fn plot(
         layers: layers.clamp(1, 12) as usize,
         refine: flags & FLAG_NO_REFINE == 0,
         implicit_refine: if flags & FLAG_NO_REFINE != 0 {
-            mesh::Refine::Off
+            mesh::Refine::Light
         } else if flags & FLAG_THOROUGH != 0 {
             mesh::Refine::Thorough
         } else {
