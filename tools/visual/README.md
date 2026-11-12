@@ -18,10 +18,12 @@ node tools/visual/render.cjs /tmp/vis 30b2332 <HEAD の短いハッシュ> WORK
 - `VISUAL_ONLY=stairs` … 名前にその文字を含む式だけ（`dump_revs.sh` の書き出しにも、`render.cjs` にも効く）
 - `VISUAL_VIEW=3,-2,1.6,0.6,0.4,0.2` … 視点を 1 つに決める（カメラの x,y,z と見る点の x,y,z）。気になる所に寄って見るとき
 - `VISUAL_REPORT=all` … 出力のフォルダ名（既定は `report`）
+- `VISUAL_CASES=別の一覧.tsv` … `render.cjs` で、`cases.tsv` の代わりに使う式の一覧
 
 ## 中身
 
-- `cases.tsv` … 比べる式（名前・壁の有無・式）。`core/tests/shape.rs` の一覧と、アプリのサンプルの曲面
+- `cases.tsv` … 比べる式（名前・壁の有無と設定・式）。設定で、回転角・再生中の軽い計算（`flags=1`）・細かさを指定できる。
+  `core/tests/shape.rs` の一覧と、アプリのサンプルの曲面
 - `core/examples/dump_meshes.rs` … 式からメッシュを作って書き出す。表示範囲と細かさはアプリの既定と同じ。
   古いコミットにはこのファイルが無いので、`dump_revs.sh` が今の版をコピーして使う（`git worktree` の中で。元の作業ツリーは変えない）
 - `render.cjs` … three.js（`web/node_modules`）と Playwright の Chromium で描く。法線は描画側で三角形ごとに作り直す

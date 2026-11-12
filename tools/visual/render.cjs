@@ -27,14 +27,14 @@ fs.mkdirSync(reportDir, { recursive: true })
 
 /** 式の一覧（名前・壁・式）。見出しの行（# で始まる）は区切りとして残す */
 const cases = []
-for (const line of fs.readFileSync(path.join(root, 'tools/visual/cases.tsv'), 'utf8').split('\n')) {
+for (const line of fs.readFileSync(process.env.VISUAL_CASES || path.join(root, 'tools/visual/cases.tsv'), 'utf8').split('\n')) {
   if (!line.trim()) continue
   if (line.startsWith('#')) {
     cases.push({ heading: line.slice(1).trim() })
     continue
   }
   const [name, walls, src] = line.split('\t')
-  cases.push({ name, walls: walls === '1', src })
+  cases.push({ name, walls: walls.startsWith('1'), opts: walls.split(',').slice(1).join(', '), src })
 }
 cases.shift() // 先頭の説明の行
 
@@ -251,7 +251,7 @@ th{background:#f4f4f4}.case{margin:24px 0}.case img{max-width:100%;border:1px so
 <p>「変化」は隣のコミットとの、色が大きく違う画素の割合（%）。5% 以上を色付けしている。変化の大きい順に並べている。</p>
 ${results
   .map(
-    (r) => `<div class="case"><h2>${esc(r.name)}: <code>${esc(r.src)}</code>${r.walls ? '（壁つき）' : ''}</h2>
+    (r) => `<div class="case"><h2>${esc(r.name)}: <code>${esc(r.src)}</code>${r.walls ? '（壁つき）' : ''}${r.opts ? `（${esc(r.opts)}）` : ''}</h2>
 <table><tr><th></th>${revs.map((v) => `<th>${esc(v)}</th>`).join('')}</tr>
 <tr><th>変化</th>${r.changes.map((x) => (x === null ? '<td></td>' : `<td class="${x >= 5 ? 'hot' : ''}">${x.toFixed(1)}</td>`)).join('')}</tr>
 <tr><th>三角形・時間</th>${revs.map((v) => cell(v, r.name)).join('')}</tr></table>

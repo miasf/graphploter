@@ -5,6 +5,8 @@
 //! ```
 //!
 //! 式の一覧は 1 行 1 式で「名前<TAB>壁(0/1)<TAB>式」。# で始まる行と空行は飛ばす。
+//! 壁の欄には、カンマで区切って設定を足せる: `0,xy=14.4,xz=10,flags=1,ires=40,res=75`
+//! （xy・xz・yz は回転角（度）、flags は plot の flags（1: 再生・ドラッグ中の軽い計算）、ires・res は細かさ）。
 //! 出力は 名前.bin（頂点の数 u32・番号の数 u32・頂点座標 f32 × 3・三角形の頂点番号 u32、すべてリトルエンディアン）と、
 //! 全部の式の結果をまとめた meta.tsv（名前・三角形の数・時間 ms・説明 or エラー）。
 //! 表示範囲と細かさはアプリの既定（x, y ∈ [−10, 10]、z ∈ [−6, 6]、細かさ 150、陰関数 80）。
@@ -39,12 +41,29 @@ fn main() {
         if only.as_deref().is_some_and(|o| !name.contains(o)) {
             continue;
         }
+        let mut opts = walls.split(',');
+        let walls = opts.next().unwrap_or("0");
+        let (mut rot, mut flags, mut res, mut ires) = ([0.0f64; 10], 0u32, RES, IRES);
+        for o in opts {
+            let (k, v) = o.split_once('=').unwrap_or_else(|| panic!("設定の形が違う: {o}"));
+            let num: f64 = v.parse().unwrap_or_else(|_| panic!("設定の値が違う: {o}"));
+            match k {
+                // 回転角の並びは (x,y), (x,z), (x,w), (x,w2), (y,z), …
+                "xy" => rot[0] = num.to_radians(),
+                "xz" => rot[1] = num.to_radians(),
+                "yz" => rot[4] = num.to_radians(),
+                "flags" => flags = num as u32,
+                "res" => res = num as u32,
+                "ires" => ires = num as u32,
+                _ => panic!("知らない設定: {o}"),
+            }
+        }
         let t = Instant::now();
         let r = graph_core::plot(
             src,
             &DOMAIN,
-            RES,
-            IRES,
+            res,
+            ires,
             "",
             &[],
             "",
@@ -57,7 +76,7 @@ fn main() {
             "",
             &[],
             16,
-            &[0.0; 10],
+            &rot,
             &[0.0; 5],
             0.0,
             0,
@@ -65,7 +84,7 @@ fn main() {
             false,
             1,
             false,
-            0,
+            flags,
         );
         let ms = t.elapsed().as_secs_f64() * 1e3;
         match r {

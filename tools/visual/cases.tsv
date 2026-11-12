@@ -1,4 +1,4 @@
-# 見た目の比較に使う式。名前<TAB>壁(0/1)<TAB>式
+# 見た目の比較に使う式。名前<TAB>壁(0/1)[,設定…]<TAB>式（設定は core/examples/dump_meshes.rs を参照）
 # サンプル（アプリのサンプルと同じ設定）
 s_stairs	1	z=floor(x)/2+floor(y)/4
 s_saddle	0	z=(x^2-y^2)/4
@@ -114,3 +114,13 @@ j09	0	min(x y, z) = mod(x, 2)
 j10	0	floor(x) + floor(y) + z = mod(x y, 3)
 j11	0	mod(z, x y) = 1
 j12	0	floor(x y) = z floor(z)
+# 回した陰関数と、回転の再生中（flags=1: 軽い計算。細かさも下がる）
+r_gy_full	0,xy=-4.4	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
+r_gy_play80	0,xy=-4.4,flags=1	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
+r_gy_play40	0,xy=-4.4,flags=1,ires=40	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
+r_gy_play24	0,xy=-4.4,flags=1,ires=24	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
+r_gy0_play40	0,flags=1,ires=40	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
+r_ring_full	0,xz=14.8	(x^2+y^2-4)^2 (z-1)^2=0
+r_ring_play40	0,xz=14.8,flags=1,ires=40	(x^2+y^2-4)^2 (z-1)^2=0
+r_ring_play24	0,yz=10.4,flags=1,ires=24	(x^2+y^2-4)^2 (z-1)^2=0
+r_ring0_play40	0,flags=1,ires=40	(x^2+y^2-4)^2 (z-1)^2=0
