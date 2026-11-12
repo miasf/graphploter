@@ -82,6 +82,114 @@ impl Program {
         (ids.into_iter().map(|i| self.sub_program(i)).collect(), true)
     }
 
+    /// F を分数 N/D の形に直す（通分）。F = 0 は「N = 0 で、D ≠ 0」と同じで、N には D の極（符号は変わるが零点でない所）が無い。
+    /// `tan` → `sin/cos`、`cot` → `cos/sin`、`sec`・`csc` → `1/cos`・`1/sin`、割り算と負のべきは分母へ、和・差は通分する。
+    /// それ以外の関数は、引数の中に割り算があっても、そのまま 1 つの項として扱う。
+    /// 分母の無い式（変形しても変わらない式）と、実数だけで計算できない式は None
+    pub fn rationalized(&self) -> Option<(Program, Program)> {
+        if !self.code.real {
+            return None;
+        }
+        let ops = &self.code.ops;
+        let mut b = Builder::default();
+        let at = b.append(ops, &Op::Var);
+        // 命令ごとの (分子, 分母)。分母が None なら 1
+        let mut nd: Vec<(usize, Option<usize>)> = Vec::with_capacity(ops.len());
+        fn mul(b: &mut Builder, x: usize, y: Option<usize>) -> usize {
+            match y {
+                Some(y) => b.push(Op::Bin(BinOp::Mul, x, y)),
+                None => x,
+            }
+        }
+        fn mul_opt(b: &mut Builder, x: Option<usize>, y: Option<usize>) -> Option<usize> {
+            match (x, y) {
+                (Some(x), y) => Some(mul(b, x, y)),
+                (None, y) => y,
+            }
+        }
+        for (i, op) in ops.iter().enumerate() {
+            let cur = match op {
+                Op::Neg(a) => {
+                    let (n, d) = nd[*a];
+                    (b.push(Op::Neg(n)), d)
+                }
+                Op::Bin(o @ (BinOp::Add | BinOp::Sub), a, c) => {
+                    let ((na, da), (nc, dc)) = (nd[*a], nd[*c]);
+                    if da.is_none() && dc.is_none() {
+                        (at[i], None)
+                    } else if da == dc {
+                        (b.push(Op::Bin(*o, na, nc)), da)
+                    } else {
+                        let (l, r) = (mul(&mut b, na, dc), mul(&mut b, nc, da));
+                        (b.push(Op::Bin(*o, l, r)), mul_opt(&mut b, da, dc))
+                    }
+                }
+                Op::Bin(BinOp::Mul, a, c) => {
+                    let ((na, da), (nc, dc)) = (nd[*a], nd[*c]);
+                    if da.is_none() && dc.is_none() {
+                        (at[i], None)
+                    } else {
+                        (b.push(Op::Bin(BinOp::Mul, na, nc)), mul_opt(&mut b, da, dc))
+                    }
+                }
+                Op::Bin(BinOp::Div, a, c) => {
+                    let ((na, da), (nc, dc)) = (nd[*a], nd[*c]);
+                    if dc.is_none() && b.const_of(nc).is_some() {
+                        // 定数で割るだけなら、分母にしない
+                        (b.push(Op::Bin(BinOp::Div, na, nc)), da)
+                    } else {
+                        (mul(&mut b, na, dc), Some(mul(&mut b, nc, da)))
+                    }
+                }
+                Op::Bin(BinOp::Pow, a, e) => {
+                    let (na, da) = nd[*a];
+                    match b.const_of(at[*e]) {
+                        Some(c) if c.im == 0.0 && c.re < 0.0 => {
+                            // a^(−p) = 1 / a^p。整数の p なら、分子と分母を入れ替えてべきにする
+                            let p = b.push(Op::Const(C::new(-c.re, 0.0)));
+                            let one = b.push(Op::Const(C::new(1.0, 0.0)));
+                            if c.re.fract() == 0.0 {
+                                let num = match da {
+                                    Some(d) => b.push(Op::Bin(BinOp::Pow, d, p)),
+                                    None => one,
+                                };
+                                (num, Some(b.push(Op::Bin(BinOp::Pow, na, p))))
+                            } else {
+                                (one, Some(b.push(Op::Bin(BinOp::Pow, at[*a], p))))
+                            }
+                        }
+                        Some(c) if c.im == 0.0 && c.re > 0.0 && c.re.fract() == 0.0 && da.is_some() => {
+                            let d = da.map(|d| b.push(Op::Bin(BinOp::Pow, d, at[*e])));
+                            (b.push(Op::Bin(BinOp::Pow, na, at[*e])), d)
+                        }
+                        _ => (at[i], None),
+                    }
+                }
+                Op::Call1(f @ (Func::Tan | Func::Cot | Func::Sec | Func::Csc), a) => {
+                    let (sin, cos) = (b.push(Op::Call1(Func::Sin, at[*a])), b.push(Op::Call1(Func::Cos, at[*a])));
+                    let one = b.push(Op::Const(C::new(1.0, 0.0)));
+                    match f {
+                        Func::Tan => (sin, Some(cos)),
+                        Func::Cot => (cos, Some(sin)),
+                        Func::Sec => (one, Some(cos)),
+                        _ => (one, Some(sin)),
+                    }
+                }
+                _ => (at[i], None),
+            };
+            nd.push(cur);
+        }
+        let (n, d) = nd[self.code.outs[0]];
+        let d = d?;
+        let ops = b.ops;
+        let make = |root: usize| {
+            let mut nb = Builder::default();
+            let at = nb.append(&ops, &Op::Var);
+            Program { code: Code::new(nb, vec![at[root]]), vars: self.vars.clone(), used_params: self.used_params.clone() }
+        };
+        Some((make(n), make(d)))
+    }
+
     /// 変数を使わない式（定数）か
     pub fn is_constant(&self) -> bool {
         !self.code.ops.iter().any(|op| matches!(op, Op::Var(_)))
@@ -164,6 +272,26 @@ mod tests {
         assert_eq!(f.len(), 2);
         // 同じ因数は 1 つにまとめる
         assert_eq!(prog("(x - 1) (x - 1) y").zero_factors().0.len(), 2);
+    }
+
+    #[test]
+    fn rationalized_removes_poles() {
+        // 値は元の式と同じ（N/D）で、分子には極が無い
+        for src in ["tan(x) - z y", "1/(x y) - z", "x/(y - 1) + 2/(z + 3) - cot(x)", "(x/y)^2 - sec(z) + y^(-2)", "-(1/x) / (y/z) + x^(-0.5)"] {
+            let p = prog(src);
+            let (n, d) = p.rationalized().unwrap_or_else(|| panic!("{src}"));
+            for q in [[0.7, 1.9, -2.3], [2.1, -0.4, 1.1], [1.3, 3.3, 0.6]] {
+                let (f, r) = (at(&p, q), at(&n, q) / at(&d, q));
+                assert!((f - r).abs() <= 1e-9 * (1.0 + f.abs()), "{src} {q:?}: {f} {r}");
+            }
+        }
+        let (n, d) = prog("tan(x) - z y").rationalized().unwrap();
+        let pole = [std::f64::consts::FRAC_PI_2, 1.0, 1.0];
+        assert!((at(&n, pole) - 1.0).abs() < 1e-12 && at(&d, pole).abs() < 1e-12);
+        // 分母の無い式・定数で割るだけの式は変えない
+        assert!(prog("x^2 + sin(y) z / 3 - 1").rationalized().is_none());
+        // 関数の引数の中の割り算は、そのまま
+        assert!(prog("sin(1/x) - z").rationalized().is_none());
     }
 
     #[test]
