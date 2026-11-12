@@ -1980,16 +1980,13 @@ fn drop_fragments(
         let r = root(&mut parent, t[0]) as usize;
         tris[r] = tris[r].saturating_add(1);
     }
-    let mut small = vec![false; nv];
-    let mut any = false;
-    for v in 0..nv {
-        let r = root(&mut parent, v as u32) as usize;
-        if tris[r] > 0 && tris[r] as usize <= MAX_TRIS {
-            small[v] = true;
-            any = true;
-        }
-    }
-    if !any {
+    let small: Vec<bool> = (0..nv as u32)
+        .map(|v| {
+            let r = root(&mut parent, v) as usize;
+            tris[r] > 0 && tris[r] as usize <= MAX_TRIS
+        })
+        .collect();
+    if !small.iter().any(|&s| s) {
         return 0;
     }
     // 小さい成分ごとの、頂点を囲む箱と「怪しいセルに頂点がある」
@@ -2018,10 +2015,7 @@ fn drop_fragments(
         q[0] + n * (q[1] + n * q[2])
     };
     let mut info: std::collections::HashMap<u32, ([f64; 3], [f64; 3], bool)> = Default::default();
-    for v in 0..nv {
-        if !small[v] {
-            continue;
-        }
+    for v in (0..nv).filter(|&v| small[v]) {
         let r = root(&mut parent, v as u32);
         let e = info.entry(r).or_insert(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], false));
         for a in 0..3 {
