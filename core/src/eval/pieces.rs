@@ -27,7 +27,76 @@ impl Cond {
     }
 }
 
+/// 枝の中での式の値の範囲を、区間演算で調べるための式（[`Program::frozen_relaxed`]）
+pub struct Relaxed {
+    /// 枝を固定した式の、`mod(a, b)` の値（余り）を新しい変数に置き換えたもの。変数は元の変数の後ろに、余りが出てくる順に並ぶ
+    prog: Program,
+    /// 余りごとの、割る数 b の式（変数の並びは `prog` と同じ）
+    divisors: Vec<Program>,
+}
+
+impl Relaxed {
+    /// 箱（元の変数ごとの区間）の中の、その枝にいる点で、枝を固定した式が 0 になるかもしれないか。
+    ///
+    /// 枝を固定した式 a − τ b をそのまま区間演算にかけると、a と b の幅がそのまま出て「あるかもしれない」ばかりになる。
+    /// その枝にいる点では、余り a − τ b は 0 と b の間にあるので、余りをその範囲の独立な変数とみなして調べる
+    pub fn may_contain_zero(&self, boxes: &[crate::interval::Interval]) -> bool {
+        use crate::interval::{Interval, Range};
+        let nv = boxes.len();
+        let mut all: Vec<Interval> = boxes.to_vec();
+        all.resize(nv + self.divisors.len(), Interval::new(f64::NEG_INFINITY, f64::INFINITY));
+        for (j, d) in self.divisors.iter().enumerate() {
+            match d.eval_interval(&all) {
+                Range::Known(i) => all[nv + j] = Interval::new(i.lo.min(0.0), i.hi.max(0.0)),
+                Range::Unknown => return true,
+            }
+        }
+        self.prog.eval_interval(&all).may_contain_zero()
+    }
+}
+
 impl Program {
+    /// [`Program::frozen`] と同じ枝の式を、区間演算で「その枝の中に零点があるか」を調べやすい形にしたもの
+    pub fn frozen_relaxed(&self, k: &[f64]) -> Relaxed {
+        let sites = self.branch_site_ops();
+        assert_eq!(sites.len(), k.len());
+        let nv = self.vars.len();
+        let mut b = Builder::default();
+        let mut at: Vec<usize> = Vec::with_capacity(self.code.ops.len());
+        let mut div_roots: Vec<usize> = Vec::new();
+        for (i, op) in self.code.ops.iter().enumerate() {
+            let new = if let Some(s) = sites.iter().position(|&x| x == i) {
+                match op {
+                    Op::Call2(Func::Mod, _, d) => {
+                        div_roots.push(at[*d]);
+                        Op::Var(nv + div_roots.len() - 1)
+                    }
+                    _ => Op::Const(C::new(k[s], 0.0)),
+                }
+            } else {
+                match op {
+                    Op::Const(c) => Op::Const(*c),
+                    Op::Var(v) => Op::Var(*v),
+                    Op::Neg(a) => Op::Neg(at[*a]),
+                    Op::Bin(o, a, c) => Op::Bin(*o, at[*a], at[*c]),
+                    Op::Call1(f, a) => Op::Call1(*f, at[*a]),
+                    Op::Call2(f, a, c) => Op::Call2(*f, at[*a], at[*c]),
+                    Op::CallN(f, args) => Op::CallN(*f, args.iter().map(|&a| at[a]).collect()),
+                }
+            };
+            at.push(b.push(new));
+        }
+        let mut vars = self.vars.clone();
+        vars.extend((0..div_roots.len()).map(|j| format!("\u{0}余り{j}")));
+        let ops = b.ops;
+        let make = |root: usize| {
+            let mut nb = Builder::default();
+            let at = nb.append(&ops, &Op::Var);
+            Program { code: Code::new(nb, vec![at[root]]), vars: vars.clone(), used_params: self.used_params.clone() }
+        };
+        Relaxed { prog: make(at[self.code.outs[0]]), divisors: div_roots.iter().map(|&r| make(r)).collect() }
+    }
+
     /// 同じ変数で、命令 `root` を結果にした式
     fn sub_program(&self, root: usize) -> Program {
         let mut b = Builder::default();
@@ -305,6 +374,18 @@ mod tests {
         // floor(x) の枝 −1: −1 ≤ x < 0
         assert_eq!(at(&conds[1].prog, [-0.25, 0.0, 0.0]), -0.25);
         assert!(conds[1].holds(-1.0) && !conds[1].holds(0.0));
+        // 枝の中での値の範囲: floor(x) + floor(y) + z − mod(x y, 3) の枝 (1, 2, 0) は 3 + z − [0, 3]。
+        // x・y の箱が広くても、z が −3 〜 0 の外なら零点は無い
+        use crate::interval::Interval;
+        let r = prog("floor(x) + floor(y) + z - mod(x y, 3)").frozen_relaxed(&[1.0, 2.0, 0.0]);
+        let wide = Interval::new(-10.0, 10.0);
+        assert!(r.may_contain_zero(&[wide, wide, Interval::new(-1.0, -0.5)]));
+        assert!(!r.may_contain_zero(&[wide, wide, Interval::new(0.5, 1.0)]));
+        assert!(!r.may_contain_zero(&[wide, wide, Interval::new(-4.0, -3.5)]));
+        // 割る数が変数のとき: mod(x y, z) − 1 の余りは 0 と z の間。z が 1 より小さければ零点は無い
+        let r = prog("mod(x y, z) - 1").frozen_relaxed(&[5.0]);
+        assert!(!r.may_contain_zero(&[wide, wide, Interval::new(0.2, 0.9)]));
+        assert!(r.may_contain_zero(&[wide, wide, Interval::new(0.2, 1.5)]));
         // 枝 0 の mod(x y, z) は x y − 0 z。0 との積を消して、x と y に分かれる
         let (f, changed) = prog("mod(x y, z)").frozen(&[0.0]).zero_factors();
         assert!(changed);
