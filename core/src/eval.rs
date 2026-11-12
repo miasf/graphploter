@@ -565,6 +565,20 @@ impl Program {
             .collect()
     }
 
+    /// 段差の元ごとの、隣の枝との境目がどちらの枝に含まれるか（[`Program::eval_branches`] と同じ順）。
+    /// `Some(true)`: 番号の大きい枝（`floor(s)` は τ ≤ s < τ + 1、`mod(a, b)` は ⌊a/b⌋ なので同じ。`round` も正の側ではこれ）、
+    /// `Some(false)`: 番号の小さい枝（`ceil(s)` は τ − 1 < s ≤ τ）、`None`: 決めない（`sign` は境目そのものが別の枝 0）
+    pub fn branch_closed_high(&self) -> Vec<Option<bool>> {
+        self.branch_site_ops()
+            .iter()
+            .map(|&i| match &self.code.ops[i] {
+                Op::Call1(Func::Ceil, _) => Some(false),
+                Op::Call1(Func::Sign, _) => None,
+                _ => Some(true),
+            })
+            .collect()
+    }
+
     /// 段差の元の数（[`Program::eval_branches`]・[`Program::frozen`] で使う）。実数だけで計算できない式では 0
     pub fn branch_sites(&self) -> usize {
         self.branch_site_ops().len()
