@@ -107,7 +107,7 @@ pub fn add_cluster_lod(mesh: &mut Mesh) {
     }
     let build = |cells: f32| -> Vec<u32> {
         let scale = cells / size;
-        let mut first: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+        let mut first: crate::adaptive::HashMap<u64, u32> = crate::adaptive::HashMap::default();
         let rep: Vec<u32> = (0..mesh.positions.len() / 3)
             .map(|k| {
                 let p = &mesh.positions[3 * k..3 * k + 3];
@@ -1678,7 +1678,7 @@ fn find_jumps(
     height: &dyn Fn(C) -> f64,
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
-) -> std::collections::HashMap<usize, Jump> {
+) -> crate::adaptive::HashMap<usize, Jump> {
     find_jumps_with(
         prog, us, vs, vals, hs, edges, height, threshold, usable, true,
     )
@@ -1697,7 +1697,7 @@ fn find_jumps_with(
     threshold: f64,
     usable: &dyn Fn(f64) -> bool,
     early_exit: bool,
-) -> std::collections::HashMap<usize, Jump> {
+) -> crate::adaptive::HashMap<usize, Jump> {
     const ROUNDS: usize = 12;
     // 差が threshold の POLE_JUMP 倍（細かくするときは高さの範囲の 0.3 倍）より大きい段差は、さらに POLE_ROUNDS 回二分する
     const POLE_JUMP: f64 = 60.0;
@@ -1844,7 +1844,7 @@ fn find_jumps_with(
             }
         }
     }
-    let mut jumps = std::collections::HashMap::new();
+    let mut jumps = crate::adaptive::HashMap::default();
     // 見つけた段差の両側の残り（始点〜段差、段差〜終点）のうち、差の大きいほうに、もう 1 つ段差がありそうか。
     // 残りの差が threshold より大きく、その中点が両端の平均から離れていれば、ありそうとみなす
     // （段差の線の交わる所を辺が斜めに通ると、1 本の辺に段差が 2 つ入る。見つかるのはそのうちの 1 つだけ）
@@ -2109,7 +2109,7 @@ fn implicit_solid_with(
             }
         });
     }
-    let not_zero: std::collections::HashSet<usize> = {
+    let not_zero: crate::adaptive::HashSet<usize> = {
         let mut sc = FieldScratch::default();
         let flags = false_crossings(&mut |xyz| field_values_with(prog, &combos, xyz, &mut sc).to_vec(), &sign_edges);
         sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
@@ -2505,7 +2505,7 @@ fn stitched_nets(
     field: &SparseField,
     dom: Domain,
     n: usize,
-    sel: &std::collections::HashSet<usize>,
+    sel: &crate::adaptive::HashSet<usize>,
     eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>,
 ) -> (Mesh, Vec<u32>) {
     let nb = field.nb;
@@ -2752,14 +2752,14 @@ const MAX_STITCH_TRIANGLES: usize = 300_000;
 
 /// 細かくするブロック: 辺でつながる頂点どうしの法線のなす角が 35° を超える所（細い部分・尖った所）を含むブロックと、
 /// その隣（面・辺・角で接するもの）
-fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> std::collections::HashSet<usize> {
+fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> crate::adaptive::HashSet<usize> {
     let cos = 35f32.to_radians().cos();
     let nr = &mesh.normals;
     let block = |v: u32| {
         let c = vertex_cell[v as usize] as usize;
         [c % n, (c / n) % n, c / (n * n)].map(|x| (x / BLOCK).min(nb - 1))
     };
-    let mut hit: std::collections::HashSet<[usize; 3]> = Default::default();
+    let mut hit: crate::adaptive::HashSet<[usize; 3]> = Default::default();
     for t in mesh.indices.chunks_exact(3) {
         let (a, b, c) = (3 * t[0] as usize, 3 * t[1] as usize, 3 * t[2] as usize);
         let dot = |p: usize, q: usize| nr[p] * nr[q] + nr[p + 1] * nr[q + 1] + nr[p + 2] * nr[q + 2];
@@ -2775,7 +2775,7 @@ fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> std::c
             }
         }
     }
-    let mut out = std::collections::HashSet::new();
+    let mut out = crate::adaptive::HashSet::default();
     for b in hit {
         for dz in -1i64..=1 {
             for dy in -1i64..=1 {
@@ -2808,9 +2808,9 @@ fn pole_meshes(
     field: &SparseField,
     dom: Domain,
     n: usize,
-    not_zero: &std::collections::HashSet<usize>,
+    not_zero: &crate::adaptive::HashSet<usize>,
     bad_pts: &[usize],
-    filled: &std::collections::HashSet<usize>,
+    filled: &crate::adaptive::HashSet<usize>,
     skip: &crate::adaptive::HashSet<usize>,
 ) -> BranchMeshes {
     const SAMPLES: usize = 32;
@@ -3629,10 +3629,10 @@ const FILL_BIG: f64 = 1e30;
 #[derive(Default)]
 struct Extended {
     /// 縁での値で埋めた格子点（格子点の番号 i + m (j + m k)）
-    filled: std::collections::HashSet<usize>,
+    filled: crate::adaptive::HashSet<usize>,
     /// 片方の端が埋めた点の辺のうち、定義される部分（有限の端から縁まで）に本当の零点があるもの:
     /// 辺の番号（3 × 始点 + 向き）→ 交わる位置（始点からの割合）
-    edge_t: std::collections::HashMap<usize, f32>,
+    edge_t: crate::adaptive::HashMap<usize, f32>,
 }
 
 /// F が有限でない（NaN・±∞ の）格子点 `nan_pts` のうち、軸の向きの隣（6 つ）に定義される点があり、
@@ -3655,7 +3655,7 @@ fn extend_undefined(
     // (埋める点, 定義される隣, 向き)
     let mut pairs: Vec<(usize, [usize; 3], [usize; 3], usize)> = Vec::new();
     // 有限でない点の集まり（ページの中の、計算していない点の NaN と区別する）
-    let bad: std::collections::HashSet<usize> = nan_pts.iter().copied().collect();
+    let bad: crate::adaptive::HashSet<usize> = nan_pts.iter().copied().collect();
     let idx = |q: [usize; 3]| q[0] + m * (q[1] + m * q[2]);
     for &p in nan_pts {
         let q = coords(p);
@@ -3716,7 +3716,7 @@ fn extend_undefined(
     }
     let fa: Vec<f64> = fa.iter().map(|&v| if v.is_infinite() { FILL_BIG.copysign(v) } else { v }).collect();
     // 埋める点ごとに平均する
-    let mut sum: std::collections::HashMap<usize, (f64, f64)> = Default::default();
+    let mut sum: crate::adaptive::HashMap<usize, (f64, f64)> = Default::default();
     for (k, &(p, ..)) in pairs.iter().enumerate() {
         let e = sum.entry(p).or_default();
         e.0 += fa[k];
@@ -3809,7 +3809,7 @@ fn trim_undefined(
     mesh: &mut Mesh,
     vertex_cell: &mut Vec<u32>,
     n: usize,
-    filled: &std::collections::HashSet<usize>,
+    filled: &crate::adaptive::HashSet<usize>,
 ) {
     let m = n + 1;
     let nv = mesh.positions.len() / 3;
@@ -3837,7 +3837,7 @@ fn trim_undefined(
         return;
     }
     // 定義される頂点 → 定義されない頂点の辺の一覧
-    let mut edge_pt: std::collections::HashMap<(u32, u32), u32> = Default::default();
+    let mut edge_pt: crate::adaptive::HashMap<(u32, u32), u32> = Default::default();
     let mut todo: Vec<(u32, u32)> = Vec::new();
     for t in mesh.indices.chunks_exact(3) {
         for e in 0..3 {
@@ -3911,8 +3911,8 @@ fn drop_fragments(
     dom: Domain,
     n: usize,
     field: &SparseField,
-    not_zero: &std::collections::HashSet<usize>,
-    filled: &std::collections::HashSet<usize>,
+    not_zero: &crate::adaptive::HashSet<usize>,
+    filled: &crate::adaptive::HashSet<usize>,
     open_too: bool,
 ) -> usize {
     const MAX_TRIS: usize = 12;
@@ -3973,7 +3973,7 @@ fn drop_fragments(
         });
         q[0] + n * (q[1] + n * q[2])
     };
-    let mut info: std::collections::HashMap<u32, ([f64; 3], [f64; 3], bool)> = Default::default();
+    let mut info: crate::adaptive::HashMap<u32, ([f64; 3], [f64; 3], bool)> = Default::default();
     for v in (0..nv).filter(|&v| small[v]) {
         let r = root(&mut parent, v as u32);
         let e = info.entry(r).or_insert(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], false));
@@ -3988,7 +3988,7 @@ fn drop_fragments(
     }
     // `open_too` なら、縁の辺（三角形が 1 つだけの辺）を持つ成分も怪しいとする（閉じた小さい球・輪は残る）
     if open_too {
-        let mut count: std::collections::HashMap<(u32, u32), u32> = Default::default();
+        let mut count: crate::adaptive::HashMap<(u32, u32), u32> = Default::default();
         for t in mesh.indices.chunks_exact(3) {
             if !small[t[0] as usize] {
                 continue;
@@ -4007,7 +4007,7 @@ fn drop_fragments(
             }
         }
     }
-    let drop: std::collections::HashSet<u32> = info
+    let drop: crate::adaptive::HashSet<u32> = info
         .iter()
         .filter(|(_, (lo, hi, sus))| *sus && (0..3).all(|a| hi[a] - lo[a] <= 2.0 * cell_size[a] + 1e-9))
         .map(|(&r, _)| r)
@@ -4044,7 +4044,7 @@ fn coarse_nets(
     dom: Domain,
     n: usize,
     k: usize,
-    not_zero: &std::collections::HashSet<usize>,
+    not_zero: &crate::adaptive::HashSet<usize>,
     eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>,
 ) -> Mesh {
     let m = n + 1;
@@ -4295,7 +4295,7 @@ fn refine_components(
     let light = refine == Refine::Light;
     // 元の格子の 1 マスの大きさ（いちばん大きい向き）
     let cell_size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n as f64).fold(0.0, f64::max);
-    use std::collections::{HashMap, HashSet};
+    use crate::adaptive::{HashMap, HashSet};
     let nb = field.nb;
     let bid = |b: [usize; 3]| b[0] + nb * (b[1] + nb * b[2]);
     let unbid = |id: usize| [id % nb, (id / nb) % nb, id / (nb * nb)];
@@ -4456,7 +4456,7 @@ fn refine_components(
             }
         }
     }
-    let mut groups: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
+    let mut groups: HashMap<usize, (Vec<usize>, bool)> = HashMap::default();
     for id in 0..nb * nb * nb {
         if suspect[id] || has_vert[id] {
             let g = groups.entry(root(&mut parent, id)).or_default();
@@ -4480,7 +4480,7 @@ fn refine_components(
     let max_r = if thorough { 8 } else { 4 };
     let mut zoom_budget = ZOOM_POINT_BUDGET[if light { 0 } else if thorough { 2 } else { 1 }];
     // ブロックごとの、頂点を持つ三角形（差し替えるときに、内と外にまたがらないかを見る）
-    let mut block_tris: HashMap<usize, Vec<u32>> = HashMap::new();
+    let mut block_tris: HashMap<usize, Vec<u32>> = HashMap::default();
     for (ti, t) in mesh.indices.chunks_exact(3).enumerate() {
         let bs = [0, 1, 2].map(|k| vblock[t[k] as usize]);
         for (k, &b) in bs.iter().enumerate() {
@@ -4489,7 +4489,7 @@ fn refine_components(
             }
         }
     }
-    let mut replaced: HashSet<usize> = HashSet::new();
+    let mut replaced: HashSet<usize> = HashSet::default();
     let mut drop_tri = vec![false; mesh.indices.len() / 3];
     let mut parts: Vec<Mesh> = Vec::new();
     let mut added = 0usize;
@@ -4624,7 +4624,7 @@ fn mesh_components(mesh: &Mesh) -> Vec<Vec<u32>> {
             }
         }
     }
-    let mut groups: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut groups: crate::adaptive::HashMap<u32, Vec<u32>> = crate::adaptive::HashMap::default();
     let mut used = vec![false; nv];
     for &v in &mesh.indices {
         used[v as usize] = true;
@@ -4822,7 +4822,7 @@ fn local_nets(
             sign_ids.push(3 * l + a);
         }
     }
-    let not_zero: std::collections::HashSet<usize> = {
+    let not_zero: crate::adaptive::HashSet<usize> = {
         let flags = false_crossings(
             &mut |xyz| field_values_with(prog, combos, xyz, &mut sc).to_vec(),
             &sign_edges,
@@ -4885,7 +4885,7 @@ fn zoom_component(
     dom: Domain,
     n: usize,
     nb: usize,
-    group: &std::collections::HashSet<usize>,
+    group: &crate::adaptive::HashSet<usize>,
     has_vert: &[bool],
     mesh: &Mesh,
     vblock: &[usize],
@@ -5041,7 +5041,7 @@ fn refine_blocks(
     dom: Domain,
     n: usize,
     field: &SparseField,
-    blocks: &mut std::collections::HashSet<usize>,
+    blocks: &mut crate::adaptive::HashSet<usize>,
     r: usize,
     budget: &mut RefineBudget,
 ) -> Option<Mesh> {
@@ -5053,7 +5053,7 @@ fn refine_blocks(
     // 成分の外側の面（ブロック b の向き a・側 side の面。向こうのブロックが成分の外）の上の格子の辺で、
     // `changes(点, 向き)` が真のものがあれば、向こうのブロックを返す。`scale` は格子の細かさ（元の格子なら 1）、
     // `origin` は格子の原点（元の格子のセル）
-    let outward = |blocks: &std::collections::HashSet<usize>, scale: usize, origin: [usize; 3], changes: &dyn Fn([usize; 3], usize) -> bool| {
+    let outward = |blocks: &crate::adaptive::HashSet<usize>, scale: usize, origin: [usize; 3], changes: &dyn Fn([usize; 3], usize) -> bool| {
         let mut grow: Vec<usize> = Vec::new();
         for &id in blocks.iter() {
             let b = unbid(id);
@@ -5213,7 +5213,7 @@ fn refine_blocks(
                 sign_ids.push(3 * l + a);
             }
         }
-        let not_zero: std::collections::HashSet<usize> = {
+        let not_zero: crate::adaptive::HashSet<usize> = {
             let flags = false_crossings(&mut |xyz| field_values_with(prog, combos, xyz, &mut sc).to_vec(), &sign_edges);
             sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
         };
@@ -5991,7 +5991,7 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
 /// ただし、辺を囲む4つのセルの角に符号の変わる所があれば、符号の変わる曲面が通っているので候補にしない
 /// （`same_sign_around`。三分探索の前に外しても、結果は最後に外すのと同じ）。
 #[cfg(test)]
-fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> std::collections::HashMap<usize, f32> {
+fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> crate::adaptive::HashMap<usize, f32> {
     touch_search(prog, touch_candidates_dense(f, n), dom, n)
 }
 
@@ -6052,7 +6052,7 @@ fn touch_candidates_dense(f: &[f32], n: usize) -> Vec<TouchCand> {
 }
 
 /// 接する所の候補を三分探索で確かめる（[`find_touches`] を参照）
-fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) -> std::collections::HashMap<usize, f32> {
+fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) -> crate::adaptive::HashMap<usize, f32> {
     const ROUNDS: usize = 16;
     if cands.is_empty() {
         return Default::default();
@@ -6101,7 +6101,7 @@ fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) ->
         [t, t]
     });
     prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
-    let mut touch = std::collections::HashMap::new();
+    let mut touch = crate::adaptive::HashMap::default();
     for (c, &(id, _, _, s, outer)) in cands.iter().enumerate() {
         let t = 0.5 * (lo[c] + hi[c]);
         let g = s * as_real(out[2 * c]);
@@ -6148,10 +6148,10 @@ fn same_sign_around(f: impl Fn([usize; 3]) -> f32, m: usize, p: [usize; 3], a: u
 /// 三角形の向き（表裏）をそろえる。辺を共有する三角形どうしが、その辺を逆向きにたどるように裏返していく。
 /// つながった部分ごとに、重心から見て囲む体積（向き付き）が負なら全体を裏返す（閉じた曲面なら外向きになる）
 fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
-    use std::collections::HashMap;
+    use crate::adaptive::HashMap;
     let count = tris.len() / 3;
     // 辺（小さい番号, 大きい番号）→ その辺を持つ三角形
-    let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::default();
     for t in 0..count {
         for e in 0..3 {
             let (u, v) = (tris[3 * t + e], tris[3 * t + (e + 1) % 3]);
@@ -7556,7 +7556,7 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     let f: Vec<f64> = out.iter().map(|v| as_real(*v)).collect();
     // 符号は変わるが F = 0 になる点が無い辺（tan(x) = y の極の縦線など。[`false_crossings`]）。
     // 辺の番号は 2 × 小さいほうの格子点 + (縦なら 1)
-    let not_zero: std::collections::HashSet<usize> = {
+    let not_zero: crate::adaptive::HashSet<usize> = {
         let mut ids = Vec::new();
         let mut edges = Vec::new();
         for k in 0..m * m {
@@ -7595,7 +7595,7 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     }
     // 接するだけの線分を作ったマスと、線分の端に使った点（ほかの所で「点」として描かないように）
     let mut touch_cell = vec![false; n * n];
-    let mut used: std::collections::HashSet<[u32; 2]> = Default::default();
+    let mut used: crate::adaptive::HashSet<[u32; 2]> = Default::default();
     let key = |p: [f64; 2]| [(p[0] as f32).to_bits(), (p[1] as f32).to_bits()];
     let mut pts: Vec<f32> = Vec::new();
     for j in 0..n {
@@ -7731,8 +7731,8 @@ fn exact_crossings_2d(
     xs: &[f64],
     ys: &[f64],
     m: usize,
-    not_zero: &std::collections::HashSet<usize>,
-) -> std::collections::HashMap<usize, [f64; 2]> {
+    not_zero: &crate::adaptive::HashSet<usize>,
+) -> crate::adaptive::HashMap<usize, [f64; 2]> {
     // (辺の番号, 始点, 終点)
     let mut edges: Vec<(usize, usize, usize)> = Vec::new();
     for k in 0..m * m {
@@ -7806,7 +7806,7 @@ fn touches_2d(
     xs: &[f64],
     ys: &[f64],
     m: usize,
-) -> std::collections::HashMap<usize, ([f64; 2], f64)> {
+) -> crate::adaptive::HashMap<usize, ([f64; 2], f64)> {
     // 候補: (辺の番号, 始点, 向き（0: 横, 1: 縦）, 符号, 外側の |F| の平均)
     let mut cands: Vec<(usize, usize, usize, f64, f64)> = Vec::new();
     let same_sign = |ks: &[usize], s: f64| ks.iter().all(|&k| f[k].is_finite() && f[k] * s >= 0.0);
@@ -7834,7 +7834,7 @@ fn touches_2d(
             }
         }
     }
-    let mut out = std::collections::HashMap::new();
+    let mut out = crate::adaptive::HashMap::default();
     if cands.is_empty() {
         return out;
     }
@@ -8369,7 +8369,7 @@ mod tests {
                 x > d.lo[a] + 1e-3 && x < d.hi[a] - 1e-3
             })
         };
-        let mut count: std::collections::HashMap<([i64; 3], [i64; 3]), usize> = Default::default();
+        let mut count: crate::adaptive::HashMap<([i64; 3], [i64; 3]), usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 let (ka, kb) = (key(a), key(b));
@@ -8404,7 +8404,7 @@ mod tests {
         let d = Domain { lo: [-4.0, -4.0, -3.0], hi: [4.0, 4.0, 3.0] };
         let m = implicit_solid_opt(&prog("mod(x y, z)", &["x", "y", "z"]), d, 48, &[], 0, Refine::Normal);
         let h = 0.2;
-        let cells: std::collections::HashSet<[i64; 3]> =
+        let cells: crate::adaptive::HashSet<[i64; 3]> =
             m.positions.chunks_exact(3).map(|p| [0, 1, 2].map(|a| (p[a] as f64 / h).floor() as i64)).collect();
         let near = |q: [f64; 3]| {
             let c = q.map(|v| (v / h).floor() as i64);
@@ -8479,8 +8479,8 @@ mod tests {
                 parent[a] = b;
             }
         }
-        let used: std::collections::HashSet<usize> = m.indices.iter().map(|&k| k as usize).collect();
-        used.iter().map(|&k| root(&mut parent, k)).collect::<std::collections::HashSet<_>>().len()
+        let used: crate::adaptive::HashSet<usize> = m.indices.iter().map(|&k| k as usize).collect();
+        used.iter().map(|&k| root(&mut parent, k)).collect::<crate::adaptive::HashSet<_>>().len()
     }
 
     #[test]
@@ -8607,8 +8607,8 @@ mod tests {
             hi: [5.0, 5.0, 5.0],
         };
         let m = explicit_surface(&prog("sqrt(4-x^2-y^2)", &["x", "y"]), d, 150, 2);
-        let mut count: std::collections::HashMap<(u32, u32), usize> =
-            std::collections::HashMap::new();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> =
+            crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 *count.entry((a.min(b), a.max(b))).or_default() += 1;
@@ -8646,7 +8646,7 @@ mod tests {
         assert!(m.indices.iter().all(|&k| m.positions[3 * k as usize + 2] <= 6.0));
         // 穴が無い: 三角形が 1 つだけの辺（縁）は、上端の円の上だけにある（定義域の縁 r = 1 の近くの三角形も描くので、
         // 上端のすぐ下に切れ込みができない）
-        let mut count: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 *count.entry((a.min(b), a.max(b))).or_default() += 1;
@@ -8961,7 +8961,7 @@ mod tests {
             assert!(dot > 0.0);
         }
         // 閉じた曲面: どの辺もちょうど2つの三角形に共有される
-        let mut edges = std::collections::HashMap::new();
+        let mut edges = crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
@@ -9056,7 +9056,7 @@ mod tests {
 
     /// 三角形が1つだけの辺（縁）の数と、3つ以上の三角形が集まる辺（重なり）の数
     fn bad_edges(m: &Mesh) -> (usize, usize) {
-        let mut count = std::collections::HashMap::new();
+        let mut count = crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for e in 0..3 {
                 let (u, v) = (t[e], t[(e + 1) % 3]);
@@ -9107,7 +9107,7 @@ mod tests {
                 p[a] = b;
             }
         }
-        let used: std::collections::HashSet<usize> = m.indices.iter().map(|&v| root(&mut p, v as usize)).collect();
+        let used: crate::adaptive::HashSet<usize> = m.indices.iter().map(|&v| root(&mut p, v as usize)).collect();
         used.len()
     }
 
@@ -9270,7 +9270,7 @@ mod tests {
         // 縁では面が垂直なので、Surface Nets の角の丸まりで、縁の辺は z = 0 より 1 マスほど上で切れる（z ≤ 2 マスまで許す）
         let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
         let m = implicit_surface(&prog("sqrt(36 - x^2 - y^2) - z", &AXES), d, 80);
-        let mut count: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
             for e in 0..3 {
                 let (a, b) = (t[e], t[(e + 1) % 3]);
@@ -9308,7 +9308,7 @@ mod tests {
         // 平面 x = n にまっすぐ乗る（格子の間隔 0.25。枝ごとに作って切り取る前は、格子に沿ってギザギザだった）
         let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
         let m = implicit_surface(&prog("floor(x) - z + y/5", &AXES), d, 80);
-        let mut count: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
             for e in 0..3 {
                 let (a, b) = (t[e], t[(e + 1) % 3]);
@@ -9335,7 +9335,7 @@ mod tests {
 
     /// 縁の辺（三角形が 1 つだけの辺。範囲 `inner` の外の頂点を持つものは数えない）と、3 つ以上の三角形が集まる辺の数
     fn crack_counts(m: &Mesh, inner: f64) -> (usize, usize) {
-        let mut count: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
             for e in 0..3 {
                 let (a, b) = (t[e], t[(e + 1) % 3]);
@@ -9375,7 +9375,7 @@ mod tests {
             let combos = sample_combos(&[], 0);
             let field = SparseField::build(&p, &combos, &[], d, n, true);
             let nb = field.nb;
-            let mut sel = std::collections::HashSet::new();
+            let mut sel = crate::adaptive::HashSet::default();
             for bz in 0..nb {
                 for by in 0..nb {
                     for bx in 0..nb {
@@ -9692,7 +9692,7 @@ mod tests {
 
     /// 3 つ以上の三角形に使われる辺の数
     fn crowded_edges(m: &Mesh) -> usize {
-        let mut count: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 *count.entry((a.min(b), a.max(b))).or_default() += 1;

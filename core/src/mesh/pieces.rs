@@ -33,7 +33,15 @@ const MIN_PIECE_N: usize = 24;
 
 /// 部品に分けて描く。分けられない（分けても変わらない）式は None
 pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: Refine) -> Option<Mesh> {
-    let (factors, changed) = prog.zero_factors();
+    // 極のある式は、通分した分子 N = 0 を描く（N に極は無い）。分母 D が 0 の所は、後で切り落とす
+    let rational = prog.rationalized().filter(|(num, den)| poles_worth_removing(num, den, dom));
+    let (base, den) = match &rational {
+        Some((num, den)) => (num, Some(den)),
+        None => (prog, None),
+    };
+    let nonzero: Vec<&Program> = den.into_iter().collect();
+    let (factors, split_changed) = base.zero_factors();
+    let changed = split_changed || rational.is_some();
     let branched = |f: &Program| (1..=MAX_BRANCH_SITES).contains(&f.branch_sites());
     if !changed && !factors.iter().any(branched) {
         return None;
@@ -66,7 +74,7 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
         let Some(group) = group else {
             let mut m = mesh_masked(f, dom, n, refine, None);
             if changed {
-                clip_piece(&mut m, f, &[], &[prog], size);
+                clip_piece(&mut m, f, &[], &[prog], &nonzero, size);
             }
             parts.push(m);
             continue;
@@ -90,14 +98,19 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
             let fz = f.frozen(&g.tau);
             let conds = f.branch_conds(&g.tau);
             let (subs, sub_changed) = fz.zero_factors();
-            let (sub_dom, sub_n, mask) = piece_grid(&g.blocks, dom, en, pn);
+            let (sub_dom, sub_n, mask, tight) = piece_grid(&g.blocks, (g.lo, g.hi), dom, en, pn);
             for sub in &subs {
                 if sub.is_constant() {
                     continue;
                 }
                 // 枝の部品は、作り直し（小さい図形・細い部分を探して細かくする処理）をしない。
                 // ブロックを絞ったせいで小さく見えるだけで、小さい図形ではない（1 つ 30 ms ほどかかる）
-                let mut m = mesh_masked(sub, sub_dom, sub_n, Refine::Off, Some(mask.clone()));
+                // 区間演算で面が無いと分かるブロックを外す（枝の範囲を面が通らない部品は、ここで終わる）
+                let mut mask = mask.clone();
+                if !prune_mask(sub, sub_dom, sub_n, tight, &mut mask) {
+                    continue;
+                }
+                let mut m = mesh_masked(sub, sub_dom, sub_n, Refine::Off, Some(mask));
                 if m.indices.is_empty() {
                     continue;
                 }
@@ -108,7 +121,7 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
                 if changed {
                     defined.push(prog);
                 }
-                clip_piece(&mut m, sub, &conds, &defined, size);
+                clip_piece(&mut m, sub, &conds, &defined, &nonzero, size);
                 if !m.indices.is_empty() {
                     parts.push(m);
                 }
@@ -119,6 +132,54 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
     let mut out = merge(parts, false);
     out.note = if truncated { "（細かすぎて描けない部分あり）".into() } else { note };
     Some(out)
+}
+
+/// 通分した式 N/D で描くほうがよいか。
+///
+/// 通分すると、極（D = 0 で N ≠ 0。F の符号は変わるが零点でない所）は消えるが、分子と分母が同時に 0 になる所
+/// （`sin(x)/x` の x = 0。F はそこでなめらかにつながる）は、逆に N = 0 の余計な面になる。
+/// 粗い格子の辺のうち D の符号が変わる辺の上で、D = 0 の点を二分で求め、そこで N が 0 でない辺（本当の極）が
+/// 2 割より少なければ、通分しない。D の符号が変わらない式（`1/x²` など）は、余計な面ができないので通分する
+fn poles_worth_removing(num: &Program, den: &Program, dom: Domain) -> bool {
+    const N: usize = 32;
+    let m = N + 1;
+    let pts: Vec<[f64; 3]> =
+        (0..m * m * m).map(|l| [dom.at(0, (l % m) as f64, N), dom.at(1, (l / m % m) as f64, N), dom.at(2, (l / (m * m)) as f64, N)]).collect();
+    let (nv, dv) = (eval_at(num, &pts), eval_at(den, &pts));
+    // D の符号が変わる辺（両端の格子点の番号）
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for l in 0..m * m * m {
+        let q = [l % m, l / m % m, l / (m * m)];
+        for (a, stride) in [1, m, m * m].into_iter().enumerate() {
+            if q[a] + 1 < m && dv[l] * dv[l + stride] < 0.0 && nv[l].is_finite() && nv[l + stride].is_finite() {
+                edges.push((l, l + stride));
+            }
+        }
+    }
+    if edges.is_empty() {
+        return true;
+    }
+    // 辺の上の位置 t（lo の側は D の符号が始点と同じ）
+    let (mut lo, mut hi) = (vec![0.0f64; edges.len()], vec![1.0f64; edges.len()]);
+    let at = |t: &[f64]| -> Vec<[f64; 3]> {
+        edges.iter().zip(t).map(|(&(i, o), &t)| [0, 1, 2].map(|a| pts[i][a] + (pts[o][a] - pts[i][a]) * t)).collect()
+    };
+    for _ in 0..40 {
+        let mid: Vec<f64> = lo.iter().zip(&hi).map(|(l, h)| 0.5 * (l + h)).collect();
+        for (e, d) in eval_at(den, &at(&mid)).into_iter().enumerate() {
+            if d * dv[edges[e].0] > 0.0 {
+                lo[e] = mid[e];
+            } else {
+                hi[e] = mid[e];
+            }
+        }
+    }
+    let poles = eval_at(num, &at(&lo))
+        .into_iter()
+        .zip(&edges)
+        .filter(|(v, (i, o))| v.abs() > 1e-6 * nv[*i].abs().max(nv[*o].abs()))
+        .count();
+    5 * poles >= edges.len()
 }
 
 /// ブロックを絞って、ふつうの陰関数として面を作る
@@ -145,8 +206,10 @@ fn solid_grid(dom: Domain, n: usize) -> (Domain, usize) {
 /// (範囲, 1 辺のマスの数, ブロックごとの印) を作る。[`implicit_solid_with`] にそのまま渡せる。
 ///
 /// 格子は、表示範囲を `pn` 等分した全体の格子の一部（格子の線が全体と同じなので、面の位置は全体で作ったときと同じ）。
-/// 枝のブロックを囲む立方体（1 辺のマスの数は 3 つの軸で同じ）だけにして、小さい部品で格子全体の大きさの手間をかけない
-fn piece_grid(blocks: &[u32], dom: Domain, en: usize, pn: usize) -> (Domain, usize, Vec<bool>) {
+/// 枝のブロックを囲む立方体（1 辺のマスの数は 3 つの軸で同じ）だけにして、小さい部品で格子全体の大きさの手間をかけない。
+/// さらに、枝の格子点のある範囲 `bbox`（細かさ `en` の格子の点の番号。両端を含む）の 1 マス外までに絞る
+/// （ブロックは 1 辺 [`BLOCK`] マスあるので、小さい枝では、ブロックの範囲は枝の何倍も広い。枝の外の面は、作っても切り落とすだけ）
+fn piece_grid(blocks: &[u32], bbox: ([u32; 3], [u32; 3]), dom: Domain, en: usize, pn: usize) -> (Domain, usize, Vec<bool>, Domain) {
     let (edom, e) = solid_grid(dom, en);
     let enb = e.div_ceil(BLOCK);
     let pn = pn.max(2);
@@ -170,6 +233,9 @@ fn piece_grid(blocks: &[u32], dom: Domain, en: usize, pn: usize) -> (Domain, usi
         }
     }
     for a in 0..3 {
+        let (lo, hi) = (edom.at(a, bbox.0[a] as f64 - 1.0, e), edom.at(a, bbox.1[a] as f64 + 1.0, e));
+        c0[a] = c0[a].max(cell(a, lo).floor() as i64 - 1);
+        c1[a] = c1[a].min(cell(a, hi).ceil() as i64 + 1);
         c0[a] = c0[a].max(-1);
         c1[a] = c1[a].min(pn as i64 + 1).max(c0[a] + 4);
     }
@@ -187,8 +253,10 @@ fn piece_grid(blocks: &[u32], dom: Domain, en: usize, pn: usize) -> (Domain, usi
         let k = eb(b);
         let span = |a: usize| {
             let (lo, hi) = world(a, k[a]);
-            let lo = (cell(a, lo).floor() as i64 - 1 - c0[a]).clamp(0, total as i64 - 1) as usize;
-            let hi = (cell(a, hi).ceil() as i64 + 1 - c0[a]).clamp(0, total as i64 - 1) as usize;
+            // 立方体にそろえて広がった分（短い軸の、枝の範囲の外）には印を付けない
+            let last = (c1[a] - c0[a] - 1).clamp(0, total as i64 - 1);
+            let lo = (cell(a, lo).floor() as i64 - 1 - c0[a]).clamp(0, last) as usize;
+            let hi = (cell(a, hi).ceil() as i64 + 1 - c0[a]).clamp(0, last) as usize;
             (lo / BLOCK)..=(hi / BLOCK).min(nb - 1)
         };
         for bk in span(2) {
@@ -199,7 +267,40 @@ fn piece_grid(blocks: &[u32], dom: Domain, en: usize, pn: usize) -> (Domain, usi
             }
         }
     }
-    (sub, inner, mask)
+    // 面を作る範囲（立方体にそろえる前の、枝の範囲）
+    let tight = Domain {
+        lo: [0, 1, 2].map(|a| dom.lo[a] + c0[a] as f64 * step[a]),
+        hi: [0, 1, 2].map(|a| dom.lo[a] + c1[a] as f64 * step[a]),
+    };
+    (sub, inner, mask, tight)
+}
+
+/// 印の付いたブロックのうち、区間演算で「面が無い」と分かるものの印を外す。印が残れば true。
+/// `dom`・`n`・`mask` は [`piece_grid`] の戻り値。ブロックの箱は、枝の範囲 `tight` に絞ってから調べる
+/// （ブロックは枝よりずっと広いことが多く、絞らないと「あるかもしれない」ばかりになる）
+fn prune_mask(prog: &Program, dom: Domain, n: usize, tight: Domain, mask: &mut [bool]) -> bool {
+    use crate::interval::Interval;
+    if !prog.supports_interval() {
+        return true;
+    }
+    let step = [0, 1, 2].map(|a| (dom.hi[a] - dom.lo[a]) / n.max(1) as f64);
+    let nb = (n + 2).div_ceil(BLOCK);
+    let mut any = false;
+    for (b, on) in mask.iter_mut().enumerate().filter(|(_, on)| **on) {
+        let k = [b % nb, (b / nb) % nb, b / (nb * nb)];
+        let boxes: Vec<Interval> = (0..3)
+            .map(|a| {
+                // implicit_solid_with は外側に 1 マスずつ広げた格子で作る
+                let lo = dom.lo[a] + ((BLOCK * k[a]) as f64 - 1.0) * step[a];
+                let hi = dom.lo[a] + ((BLOCK * (k[a] + 1)).min(n + 2) as f64 - 1.0) * step[a];
+                let (lo, hi) = (lo.max(tight.lo[a]), hi.min(tight.hi[a]));
+                Interval::new(lo.min(hi), lo.max(hi))
+            })
+            .collect();
+        *on = prog.eval_interval(&boxes).may_contain_zero();
+        any |= *on;
+    }
+    any
 }
 
 /// 枝の組 1 つ分
@@ -210,6 +311,9 @@ struct BranchGroup {
     blocks: Vec<u32>,
     /// この枝の格子点の数（多い順に描く）
     count: usize,
+    /// この枝の格子点のある範囲（格子点の番号。両端を含む）
+    lo: [u32; 3],
+    hi: [u32; 3],
 }
 
 /// 式の枝の組を、[`implicit_solid_with`] と同じ格子の点で調べる。格子点の多い順。多すぎる式は None。
@@ -268,6 +372,7 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
     // 格子点ごとの「厚みのある所か」: 3 つの軸のどれでも、隣（前か後ろ）が同じ枝の点
     let strides = [1, m, m * m];
     let mut paired: Vec<bool> = vec![false; m * m * m];
+    let mut boxes: Vec<([u32; 3], [u32; 3])> = vec![([u32::MAX; 3], [0; 3]); taus.len()];
     for kz in 0..m {
         for jy in 0..m {
             for ix in 0..m {
@@ -277,6 +382,11 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
                     continue;
                 }
                 let q = [ix, jy, kz];
+                let bx = &mut boxes[id as usize];
+                for a in 0..3 {
+                    bx.0[a] = bx.0[a].min(q[a] as u32);
+                    bx.1[a] = bx.1[a].max(q[a] as u32);
+                }
                 paired[l] = (0..3).all(|a| (q[a] > 0 && ids[l - strides[a]] == id) || (q[a] + 1 < m && ids[l + strides[a]] == id));
             }
         }
@@ -328,7 +438,7 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
     let mut out: Vec<BranchGroup> = Vec::new();
     for (id, (tau, blocks)) in taus.into_iter().zip(blocks).enumerate() {
         if !blocks.is_empty() {
-            out.push(BranchGroup { tau, blocks, count: counts[id] });
+            out.push(BranchGroup { tau, blocks, count: counts[id], lo: boxes[id].0, hi: boxes[id].1 });
         }
     }
     // 格子点の多い順（同じ数なら見つけた順。毎回同じ並びにする）
@@ -344,35 +454,40 @@ fn eval_at(prog: &Program, pts: &[[f64; 3]]) -> Vec<f64> {
     out.into_iter().map(as_real).collect()
 }
 
-/// 点を面 `surf` = 0 の上に寄せる（勾配の向きにニュートン法で 2 回）。大きく動く点・計算できない点は元のまま
-fn project_to_surface(surf: &Program, pts: &[[f64; 3]], size: f64) -> Vec<[f64; 3]> {
+/// 点を面 `surf` = 0 の上に寄せる（ニュートン法で 2 回）。大きく動く点・計算できない点は元のまま。
+/// `normals`（点ごとの面の法線）があれば、その向きにだけ動かす（1 回につき式の計算が 2 回で済む。
+/// 面の上のどの点に寄せてもよいので、向きは面を横切っていれば足りる）。無ければ、勾配を差分で求めて、その向きに動かす
+fn project_to_surface(surf: &Program, pts: &[[f64; 3]], normals: Option<&[f32]>, size: f64) -> Vec<[f64; 3]> {
     let h = 1e-6 * size;
     let limit = 0.02 * size;
     let mut cur = pts.to_vec();
     for _ in 0..2 {
         let f0 = eval_at(surf, &cur);
-        let mut grad = vec![[0.0f64; 3]; cur.len()];
-        for a in 0..3 {
-            let shift = |s: f64| -> Vec<[f64; 3]> {
-                cur.iter()
-                    .map(|p| {
-                        let mut q = *p;
-                        q[a] += s;
-                        q
-                    })
-                    .collect()
-            };
-            let (fp, fm) = (eval_at(surf, &shift(h)), eval_at(surf, &shift(-h)));
-            for (g, (p, m)) in grad.iter_mut().zip(fp.iter().zip(&fm)) {
-                g[a] = (p - m) / (2.0 * h);
+        let shift = |a: usize, s: f64| -> Vec<[f64; 3]> {
+            cur.iter()
+                .map(|p| {
+                    let mut q = *p;
+                    q[a] += s;
+                    q
+                })
+                .collect()
+        };
+        let steps: Vec<[f64; 3]> = if let Some(nrm) = normals {
+            let dir = |k: usize| [0, 1, 2].map(|a| nrm[3 * k + a] as f64);
+            let ahead: Vec<[f64; 3]> = cur.iter().enumerate().map(|(k, p)| [0, 1, 2].map(|a| p[a] + h * dir(k)[a])).collect();
+            let f1 = eval_at(surf, &ahead);
+            f0.iter().zip(&f1).enumerate().map(|(k, (f, f1))| dir(k).map(|d| f * h / (f1 - f) * d)).collect()
+        } else {
+            let mut grad = vec![[0.0f64; 3]; cur.len()];
+            for a in 0..3 {
+                let (fp, fm) = (eval_at(surf, &shift(a, h)), eval_at(surf, &shift(a, -h)));
+                for (g, (p, m)) in grad.iter_mut().zip(fp.iter().zip(&fm)) {
+                    g[a] = (p - m) / (2.0 * h);
+                }
             }
-        }
-        for ((p, f), g) in cur.iter_mut().zip(&f0).zip(&grad) {
-            let g2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-            if !f.is_finite() || !g2.is_finite() || g2 <= 0.0 {
-                continue;
-            }
-            let step = [0, 1, 2].map(|a| f * g[a] / g2);
+            f0.iter().zip(&grad).map(|(f, g)| g.map(|c| f * c / (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]))).collect()
+        };
+        for (p, step) in cur.iter_mut().zip(&steps) {
             if step.iter().all(|s| s.is_finite()) {
                 for a in 0..3 {
                     p[a] -= step[a];
@@ -392,22 +507,34 @@ fn project_to_surface(surf: &Program, pts: &[[f64; 3]], size: f64) -> Vec<[f64; 
 /// 面 `surf` = 0 のメッシュから、条件に合う部分だけを残す。
 /// - `conds`: 全部が成り立つ所だけ残す（その枝にいる所）
 /// - `defined`: 全部の式の値が有限な所だけ残す（元の式が定義される所）
+/// - `nonzero`: 全部の式の値が 0 でない所だけ残す（通分した式の分母。分子と分母が同時に 0 になる面は、元の式の零点ではない）
 ///
 /// 条件の境目が面そのものに重なること（`mod(x y, z) = 0` の枝 τ の面 x y = τ z は、枝の境目 x y / z = τ の上）がある。
 /// メッシュの頂点は面から少しずれているので、そのまま条件を調べると、境目のどちら側に出るかが点ごとにばらつく。
 /// そこで頂点を面の上に寄せてから調べ、境目からのずれが丸め誤差ほどなら、境目の上にあるとみなす
 /// （境目を含む条件なら成り立ち、含まない条件なら成り立たない）
-fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Program], size: f64) {
+fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Program], nonzero: &[&Program], size: f64) {
     let count = mesh.positions.len() / 3;
-    if count == 0 || (conds.is_empty() && defined.is_empty()) {
+    if count == 0 || (conds.is_empty() && defined.is_empty() && nonzero.is_empty()) {
         return;
     }
     let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
     let mut inside = vec![true; count];
     // 境目が面に重なっていない条件（辺の上で境目を探すときに調べる）
     let mut live: Vec<&Cond> = Vec::new();
-    if !conds.is_empty() {
-        let on = project_to_surface(surf, &pts, size);
+    // 0 とみなす大きさ（式ごと。面の上の値のいちばん大きいものの 10⁻⁷ 倍）
+    let mut zero_tol: Vec<f64> = Vec::new();
+    if !conds.is_empty() || !nonzero.is_empty() {
+        let normals = (mesh.normals.len() == mesh.positions.len()).then_some(mesh.normals.as_slice());
+        let on = project_to_surface(surf, &pts, normals, size);
+        for d in nonzero {
+            let v = eval_at(d, &on);
+            let tol = 1e-7 * v.iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+            for (k, v) in v.iter().enumerate() {
+                inside[k] &= !(v.abs() <= tol);
+            }
+            zero_tol.push(tol);
+        }
         for c in conds {
             let s = eval_at(&c.prog, &on);
             let tol = |b: f64| 1e-6 * (1.0 + b.abs());
@@ -464,6 +591,11 @@ fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Progr
         for d in defined {
             for (o, v) in ok.iter_mut().zip(eval_at(d, q)) {
                 *o &= !v.is_nan();
+            }
+        }
+        for (d, tol) in nonzero.iter().zip(&zero_tol) {
+            for (o, v) in ok.iter_mut().zip(eval_at(d, q)) {
+                *o &= !(v.abs() <= *tol);
             }
         }
         ok
@@ -575,7 +707,7 @@ mod tests {
 
     /// 点 q の近く（1 辺 h の箱で、隣の箱まで）にメッシュの頂点があるか調べる関数
     fn near_fn(m: &Mesh, h: f64) -> impl Fn([f64; 3]) -> bool {
-        let cells: std::collections::HashSet<[i64; 3]> =
+        let cells: crate::adaptive::HashSet<[i64; 3]> =
             m.positions.chunks_exact(3).map(|p| [0, 1, 2].map(|a| (p[a] as f64 / h).floor() as i64)).collect();
         move |q: [f64; 3]| {
             let c = q.map(|v| (v / h).floor() as i64);
@@ -585,7 +717,7 @@ mod tests {
 
     /// 頂点（位置でまとめる）でつながった成分ごとの三角形の数
     fn component_sizes(m: &Mesh) -> Vec<usize> {
-        let mut ids: std::collections::HashMap<[i64; 3], usize> = Default::default();
+        let mut ids: crate::adaptive::HashMap<[i64; 3], usize> = Default::default();
         let vid: Vec<usize> = m
             .positions
             .chunks_exact(3)
@@ -609,7 +741,7 @@ mod tests {
                 parent[b] = a;
             }
         }
-        let mut sizes: std::collections::HashMap<usize, usize> = Default::default();
+        let mut sizes: crate::adaptive::HashMap<usize, usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
             *sizes.entry(root(&mut parent, vid[t[0] as usize])).or_default() += 1;
         }
@@ -646,6 +778,47 @@ mod tests {
             }
             // 平面と円柱の 2 つだけ（破片が無い）
             assert_eq!(component_sizes(&m).len(), 2, "細かさ {n}");
+        }
+    }
+
+    #[test]
+    fn poles_are_removed_by_clearing_denominators() {
+        // tan(x) = z y は、通分した sin(x) − z y cos(x) = 0 を描く。極 cos(x) = 0 の平面に面を張らず、
+        // 極のすぐ隣を走る面も欠けない。粗い格子・軽い計算（回転の再生中）でも同じ
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        for (n, refine) in [(80, Refine::Normal), (40, Refine::Light), (24, Refine::Light)] {
+            let m = implicit_solid_opt(&prog("tan(x) - z y"), d, n, &[], 0, refine);
+            let h = 20.0 / n as f64;
+            // 面から離れた頂点が無い（面までの距離を、分子の値 ÷ 勾配の大きさで見積もる）
+            for p in m.positions.chunks_exact(3) {
+                let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                let f = x.sin() - z * y * x.cos();
+                let g = [x.cos() + z * y * x.sin(), -z * x.cos(), -y * x.cos()];
+                let dist = f.abs() / (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+                assert!(dist < 0.6 * h, "細かさ {n}: 面から {dist} 離れた頂点 ({x}, {y}, {z})");
+            }
+            // 面の欠けが無い: z = tan(x) / y の上の点（表示範囲の端から 1 マスより内側）
+            let near = near_fn(&m, h);
+            let (mut hit, mut all) = (0, 0);
+            for i in 0..=400 {
+                for j in 0..=80 {
+                    let (x, y) = (-9.0 + 0.045 * i as f64, -9.0 + 0.225 * j as f64);
+                    let z = x.tan() / y;
+                    if z.abs() < 6.0 - h && y.abs() > 1e-9 {
+                        all += 1;
+                        hit += near([x, y, z]) as usize;
+                    }
+                }
+            }
+            assert_eq!(hit, all, "細かさ {n}: 面の欠け");
+        }
+        // 分子と分母が同時に 0 になる所（sin(x)/x の x = 0）は極ではない。通分して x = 0 の余計な平面を作らない
+        let m = implicit_solid_opt(&prog("sin(x)/x - z"), d, 80, &[], 0, Refine::Normal);
+        assert!(!m.positions.is_empty());
+        for p in m.positions.chunks_exact(3) {
+            let (x, z) = (p[0] as f64, p[2] as f64);
+            let want = if x == 0.0 { 1.0 } else { x.sin() / x };
+            assert!((z - want).abs() < 0.2, "余計な面の頂点 ({x}, {z})");
         }
     }
 
