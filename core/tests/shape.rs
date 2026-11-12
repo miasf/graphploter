@@ -1140,3 +1140,18 @@ fn tilted_walls_and_colors() {
     let (one, _) = mesh("z = floor(x)", Rot::Xw, IRES);
     assert!(l.indices().len() > one.indices().len());
 }
+
+#[test]
+fn fragments_are_dropped_but_small_shapes_stay() {
+    // S22: 混ぜた回転の 1/(x y) − z = 0 は、極の近くに紙吹雪のような破片が出ていた（変更前は 135 個）
+    let (r, _) = mesh("1/(x y) - z = 0", Rot::Mixed, IRES);
+    let f = fragments(&r.positions(), &r.indices());
+    assert!(f <= 5, "破片 {f} 個");
+    // 定義域の縁: 欠けが小さく、破片も無い
+    let (r, _) = mesh("sqrt(36 - x^2 - y^2) - z = 0", Rot::Mixed, IRES);
+    let reference = reference_implicit("sqrt(36 - x^2 - y^2) - z = 0", Rot::Mixed);
+    let got = voxels_of_mesh(&r.positions(), &r.indices());
+    let m = miss(&reference, &got, 1);
+    assert!(m <= 2.0, "欠け {m:.3}%");
+    assert_eq!(fragments(&r.positions(), &r.indices()), 0);
+}

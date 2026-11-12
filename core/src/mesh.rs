@@ -39,6 +39,8 @@ pub struct Mesh {
     pub keep_full: bool,
     /// 自分の頂点を持つ粗い版（陰関数。F の格子を間引いて作り直したもの）。[`Mesh::lod`] とはどちらか一方
     pub lod_mesh: Option<Box<Mesh>>,
+    /// 式の説明（`kind`）に足す注意書き（陰関数で、格子を間引いて表示したときなど）。ふつうは空
+    pub note: String,
     /// 作るのにかかった時間の内訳（`lib.rs` の入口で記録する。メッシュを作る関数自体は 0 のまま）
     pub stats: Stats,
 }
@@ -1254,9 +1256,21 @@ fn implicit_solid_with(
         });
         let Some(vals) = vals else { return Mesh::default() };
         plan.fill(&vals);
-        plan.field
+        // 値が有限でない（NaN・±∞ の）格子点（格子点の番号）。1'''（定義域の縁）で使う
+        let nan_pts: Vec<usize> = if plan.field.dense {
+            plan.field.vals.iter().enumerate().filter(|(_, v)| !v.is_finite()).map(|(l, _)| l).collect()
+        } else {
+            plan.spots.iter().filter(|&&(at, _)| !plan.field.vals[at as usize].is_finite()).map(|&(_, p)| p as usize).collect()
+        };
+        (plan.field, nan_pts)
     };
+    let (mut field, nan_pts) = field;
     let idx = |i: usize, j: usize, k: usize| i + m * (j + m * k);
+    // 1'''. 定義されない格子点のうち、軸の向きの隣に定義される点があるものを、縁での値で埋める（[`extend_undefined`]）。
+    //       こうすると、定義域の縁をまたぐセルにも頂点が置かれ、面が縁の少し外まで延びる（外にはみ出た所は 4' で切り落とす）
+    let ext = if nan_pts.is_empty() { Extended::default() } else { extend_undefined(prog, &combos, &mut field, dom, n, &nan_pts) };
+    let field = field;
+    let filled = |p: usize| !ext.filled.is_empty() && ext.filled.contains(&p);
 
     let t_field = crate::timing::now_ms();
 
@@ -1299,6 +1313,10 @@ fn implicit_solid_with(
                                 }
                                 let mut q1 = q;
                                 q1[a] += 1;
+                                // 片方の端が埋めた点の辺は、間に定義されない所があるので調べない（交わる位置は 1''' で決めた）
+                                if filled(idx(i, j, k)) || filled(idx(q1[0], q1[1], q1[2])) {
+                                    continue;
+                                }
                                 sign_edges.push(SignEdge { p0: pt(q), p1: pt(q1), f0: f0 as f64, f1: f1 as f64 });
                                 sign_ids.push(3 * idx(i, j, k) + a);
                             } else if ranges.is_empty() && q[a] >= 1 && q[a] + 2 <= n {
@@ -1359,6 +1377,9 @@ fn implicit_solid_with(
         if (f0 < 0.0) != (f1 < 0.0) {
             if !not_zero.is_empty() && not_zero.contains(&(3 * idx(p[0], p[1], p[2]) + a)) {
                 return None; // F が飛ぶだけで、0 になる点は無い
+            }
+            if let Some(&t) = (!ext.edge_t.is_empty()).then(|| ext.edge_t.get(&(3 * idx(p[0], p[1], p[2]) + a))).flatten() {
+                return Some((t as f64, Some(f0 < 0.0))); // 定義される部分にある本当の零点
             }
             return Some(((f0 / (f0 - f1)) as f64, Some(f0 < 0.0)));
         }
@@ -1569,10 +1590,62 @@ fn implicit_solid_with(
         mesh.indices.extend_from_slice(&touch_tris);
     }
 
+    // 4'. 定義されない所に延びた面を、定義域の縁で切り落とす（[`trim_undefined`]）
+    if !ext.filled.is_empty() {
+        trim_undefined(prog, &combos, &mut mesh, &mut vertex_cell, n, &ext.filled);
+    }
+    // 4''. 極・値が飛ぶ所・定義域の縁にできる小さな破片と、値が飛ぶ所で「接する」と見誤った細かい切れ端を消す（[`drop_fragments`]）
+    let mut dropped = 0;
+    if !not_zero.is_empty() || !nan_pts.is_empty() || !touch.is_empty() {
+        dropped = drop_fragments(&mut mesh, dom, n, &field, &not_zero, &ext.filled, true);
+    }
+    if dropped > 1000 {
+        mesh.note.push_str("（細かすぎて描けない部分あり）");
+    }
+    // 4'''. 三角形が多すぎる（面が詰まりすぎて描ききれない）ときは、F の格子を間引いた版を本体にする（画面が固まらないように）
+    let mut coarse = None;
+    if mesh.indices.len() / 3 > MAX_IMPLICIT_TRIANGLES {
+        let mut sc = FieldScratch::default();
+        let mut eval = |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
+        for k in [2, 4] {
+            let c = coarse_nets(&field, dom, n, k, &not_zero, &mut eval);
+            let ok = c.indices.len() / 3 <= MAX_IMPLICIT_TRIANGLES;
+            coarse = Some((k, c));
+            if ok {
+                break;
+            }
+        }
+    }
+    if let Some((k, c)) = coarse {
+        let note = std::mem::take(&mut mesh.note);
+        mesh = c;
+        mesh.note = note + "（粗くして表示）";
+        compute_normals(&mut mesh);
+        if mesh.indices.len() / 3 > LOD_MIN_TRIANGLES {
+            let mut sc = FieldScratch::default();
+            let mut eval = |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
+            let lod = coarse_nets(&field, dom, n, 2 * k, &not_zero, &mut eval);
+            if !lod.indices.is_empty() {
+                mesh.lod_mesh = Some(Box::new(lod));
+            }
+        }
+        let t_end = crate::timing::now_ms();
+        mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
+        return mesh;
+    }
+
     compute_normals(&mut mesh);
     // 4. 格子より小さい図形（見落とした・角ばった所）を探して、その所だけ細かく作り直す
     if refine != Refine::Off && ranges.is_empty() {
+        let before = (mesh.positions.len(), mesh.indices.len());
         refine_components(prog, &combos, dom, n, &field, &mut mesh, &vertex_cell, refine);
+        // 作り直しが、値の飛ぶ所・極の近くに作った細かい切れ端も消す（作り直しでメッシュが変わったときだけ）
+        if (mesh.positions.len(), mesh.indices.len()) != before {
+            let more = drop_fragments(&mut mesh, dom, n, &field, &not_zero, &ext.filled, true);
+            if more > 0 {
+                compute_normals(&mut mesh);
+            }
+        }
     }
     // 粗い版（視点を動かしている間に描く）: F の格子を間引いて作り直す
     if let Some(k) = lod_stride(mesh.indices.len() / 3) {
@@ -1586,6 +1659,417 @@ fn implicit_solid_with(
     let t_end = crate::timing::now_ms();
     mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
     mesh
+}
+
+/// 陰関数のメッシュの三角形の数の上限。超えたら、F の格子を間引いた版を本体にする
+const MAX_IMPLICIT_TRIANGLES: usize = 1_500_000;
+/// 縁での値が ±∞ のとき、代わりに使う大きな値（符号は保つ）
+const FILL_BIG: f64 = 1e30;
+
+/// [`extend_undefined`] の結果
+#[derive(Default)]
+struct Extended {
+    /// 縁での値で埋めた格子点（格子点の番号 i + m (j + m k)）
+    filled: std::collections::HashSet<usize>,
+    /// 片方の端が埋めた点の辺のうち、定義される部分（有限の端から縁まで）に本当の零点があるもの:
+    /// 辺の番号（3 × 始点 + 向き）→ 交わる位置（始点からの割合）
+    edge_t: std::collections::HashMap<usize, f32>,
+}
+
+/// F が有限でない（NaN・±∞ の）格子点 `nan_pts` のうち、軸の向きの隣（6 つ）に定義される点があり、
+/// 反対側の隣も有限でないもの（定義されない所の端）を、
+/// 縁での値で埋める。辺の上で「定義される側の端」を二分で 10 回探し、そこでの F の値（縁に近づいたときの値）を取り、
+/// 隣が複数あれば平均する（±∞ は符号を保って [`FILL_BIG`] にする）。埋めるのは 1 層だけ。
+/// 埋めた点と定義される隣を結ぶ辺で符号が変わり、しかも定義される部分（隣から縁まで）にも本当の零点があるなら、
+/// それを二分で求めて交わる位置にする。無ければ、ふつうの直線の補間の位置（定義されない側に出る。後で切り落とす）
+fn extend_undefined(
+    prog: &Program,
+    combos: &[Vec<f64>],
+    field: &mut SparseField,
+    dom: Domain,
+    n: usize,
+    nan_pts: &[usize],
+) -> Extended {
+    let m = n + 1;
+    let coords = |p: usize| [p % m, (p / m) % m, p / (m * m)];
+    let pt = |q: [usize; 3]| [0, 1, 2].map(|x| dom.at(x, q[x] as f64, n));
+    // (埋める点, 定義される隣, 向き)
+    let mut pairs: Vec<(usize, [usize; 3], [usize; 3], usize)> = Vec::new();
+    // 有限でない点の集まり（ページの中の、計算していない点の NaN と区別する）
+    let bad: std::collections::HashSet<usize> = nan_pts.iter().copied().collect();
+    let idx = |q: [usize; 3]| q[0] + m * (q[1] + m * q[2]);
+    for &p in nan_pts {
+        let q = coords(p);
+        // 隣 r が有限で、反対側の隣も有限でない（または格子の外）ときだけ、r から埋める（q が、その直線の上で定義されない所の端）。
+        // 1 層だけ定義されない所（1/x の x = 0 などの極。両側で定義される）は埋めない（埋めると、極に偽の面ができる）
+        for a in 0..3 {
+            for up in [false, true] {
+                if (!up && q[a] == 0) || (up && q[a] + 1 >= m) {
+                    continue;
+                }
+                let mut r = q;
+                if up { r[a] += 1 } else { r[a] -= 1 }
+                if !field.f(r).is_finite() {
+                    continue;
+                }
+                let opposite_bad = if up { q[a] == 0 } else { q[a] + 1 >= m } || {
+                    let mut o = q;
+                    if up { o[a] -= 1 } else { o[a] += 1 }
+                    bad.contains(&idx(o))
+                };
+                if opposite_bad {
+                    pairs.push((p, q, r, a));
+                }
+            }
+        }
+    }
+    let mut ext = Extended::default();
+    if pairs.is_empty() {
+        return ext;
+    }
+    let mut sc = FieldScratch::default();
+    let np = pairs.len();
+    // 辺の上の位置 t（定義される隣 r が 0、埋める点 q が 1）
+    let at = |k: usize, t: f64, ax: usize| {
+        let (_, q, r, _) = pairs[k];
+        let (a, b) = (pt(r)[ax], pt(q)[ax]);
+        a + (b - a) * t
+    };
+    let (mut ta, mut tb) = (vec![0.0f64; np], vec![1.0f64; np]);
+    let fr: Vec<f64> = pairs.iter().map(|&(_, _, r, _)| field.f(r) as f64).collect();
+    let mut fa = fr.clone();
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for _ in 0..10 {
+        for (ax, col) in cols.iter_mut().enumerate() {
+            col.clear();
+            col.extend((0..np).map(|k| at(k, 0.5 * (ta[k] + tb[k]), ax)));
+        }
+        let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
+        for k in 0..np {
+            let t = 0.5 * (ta[k] + tb[k]);
+            if v[k].is_nan() {
+                tb[k] = t;
+            } else {
+                ta[k] = t;
+                fa[k] = v[k];
+            }
+        }
+    }
+    let fa: Vec<f64> = fa.iter().map(|&v| if v.is_infinite() { FILL_BIG.copysign(v) } else { v }).collect();
+    // 埋める点ごとに平均する
+    let mut sum: std::collections::HashMap<usize, (f64, f64)> = Default::default();
+    for (k, &(p, ..)) in pairs.iter().enumerate() {
+        let e = sum.entry(p).or_default();
+        e.0 += fa[k];
+        e.1 += 1.0;
+    }
+    for (&p, &(s, c)) in &sum {
+        let slot = field.at(coords(p));
+        if slot != usize::MAX {
+            field.vals[slot] = (s / c) as f32;
+            ext.filled.insert(p);
+        }
+    }
+    // 2 層目: 埋めた点と軸の向きで隣り合う、まだ有限でない点に、隣の埋めた値の平均を写す。
+    // 縁が格子に対して斜めだと、縁をまたぐセルの角に 2 層目の点が入り、その角への辺で面が途切れて穴が空くので、それを防ぐ
+    // （2 層目は定義域の外なので、面は 4' でいつも切り落とされる）
+    let mut second: Vec<(usize, f32)> = Vec::new();
+    for &p in nan_pts {
+        if ext.filled.contains(&p) {
+            continue;
+        }
+        let q = coords(p);
+        let (mut s, mut c) = (0.0f64, 0.0f64);
+        for a in 0..3 {
+            for up in [false, true] {
+                if (!up && q[a] == 0) || (up && q[a] + 1 >= m) {
+                    continue;
+                }
+                let mut r = q;
+                if up { r[a] += 1 } else { r[a] -= 1 }
+                if ext.filled.contains(&idx(r)) {
+                    s += field.f(r) as f64;
+                    c += 1.0;
+                }
+            }
+        }
+        if c > 0.0 {
+            second.push((p, (s / c) as f32));
+        }
+    }
+    for (p, v) in second {
+        let slot = field.at(coords(p));
+        if slot != usize::MAX {
+            field.vals[slot] = v;
+            ext.filled.insert(p);
+        }
+    }
+    // 符号が変わる辺のうち、定義される部分に本当の零点があるもの（隣の値と縁での値の符号が違う）を二分で求める
+    let zero: Vec<usize> = (0..np)
+        .filter(|&k| {
+            let fq = field.f(pairs[k].1) as f64;
+            (fr[k] < 0.0) != (fq < 0.0) && (fr[k] < 0.0) != (fa[k] < 0.0)
+        })
+        .collect();
+    if zero.is_empty() {
+        return ext;
+    }
+    let (mut lo, mut hi): (Vec<f64>, Vec<f64>) = (vec![0.0; zero.len()], zero.iter().map(|&k| ta[k]).collect());
+    for _ in 0..12 {
+        for (ax, col) in cols.iter_mut().enumerate() {
+            col.clear();
+            col.extend(zero.iter().enumerate().map(|(z, &k)| at(k, 0.5 * (lo[z] + hi[z]), ax)));
+        }
+        let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
+        for (z, &k) in zero.iter().enumerate() {
+            let t = 0.5 * (lo[z] + hi[z]);
+            if !v[z].is_nan() && (v[z] < 0.0) == (fr[k] < 0.0) {
+                lo[z] = t;
+            } else {
+                hi[z] = t;
+            }
+        }
+    }
+    for (z, &k) in zero.iter().enumerate() {
+        let (_, q, r, a) = pairs[k];
+        let t = 0.5 * (lo[z] + hi[z]);
+        // 辺の始点（座標の小さいほうの端）からの割合にする
+        let (start, t) = if r[a] < q[a] { (r, t) } else { (q, 1.0 - t) };
+        ext.edge_t.insert(3 * (start[0] + m * (start[1] + m * start[2])) + a, t as f32);
+    }
+    ext
+}
+
+/// 縁での値で埋めた点（`filled`）を角に持つセルの頂点で F を計算し、定義されない（NaN の）頂点を見つけて、
+/// 定義される所だけを残す。3 頂点とも定義されない三角形は捨て、混ざる三角形は、定義される頂点と定義されない頂点を
+/// 結ぶ辺の上で定義される側の端を二分で 8 回探し、そこまでの多角形に切る（辺の上に求めた点は、隣の三角形と共有する）。
+/// 足した頂点の `vertex_cell` は、定義される側の頂点のセルにする
+fn trim_undefined(
+    prog: &Program,
+    combos: &[Vec<f64>],
+    mesh: &mut Mesh,
+    vertex_cell: &mut Vec<u32>,
+    n: usize,
+    filled: &std::collections::HashSet<usize>,
+) {
+    let m = n + 1;
+    let nv = mesh.positions.len() / 3;
+    let near: Vec<usize> = (0..nv)
+        .filter(|&v| {
+            let c = vertex_cell[v] as usize;
+            let q = [c % n, (c / n) % n, c / (n * n)];
+            CORNERS.iter().any(|d| filled.contains(&((q[0] + d[0]) + m * ((q[1] + d[1]) + m * (q[2] + d[2])))))
+        })
+        .collect();
+    if near.is_empty() {
+        return;
+    }
+    let pos = |mesh: &Mesh, v: usize| [0, 1, 2].map(|a| mesh.positions[3 * v + a] as f64);
+    let mut sc = FieldScratch::default();
+    let mut undefined = vec![false; nv];
+    {
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| near.iter().map(|&v| pos(mesh, v)[a]).collect());
+        let vals = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
+        for (&v, &f) in near.iter().zip(vals) {
+            undefined[v] = f.is_nan();
+        }
+    }
+    if !undefined.iter().any(|&u| u) {
+        return;
+    }
+    // 定義される頂点 → 定義されない頂点の辺の一覧
+    let mut edge_pt: std::collections::HashMap<(u32, u32), u32> = Default::default();
+    let mut todo: Vec<(u32, u32)> = Vec::new();
+    for t in mesh.indices.chunks_exact(3) {
+        for e in 0..3 {
+            let (a, b) = (t[e], t[(e + 1) % 3]);
+            for (d, u) in [(a, b), (b, a)] {
+                if !undefined[d as usize] && undefined[u as usize] && !edge_pt.contains_key(&(d, u)) {
+                    edge_pt.insert((d, u), NONE);
+                    todo.push((d, u));
+                }
+            }
+        }
+    }
+    let (mut ta, mut tb) = (vec![0.0f64; todo.len()], vec![1.0f64; todo.len()]);
+    let lerp = |mesh: &Mesh, (d, u): (u32, u32), t: f64, a: usize| {
+        let (p, q) = (pos(mesh, d as usize)[a], pos(mesh, u as usize)[a]);
+        p + (q - p) * t
+    };
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for _ in 0..8 {
+        for (a, col) in cols.iter_mut().enumerate() {
+            col.clear();
+            col.extend(todo.iter().enumerate().map(|(k, &e)| lerp(mesh, e, 0.5 * (ta[k] + tb[k]), a)));
+        }
+        let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
+        for k in 0..todo.len() {
+            let t = 0.5 * (ta[k] + tb[k]);
+            if v[k].is_nan() { tb[k] = t } else { ta[k] = t }
+        }
+    }
+    for (k, &e) in todo.iter().enumerate() {
+        let p = [0, 1, 2].map(|a| lerp(mesh, e, ta[k], a));
+        let id = mesh.push_vertex(p);
+        vertex_cell.push(vertex_cell[e.0 as usize]);
+        edge_pt.insert(e, id);
+    }
+    let mut out: Vec<u32> = Vec::with_capacity(mesh.indices.len());
+    for t in mesh.indices.chunks_exact(3) {
+        let bad = t.iter().filter(|&&v| undefined[v as usize]).count();
+        if bad == 0 {
+            out.extend_from_slice(t);
+            continue;
+        }
+        if bad == 3 {
+            continue;
+        }
+        let mut poly: Vec<u32> = Vec::with_capacity(4);
+        for e in 0..3 {
+            let (a, b) = (t[e], t[(e + 1) % 3]);
+            let (ua, ub) = (undefined[a as usize], undefined[b as usize]);
+            if !ua {
+                poly.push(a);
+            }
+            if ua != ub {
+                poly.push(if ua { edge_pt[&(b, a)] } else { edge_pt[&(a, b)] });
+            }
+        }
+        for k in 1..poly.len().saturating_sub(1) {
+            out.extend_from_slice(&[poly[0], poly[k], poly[k + 1]]);
+        }
+    }
+    mesh.indices = out;
+}
+
+/// 頂点でつながった成分のうち、三角形が 12 個以下で、大きさがどの向きにも 2 マス以下で、
+/// 「零点ではない」とされた辺（`not_zero`）か、定義されない・埋めた角（`filled`）を持つセルに頂点があるものを捨てる
+/// （極・値が飛ぶ所・定義域の縁にできる紙吹雪のような破片）。`open_too` なら、縁の辺を持つ（閉じていない）成分も捨てる
+/// （小さい図形の作り直しが、値が飛ぶ線の上に作る細かい切れ端）。それ以外の小さい成分（本当に小さい球など）は残す。
+/// 捨てた成分の数を返す
+fn drop_fragments(
+    mesh: &mut Mesh,
+    dom: Domain,
+    n: usize,
+    field: &SparseField,
+    not_zero: &std::collections::HashSet<usize>,
+    filled: &std::collections::HashSet<usize>,
+    open_too: bool,
+) -> usize {
+    const MAX_TRIS: usize = 12;
+    let m = n + 1;
+    let nv = mesh.positions.len() / 3;
+    let mut parent: Vec<u32> = (0..nv as u32).collect();
+    fn root(p: &mut [u32], mut x: u32) -> u32 {
+        while p[x as usize] != x {
+            p[x as usize] = p[p[x as usize] as usize];
+            x = p[x as usize];
+        }
+        x
+    }
+    for t in mesh.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2])] {
+            let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+            if ra != rb {
+                parent[ra as usize] = rb;
+            }
+        }
+    }
+    let mut tris = vec![0u32; nv];
+    for t in mesh.indices.chunks_exact(3) {
+        let r = root(&mut parent, t[0]) as usize;
+        tris[r] = tris[r].saturating_add(1);
+    }
+    let mut small = vec![false; nv];
+    let mut any = false;
+    for v in 0..nv {
+        let r = root(&mut parent, v as u32) as usize;
+        if tris[r] > 0 && tris[r] as usize <= MAX_TRIS {
+            small[v] = true;
+            any = true;
+        }
+    }
+    if !any {
+        return 0;
+    }
+    // 小さい成分ごとの、頂点を囲む箱と「怪しいセルに頂点がある」
+    let cell_size: [f64; 3] = [0, 1, 2].map(|a| (dom.hi[a] - dom.lo[a]) / n as f64);
+    let idx = |q: [usize; 3]| q[0] + m * (q[1] + m * q[2]);
+    let suspect_cell = |c: usize| {
+        let q = [c % n, (c / n) % n, c / (n * n)];
+        let corner_bad = CORNERS.iter().any(|d| {
+            let p = [q[0] + d[0], q[1] + d[1], q[2] + d[2]];
+            !field.f(p).is_finite() || (!filled.is_empty() && filled.contains(&idx(p)))
+        });
+        corner_bad
+            || (!not_zero.is_empty()
+                && EDGES.iter().any(|&[ca, cb]| {
+                    let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
+                    let s =if CORNERS[ca][a] == 0 { CORNERS[ca] } else { CORNERS[cb] };
+                    not_zero.contains(&(3 * idx([q[0] + s[0], q[1] + s[1], q[2] + s[2]]) + a))
+                }))
+    };
+    // 頂点の位置から、頂点のあるセル（細かく作り直した頂点にも使えるように、位置から求める）
+    let cell_of = |v: usize| {
+        let q = [0, 1, 2].map(|a| {
+            let t = (mesh.positions[3 * v + a] as f64 - dom.lo[a]) / cell_size[a];
+            (t.floor().max(0.0) as usize).min(n - 1)
+        });
+        q[0] + n * (q[1] + n * q[2])
+    };
+    let mut info: std::collections::HashMap<u32, ([f64; 3], [f64; 3], bool)> = Default::default();
+    for v in 0..nv {
+        if !small[v] {
+            continue;
+        }
+        let r = root(&mut parent, v as u32);
+        let e = info.entry(r).or_insert(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], false));
+        for a in 0..3 {
+            let x = mesh.positions[3 * v + a] as f64;
+            e.0[a] = e.0[a].min(x);
+            e.1[a] = e.1[a].max(x);
+        }
+        if !e.2 && suspect_cell(cell_of(v)) {
+            e.2 = true;
+        }
+    }
+    // `open_too` なら、縁の辺（三角形が 1 つだけの辺）を持つ成分も怪しいとする（閉じた小さい球・輪は残る）
+    if open_too {
+        let mut count: std::collections::HashMap<(u32, u32), u32> = Default::default();
+        for t in mesh.indices.chunks_exact(3) {
+            if !small[t[0] as usize] {
+                continue;
+            }
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        for (&(a, _), &c) in &count {
+            if c == 1 {
+                let r = root(&mut parent, a);
+                if let Some(e) = info.get_mut(&r) {
+                    e.2 = true;
+                }
+            }
+        }
+    }
+    let drop: std::collections::HashSet<u32> = info
+        .iter()
+        .filter(|(_, (lo, hi, sus))| *sus && (0..3).all(|a| hi[a] - lo[a] <= 2.0 * cell_size[a] + 1e-9))
+        .map(|(&r, _)| r)
+        .collect();
+    if drop.is_empty() {
+        return 0;
+    }
+    let mut out = Vec::with_capacity(mesh.indices.len());
+    for t in mesh.indices.chunks_exact(3) {
+        if !drop.contains(&root(&mut parent, t[0])) {
+            out.extend_from_slice(t);
+        }
+    }
+    mesh.indices = out;
+    drop.len()
 }
 
 /// 陰関数の粗い版の、格子の間引き方: 三角形が `tris` 個のメッシュなら、三角形の数（間引くと 1/k² になる）が
@@ -6438,6 +6922,46 @@ mod tests {
     }
 
     #[test]
+    fn implicit_domain_edge_is_smooth() {
+        // sqrt(36 − x² − y²) − z = 0（半径 6 の半球）は x² + y² ≤ 36 でしか定義されない。面は縁まで延び、
+        // 縁の辺（三角形が 1 つだけの辺）は、定義域の縁（円柱 x² + y² = 36）と半球の上に乗る（格子の間隔 0.25。
+        // 変更前は 1 マスほど内側で、ギザギザに途切れていた）。
+        // 縁では面が垂直なので、Surface Nets の角の丸まりで、縁の辺は z = 0 より 1 マスほど上で切れる（z ≤ 2 マスまで許す）
+        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let m = implicit_surface(&prog("sqrt(36 - x^2 - y^2) - z", &AXES), d, 80);
+        let mut count: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        for t in m.indices.chunks_exact(3) {
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let p = |v: u32| [0, 1, 2].map(|a| m.positions[3 * v as usize + a] as f64);
+        let mut border = 0;
+        let (mut off_edge, mut off_sphere, mut top) = (0.0f64, 0.0f64, f64::NEG_INFINITY);
+        for (&(a, b), &c) in &count {
+            if c != 1 {
+                continue;
+            }
+            for v in [a, b] {
+                let q = p(v);
+                if q.iter().any(|x| x.abs() >= 10.0) {
+                    continue;
+                }
+                border += 1;
+                let r = (q[0] * q[0] + q[1] * q[1]).sqrt();
+                off_edge = off_edge.max((r - 6.0).abs());
+                off_sphere = off_sphere.max(((r * r + q[2] * q[2]).sqrt() - 6.0).abs());
+                top = top.max(q[2]);
+            }
+        }
+        assert!(border > 100, "縁の頂点 {border} 個");
+        assert!(off_edge <= 0.05, "縁の頂点が定義域の縁から {off_edge} 離れている");
+        assert!(off_sphere <= 0.05, "縁の頂点が半球から {off_sphere} 離れている");
+        assert!(top <= 0.5, "縁の頂点の高さが {top}");
+    }
+
+    #[test]
     fn steep_root_is_still_a_surface() {
         // 急なだけで本当に 0 になる所は、今までどおり面を張る（頂点の数が、極の判定をしない版と同じ）。
         // 小さい図形の作り直し（半径 1 の球は 20 マスなので作り直す）は比べない
@@ -6447,6 +6971,11 @@ mod tests {
             let a = implicit_solid_opt(&p, d, 40, &[], 0, Refine::Off);
             let b = implicit_solid_reference(&p, d, 40, &[], 0);
             assert!(!a.indices.is_empty(), "{src}");
+            if src == "x^(1/3) - z" {
+                // x < 0 では定義されない。S22 から、面が定義域の縁 x = 0 まで延びるので、頂点は比べる版より多い
+                assert!(a.positions.len() >= b.positions.len(), "{src}");
+                continue;
+            }
             assert_eq!(a.positions.len(), b.positions.len(), "{src}");
         }
         // z (x² + y²) = 1 は、z 軸に向かって伸びる本当の曲面。頂点の数が 95% 以上残る
