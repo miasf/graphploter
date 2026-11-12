@@ -5671,13 +5671,21 @@ impl SparseField {
     fn plan(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool, mask: Option<&[bool]>) -> FieldPlan {
         let m = n + 1;
         let nb = n.div_ceil(BLOCK);
-        let mut occupied = if all_blocks { vec![true; nb * nb * nb] } else { block_occupancy(prog, ranges, dom, n, nb) };
-        // 面を作るブロックを絞る（部品に分けて描くとき。pieces.rs）
-        if let Some(mask) = mask.filter(|k| k.len() == occupied.len()) {
-            for (o, &k) in occupied.iter_mut().zip(mask) {
-                *o &= k;
+        // 面を作るブロックを絞る（部品に分けて描くとき。pieces.rs）。絞ったブロックでは、区間演算で空かどうかを調べない
+        // （小さい部品をたくさん作るとき、全部のブロックを調べる手間のほうが大きい）
+        let occupied = match mask.filter(|k| k.len() == nb * nb * nb) {
+            // 大きい部品（何枚も重なる大きな面）は、絞ったうえで、区間演算でも空のブロックを外す
+            Some(mask) if mask.iter().filter(|&&k| k).count() > 64 => {
+                let mut occ = block_occupancy(prog, ranges, dom, n, nb);
+                for (o, &k) in occ.iter_mut().zip(mask) {
+                    *o &= k;
+                }
+                occ
             }
-        }
+            Some(mask) => mask.to_vec(),
+            None if all_blocks => vec![true; nb * nb * nb],
+            None => block_occupancy(prog, ranges, dom, n, nb),
+        };
         let np = m.div_ceil(8);
         let mut field =
             SparseField { m, nb, occupied, np, pages: Vec::new(), vals: Vec::new(), dense: false };

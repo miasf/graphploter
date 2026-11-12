@@ -21,10 +21,15 @@ thread_local! {
     pub(super) static BLOCK_MASK: std::cell::RefCell<Option<Vec<bool>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// 描く部品の数の上限（多い順に描く。再生・ドラッグ中は少なくする）
-fn max_pieces(refine: Refine) -> usize {
-    if refine == Refine::Light { 200 } else { 3000 }
-}
+/// 描く部品の数の上限（多い順に描く）
+const MAX_PIECES: usize = 3000;
+/// 枝を調べる格子の細かさの下限。どの枝を描くかは、面を作る格子の細かさ（再生・ドラッグ中は粗くなる）ではなく、
+/// この細かさで決める。粗い格子で調べると、粗くしたときに枝ごと消える（止めたときと形が変わる）
+const ENUM_N: usize = 80;
+/// 枝の部品の三角形の数の目安。超えそうなら、枝の部品を作る格子を粗くする（面の数は減らさない）
+const TARGET_PIECE_TRIANGLES: f64 = 600_000.0;
+/// 枝の部品を作る格子の細かさの下限
+const MIN_PIECE_N: usize = 24;
 
 /// 部品に分けて描く。分けられない（分けても変わらない）式は None
 pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: Refine) -> Option<Mesh> {
@@ -38,7 +43,7 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
     let mut truncated = false;
     for f in &factors {
         groups.push(if branched(f) {
-            let (g, thin) = branch_groups(f, dom, n)?;
+            let (g, thin) = branch_groups(f, dom, n.max(ENUM_N))?;
             truncated |= thin;
             Some(g)
         } else {
@@ -53,7 +58,7 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
     }
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
     let mut parts: Vec<Mesh> = Vec::new();
-    let mut budget = max_pieces(refine);
+    let mut budget = MAX_PIECES;
     for (f, group) in factors.iter().zip(groups) {
         if f.is_constant() {
             continue;
@@ -66,7 +71,15 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
             parts.push(m);
             continue;
         };
-        let nb3 = group.first().map_or(0, |g| g.nb3);
+        // 面の数が多い式は、三角形が増えすぎないよう、枝の部品を作る格子を粗くする（1 ブロックあたり約 80 個）
+        let blocks: usize = group.iter().map(|g| g.blocks.len()).sum();
+        let en = n.max(ENUM_N);
+        let est = 80.0 * blocks as f64 * (n as f64 / en as f64).powi(2);
+        let pn = if est > TARGET_PIECE_TRIANGLES {
+            ((n as f64 * (TARGET_PIECE_TRIANGLES / est).sqrt()) as usize).max(MIN_PIECE_N).min(n)
+        } else {
+            n
+        };
         for g in group {
             // 三角形が多すぎる（画面が固まる）ときも、残りの部品は描かない
             if budget == 0 || parts.iter().map(|m| m.indices.len() / 3).sum::<usize>() > MAX_IMPLICIT_TRIANGLES {
@@ -77,17 +90,14 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
             let fz = f.frozen(&g.tau);
             let conds = f.branch_conds(&g.tau);
             let (subs, sub_changed) = fz.zero_factors();
-            let mut mask = vec![false; nb3];
-            for &b in &g.blocks {
-                mask[b as usize] = true;
-            }
+            let (sub_dom, sub_n, mask) = piece_grid(&g.blocks, dom, en, pn);
             for sub in &subs {
                 if sub.is_constant() {
                     continue;
                 }
                 // 枝の部品は、作り直し（小さい図形・細い部分を探して細かくする処理）をしない。
                 // ブロックを絞ったせいで小さく見えるだけで、小さい図形ではない（1 つ 30 ms ほどかかる）
-                let mut m = mesh_masked(sub, dom, n, Refine::Off, Some(mask.clone()));
+                let mut m = mesh_masked(sub, sub_dom, sub_n, Refine::Off, Some(mask.clone()));
                 if m.indices.is_empty() {
                     continue;
                 }
@@ -119,6 +129,79 @@ fn mesh_masked(prog: &Program, dom: Domain, n: usize, refine: Refine, mask: Opti
     mesh
 }
 
+/// [`implicit_solid_with`] が使う格子（表示範囲の外側に 1 マスずつ広げたもの）の、(範囲, 1 辺のマスの数)
+fn solid_grid(dom: Domain, n: usize) -> (Domain, usize) {
+    let n = n.max(2);
+    let mut dom = dom;
+    for ax in 0..3 {
+        let step = (dom.hi[ax] - dom.lo[ax]) / n as f64;
+        dom.lo[ax] -= step;
+        dom.hi[ax] += step;
+    }
+    (dom, n + 2)
+}
+
+/// 枝の部品を作る格子。細かさ `en` の格子のブロックの一覧（その枝を描く所）から、
+/// (範囲, 1 辺のマスの数, ブロックごとの印) を作る。[`implicit_solid_with`] にそのまま渡せる。
+///
+/// 格子は、表示範囲を `pn` 等分した全体の格子の一部（格子の線が全体と同じなので、面の位置は全体で作ったときと同じ）。
+/// 枝のブロックを囲む立方体（1 辺のマスの数は 3 つの軸で同じ）だけにして、小さい部品で格子全体の大きさの手間をかけない
+fn piece_grid(blocks: &[u32], dom: Domain, en: usize, pn: usize) -> (Domain, usize, Vec<bool>) {
+    let (edom, e) = solid_grid(dom, en);
+    let enb = e.div_ceil(BLOCK);
+    let pn = pn.max(2);
+    let step = [0, 1, 2].map(|a| (dom.hi[a] - dom.lo[a]) / pn as f64);
+    // 全体の格子（外側に 1 マス広げたもの。マスの番号は −1 〜 pn）での、点 x のマスの位置
+    let cell = |a: usize, x: f64| (x - dom.lo[a]) / step[a];
+    // ブロック b（en の格子）の、軸 a の範囲
+    let eb = |b: u32| {
+        let b = b as usize;
+        [b % enb, (b / enb) % enb, b / (enb * enb)]
+    };
+    let world = |a: usize, k: usize| (edom.at(a, (BLOCK * k) as f64, e), edom.at(a, (BLOCK * (k + 1)).min(e) as f64, e));
+    // 枝のブロックを囲むマスの範囲（1 マス外まで。全体の格子の中に収める）
+    let (mut c0, mut c1) = ([i64::MAX; 3], [i64::MIN; 3]);
+    for &b in blocks {
+        let k = eb(b);
+        for a in 0..3 {
+            let (lo, hi) = world(a, k[a]);
+            c0[a] = c0[a].min(cell(a, lo).floor() as i64 - 1);
+            c1[a] = c1[a].max(cell(a, hi).ceil() as i64 + 1);
+        }
+    }
+    for a in 0..3 {
+        c0[a] = c0[a].max(-1);
+        c1[a] = c1[a].min(pn as i64 + 1).max(c0[a] + 4);
+    }
+    // 立方体にする（マスの数を、一番長い軸にそろえる）。implicit_solid_with は外側に 1 マスずつ広げるので、その分を引いて渡す
+    let total = (0..3).map(|a| c1[a] - c0[a]).max().unwrap_or(4) as usize;
+    let inner = total - 2;
+    let sub = Domain {
+        lo: [0, 1, 2].map(|a| dom.lo[a] + (c0[a] + 1) as f64 * step[a]),
+        hi: [0, 1, 2].map(|a| dom.lo[a] + (c0[a] + 1 + inner as i64) as f64 * step[a]),
+    };
+    // ブロックごとの印（この格子のマスの番号は、全体の番号 − c0）
+    let nb = total.div_ceil(BLOCK);
+    let mut mask = vec![false; nb * nb * nb];
+    for &b in blocks {
+        let k = eb(b);
+        let span = |a: usize| {
+            let (lo, hi) = world(a, k[a]);
+            let lo = (cell(a, lo).floor() as i64 - 1 - c0[a]).clamp(0, total as i64 - 1) as usize;
+            let hi = (cell(a, hi).ceil() as i64 + 1 - c0[a]).clamp(0, total as i64 - 1) as usize;
+            (lo / BLOCK)..=(hi / BLOCK).min(nb - 1)
+        };
+        for bk in span(2) {
+            for bj in span(1) {
+                for bi in span(0) {
+                    mask[bi + nb * (bj + nb * bk)] = true;
+                }
+            }
+        }
+    }
+    (sub, inner, mask)
+}
+
 /// 枝の組 1 つ分
 struct BranchGroup {
     /// 段差の元ごとの枝の番号
@@ -127,25 +210,16 @@ struct BranchGroup {
     blocks: Vec<u32>,
     /// この枝の格子点の数（多い順に描く）
     count: usize,
-    /// ブロックの総数
-    nb3: usize,
 }
 
 /// 式の枝の組を、[`implicit_solid_with`] と同じ格子の点で調べる。格子点の多い順。多すぎる式は None。
 ///
-/// 格子より薄い枝（`mod(x y, z)` の z = 0 の近くに無限に重なる層など）は、面を描き分けられないので入れない。
-/// 薄いかどうかは、その枝の格子点のうち「3 つの軸のどれでも、隣（前か後ろ）が同じ枝の点」の割合で決める
-/// （厚みが格子の 1 マスより薄い層は、厚みの向きに 2 点並ばない）。入れなかった枝があれば、2 つ目の戻り値が true
+/// 格子より薄い所（`mod(x y, z)` の z = 0 の近くに無限に重なる層など）は、面を描き分けられないので、ブロックごとに外す
+/// （枝まるごとではなく場所ごとに決める。一部だけ混み合う面は、描ける所だけ描く）。
+/// 薄いかどうかは、ブロックの中のその枝の格子点のうち「3 つの軸のどれでも、隣（前か後ろ）が同じ枝の点」の割合で決める
+/// （厚みが格子の 1 マスより薄い層は、厚みの向きに 2 点並ばない）。外した所があれば、2 つ目の戻り値が true
 fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>, bool)> {
-    // implicit_solid_with と同じ格子（表示範囲の外側に 1 マスずつ広げたもの）
-    let n = n.max(2);
-    let mut dom = dom;
-    for ax in 0..3 {
-        let step = (dom.hi[ax] - dom.lo[ax]) / n as f64;
-        dom.lo[ax] -= step;
-        dom.hi[ax] += step;
-    }
-    let n = n + 2;
+    let (dom, n) = solid_grid(dom, n);
     let m = n + 1;
     if m * m * m > MAX_BRANCH_POINTS {
         return None;
@@ -160,6 +234,7 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
     let mut seen: crate::adaptive::HashMap<[i64; MAX_BRANCH_SITES], u32> = Default::default();
     let xs: Vec<f64> = (0..m * m).map(|l| dom.at(0, (l % m) as f64, n)).collect();
     let ys: Vec<f64> = (0..m * m).map(|l| dom.at(1, (l / m) as f64, n)).collect();
+    let mut last = NONE;
     for kz in 0..m {
         let zs = vec![dom.at(2, kz as f64, n); m * m];
         let br = branch.eval(&[&xs, &ys, &zs], m * m);
@@ -168,15 +243,21 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
             if b.iter().any(|v| !v.is_finite()) {
                 continue;
             }
-            let mut key = [0i64; MAX_BRANCH_SITES];
-            for (o, &v) in key.iter_mut().zip(b) {
-                *o = v as i64;
-            }
-            let id = *seen.entry(key).or_insert_with(|| {
-                taus.push(b.to_vec());
-                counts.push(0);
-                (taus.len() - 1) as u32
-            });
+            // 隣の点と同じ組のことが多いので、直前と同じなら表を引かない
+            let id = if last != NONE && taus[last as usize] == b {
+                last
+            } else {
+                let mut key = [0i64; MAX_BRANCH_SITES];
+                for (o, &v) in key.iter_mut().zip(b) {
+                    *o = v as i64;
+                }
+                *seen.entry(key).or_insert_with(|| {
+                    taus.push(b.to_vec());
+                    counts.push(0);
+                    (taus.len() - 1) as u32
+                })
+            };
+            last = id;
             counts[id as usize] += 1;
             ids[l + m * m * kz] = id;
         }
@@ -184,34 +265,9 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
             return None;
         }
     }
-    // 枝ごとの、その枝の格子点があるブロック。ブロックのセルの角と、その外側の 1 点までを見る
-    let mut blocks: Vec<Vec<u32>> = vec![Vec::new(); taus.len()];
-    let mut stamp: Vec<u32> = vec![0; taus.len()];
-    for bk in 0..nb {
-        for bj in 0..nb {
-            for bi in 0..nb {
-                let bid = (bi + nb * (bj + nb * bk)) as u32;
-                let span = |b: usize| (BLOCK * b).saturating_sub(1)..=(BLOCK * (b + 1) + 1).min(m - 1);
-                for kz in span(bk) {
-                    for jy in span(bj) {
-                        let row = m * (jy + m * kz);
-                        for ix in span(bi) {
-                            let id = ids[ix + row];
-                            if id != NONE && stamp[id as usize] != bid + 1 {
-                                stamp[id as usize] = bid + 1;
-                                blocks[id as usize].push(bid);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // 枝ごとの、厚みのある所の格子点の数
-    let mut solid: Vec<usize> = vec![0; taus.len()];
-    // 枝ごとの、表示範囲の中に格子点があるか（端で切れて薄くなっただけの枝は、「描けない部分」に数えない）
-    let mut inner: Vec<bool> = vec![false; taus.len()];
+    // 格子点ごとの「厚みのある所か」: 3 つの軸のどれでも、隣（前か後ろ）が同じ枝の点
     let strides = [1, m, m * m];
+    let mut paired: Vec<bool> = vec![false; m * m * m];
     for kz in 0..m {
         for jy in 0..m {
             for ix in 0..m {
@@ -221,21 +277,59 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
                     continue;
                 }
                 let q = [ix, jy, kz];
-                let paired = (0..3).all(|a| (q[a] > 0 && ids[l - strides[a]] == id) || (q[a] + 1 < m && ids[l + strides[a]] == id));
-                solid[id as usize] += paired as usize;
-                // 格子の端の 2 点より内側（表示範囲の中）
-                inner[id as usize] |= q.iter().all(|&x| x >= 2 && x + 2 < m);
+                paired[l] = (0..3).all(|a| (q[a] > 0 && ids[l - strides[a]] == id) || (q[a] + 1 < m && ids[l + strides[a]] == id));
             }
         }
     }
+    // 枝ごとの、その枝を描くブロック: その枝の格子点があり（ブロックのセルの角と、その外側の 1 点までを見る）、
+    // そのうち厚みのある所の点が 3 割以上のブロック。薄い所（面が格子より細かく重なる所）は、ブロックごとに外す
+    let mut blocks: Vec<Vec<u32>> = vec![Vec::new(); taus.len()];
+    let mut seen_in: Vec<u32> = vec![0; taus.len()];
+    let mut cnt: Vec<(u32, u32)> = vec![(0, 0); taus.len()];
+    let mut here: Vec<u32> = Vec::new();
     let mut thin = false;
+    for bk in 0..nb {
+        for bj in 0..nb {
+            for bi in 0..nb {
+                let bid = (bi + nb * (bj + nb * bk)) as u32;
+                let span = |b: usize| (BLOCK * b).saturating_sub(1)..=(BLOCK * (b + 1) + 1).min(m - 1);
+                here.clear();
+                for kz in span(bk) {
+                    for jy in span(bj) {
+                        let row = m * (jy + m * kz);
+                        for ix in span(bi) {
+                            let id = ids[ix + row];
+                            if id == NONE {
+                                continue;
+                            }
+                            if seen_in[id as usize] != bid + 1 {
+                                seen_in[id as usize] = bid + 1;
+                                cnt[id as usize] = (0, 0);
+                                here.push(id);
+                            }
+                            cnt[id as usize].0 += 1;
+                            cnt[id as usize].1 += paired[ix + row] as u32;
+                        }
+                    }
+                }
+                // 格子の端のブロック（表示範囲の端で切れて薄くなっただけの所）は、「描けない部分」に数えない
+                let edge = [bi, bj, bk].iter().any(|&b| b == 0 || b + 1 == nb);
+                for &id in &here {
+                    let (all, solid) = cnt[id as usize];
+                    if 10 * solid >= 3 * all {
+                        blocks[id as usize].push(bid);
+                    } else {
+                        thin |= !edge;
+                    }
+                }
+            }
+        }
+    }
     let mut out: Vec<BranchGroup> = Vec::new();
     for (id, (tau, blocks)) in taus.into_iter().zip(blocks).enumerate() {
-        if 10 * solid[id] < 3 * counts[id] {
-            thin |= inner[id];
-            continue;
+        if !blocks.is_empty() {
+            out.push(BranchGroup { tau, blocks, count: counts[id] });
         }
-        out.push(BranchGroup { tau, blocks, count: counts[id], nb3: nb * nb * nb });
     }
     // 格子点の多い順（同じ数なら見つけた順。毎回同じ並びにする）
     out.sort_by_key(|g| std::cmp::Reverse(g.count));
@@ -250,12 +344,12 @@ fn eval_at(prog: &Program, pts: &[[f64; 3]]) -> Vec<f64> {
     out.into_iter().map(as_real).collect()
 }
 
-/// 点を面 `surf` = 0 の上に寄せる（勾配の向きにニュートン法で 3 回）。大きく動く点・計算できない点は元のまま
+/// 点を面 `surf` = 0 の上に寄せる（勾配の向きにニュートン法で 2 回）。大きく動く点・計算できない点は元のまま
 fn project_to_surface(surf: &Program, pts: &[[f64; 3]], size: f64) -> Vec<[f64; 3]> {
     let h = 1e-6 * size;
     let limit = 0.02 * size;
     let mut cur = pts.to_vec();
-    for _ in 0..3 {
+    for _ in 0..2 {
         let f0 = eval_at(surf, &cur);
         let mut grad = vec![[0.0f64; 3]; cur.len()];
         for a in 0..3 {
@@ -394,7 +488,7 @@ fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Progr
     // 辺の上の位置 t（0: 成り立つ側の頂点）。lo は成り立つ、hi は成り立たない
     let mut lo = vec![0.0f64; cuts.len()];
     let mut hi = vec![1.0f64; cuts.len()];
-    for _ in 0..24 {
+    for _ in 0..16 {
         let mid: Vec<[f64; 3]> = cuts
             .iter()
             .enumerate()
@@ -596,8 +690,24 @@ mod tests {
             let dist = (x * y - tau * z).abs() / (x * x + y * y + tau * tau).sqrt().max(1e-9);
             assert!(dist < 0.1, "面から {dist} 離れた頂点 ({x}, {y}, {z})");
         }
-        // 小さな破片（手裏剣のような切れ端）が無い
-        let small = component_sizes(&m).into_iter().filter(|&s| s <= 50).count();
+        // 小さな破片（手裏剣のような切れ端）が無い。表示範囲の端にかかるもの（端で切れた面の一部）は数えない
+        let inner = Mesh {
+            positions: m.positions.clone(),
+            indices: m
+                .indices
+                .chunks_exact(3)
+                .filter(|t| {
+                    t.iter().all(|&i| {
+                        let q = &m.positions[i as usize * 3..i as usize * 3 + 3];
+                        (0..3).all(|a| (q[a] as f64) > d.lo[a] + 0.5 && (q[a] as f64) < d.hi[a] - 0.5)
+                    })
+                })
+                .flatten()
+                .copied()
+                .collect(),
+            ..Default::default()
+        };
+        let small = component_sizes(&inner).into_iter().filter(|&s| s <= 50).count();
         assert_eq!(small, 0, "破片の数");
     }
 
@@ -632,3 +742,4 @@ mod tests {
         }
     }
 }
+

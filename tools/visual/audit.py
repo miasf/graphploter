@@ -6,6 +6,7 @@
 
 tools/visual/cases.tsv の陰関数（設定の付いていない行）ごとに、次の版を作って比べる。
 先に core で `cargo build --release --example dump_meshes` をしておく。
+出力先に mesh/meta.tsv がもうあれば、メッシュは作り直さない（AUDIT_REDUMP=1 で作り直す）。
 
 - 基準: 細かさ 160・ふつうの計算
 - 80: 細かさ 80（アプリの既定）、p40・p24: 回転の再生中と同じ軽い計算（flags=1）で細かさ 40・24
@@ -72,7 +73,11 @@ def samples(p, i):
     a, b, c = p[i[:, 0]], p[i[:, 1]], p[i[:, 2]]
     q = np.concatenate([a, b, c, (a + b) / 2, (b + c) / 2, (c + a) / 2, (a + b + c) / 3])
     q = q[np.isfinite(q).all(1)]
-    return q[((q > LO) & (q < HI)).all(1)]
+    q = q[((q > LO) & (q < HI)).all(1)]
+    # 多すぎる点は間引く（毎回同じ点を選ぶ）
+    if len(q) > 400_000:
+        q = q[np.random.default_rng(0).choice(len(q), 400_000, replace=False)]
+    return q
 
 
 def keys(q, tol):
@@ -97,39 +102,6 @@ def far_fraction(src, dst, tol, margin):
     return 100.0 * (1.0 - near.mean())
 
 
-def weld(p, i):
-    """同じ位置の頂点をまとめた三角形"""
-    _, inv = np.unique(np.round(p * 1e4).astype(np.int64), axis=0, return_inverse=True)
-    return inv.reshape(-1)[i], int(inv.max()) + 1 if len(inv) else 0
-
-
-def flipped(t, nv):
-    if len(t) == 0:
-        return 0.0
-    e = np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]])
-    e = e[e[:, 0] != e[:, 1]]
-    k = e[:, 0] * nv + e[:, 1]
-    _, cnt = np.unique(k, return_counts=True)
-    return 100.0 * (cnt[cnt > 1].sum() / max(1, len(k)))
-
-
-def fragments(t, nv):
-    if len(t) == 0:
-        return 0
-    label = np.arange(nv)
-    for _ in range(400):
-        m = label[t].min(1)
-        new = label.copy()
-        for c in range(3):
-            np.minimum.at(new, t[:, c], m)
-        new = new[new]
-        if np.array_equal(new, label):
-            break
-        label = new
-    _, cnt = np.unique(label[t[:, 0]], return_counts=True)
-    return int((cnt <= 12).sum())
-
-
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
@@ -142,7 +114,8 @@ def main():
                 lines.append(f"{tag}\t0,{opts}{',' + rot if rot else ''}\t{src}")
     tsv = os.path.join(out, "audit_cases.tsv")
     open(tsv, "w", encoding="utf8").write("\n".join(lines) + "\n")
-    subprocess.run([DUMP, tsv, os.path.join(out, "mesh")], check=True, stderr=subprocess.DEVNULL)
+    if os.environ.get("AUDIT_REDUMP") or not os.path.exists(os.path.join(out, "mesh", "meta.tsv")):
+        subprocess.run([DUMP, tsv, os.path.join(out, "mesh")], check=True, stderr=subprocess.DEVNULL)
     meta = {}
     for line in open(os.path.join(out, "mesh", "meta.tsv"), encoding="utf8"):
         f = line.rstrip("\n").split("\t")
@@ -156,9 +129,9 @@ def main():
                 p, i = load(os.path.join(out, "mesh", tag + ".bin"))
                 tol = 0.75 * 20.0 / n  # 隣の箱まで見るので、0.75〜1.5 マス以内
                 s = samples(p, i)
-                t, nv = weld(p, i)
+                m = meta.get(tag, [tag, "0", "0", "", "0", "0"])
                 rows.append((name, "回" if rot else "-", v, far_fraction(ref, s, tol, tol), far_fraction(s, ref, tol, tol),
-                             flipped(t, nv), fragments(t, nv), len(i), int(meta.get(tag, [0, 0, 0])[2]), src))
+                             float(m[5]), int(m[4]), len(i), int(m[2]), src))
     head = "名前\t回転\t版\t欠け%\t余計%\t裏返り%\t破片\t三角形\tms\t式"
     body = ["\t".join([r[0], r[1], r[2], f"{r[3]:.1f}", f"{r[4]:.1f}", f"{r[5]:.1f}", str(r[6]), str(r[7]), str(r[8]), r[9]]) for r in rows]
     open(os.path.join(out, "audit.tsv"), "w", encoding="utf8").write("\n".join([head] + body) + "\n")
