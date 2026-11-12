@@ -3142,15 +3142,81 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
     let idx = |q: [usize; 3]| q[0] + m * (q[1] + m * q[2]);
     let cell_id = |c: [usize; 3]| c[0] + n * (c[1] + n * c[2]);
     let pt = |q: [usize; 3]| [0, 1, 2].map(|a| dom.at(a, q[a] as f64, n));
-    // 調べるセル: 角の F の符号が混ざるセル（面が通りうるセル）。符号のそろったセルには、ふつうの F の面も、
-    // その枝の F_τ（= F）の面も通らない
     let nb = field.nb;
+    let occupied = |c: [usize; 3]| {
+        let b = c.map(|x| (x / BLOCK).min(nb - 1));
+        field.occupied[b[0] + nb * (b[1] + nb * b[2])]
+    };
+    // 使われているブロックのセルの角になる格子点すべてで、枝の番号の組 τ を計算して番号をつける（NONE: 計算できない点）
+    let key = |b: &[f64]| -> [i64; MAX_BRANCH_SITES] {
+        let mut out = [0i64; MAX_BRANCH_SITES];
+        for (o, &v) in out.iter_mut().zip(b) {
+            *o = if v.is_nan() { i64::MIN } else { v as i64 };
+        }
+        out
+    };
+    let mut tau_all: Vec<u32> = vec![NONE; m * m * m];
+    let mut taus: Vec<Vec<f64>> = Vec::new();
+    {
+        let mut need = vec![false; m * m * m];
+        for kz in 0..n {
+            for jy in 0..n {
+                for ix in 0..n {
+                    if occupied([ix, jy, kz]) {
+                        for d in CORNERS {
+                            need[idx([ix + d[0], jy + d[1], kz + d[2]])] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let pts: Vec<usize> = (0..m * m * m).filter(|&p| need[p]).collect();
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| pts.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+        let br = branch.eval(&[&cols[0], &cols[1], &cols[2]], pts.len());
+        let mut ids: crate::adaptive::HashMap<[i64; MAX_BRANCH_SITES], u32> = Default::default();
+        for (q, &p) in pts.iter().enumerate() {
+            let b = &br[q * k..(q + 1) * k];
+            if b.iter().any(|v| !v.is_finite()) {
+                continue;
+            }
+            tau_all[p] = *ids.entry(key(b)).or_insert_with(|| {
+                taus.push(b.to_vec());
+                (taus.len() - 1) as u32
+            });
+        }
+    }
+    let tau_at = |p: usize| (tau_all[p] != NONE).then_some(tau_all[p]);
+    // 枝 t と枝 u の境目が、t に含まれるか（違う段差の元すべてで含まれるときだけ。決めない元は含まれるとみなす）。
+    // 含まれないなら、F_t が境目で 0 になっても、そこは F の零点ではない（z = mod(x y, z) は z に近づくが z にはならない）
+    let closed_high = prog.branch_closed_high();
+    let owns = |t: u32, u: u32| {
+        let (a, b) = (&taus[t as usize], &taus[u as usize]);
+        (0..k).all(|j| a[j] == b[j] || closed_high[j].is_none_or(|high| (a[j] > b[j]) == high))
+    };
+    // セルの角の τ（計算できない角があれば None）と、その中の違う τ
+    let corner_taus = |c: [usize; 3]| -> Option<([u32; 8], Vec<u32>)> {
+        let mut ts = [NONE; 8];
+        for (t, d) in ts.iter_mut().zip(CORNERS) {
+            *t = tau_at(idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]))?;
+        }
+        let mut uniq = ts.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        Some((ts, uniq))
+    };
+
+    // 調べるセル:
+    // - 角の F の符号が混ざるセル（面が通りうるセル）
+    // - 角の τ が混ざり、どれかの枝 τ の続き F_τ の符号がセルの中で変わるセル。mod(x y, z) = 0 のように、
+    //   F が 0 に触れるだけで符号が変わらない段差（z > 0 では F ∈ [0, z)）の面は、F の符号では見つからない。
+    //   F の符号だけで選ぶと、F = 0 ちょうどを正に数えるので、z < 0 の側（F ∈ (z, 0]）だけ見つかり、上下が非対称になっていた
     let mut cand: Vec<[usize; 3]> = Vec::new();
+    let mut stepped: Vec<([usize; 3], [u32; 8], Vec<u32>)> = Vec::new();
     for kz in 0..n {
         for jy in 0..n {
             for ix in 0..n {
-                let b = [ix, jy, kz].map(|x| (x / BLOCK).min(nb - 1));
-                if !field.occupied[b[0] + nb * (b[1] + nb * b[2])] {
+                let c = [ix, jy, kz];
+                if !occupied(c) {
                     continue;
                 }
                 let (mut neg, mut pos, mut bad) = (false, false, false);
@@ -3162,14 +3228,77 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                     }
                     if v < 0.0 { neg = true } else { pos = true }
                 }
-                if !bad && neg && pos {
-                    cand.push([ix, jy, kz]);
+                if bad {
+                    continue;
+                }
+                if neg && pos {
+                    cand.push(c);
+                } else if let Some((ts, uniq)) = corner_taus(c) {
+                    if (2..=MAX_CELL_BRANCHES).contains(&uniq.len()) {
+                        stepped.push((c, ts, uniq));
+                    }
                 }
             }
         }
     }
-    // 面で隣り合うセルも調べる（段差の所では、F の符号がそろっていても、隣の枝の F_τ の面が通ることがある）
-    {
+    // 符号の混ざるセルだけで多すぎる式は、ここでやめる（τ の混ざるセルは、下で絞り込んでから数える）
+    if cand.len() > MAX_BRANCH_CELLS {
+        return BranchMeshes::default();
+    }
+    let mut sign_mixed = cand.clone();
+    // τ の混ざるセルのうち、F_τ が 0 になるもの（F は 0 に触れるだけで、符号は変わらない段差）
+    let mut touching: Vec<[usize; 3]> = Vec::new();
+    // 符号のそろった、τ の混ざるセル: 各 τ について、ほかの枝の角での F_τ を計算し、符号が変わるか調べる
+    if !stepped.is_empty() {
+        // (格子点, τ) → F_τ。τ ごとにまとめて計算する
+        let mut want: crate::adaptive::HashMap<u32, Vec<usize>> = Default::default();
+        for (c, ts, uniq) in &stepped {
+            for &t in uniq {
+                for (&tc, d) in ts.iter().zip(CORNERS) {
+                    if tc != t && owns(t, tc) {
+                        want.entry(t).or_default().push(idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]));
+                    }
+                }
+            }
+        }
+        let mut cont: crate::adaptive::HashMap<(usize, u32), f32> = Default::default();
+        let mut order: Vec<u32> = want.keys().copied().collect();
+        order.sort_unstable();
+        for t in order {
+            let mut ps = std::mem::take(want.get_mut(&t).unwrap());
+            ps.sort_unstable();
+            ps.dedup();
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| ps.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+            let mut v = vec![C::new(0.0, 0.0); ps.len()];
+            prog.frozen(&taus[t as usize]).eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut v);
+            for (&p, z) in ps.iter().zip(v) {
+                cont.insert((p, t), as_real(z) as f32);
+            }
+        }
+        for (c, ts, uniq) in &stepped {
+            let crosses = uniq.iter().any(|&t| {
+                let (mut neg, mut pos) = (false, false);
+                for (&tc, d) in ts.iter().zip(CORNERS) {
+                    // t が境目を含まない枝の角は見ない（そこで F_t が 0 になっても、F の零点ではない）
+                    if tc != t && !owns(t, tc) {
+                        continue;
+                    }
+                    let p = idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]);
+                    let v = if tc == t { field.f([c[0] + d[0], c[1] + d[1], c[2] + d[2]]) } else { cont[&(p, t)] };
+                    if !v.is_finite() {
+                        continue;
+                    }
+                    if v < 0.0 { neg = true } else { pos = true }
+                }
+                neg && pos
+            });
+            if crosses {
+                touching.push(*c);
+            }
+        }
+    }
+    // 面で隣り合うセルも足す（段差の所では、F の符号がそろっていても、隣の枝の F_τ の面が通ることがある）
+    let expand = |mut cand: Vec<[usize; 3]>| -> Vec<[usize; 3]> {
         let mut set: crate::adaptive::HashSet<usize> = cand.iter().map(|&c| cell_id(c)).collect();
         let mut more: Vec<[usize; 3]> = Vec::new();
         for &c in &cand {
@@ -3194,38 +3323,18 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
             }
         }
         cand.extend(more);
+        cand
+    };
+    // 調べるセルが多すぎるときは、0 に触れるだけの段差のセルを外して、符号の混ざるセルだけにする。
+    // それでも多すぎる式（細かさ 200 の、面が詰まった式など）は、枝ごとに作らない（メモリと時間がかかりすぎる）
+    let mut all = cand.clone();
+    all.extend_from_slice(&touching);
+    let mut cand = expand(all);
+    if cand.len() > MAX_BRANCH_CELLS && !touching.is_empty() {
+        cand = expand(std::mem::take(&mut sign_mixed));
     }
-    // 調べるセルが多すぎる式（細かさ 200 の、面が詰まった式など）は、枝ごとに作らない（メモリと時間がかかりすぎる）
     if cand.len() > MAX_BRANCH_CELLS {
         return BranchMeshes::default();
-    }
-    // その角の格子点で、枝の番号の組を計算する（番号をつけて持つ）
-    let mut pts: Vec<usize> = cand.iter().flat_map(|c| CORNERS.map(|d| idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]))).collect();
-    pts.sort_unstable();
-    pts.dedup();
-    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| pts.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
-    let br = branch.eval(&[&cols[0], &cols[1], &cols[2]], pts.len());
-    let key = |b: &[f64]| -> [i64; MAX_BRANCH_SITES] {
-        let mut out = [0i64; MAX_BRANCH_SITES];
-        for (o, &v) in out.iter_mut().zip(b) {
-            *o = if v.is_nan() { i64::MIN } else { v as i64 };
-        }
-        out
-    };
-    let mut ids: crate::adaptive::HashMap<[i64; MAX_BRANCH_SITES], u32> = Default::default();
-    let mut taus: Vec<Vec<f64>> = Vec::new();
-    let mut tau_of: crate::adaptive::HashMap<usize, u32> = Default::default();
-    for (q, &p) in pts.iter().enumerate() {
-        let b = &br[q * k..(q + 1) * k];
-        if b.iter().any(|v| !v.is_finite()) {
-            continue;
-        }
-        let kk = key(b);
-        let id = *ids.entry(kk).or_insert_with(|| {
-            taus.push(b.to_vec());
-            (taus.len() - 1) as u32
-        });
-        tau_of.insert(p, id);
     }
     let mut out = BranchMeshes::default();
     // 段差をまたぐセル（調べるセルのうち、角の τ が混ざるもの）と、そこに出てくる τ
@@ -3234,8 +3343,8 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
         let mut ts: [u32; 8] = [u32::MAX; 8];
         let mut ok = true;
         for (t, d) in ts.iter_mut().zip(CORNERS) {
-            match tau_of.get(&idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]])) {
-                Some(&id) => *t = id,
+            match tau_at(idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]])) {
+                Some(id) => *t = id,
                 None => {
                     ok = false;
                     break;
@@ -3300,7 +3409,7 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                 if fval.contains_key(&p) {
                     continue;
                 }
-                if tau_of.get(&p) == Some(&t) {
+                if tau_at(p) == Some(t) {
                     fval.insert(p, field.f([p % m, (p / m) % m, p / (m * m)]) as f64);
                 } else {
                     fval.insert(p, f64::NAN);
@@ -8261,6 +8370,41 @@ mod tests {
             let m = explicit_surface_full(&prog(src, &["x", "y"]), d, 150, 2, ComplexMode::Off, true);
             // 修正前は 678・32・508 本
             assert_eq!(open_edges_inside(&m, d), 0, "{src}");
+        }
+    }
+
+    #[test]
+    fn touching_steps_are_drawn_on_both_sides() {
+        // mod(x y, z) = 0 は x y = n z（n は整数）の面。z > 0 では F ∈ [0, z)、z < 0 では F ∈ (z, 0] で、
+        // F は 0 に触れるだけで符号が変わらない。前は F = 0 ちょうどを正に数えて段差のセルを選んでいたので、
+        // z < 0 の側しか描けなかった（z = x y の面が z > 0 で 16%、z < 0 で 97%）
+        let d = Domain { lo: [-4.0, -4.0, -3.0], hi: [4.0, 4.0, 3.0] };
+        let m = implicit_solid_opt(&prog("mod(x y, z)", &["x", "y", "z"]), d, 48, &[], 0, Refine::Normal);
+        let h = 0.2;
+        let cells: std::collections::HashSet<[i64; 3]> =
+            m.positions.chunks_exact(3).map(|p| [0, 1, 2].map(|a| (p[a] as f64 / h).floor() as i64)).collect();
+        let near = |q: [f64; 3]| {
+            let c = q.map(|v| (v / h).floor() as i64);
+            (-1..=1).any(|a| (-1..=1).any(|b| (-1..=1).any(|e| cells.contains(&[c[0] + a, c[1] + b, c[2] + e]))))
+        };
+        for nn in [1.0, -1.0, 2.0] {
+            let (mut hit, mut all) = ([0; 2], [0; 2]);
+            for i in 0..=40 {
+                for j in 0..=40 {
+                    let (x, y) = (-4.0 + 0.2 * i as f64, -4.0 + 0.2 * j as f64);
+                    let z = x * y / nn;
+                    if z.abs() < 0.5 || z.abs() > 2.8 {
+                        continue;
+                    }
+                    let side = (z < 0.0) as usize;
+                    all[side] += 1;
+                    hit[side] += near([x, y, z]) as usize;
+                }
+            }
+            for side in 0..2 {
+                let r = hit[side] as f64 / all[side] as f64;
+                assert!(r > 0.9, "x y = {nn} z の面の、z {} 0 の側が {:.0}% しか描けていない", ["> ", "<"][side], 100.0 * r);
+            }
         }
     }
 
