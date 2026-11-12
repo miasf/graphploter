@@ -13,6 +13,8 @@ use crate::eval::Cond;
 
 /// 枝の組の数がこれを超える式（`floor(1000 x)` など）は、部品に分けない
 const MAX_TAUS: usize = 20_000;
+/// 切り取りの境目が、辺の上で成り立つ側の頂点からこの割合より近ければ、その頂点を境目にする
+const CUT_SNAP: f64 = 1e-4;
 /// 枝を調べる格子点の数の上限
 const MAX_BRANCH_POINTS: usize = 40_000_000;
 
@@ -98,7 +100,13 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
             let fz = f.frozen(&g.tau);
             let conds = f.branch_conds(&g.tau);
             let (subs, sub_changed) = fz.zero_factors();
-            let (sub_dom, sub_n, mask, tight) = piece_grid(&g.blocks, (g.lo, g.hi), dom, en, pn);
+            let relaxed = f.frozen_relaxed(&g.tau);
+            let may_zero = |lo: [f64; 3], hi: [f64; 3]| {
+                relaxed.may_contain_zero(&[0, 1, 2].map(|a| crate::interval::Interval::new(lo[a], hi[a])))
+            };
+            let Some((sub_dom, sub_n, mask, tight)) = piece_grid(&g.blocks, (g.lo, g.hi), dom, en, pn, &may_zero) else {
+                continue;
+            };
             for sub in &subs {
                 if sub.is_constant() {
                     continue;
@@ -209,7 +217,17 @@ fn solid_grid(dom: Domain, n: usize) -> (Domain, usize) {
 /// 枝のブロックを囲む立方体（1 辺のマスの数は 3 つの軸で同じ）だけにして、小さい部品で格子全体の大きさの手間をかけない。
 /// さらに、枝の格子点のある範囲 `bbox`（細かさ `en` の格子の点の番号。両端を含む）の 1 マス外までに絞る
 /// （ブロックは 1 辺 [`BLOCK`] マスあるので、小さい枝では、ブロックの範囲は枝の何倍も広い。枝の外の面は、作っても切り落とすだけ）
-fn piece_grid(blocks: &[u32], bbox: ([u32; 3], [u32; 3]), dom: Domain, en: usize, pn: usize) -> (Domain, usize, Vec<bool>, Domain) {
+///
+/// `may_zero(lo, hi)` は、箱の中の、その枝にいる点に面があるかもしれないか。面が無いと分かるマスの層を、軸ごとに両端から外す
+/// （縦に細長い枝を面が 1 か所で横切るだけの部品で、枝を囲む大きな立方体の格子を用意しない）。面がどこにも無ければ None
+fn piece_grid(
+    blocks: &[u32],
+    bbox: ([u32; 3], [u32; 3]),
+    dom: Domain,
+    en: usize,
+    pn: usize,
+    may_zero: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+) -> Option<(Domain, usize, Vec<bool>, Domain)> {
     let (edom, e) = solid_grid(dom, en);
     let enb = e.div_ceil(BLOCK);
     let pn = pn.max(2);
@@ -239,14 +257,58 @@ fn piece_grid(blocks: &[u32], bbox: ([u32; 3], [u32; 3]), dom: Domain, en: usize
         c0[a] = c0[a].max(-1);
         c1[a] = c1[a].min(pn as i64 + 1).max(c0[a] + 4);
     }
+    // 面が無いと分かる層を外す。面のあるマスの 2 マス外までは残す（面の三角形は隣のマスの頂点とつながり、
+    // 枝の外に出た分は後で切り落とす。切り落とす境目の辺が欠けないようにする）
+    // 外す前の範囲（ブロックの印は、この範囲の格子の区切りで付ける）
+    let (o0, o1) = (c0, c1);
+    // 層を外さないときに面を作る範囲: 枝の範囲を囲む立方体のうち、枝の範囲にかかるブロックまで（枝の範囲より少し広い。
+    // 枝の格子点が無くても、格子点の間に枝の細い切れ端があって面が描けることがある）。ここから層を外す
+    let old_total = (0..3).map(|a| o1[a] - o0[a]).max().unwrap_or(4);
+    let bs = BLOCK as i64;
+    for a in 0..3 {
+        c1[a] = o0[a] + old_total.min(bs * ((o1[a] - o0[a] + bs - 1) / bs));
+    }
+    for a in 0..3 {
+        let slab = |c0: &[i64; 3], c1: &[i64; 3], k: i64| {
+            let at = |b: usize, c: i64| dom.lo[b] + c as f64 * step[b];
+            let lo = [0, 1, 2].map(|b| at(b, if b == a { k } else { c0[b] }));
+            let hi = [0, 1, 2].map(|b| at(b, if b == a { k + 1 } else { c1[b] }));
+            may_zero(lo, hi)
+        };
+        let mut k0 = c0[a];
+        while k0 < c1[a] && !slab(&c0, &c1, k0) {
+            k0 += 1;
+        }
+        if k0 == c1[a] {
+            return None;
+        }
+        let mut k1 = c1[a];
+        while k1 > k0 + 1 && !slab(&c0, &c1, k1 - 1) {
+            k1 -= 1;
+        }
+        let (old0, old1) = (c0[a], c1[a]);
+        c0[a] = old0.max(k0 - 2);
+        c1[a] = old1.min(k1 + 2);
+        if c1[a] - c0[a] < 4 {
+            c0[a] = old0.max(c1[a] - 4);
+            c1[a] = old1.min(c0[a] + 4);
+        }
+    }
     // 立方体にする（マスの数を、一番長い軸にそろえる）。implicit_solid_with は外側に 1 マスずつ広げるので、その分を引いて渡す
     let total = (0..3).map(|a| c1[a] - c0[a]).max().unwrap_or(4) as usize;
     let inner = total - 2;
+    // 立方体の始まりのマス。下の層を外した軸は、立方体の上の端が残した範囲の上の端に来るように下げる
+    // （立方体が範囲の上にはみ出すと、表示範囲の外の面まで作ってしまう）。外す前の始まりよりは下げない。
+    // 層を外していない軸は、今までどおり範囲の下の端から
+    let org: [i64; 3] = [0, 1, 2].map(|a| if c0[a] > o0[a] { o0[a].max(c0[a].min(c1[a] - total as i64)) } else { c0[a] });
     let sub = Domain {
-        lo: [0, 1, 2].map(|a| dom.lo[a] + (c0[a] + 1) as f64 * step[a]),
-        hi: [0, 1, 2].map(|a| dom.lo[a] + (c0[a] + 1 + inner as i64) as f64 * step[a]),
+        lo: [0, 1, 2].map(|a| dom.lo[a] + (org[a] + 1) as f64 * step[a]),
+        hi: [0, 1, 2].map(|a| dom.lo[a] + (org[a] + 1 + inner as i64) as f64 * step[a]),
     };
-    // ブロックごとの印（この格子のマスの番号は、全体の番号 − c0）
+    // ブロックごとの印。枝のブロック（とその 1 マス外）にかかるブロックに付ける。
+    // ブロックの区切りは、層を外す前の範囲の格子（マスの番号は、全体の番号 − o0）で決めてから、この格子（全体の番号 − org）のブロックに直す。
+    // 枝のブロックの外でも、区切りの都合で印の付いたブロックにある面は描く。層を外して区切りがずれても、描く範囲が減らないようにする
+    let old_nb = (old_total as usize).div_ceil(BLOCK) as i64;
     let nb = total.div_ceil(BLOCK);
     let mut mask = vec![false; nb * nb * nb];
     for &b in blocks {
@@ -254,10 +316,15 @@ fn piece_grid(blocks: &[u32], bbox: ([u32; 3], [u32; 3]), dom: Domain, en: usize
         let span = |a: usize| {
             let (lo, hi) = world(a, k[a]);
             // 立方体にそろえて広がった分（短い軸の、枝の範囲の外）には印を付けない
-            let last = (c1[a] - c0[a] - 1).clamp(0, total as i64 - 1);
-            let lo = (cell(a, lo).floor() as i64 - 1 - c0[a]).clamp(0, last) as usize;
-            let hi = (cell(a, hi).ceil() as i64 + 1 - c0[a]).clamp(0, last) as usize;
-            (lo / BLOCK)..=(hi / BLOCK).min(nb - 1)
+            let last = (o1[a] - o0[a] - 1).clamp(0, old_total - 1);
+            let lo = (cell(a, lo).floor() as i64 - 1 - o0[a]).clamp(0, last) / bs;
+            let hi = ((cell(a, hi).ceil() as i64 + 1 - o0[a]).clamp(0, last) / bs).min(old_nb - 1);
+            // 前の区切りのブロック lo〜hi のマスの範囲（全体の番号）のうち、残した範囲に入る分
+            let (c_lo, c_hi) = ((o0[a] + bs * lo).max(c0[a]), (o0[a] + bs * (hi + 1)).min(c1[a]));
+            if c_lo >= c_hi {
+                return 1..=0;
+            }
+            (((c_lo - org[a]) / bs) as usize)..=(((c_hi - 1 - org[a]) / bs) as usize).min(nb - 1)
         };
         for bk in span(2) {
             for bj in span(1) {
@@ -267,12 +334,12 @@ fn piece_grid(blocks: &[u32], bbox: ([u32; 3], [u32; 3]), dom: Domain, en: usize
             }
         }
     }
-    // 面を作る範囲（立方体にそろえる前の、枝の範囲）
+    // 面を探す範囲（立方体にそろえる前の、枝の範囲のうち、層を外して残った分）
     let tight = Domain {
         lo: [0, 1, 2].map(|a| dom.lo[a] + c0[a] as f64 * step[a]),
-        hi: [0, 1, 2].map(|a| dom.lo[a] + c1[a] as f64 * step[a]),
+        hi: [0, 1, 2].map(|a| dom.lo[a] + c1[a].min(o1[a]) as f64 * step[a]),
     };
-    (sub, inner, mask, tight)
+    Some((sub, inner, mask, tight))
 }
 
 /// 印の付いたブロックのうち、区間演算で「面が無い」と分かるものの印を外す。印が残れば true。
@@ -639,12 +706,16 @@ fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Progr
             }
         }
     }
-    // 境目の頂点を足す（法線は両端の間を取る）
+    // 境目の頂点を足す（法線は両端の間を取る）。境目が成り立つ側の頂点そのもの（頂点がちょうど境目の上にある。
+    // 回していない式では、枝の境目が格子の面に重なるので多い）なら、頂点を足さずにその頂点を使う
     let cut_vertex: Vec<u32> = cuts
         .iter()
         .enumerate()
         .map(|(e, &(i, o))| {
             let t = lo[e];
+            if t < CUT_SNAP {
+                return i;
+            }
             let (p, q) = (pts[i as usize], pts[o as usize]);
             let id = mesh.push_vertex([0, 1, 2].map(|a| p[a] + (q[a] - p[a]) * t));
             let (ni, no) = (i as usize * 3, o as usize * 3);
@@ -657,7 +728,13 @@ fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Progr
         })
         .collect();
     let cut = |i: u32, o: u32| cut_vertex[cut_of[&(i, o)]];
+    // 切ってできた三角形のうち、頂点が重なってつぶれたもの（面積 0）は入れない
     let mut indices: Vec<u32> = Vec::with_capacity(mesh.indices.len());
+    let push = |indices: &mut Vec<u32>, t: [u32; 3]| {
+        if t[0] != t[1] && t[1] != t[2] && t[2] != t[0] {
+            indices.extend_from_slice(&t);
+        }
+    };
     for t in mesh.indices.chunks_exact(3) {
         let ins = [inside[t[0] as usize], inside[t[1] as usize], inside[t[2] as usize]];
         match ins.iter().filter(|&&i| i).count() {
@@ -665,13 +742,14 @@ fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Progr
             1 => {
                 let k = ins.iter().position(|&i| i).unwrap_or(0);
                 let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
-                indices.extend_from_slice(&[a, cut(a, b), cut(a, c)]);
+                push(&mut indices, [a, cut(a, b), cut(a, c)]);
             }
             2 => {
                 let k = ins.iter().position(|&i| !i).unwrap_or(0);
                 let (c, a, b) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
                 let (ca, cb) = (cut(a, c), cut(b, c));
-                indices.extend_from_slice(&[a, b, cb, a, cb, ca]);
+                push(&mut indices, [a, b, cb]);
+                push(&mut indices, [a, cb, ca]);
             }
             _ => {}
         }
@@ -914,5 +992,81 @@ mod tests {
             }
         }
     }
-}
 
+    #[test]
+    fn tall_branches_keep_their_faces() {
+        // floor(x) + floor(y) + z = mod(x y, 3) は、1 × 1 の柱ごとに z = mod(x y, 3) − floor(x) − floor(y) の面。
+        // 枝は柱（縦に長い）だが、面は高さ 3 の範囲にしか無い。面の無い層を外して作っても、面が欠けない
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let truth = |x: f64, y: f64| (x * y).rem_euclid(3.0) - x.floor() - y.floor();
+        for n in [40usize, 80] {
+            let m = implicit_solid_opt(&prog("floor(x) + floor(y) + z - mod(x y, 3)"), d, n, &[], 0, Refine::Normal);
+            let h = 20.0 / n as f64;
+            // 頂点は面の近く（ずれは格子の 1 マスの 3 割まで。柱の端・余りが飛ぶ所の近くは、隣の枝の値でもよい）
+            let mut off = 0;
+            for p in m.positions.chunks_exact(3) {
+                let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                let e = 1e-3;
+                let ok = [(0.0, 0.0), (e, 0.0), (-e, 0.0), (0.0, e), (0.0, -e), (e, e), (-e, -e), (e, -e), (-e, e)]
+                    .iter()
+                    .any(|(dx, dy)| (z - truth(x + dx, y + dy)).abs() < 0.3 * h);
+                off += !ok as usize;
+            }
+            assert!(off * 200 <= m.positions.len() / 3, "細かさ {n}: 面の上に無い頂点が {off} 個");
+            // 面の上の点（柱の中ほど）の近くに、メッシュがある
+            let near = near_fn(&m, h);
+            let (mut all, mut missing) = (0, 0);
+            for i in -9..9 {
+                for j in -9..9 {
+                    for (sx, sy) in [(0.3, 0.3), (0.5, 0.7), (0.7, 0.4)] {
+                        let (x, y) = (i as f64 + sx, j as f64 + sy);
+                        let z = truth(x, y);
+                        // 余りが飛ぶ線（x y が 3 の倍数）のすぐ近くと、表示範囲の外は見ない
+                        let r = (x * y).rem_euclid(3.0);
+                        if z.abs() > 5.5 || r < 0.3 || r > 2.7 {
+                            continue;
+                        }
+                        all += 1;
+                        missing += !near([x, y, z]) as usize;
+                    }
+                }
+            }
+            assert!(all > 300 && missing * 50 <= all, "細かさ {n}: {all} 点のうち {missing} 点が欠けている");
+        }
+    }
+
+    #[test]
+    fn clipping_leaves_no_collapsed_triangles() {
+        // 回していない式では、枝の境目が格子の面に重なり、切り取りの境目が頂点そのものになる。
+        // そこで面積 0 の三角形（同じ頂点を 2 回使う三角形）を作らない
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let m = implicit_solid_opt(&prog("mod(x, 2) + mod(y, 2) + mod(z, 2) - 2"), d, 80, &[], 0, Refine::Normal);
+        let key = |v: u32| [0, 1, 2].map(|a| (m.positions[3 * v as usize + a] as f64 * 1e4).round() as i64);
+        let tris = m.indices.len() / 3;
+        let collapsed = m.indices.chunks_exact(3).filter(|t| key(t[0]) == key(t[1]) || key(t[1]) == key(t[2]) || key(t[2]) == key(t[0])).count();
+        assert!(tris > 100_000 && collapsed * 1000 <= tris, "{tris} 個のうち {collapsed} 個がつぶれている");
+    }
+
+    #[test]
+    fn coarse_gyroid_is_not_flipped() {
+        // 回転の再生中の粗い格子（細かさ 24）でも、三角形の向きが全部そろっている（法線が F の勾配と同じ側を向く）
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let m = implicit_solid_opt(&prog("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)"), d, 24, &[], 0, Refine::Light);
+        let p = |v: u32| [0, 1, 2].map(|a| m.positions[3 * v as usize + a] as f64);
+        let (mut pos, mut neg) = (0, 0);
+        for t in m.indices.chunks_exact(3) {
+            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let nrm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let [x, y, z] = [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0);
+            let g = [x.cos() * y.cos() - z.sin() * x.sin(), -x.sin() * y.sin() + y.cos() * z.cos(), -y.sin() * z.sin() + z.cos() * x.cos()];
+            let s = nrm[0] * g[0] + nrm[1] * g[1] + nrm[2] * g[2];
+            if s > 0.0 {
+                pos += 1;
+            } else {
+                neg += 1;
+            }
+        }
+        assert!(pos + neg > 10_000 && pos.min(neg) == 0, "向きが混ざっている: {pos} / {neg}");
+    }
+}

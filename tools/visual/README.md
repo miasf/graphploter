@@ -15,6 +15,11 @@ node tools/visual/render.cjs /tmp/vis 30b2332 <HEAD の短いハッシュ> WORK
 # → /tmp/vis/report/index.html（変化の大きい順の一覧）、式ごとの画像、changes.tsv
 ```
 
+```sh
+# 3. 形が変わっていないはずの変更（速くするだけ・整理するだけ）は、三角形の集合が同じかを確かめる
+python3 tools/visual/same_shape.py /tmp/vis/<前の短いハッシュ> /tmp/vis/WORK
+```
+
 - `VISUAL_ONLY=stairs` … 名前にその文字を含む式だけ（`dump_revs.sh` の書き出しにも、`render.cjs` にも効く）
 - `VISUAL_VIEW=3,-2,1.6,0.6,0.4,0.2` … 視点を 1 つに決める（カメラの x,y,z と見る点の x,y,z）。気になる所に寄って見るとき
 - `VISUAL_REPORT=all` … 出力のフォルダ名（既定は `report`）
