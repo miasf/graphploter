@@ -9,7 +9,7 @@
 use crate::special as sp;
 use num_complex::Complex64 as C;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Func {
     // 初等関数
     Sin,

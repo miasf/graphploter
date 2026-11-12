@@ -20,7 +20,6 @@ use crate::interval::{Interval, Range};
 use crate::functions::Func;
 use crate::parser::{BinOp, Constant, Expr};
 use num_complex::Complex64 as C;
-use std::collections::HashMap;
 use std::f64::consts::{E, PI};
 
 mod pieces;
@@ -42,6 +41,18 @@ enum Op {
     CallN(Func, Vec<usize>),
 }
 
+/// 同じ命令を見つけるためのキー（[`Op`] と同じ形。定数は値のビット）
+#[derive(PartialEq, Eq, Hash)]
+enum OpKey {
+    Const(u64, u64),
+    Var(usize),
+    Neg(usize),
+    Bin(BinOp, usize, usize),
+    Call1(Func, usize),
+    Call2(Func, usize, usize),
+    CallN(Func, Vec<usize>),
+}
+
 /// パラメータ（スライダーで値を決める文字）の名前と値
 pub type Params = std::collections::BTreeMap<String, C>;
 
@@ -49,8 +60,8 @@ pub type Params = std::collections::BTreeMap<String, C>;
 #[derive(Default)]
 struct Builder {
     ops: Vec<Op>,
-    /// 命令（の文字列での表現）→ 番号。同じ命令は1つにまとめる
-    seen: HashMap<String, usize>,
+    /// 命令 → 番号。同じ命令は1つにまとめる
+    seen: crate::adaptive::HashMap<OpKey, usize>,
 }
 
 impl Builder {
@@ -80,8 +91,13 @@ impl Builder {
         };
         // 定数は、ビットまで同じ値だけを同じとみなす（0.0 と −0.0、NaN どうしを取り違えない）
         let key = match &op {
-            Op::Const(c) => format!("C{:x},{:x}", c.re.to_bits(), c.im.to_bits()),
-            other => format!("{other:?}"),
+            Op::Const(c) => OpKey::Const(c.re.to_bits(), c.im.to_bits()),
+            Op::Var(k) => OpKey::Var(*k),
+            Op::Neg(a) => OpKey::Neg(*a),
+            Op::Bin(o, a, b) => OpKey::Bin(*o, *a, *b),
+            Op::Call1(f, a) => OpKey::Call1(*f, *a),
+            Op::Call2(f, a, b) => OpKey::Call2(*f, *a, *b),
+            Op::CallN(f, args) => OpKey::CallN(*f, args.clone()),
         };
         if let Some(&k) = self.seen.get(&key) {
             return k;
