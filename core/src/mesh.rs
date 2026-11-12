@@ -233,8 +233,10 @@ struct Jump {
     /// 飛ぶ直前（始点の側）と直後（終点の側）の値
     before: C,
     after: C,
-    /// 辺の両端の高さの差（段差の大きさの目安）
-    first: f64,
+    /// 辺の中に、ほかにも段差がありそう（段差の線の交わる所を、辺が斜めに通るなど）
+    multi: bool,
+    /// `multi` のとき、もう 1 つの段差が始点の側（始点〜この段差）にありそう
+    rest_at_start: bool,
 }
 
 /// 陽関数の曲面。値が飛ぶ所（段差）を見つけて、そこで三角形を切り分ける（段差の縁がギザギザにならない）。
@@ -249,8 +251,12 @@ struct Jump {
 ///
 /// 段差の見つけ方: 両端の高さの差が大きい辺を二分法で 12 回狭めていき、差がほとんど縮まらなければ
 /// 「値が飛んでいる」とみなす（なめらかな関数なら、区間を半分にすると差もおよそ半分になる）。
+/// 切り分けるのは、表示範囲の高さの 0.5% より大きい段差（再生・ドラッグ中は 3%）。
 /// 三角形の3辺のうち2辺で値が飛んでいれば、飛ぶ所を結ぶ線で三角形を2つの部分に分け、それぞれの側の値で描く。
-/// 1辺のときは、飛ぶ所と向かいの頂点を結ぶ線で分ける。3辺のときは、その三角形を描かない。
+/// 段差の線が三角形の中で終わる・枝分かれする・交わる所（1 辺だけ、または 3 辺とも飛ぶ三角形）は、そこだけを
+/// 5 回まで二分して細かくする（足す三角形は 20,000 個まで。再生・ドラッグ中はしない）。
+/// その後も残る 1 辺のときは、飛ぶ所と向かいの頂点を結ぶ線で分ける。3辺のときは、頂点ごとに、頂点と両側の辺の
+/// 飛ぶ所を結ぶ三角形をその頂点の側の値で描く（真ん中の小さい三角形は描かない）。
 pub fn explicit_surface_full(
     prog: &Program,
     dom: Domain,
@@ -292,6 +298,18 @@ fn explicit_surface_scaled(
     let n = n.max(2);
     let m = n + 1; // 1辺の頂点数
     let (ua, va) = others(axis);
+    // 計算する範囲を、幅の 1e-7 ほど内側に縮める（下端と上端で縮める量を変える）。格子の点が、0 や整数などの
+    // ちょうどの値に乗らないようにするため。乗ると、その線の上だけの値（`sign(x)` の x = 0 での 0、範囲の上端
+    // x = 10 での `floor(x)` の 10 など。両側と違う値）で、幅の無い細い帯を描いてしまう
+    let dom = {
+        let mut d = dom;
+        for a in [ua, va] {
+            let w = d.hi[a] - d.lo[a];
+            d.lo[a] += 1.3e-7 * w;
+            d.hi[a] -= 0.7e-7 * w;
+        }
+        d
+    };
 
     // 格子点の座標を用意
     let mut us = Vec::with_capacity(m * m);
@@ -314,7 +332,8 @@ fn explicit_surface_scaled(
     let (wlo, whi) = (dom.lo[axis] - h, dom.hi[axis] + h);
     let usable = |w: f64| w.is_finite();
     let clamped = |z: C| height(z, mode).clamp(wlo, whi);
-    let threshold = h * 0.03;
+    // 切り分ける段差の高さ。再生・ドラッグ中は、候補が増えて遅くならないよう高めのまま
+    let threshold = if refine { h * 0.005 } else { h * 0.03 };
 
     // 最初の格子の辺: 右 (i, j)–(i+1, j)、上 (i, j)–(i, j+1)、斜め (i, j)–(i+1, j+1)。番号の小さいほうが始点
     let mut grid_edges = Vec::with_capacity(3 * m * m);
@@ -332,13 +351,11 @@ fn explicit_surface_scaled(
             }
         }
     }
-    // 段差は、切り分けるもの（差が threshold より大きい）より小さいものまで探す。小さい段差（階段の 1 段が
-    // 表示範囲の高さの 3% より低いなど）は切り分けずに描くが、そこを細かくしても急な斜面が増えるだけなので、細かくしない
+    // 段差のある辺（細かくしない）
     let mut steps: crate::adaptive::HashSet<(u32, u32)> = Default::default();
     let base_jumps: crate::adaptive::HashMap<(u32, u32), Jump> = {
         let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
         let mut out: crate::adaptive::HashMap<(u32, u32), Jump> = Default::default();
-        let small = if refine { 0.01 * h } else { threshold };
         for (e, jp) in find_jumps(
             prog,
             &us,
@@ -347,25 +364,23 @@ fn explicit_surface_scaled(
             &hs,
             &grid_edges,
             &clamped,
-            small,
+            threshold,
             &usable,
         ) {
             let key = (grid_edges[e].0 as u32, grid_edges[e].1 as u32);
             steps.insert(key);
-            if jp.first > threshold {
-                out.insert(key, jp);
-            }
+            out.insert(key, jp);
         }
         out
     };
 
+    let mut eval = |a: &[f64], b: &[f64]| {
+        let mut out = vec![C::new(0.0, 0.0); a.len()];
+        prog.eval_batch(&[a, b], &mut out);
+        out
+    };
     // 形が急に変わる所を細かくする
-    let r = {
-        let mut eval = |a: &[f64], b: &[f64]| {
-            let mut out = vec![C::new(0.0, 0.0); a.len()];
-            prog.eval_batch(&[a, b], &mut out);
-            out
-        };
+    let mut r = {
         let (lo, hi) = (dom.lo[axis], dom.hi[axis]);
         let tol = 0.004 * h;
         let ek = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
@@ -411,44 +426,98 @@ fn explicit_surface_scaled(
         };
         let (u0, u1) = (dom.lo[ua], dom.hi[ua]);
         let (v0, v1) = (dom.lo[va], dom.hi[va]);
-        crate::adaptive::refine(n, (u0, u1), (v0, v1), vals, &mut eval, &mut decide, limits)
+        crate::adaptive::refine_keep(n, (u0, u1), (v0, v1), vals, &mut eval, &mut decide, limits)
     };
+
+    // 細かくしてできた辺の段差を探す（最初の格子のままの辺は、もう調べてある）。
+    // 二分してできた辺は、どれも新しい頂点を端に持つので、番号が `from` 以上の頂点を持つ辺だけを調べればよい
+    let mut jumps = base_jumps;
+    let ek = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+    let search_new_edges = |r: &crate::adaptive::Triangulation<C>,
+                            tris: &[[u32; 3]],
+                            from: usize,
+                            jumps: &mut crate::adaptive::HashMap<(u32, u32), Jump>| {
+        let mut new_edges: Vec<(usize, usize)> = Vec::new();
+        let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+        for t in tris {
+            if t.iter().all(|&k| (k as usize) < from) {
+                continue;
+            }
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let e = ek(a, b);
+                if (e.1 as usize) >= from && seen.insert(e) {
+                    new_edges.push((e.0 as usize, e.1 as usize));
+                }
+            }
+        }
+        if new_edges.is_empty() {
+            return;
+        }
+        let (us, vs): (Vec<f64>, Vec<f64>) = r.uv().iter().map(|p| (p[0], p[1])).unzip();
+        let vals = r.vals();
+        let hs_clamped: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+        for (e, jp) in find_jumps(prog, &us, &vs, vals, &hs_clamped, &new_edges, &clamped, threshold, &usable) {
+            jumps.insert((new_edges[e].0 as u32, new_edges[e].1 as u32), jp);
+        }
+    };
+    let mut tris = r.tris();
+    search_new_edges(&r, &tris, m * m, &mut jumps);
+
+    // 段差の線が三角形の中で終わる・枝分かれする・交わる所（1 辺だけ、または 3 辺とも飛ぶ三角形と、
+    // 1 本の辺に段差が 2 つ以上ありそうな三角形）だけを細かくする。
+    // 段差の線の途中（2 辺で飛ぶ三角形）は、切り分けだけで正しく描ける
+    if refine && !jumps.is_empty() {
+        const ROUNDS: usize = 5;
+        const MAX_NEW: usize = 20_000;
+        let mut added = 0;
+        for _ in 0..ROUNDS {
+            let hs: Vec<f64> = r.vals().iter().map(|&z| height(z, mode)).collect();
+            let mut marked: Vec<[u32; 3]> = tris
+                .iter()
+                .filter(|t| {
+                    t.iter().all(|&k| usable(hs[k as usize])) && {
+                        let js: Vec<&Jump> = [ek(t[0], t[1]), ek(t[1], t[2]), ek(t[2], t[0])]
+                            .iter()
+                            .filter_map(|e| jumps.get(e))
+                            .collect();
+                        js.len() == 1 || js.len() == 3 || js.iter().any(|j| j.multi)
+                    }
+                })
+                .copied()
+                .collect();
+            if marked.is_empty() || added >= MAX_NEW {
+                break;
+            }
+            // 1 つ分けると、継ぎ目を合わせる分も含めて 2 つほど増える
+            let room = (MAX_NEW - added) / 2;
+            let last = marked.len() > room;
+            marked.truncate(room.max(1));
+            let from = r.uv().len();
+            added += r.bisect(&marked, &mut eval);
+            tris = r.tris();
+            search_new_edges(&r, &tris, from, &mut jumps);
+            if last {
+                break;
+            }
+        }
+        // 分けられて無くなった辺の段差は消す
+        let mut alive: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+        for t in &tris {
+            for e in [ek(t[0], t[1]), ek(t[1], t[2]), ek(t[2], t[0])] {
+                if jumps.contains_key(&e) {
+                    alive.insert(e);
+                }
+            }
+        }
+        jumps.retain(|e, _| alive.contains(e));
+    }
+
+    let r = r.finish();
     let count = r.uv.len();
     let us: Vec<f64> = r.uv.iter().map(|p| p[0]).collect();
     let vs: Vec<f64> = r.uv.iter().map(|p| p[1]).collect();
     let vals = r.vals;
     let hs: Vec<f64> = vals.iter().map(|&z| height(z, mode)).collect();
-
-    // 細かくしてできた辺の段差を探す（最初の格子のままの辺は、もう調べてある）
-    let mut jumps = base_jumps;
-    {
-        let mut new_edges: Vec<(usize, usize)> = Vec::new();
-        let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
-        for t in &r.tris {
-            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                let e = if a < b { (a, b) } else { (b, a) };
-                if (e.1 as usize) >= m * m && seen.insert(e) {
-                    new_edges.push((e.0 as usize, e.1 as usize));
-                }
-            }
-        }
-        if !new_edges.is_empty() {
-            let hs_clamped: Vec<f64> = hs.iter().map(|&w| w.clamp(wlo, whi)).collect();
-            for (e, jp) in find_jumps(
-                prog,
-                &us,
-                &vs,
-                &vals,
-                &hs_clamped,
-                &new_edges,
-                &clamped,
-                threshold,
-                &usable,
-            ) {
-                jumps.insert((new_edges[e].0 as u32, new_edges[e].1 as u32), jp);
-            }
-        }
-    }
 
     let mut mesh = Mesh::default();
     let complex = mode != ComplexMode::Off;
@@ -594,7 +663,32 @@ fn explicit_surface_scaled(
                 emit(&mut mesh, [index_of[p], near_p, index_of[w]]);
                 emit(&mut mesh, [near_q, index_of[q], index_of[w]]);
             }
-            _ => {} // 3辺とも飛ぶ: 描かない
+            // 3辺とも飛ぶ（段差の線の交わる所・値が細かく暴れる所）: 頂点ごとに、頂点とその両側の辺の飛ぶ所
+            // （頂点の側の値）を結ぶ三角形を描く。真ん中（3 つの飛ぶ所を結ぶ三角形）は値が決まらないので描かない。
+            // そのまま描くと 3 つの段にまたがる針になり、全部描かないと穴が空く
+            _ => {
+                // 辺 e の飛ぶ所の、頂点 p の側の頂点。辺にもう 1 つ段差がありそうで、それが p の側にあるときは、
+                // 見つけた段差の手前の値は p の段の値ではないので、p の値で頂点を置く
+                let near = |mesh: &mut Mesh, e: usize, p: u32| {
+                    let (id, _) = edges[e];
+                    let (a, b) = jump_vertex[&id];
+                    let jp = jumps[&id];
+                    let at_start = id.0 == p;
+                    if jp.multi && jp.rest_at_start == at_start {
+                        let (k0, k1) = (id.0 as usize, id.1 as usize);
+                        let (u, v) = (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t);
+                        push(mesh, u, v, vals[p as usize])
+                    } else if at_start {
+                        a
+                    } else {
+                        b
+                    }
+                };
+                for k in 0..3 {
+                    let (x, y) = (near(&mut mesh, k, t[k]), near(&mut mesh, (k + 2) % 3, t[k]));
+                    emit(&mut mesh, [index_of[vtx[k]], x, y]);
+                }
+            }
         }
     }
     clip_to_height_range(prog, &mut mesh, &plain, &us, &vs, &vals, &index_of, axis, mode, (dom.lo[axis], dom.hi[axis]), flip, &push);
@@ -898,6 +992,8 @@ fn find_jumps_with(
     // この回数だけ二分した後、差が最初の差の EARLY_KEEP 倍より小さい候補は外す
     const EARLY_ROUND: usize = 3;
     const EARLY_KEEP: f64 = 0.3;
+    // 1 回目と 2 回目の二分の後、どちらも中点と両端の平均とのずれが、両端の差のこの倍より小さい候補は外す
+    const MID_KEEP: f64 = 0.2;
     // 候補: 両端が使えて、高さの差が大きい辺
     struct Cand {
         id: usize,
@@ -908,6 +1004,8 @@ fn find_jumps_with(
         fa: C,
         fb: C,
         first: f64,
+        /// 1 回目の二分の中点が、両端の平均に近かった
+        smooth: bool,
     }
     let mut cands = Vec::new();
     for (id, &(k, k1)) in edges.iter().enumerate() {
@@ -925,6 +1023,7 @@ fn find_jumps_with(
                 fa: vals[k],
                 fb: vals[k1],
                 first: d,
+                smooth: false,
             });
         }
     }
@@ -948,9 +1047,23 @@ fn find_jumps_with(
             *b = vs[c.k0] + (vs[c.k1] - vs[c.k0]) * t;
         }
         prog.eval_batch(&[&mu, &mv], &mut out);
-        for (c, &z) in cands.iter_mut().zip(&out) {
+        let mut keep = vec![true; cands.len()];
+        for ((c, &z), keep) in cands.iter_mut().zip(&out).zip(keep.iter_mut()) {
             let t = 0.5 * (c.ta + c.tb);
             let (ha, hb, hm) = (height(c.fa), height(c.fb), height(z));
+            // 1 回目と 2 回目の二分の直後: どちらでも中点が両端の平均に近い辺は、なめらかな斜面なので外す。
+            // 辺の中で値が飛んでいれば、飛ぶ所を含む区間の中点はどちらかの端の値に近く、平均とのずれは差の約半分になる
+            // （なめらかな斜面なら、ずっと小さい）。1 回目だけで決めないのは、段差が 2 つ入った辺（段差の線の交わる所を
+            // 斜めに通る辺）では、1 回目の中点がちょうど真ん中の段に乗って、平均と同じになることがあるから
+            if early_exit && round < 2 {
+                let smooth = hm.is_finite() && (hm - 0.5 * (ha + hb)).abs() < MID_KEEP * (hb - ha).abs();
+                if round == 0 {
+                    c.smooth = smooth;
+                } else if smooth && c.smooth {
+                    *keep = false;
+                    continue;
+                }
+            }
             // 差の大きいほうの半分に狭める（真ん中が定義されなければ、始点の側に寄せる）
             if !hm.is_finite() || (hm - ha).abs() >= (hb - hm).abs() {
                 c.tb = t;
@@ -960,14 +1073,52 @@ fn find_jumps_with(
                 c.fa = z;
             }
         }
+        if keep.contains(&false) {
+            let mut it = keep.iter();
+            cands.retain(|_| *it.next().unwrap());
+            mu.truncate(cands.len());
+            mv.truncate(cands.len());
+            out.truncate(cands.len());
+        }
     }
     let mut jumps = std::collections::HashMap::new();
+    // 見つけた段差の両側の残り（始点〜段差、段差〜終点）のうち、差の大きいほうに、もう 1 つ段差がありそうか。
+    // 残りの差が threshold より大きく、その中点が両端の平均から離れていれば、ありそうとみなす
+    // （段差の線の交わる所を辺が斜めに通ると、1 本の辺に段差が 2 つ入る。見つかるのはそのうちの 1 つだけ）
+    let mut rest: Vec<(usize, f64, f64, f64, f64)> = Vec::new(); // (jumps の鍵, t0, t1, h0, h1)。t0 = 0 なら始点の側
     for c in cands {
         let d = (height(c.fb) - height(c.fa)).abs();
-        // 区間を 1/4096 にしても差が半分以上残っていれば、値が飛んでいる
-        // （どちらかの側が定義されない所は段差とはみなさない）
-        if d.is_finite() && d > 0.5 * c.first {
-            jumps.insert(c.id, Jump { t: 0.5 * (c.ta + c.tb), before: c.fa, after: c.fb, first: c.first });
+        // 区間を 1/4096 にしても差が 0.3 倍より多く残っていれば、値が飛んでいる（なめらかなら 1/4096 ほどになる）。
+        // 半分より小さくてもよいのは、1 本の辺に段差が 2 つ入ると、残るのはそのうちの 1 つ（差の約半分）だから。
+        // どちらかの側が定義されない所は段差とはみなさない
+        if d.is_finite() && d > EARLY_KEEP * c.first {
+            let (h0, h1) = (hs[c.k0], hs[c.k1]);
+            let (ha, hb) = (height(c.fa), height(c.fb));
+            let side = if (ha - h0).abs() >= (h1 - hb).abs() { (0.0, c.ta, h0, ha) } else { (c.tb, 1.0, hb, h1) };
+            if (side.3 - side.2).abs() > threshold {
+                rest.push((c.id, side.0, side.1, side.2, side.3));
+            }
+            jumps.insert(c.id, Jump { t: 0.5 * (c.ta + c.tb), before: c.fa, after: c.fb, multi: false, rest_at_start: false });
+        }
+    }
+    if !rest.is_empty() {
+        let (mut mu, mut mv) = (Vec::with_capacity(rest.len()), Vec::with_capacity(rest.len()));
+        for &(id, t0, t1, ..) in &rest {
+            let (k0, k1) = edges[id];
+            let t = 0.5 * (t0 + t1);
+            mu.push(us[k0] + (us[k1] - us[k0]) * t);
+            mv.push(vs[k0] + (vs[k1] - vs[k0]) * t);
+        }
+        let mut out = vec![C::new(0.0, 0.0); rest.len()];
+        prog.eval_batch(&[&mu, &mv], &mut out);
+        for (&(id, t0, _, h0, h1), &z) in rest.iter().zip(&out) {
+            let hm = height(z);
+            if !hm.is_finite() || (hm - 0.5 * (h0 + h1)).abs() >= MID_KEEP * (h1 - h0).abs() {
+                if let Some(j) = jumps.get_mut(&id) {
+                    j.multi = true;
+                    j.rest_at_start = t0 == 0.0;
+                }
+            }
         }
     }
     jumps
@@ -5455,7 +5606,7 @@ mod tests {
                 }
             }
         }
-        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, &edges, &clamped, h * 0.03, &usable, early_exit);
+        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, &edges, &clamped, h * 0.005, &usable, early_exit);
         let mut out: Vec<(usize, f64)> = jumps.iter().map(|(&id, j)| (id, j.t)).collect();
         out.sort_by_key(|&(id, _)| id);
         out
@@ -5504,6 +5655,45 @@ mod tests {
         let p = prog("20 x", &["x", "y"]);
         let full = explicit_surface(&p, Domain { lo: [-1.0, -1.0, -30.0], hi: [1.0, 1.0, 30.0] }, 10, 2);
         assert_eq!(full.positions.len(), 11 * 11 * 3);
+    }
+
+    /// 三角形ごとの (xy 平面に落とした面積, 3 頂点の高さの差)
+    fn tri_spreads(m: &Mesh) -> Vec<(f64, f64)> {
+        m.indices
+            .chunks_exact(3)
+            .map(|t| {
+                let v = |k: u32| {
+                    let k = k as usize * 3;
+                    [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+                };
+                let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+                let area = (((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2.0).abs();
+                let hi = a[2].max(b[2]).max(c[2]);
+                let lo = a[2].min(b[2]).min(c[2]);
+                (area, hi - lo)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn step_corners_have_no_spikes() {
+        // floor(x) + floor(y) の段差の線が交わる所（格子の点）に、針のような三角形が立たない
+        let d = Domain { lo: [-3.1, -3.1, -10.0], hi: [3.1, 3.1, 10.0] };
+        let m = explicit_surface_full(&prog("floor(x) + floor(y)", &["x", "y"]), d, 60, 2, ComplexMode::Off, false);
+        let tris = tri_spreads(&m);
+        let total: f64 = tris.iter().map(|t| t.0).sum();
+        let spikes: f64 = tris.iter().filter(|t| t.1 > 0.5).map(|t| t.0).sum();
+        assert!((total - 6.2 * 6.2).abs() < 0.05, "面積 {total}");
+        assert!(spikes <= 0.0005 * total, "針の面積 {spikes}（全体 {total}）");
+    }
+
+    #[test]
+    fn low_steps_are_cut() {
+        // 表示範囲の高さの 3% より低い段差（1 段 1/3、範囲の高さ 12.8）も、斜面ではなく段として描く
+        let d = Domain { lo: [-5.0, -5.0, -6.4], hi: [5.0, 5.0, 6.4] };
+        let m = explicit_surface(&prog("floor(3x)/3", &["x", "y"]), d, 60, 2);
+        let slopes = tri_spreads(&m).iter().filter(|t| t.1 > 0.1).count();
+        assert_eq!(slopes, 0);
     }
 
     #[test]
@@ -5599,7 +5789,8 @@ mod tests {
         let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], dom, 4, ComplexMode::Abs, false, false, 20.0);
         assert_eq!(shape.complex.len(), shape.points.len()); // 3次元の点1つにつき3つ
         for q in shape.points.chunks_exact(3) {
-            assert!((q[2] - (q[0] * q[0] + q[1] * q[1])).abs() < 1e-9); // |(x+iy)²| = x² + y²
+            // |(x+iy)²| = x² + y²（頂点は f32 なので、その精度で）
+            assert!((q[2] - (q[0] * q[0] + q[1] * q[1])).abs() < 1e-6);
         }
     }
 
@@ -5910,7 +6101,8 @@ mod tests {
         assert!(!half.indices.is_empty());
         // 平面に落とした面積: 全体は 2 × 2 = 4、x ≥ 0 の所だけなら 2（縁は細かくするので、ほぼ 2）
         let (a_full, a_half) = (flat_area(&full), flat_area(&half));
-        assert!((a_full - 4.0).abs() < 1e-9);
+        // （計算する範囲は幅の 1e-7 だけ内側に縮めてあるので、全体も 4 よりわずかに小さい）
+        assert!((a_full - 4.0).abs() < 1e-5);
         assert!((a_half - 2.0).abs() < 0.03, "{a_half}");
     }
 
