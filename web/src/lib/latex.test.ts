@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { joinTuple, latexToText, splitTuple } from './latex.ts'
+import { fenceBareDelimiters, joinTuple, latexToText, splitTuple } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -74,6 +74,14 @@ check('split 入れ子のカンマ', splitTuple('\\left(\\operatorname{max}\\lef
   '\\operatorname{max}\\left(t,1\\right)',
   '2',
 ])
+// 裸の床・天井の括弧を \left … \right の形に直す
+check('fence floor', fenceBareDelimiters('z=\\lfloor x\\rfloor'), 'z=\\left\\lfloor x\\right\\rfloor')
+check('fence 入れ子', fenceBareDelimiters('\\lceil \\lfloor x\\rfloor /2\\rceil'), '\\left\\lceil \\left\\lfloor x\\right\\rfloor /2\\right\\rceil')
+check('fence 分数の中', fenceBareDelimiters('z=\\frac{\\lfloor x\\rfloor}{2}'), 'z=\\frac{\\left\\lfloor x\\right\\rfloor}{2}')
+check('fence 済みはそのまま', fenceBareDelimiters('\\left\\lfloor x\\right\\rfloor'), '\\left\\lfloor x\\right\\rfloor')
+check('fence 対にならない', fenceBareDelimiters('\\lfloor x\\rceil'), '\\lfloor x\\rceil')
+check('fence { } をまたがない', fenceBareDelimiters('\\frac{\\lfloor x}{y\\rfloor}'), '\\frac{\\lfloor x}{y\\rfloor}')
+check('fence 変換結果は同じ', latexToText(fenceBareDelimiters('z=\\lfloor x\\rfloor+1')), latexToText('z=\\lfloor x\\rfloor+1'))
 check('join', joinTuple(['a', 'b']), '\\left(a,b\\right)')
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)

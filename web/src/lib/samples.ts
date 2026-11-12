@@ -87,7 +87,7 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         label: '階段 z = ⌊x⌋/2 + ⌊y⌋/4（段差の壁つき）',
         items: [
           {
-            latex: 'z=\\frac{\\lfloor x\\rfloor}{2}+\\frac{\\lfloor y\\rfloor}{4}',
+            latex: 'z=\\frac{\\left\\lfloor x\\right\\rfloor}{2}+\\frac{\\left\\lfloor y\\right\\rfloor}{4}',
             options: { color: '#1a9ea0', walls: true },
           },
         ],

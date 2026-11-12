@@ -110,7 +110,7 @@ class Converter {
     return /[\w)!.]$/.test(t)
   }
 
-  /** end のトークン（'}' や '\\right'）が来るまで変換する */
+  /** end のトークン（'}' や '\right'）が来るまで変換する */
   private seq(end: Token | null) {
     while (this.i < this.toks.length) {
       const t = this.toks[this.i]
@@ -285,6 +285,49 @@ class Converter {
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */
 export function latexToText(latex: string): string {
   return new Converter(tokenize(latex)).run()
+}
+
+/** 裸の床・天井の括弧（\left / \right の付いていないもの）の開き → 閉じ */
+const BARE_FENCES: Record<string, string> = { '\\lfloor': '\\rfloor', '\\lceil': '\\rceil' }
+
+/**
+ * 対になった裸の \lfloor … \rfloor / \lceil … \rceil を \left\lfloor … \right\rfloor の形に直す。
+ * MathLive は裸の ⌊ ⌋ を1組の括弧として扱わないので、その後ろで / を打つと、分子に式の先頭（z= など）まで入ってしまう。
+ * 同じ { } の中で対になっているものだけを直し、対にならないものはそのまま残す。
+ * 例) "z=\lfloor x\rfloor" → "z=\left\lfloor x\right\rfloor"
+ */
+export function fenceBareDelimiters(latex: string): string {
+  /** 直す所（文字の位置 → 前に入れる \left / \right） */
+  const inserts = new Map<number, string>()
+  /** 開いている { と裸の開き括弧（{ は null） */
+  const stack: ({ name: string; at: number } | null)[] = []
+  /** 直前の \left / \right の終わりの位置（無ければ -1） */
+  let leftRightEnd = -1
+  for (const m of latex.matchAll(/\\(?:left|right|[lr](?:floor|ceil))(?![a-zA-Z])|\\.|[{}]/g)) {
+    const t = m[0]
+    const at = m.index
+    // \left / \right の直後の括弧はそのまま（間の空白は飛ばす）
+    const fenced = leftRightEnd >= 0 && latex.slice(leftRightEnd, at).trim() === ''
+    leftRightEnd = t === '\\left' || t === '\\right' ? at + t.length : -1
+    if (fenced) continue
+    if (t === '{') stack.push(null)
+    else if (t === '}') {
+      while (stack.length && stack[stack.length - 1] !== null) stack.pop() // この { } の中で閉じなかった開き括弧
+      stack.pop()
+    } else if (t in BARE_FENCES) stack.push({ name: t, at })
+    else if (t === '\\rfloor' || t === '\\rceil') {
+      const top = stack[stack.length - 1]
+      if (top && BARE_FENCES[top.name] === t) {
+        stack.pop()
+        inserts.set(top.at, '\\left')
+        inserts.set(at, '\\right')
+      }
+    }
+  }
+  if (inserts.size === 0) return latex
+  let out = ''
+  for (let i = 0; i < latex.length; i++) out += (inserts.get(i) ?? '') + latex[i]
+  return out
 }
 
 // ---------------------------------------------------------------------------
