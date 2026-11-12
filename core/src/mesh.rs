@@ -1925,6 +1925,89 @@ const EDGES: [[usize; 2]; 12] = [
     [3, 7],
 ];
 
+/// セルの角のうち、少ないほうの符号（負なら true）の角を、つながっているものどうしの組に分ける（組ごとに曲面が 1 枚）。
+/// `v` は角の F の値（負かどうかで符号を決める）。戻り値は (角ごとの組の番号（少ないほうの符号でない角は usize::MAX）,
+/// 組の数, 少ないほうの符号)。
+///
+/// 角は、セルの辺で隣り合うときと、あいまいな面（対角の 2 つが同じ符号で、残りの 2 つが逆の符号の面）の対角で
+/// 「その面の中でつながっている」ときにつながる。
+///
+/// 組に分けるのは少ないほうの符号の角だけなので、あいまいな面では、そのセルが「少ないほうの符号の対角がつながる」か
+/// 「多いほうの符号の対角がつながる（少ないほうは切れる）」かを決めることになる。面を共有する隣のセルと判断が食い違うと、
+/// その面の上に四角形が張られず穴が開く（前は辺のつながりだけで決めていたので、少ないほうの符号が面の両側で逆のとき、
+/// 両側とも「相手の符号がつながる」とみなしていた。面が格子の平面にほぼ重なるジャイロイドなどで出る）。そこで:
+///
+/// - 隣のセルの少ないほうの符号がこのセルと逆なら、面の上で F を双一次に補間したときの鞍点の値
+///   $s = \frac{ab - cd}{(a + b) - (c + d)}$（a, b は対角の 2 つ、c, d は残りの 2 つ）の符号の対角がつながるとする（漸近判定）。
+///   隣のセルも同じ 4 つの値で同じ $s$ を計算するので、判断がそろう
+/// - 隣のセルの少ないほうの符号がこのセルと同じなら、前と同じく切れるとする（両側とも切るので、そろう。
+///   両側ともつなぐと、セルより細い管が 1 本の辺につぶれて、3 つ以上の三角形が集まる辺になる）
+///
+/// `far(f, side)` は、軸 f の向きの面（side = 0: 手前、1: 奥）の向こうのセルの、その面と反対側の面の 4 つの角の値
+/// （格子の外なら None。そのときは鞍点の値だけで決める）
+fn corner_groups(v: &[f32; 8], far: &dyn Fn(usize, usize) -> Option<[f32; 4]>) -> ([usize; 8], usize, bool) {
+    let neg: [bool; 8] = v.map(|x| x < 0.0);
+    let count = neg.iter().filter(|&&b| b).count();
+    let minority = count <= 4;
+    let linked = |x: usize, y: usize| -> bool {
+        let diff = (0..3).filter(|&a| CORNERS[x][a] != CORNERS[y][a]).count();
+        match diff {
+            1 => true,
+            2 => {
+                // 面の対角。面の残りの 2 つの角が同じ符号なら（あいまいな面）、鞍点の値で決める
+                let f = (0..3).find(|&a| CORNERS[x][a] == CORNERS[y][a]).unwrap_or(0);
+                let mut w = [0usize; 2];
+                let mut k = 0;
+                for c in 0..8 {
+                    if c != x && c != y && CORNERS[c][f] == CORNERS[x][f] {
+                        w[k] = c;
+                        k += 1;
+                    }
+                }
+                if neg[w[0]] == neg[x] || neg[w[1]] == neg[x] {
+                    return false; // あいまいでない面（辺でつながるなら、辺をたどってつながる）
+                }
+                // 隣のセルの少ないほうの符号（面の 4 つの角と、向こうの 4 つの角から）
+                if let Some(other) = far(f, CORNERS[x][f]) {
+                    let count = 2 + other.iter().filter(|&&q| q < 0.0).count();
+                    if (count <= 4) == neg[x] {
+                        return false;
+                    }
+                }
+                let (a, b, c, d) = (v[x] as f64, v[y] as f64, v[w[0]] as f64, v[w[1]] as f64);
+                let s = (a * b - c * d) / ((a + b) - (c + d));
+                (s < 0.0) == neg[x]
+            }
+            _ => false,
+        }
+    };
+    let mut group = [usize::MAX; 8];
+    let mut groups = 0;
+    for c in 0..8 {
+        if neg[c] != minority || group[c] != usize::MAX {
+            continue;
+        }
+        // 角は8つなので、積む場所は固定の大きさで足りる（セルごとに Vec を作らない）
+        let mut stack = [0usize; 8];
+        let mut top = 1;
+        stack[0] = c;
+        group[c] = groups;
+        while top > 0 {
+            top -= 1;
+            let x = stack[top];
+            for y in 0..8 {
+                if y != x && neg[y] == minority && group[y] == usize::MAX && linked(x, y) {
+                    group[y] = groups;
+                    stack[top] = y;
+                    top += 1;
+                }
+            }
+        }
+        groups += 1;
+    }
+    (group, groups, minority)
+}
+
 /// 陰関数の曲面 F(x, y, z) = 0 を作る。`prog` の変数は x, y, z。
 pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
     implicit_solid(prog, dom, n, &[], 0)
@@ -2223,6 +2306,7 @@ fn implicit_solid_with(
                 for (c, off) in corner_off.iter().enumerate() {
                     mask |= ((buf[l + off] < 0.0) as u8) << c;
                 }
+                let corner_val = |c: usize| buf[l + corner_off[c]];
                 // 段差をまたぐセルは枝ごとに、極の近くのセルは零点を数え直して、別に作る
                 if in_branch_cell(i, j, k) || (!poles.mixed.is_empty() && poles.mixed.contains(&cell(i, j, k))) {
                     continue;
@@ -2233,34 +2317,18 @@ fn implicit_solid_with(
                     continue;
                 }
                 let corner_neg: [bool; 8] = std::array::from_fn(|c| mask >> c & 1 == 1);
-                let neg = mask.count_ones() as usize;
-                // 少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分ける
-                let minority = neg <= 4;
-                let mut group = [usize::MAX; 8];
-                let mut groups = 0;
-                for c in 0..8 {
-                    if corner_neg[c] != minority || group[c] != usize::MAX {
-                        continue;
+                // 少ないほうの符号の角を、つながっているものどうしで組に分ける（[`corner_groups`]）
+                let q = [i, j, k];
+                let far = |f: usize, side: usize| -> Option<[f32; 4]> {
+                    // 向こうのセルの反対側の面: 軸 f の座標が q[f] − 1（手前）か q[f] + 2（奥）
+                    if (side == 0 && q[f] == 0) || (side == 1 && q[f] + 2 > n) {
+                        return None;
                     }
-                    // 角は8つなので、積む場所は固定の大きさで足りる（セルごとに Vec を作らない）
-                    let mut stack = [0usize; 8];
-                    let mut top = 1;
-                    stack[0] = c;
-                    group[c] = groups;
-                    while top > 0 {
-                        top -= 1;
-                        let x = stack[top];
-                        for [ca, cb] in EDGES {
-                            let y = if ca == x { cb } else if cb == x { ca } else { continue };
-                            if corner_neg[y] == minority && group[y] == usize::MAX {
-                                group[y] = groups;
-                                stack[top] = y;
-                                top += 1;
-                            }
-                        }
-                    }
-                    groups += 1;
-                }
+                    let (g, h) = ((f + 1) % 3, (f + 2) % 3);
+                    let base = if side == 0 { l - view.strides[f] } else { l + 2 * view.strides[f] };
+                    Some([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dg, dh)| buf[base + dg * view.strides[g] + dh * view.strides[h]]))
+                };
+                let (mut group, mut groups, minority) = corner_groups(&std::array::from_fn(corner_val), &far);
                 // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
                 // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
                 let has_touch = near_touch
@@ -4122,17 +4190,17 @@ fn coarse_nets(
         Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
     };
     let pos = |p: [f64; 3]| [0, 1, 2].map(|a| dom.at(a, p[a] * k as f64, n));
-    nets_on_grid([nc; 3], &cell_ok, &|c| vals[at(c)] < 0.0, &cross, &pos)
+    nets_on_grid([nc; 3], &cell_ok, &|c| vals[at(c)], &cross, &pos)
 }
 
-/// Surface Nets（`dims` マスの格子）。`cell_ok` が偽のセルは見ない。`neg(角)` は角の F が負か、
+/// Surface Nets（`dims` マスの格子）。`cell_ok` が偽のセルは見ない。`val(角)` は角の F の値（負かどうかで符号を決める）、
 /// `cross(p, a)` は辺 p → p + e_a の交わる位置と始点の符号（負なら true）。`pos` は格子の座標から空間の座標へ。
 /// 1 つのセルを 2 枚以上の曲面が通るときは、細かい版と同じく、少ないほうの符号の角の組ごとに頂点を分ける
 /// （分けないと、鞍の形の面で 4 つの三角形が 1 本の辺に集まる）
 fn nets_on_grid(
     dims: [usize; 3],
     cell_ok: &dyn Fn([usize; 3]) -> bool,
-    neg: &dyn Fn([usize; 3]) -> bool,
+    val: &dyn Fn([usize; 3]) -> f32,
     cross: &dyn Fn([usize; 3], usize) -> Option<(f64, bool)>,
     pos: &dyn Fn([f64; 3]) -> [f64; 3],
 ) -> Mesh {
@@ -4150,31 +4218,26 @@ fn nets_on_grid(
                     continue;
                 }
                 let corner = |d: [usize; 3]| [x + d[0], y + d[1], z + d[2]];
-                let corner_neg: [bool; 8] = std::array::from_fn(|i| neg(corner(CORNERS[i])));
+                let corner_val: [f32; 8] = std::array::from_fn(|i| val(corner(CORNERS[i])));
+                let corner_neg: [bool; 8] = corner_val.map(|v| v < 0.0);
                 let count = corner_neg.iter().filter(|&&b| b).count();
                 if count == 0 || count == 8 {
                     continue;
                 }
-                let minority = count <= 4;
-                let mut group = [usize::MAX; 8];
-                let mut groups = 0;
-                for i in 0..8 {
-                    if corner_neg[i] != minority || group[i] != usize::MAX {
-                        continue;
+                let far = |f: usize, side: usize| -> Option<[f32; 4]> {
+                    if (side == 0 && c[f] == 0) || (side == 1 && c[f] + 2 > dims[f]) {
+                        return None;
                     }
-                    let mut stack = vec![i];
-                    group[i] = groups;
-                    while let Some(a) = stack.pop() {
-                        for [ca, cb] in EDGES {
-                            let b = if ca == a { cb } else if cb == a { ca } else { continue };
-                            if corner_neg[b] == minority && group[b] == usize::MAX {
-                                group[b] = groups;
-                                stack.push(b);
-                            }
-                        }
-                    }
-                    groups += 1;
-                }
+                    let (g, h) = ((f + 1) % 3, (f + 2) % 3);
+                    Some([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dg, dh)| {
+                        let mut p = c;
+                        p[f] = if side == 0 { c[f] - 1 } else { c[f] + 2 };
+                        p[g] += dg;
+                        p[h] += dh;
+                        val(p)
+                    }))
+                };
+                let (group, groups, minority) = corner_groups(&corner_val, &far);
                 let mut sums = [([0.0f64; 3], 0.0f64); 8];
                 let mut edge_group = [usize::MAX; 12];
                 for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
@@ -4867,7 +4930,7 @@ fn local_nets(
     Ok(nets_on_grid(
         dims,
         &|_| true,
-        &|c| vals[at(c)] < 0.0,
+        &|c| vals[at(c)],
         &cross,
         &pos,
     ))
@@ -5231,7 +5294,7 @@ fn refine_blocks(
             Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
         };
         let pos = |p: [f64; 3]| [0, 1, 2].map(|a| dom.at(a, c0[a] as f64 + p[a] / r as f64, n));
-        return Some(nets_on_grid(dims, &cell_ok, &|c| vals[at(c)] < 0.0, &cross, &pos));
+        return Some(nets_on_grid(dims, &cell_ok, &|c| vals[at(c)], &cross, &pos));
     }
 }
 
@@ -5340,27 +5403,23 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
                 if !near_touch && (neg == 0 || neg == 8) {
                     continue;
                 }
-                // 少ないほうの符号の角を、セルの辺でつながっているものどうしで組に分ける
-                let minority = neg <= 4;
-                let mut group = [usize::MAX; 8];
-                let mut groups = 0;
-                for c in 0..8 {
-                    if corner_neg[c] != minority || group[c] != usize::MAX {
-                        continue;
+                // 少ないほうの符号の角を、つながっているものどうしで組に分ける
+                let q = [i, j, k];
+                let far = |fa: usize, side: usize| -> Option<[f32; 4]> {
+                    if (side == 0 && q[fa] == 0) || (side == 1 && q[fa] + 2 > n) {
+                        return None;
                     }
-                    let mut stack = vec![c];
-                    group[c] = groups;
-                    while let Some(x) = stack.pop() {
-                        for [ca, cb] in EDGES {
-                            let y = if ca == x { cb } else if cb == x { ca } else { continue };
-                            if corner_neg[y] == minority && group[y] == usize::MAX {
-                                group[y] = groups;
-                                stack.push(y);
-                            }
-                        }
-                    }
-                    groups += 1;
-                }
+                    let (g, h) = ((fa + 1) % 3, (fa + 2) % 3);
+                    Some([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dg, dh)| {
+                        let mut p = q;
+                        p[fa] = if side == 0 { q[fa] - 1 } else { q[fa] + 2 };
+                        p[g] += dg;
+                        p[h] += dh;
+                        f[idx(p[0], p[1], p[2])]
+                    }))
+                };
+                let (mut group, mut groups, minority) =
+                    corner_groups(&CORNERS.map(|d| f[idx(i + d[0], j + d[1], k + d[2])]), &far);
                 // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
                 // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
                 let has_touch = near_touch
@@ -5924,9 +5983,14 @@ struct SignEdge {
 ///    「零点ではない」。途中で値が有限でなくなった辺も「零点ではない」
 ///    （両端の小さいほうの値だけで比べると、零点が辺の端のすぐ近くにあるとき、端の値が変わらないので見誤る）
 ///
+/// 3. 2 で「縮まなかった」辺は、二分をさらに [`EXTRA_ROUNDS`] 回続けてから、同じ基準で決め直す。面が辺にほぼ沿っていて
+///    両端の値がとても小さい辺（ジャイロイドの鞍の近くなど）は、零点があっても 6 回では半分まで縮まないことがある。
+///    本当の零点なら、続ければ値は区間の幅に比例して縮む（極なら増え、値が飛ぶ所なら変わらない）
+///
 /// 計算は、全部の辺をまとめて行う
 fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignEdge]) -> Vec<bool> {
     const ROUNDS: usize = 6;
+    const EXTRA_ROUNDS: usize = 18;
     let mut result = vec![false; edges.len()];
     if edges.is_empty() {
         return result;
@@ -5954,7 +6018,12 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
         .map(|(k, e)| (k, 0.0, 1.0, e.f0, e.f1))
         .collect();
     // 2. 二分
-    for _ in 0..ROUNDS {
+    let shrunk = |k: usize, fa: f64, fb: f64| fa.abs() + fb.abs() < 0.5 * (edges[k].f0.abs() + edges[k].f1.abs());
+    for round in 0..ROUNDS + EXTRA_ROUNDS {
+        if round == ROUNDS {
+            // 3. 縮んだ辺は本当の零点。縮まなかった辺だけ、二分を続ける
+            rest.retain(|&(k, _, _, fa, fb)| !shrunk(k, fa, fb));
+        }
         if rest.is_empty() {
             break;
         }
@@ -5974,8 +6043,7 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
             .collect();
     }
     for (k, _, _, fa, fb) in rest {
-        let e = &edges[k];
-        if fa.abs() + fb.abs() >= 0.5 * (e.f0.abs() + e.f1.abs()) {
+        if !shrunk(k, fa, fb) {
             result[k] = true;
         }
     }
@@ -9728,6 +9796,49 @@ mod tests {
         let (la, nb) = (a.lod_mesh.as_ref().unwrap().indices.len(), b.indices.len());
         let merged = merge(vec![a, b], false);
         assert_eq!(merged.lod_mesh.as_ref().unwrap().indices.len(), la + nb);
+    }
+
+    /// 表示範囲の端から `margin` より内側にある、1 つの三角形にしか使われない辺（穴の縁）の数。頂点は位置でまとめる
+    fn inner_border_edges(m: &Mesh, d: Domain, margin: f64) -> usize {
+        let mut ids: crate::adaptive::HashMap<[i64; 3], u32> = Default::default();
+        let vid: Vec<u32> = m
+            .positions
+            .chunks_exact(3)
+            .map(|p| {
+                let next = ids.len() as u32;
+                *ids.entry([0, 1, 2].map(|a| (p[a] as f64 * 1e4).round() as i64)).or_insert(next)
+            })
+            .collect();
+        let mut count: crate::adaptive::HashMap<(u32, u32), (usize, [f64; 3])> = Default::default();
+        for t in m.indices.chunks_exact(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (va, vb) = (vid[a as usize], vid[b as usize]);
+                if va == vb {
+                    continue;
+                }
+                let mid = [0, 1, 2].map(|k| 0.5 * (m.positions[3 * a as usize + k] + m.positions[3 * b as usize + k]) as f64);
+                count.entry((va.min(vb), va.max(vb))).or_insert((0, mid)).0 += 1;
+            }
+        }
+        count.values().filter(|(c, q)| *c == 1 && (0..3).all(|k| q[k] > d.lo[k] + margin && q[k] < d.hi[k] - margin)).count()
+    }
+
+    #[test]
+    fn gyroid_has_no_holes() {
+        // ジャイロイドは表示範囲の中で縁の無い面。面が格子の平面にほぼ重なる所（x = ±7π/4 など）では、格子の面の上で F の符号が
+        // 市松に入れ替わる。面の両側のセルで「どちらの対角がつながるか」の判断が食い違うと、四角形が張られず穴が開いていた。
+        // 細かさ 80（粗い版も）・40・24（回転の再生中）のどれでも、穴の縁が無い
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let p = prog("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", &AXES);
+        for n in [80, 40, 24] {
+            let m = implicit_solid_opt(&p, d, n, &[], 0, Refine::Light);
+            assert!(m.indices.len() > 10_000);
+            assert_eq!(inner_border_edges(&m, d, 0.4), 0, "細かさ {n}");
+            if let Some(lod) = &m.lod_mesh {
+                assert_eq!(inner_border_edges(lod, d, 0.4), 0, "細かさ {n} の粗い版");
+            }
+        }
+        assert!(implicit_surface(&p, d, 80).lod_mesh.is_some());
     }
 
     #[test]
