@@ -1951,6 +1951,15 @@ fn implicit_solid_with(
     let ext = if nan_pts.is_empty() { Extended::default() } else { extend_undefined(prog, &combos, &mut field, dom, n, &nan_pts) };
     let field = field;
     let filled = |p: usize| !ext.filled.is_empty() && ext.filled.contains(&p);
+    let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
+    // 1''''. 段差（floor・mod など）をまたぐセルは、枝ごとのなめらかな続きで別に作る（[`branch_meshes`]）。
+    //        ふつうの Surface Nets では、そのセルに頂点を置かない
+    let branches = if refine != Refine::Off && ranges.is_empty() && (1..=MAX_BRANCH_SITES).contains(&prog.branch_sites()) {
+        branch_meshes(prog, &field, dom, n)
+    } else {
+        BranchMeshes::default()
+    };
+    let in_branch_cell = |i: usize, j: usize, k: usize| !branches.mixed.is_empty() && branches.mixed.contains(&cell(i, j, k));
 
     let t_field = crate::timing::now_ms();
 
@@ -2018,7 +2027,6 @@ fn implicit_solid_with(
         sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
     };
     let touch = if ranges.is_empty() { touch_search(prog, touch_cands, dom, n) } else { Default::default() };
-    let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
     // 接するだけの辺を囲むセルに印を付ける。印の無いセル・辺は、接する所を調べずに済ませる
     // （1つでも接する所があると全部のセルが遅い道を通る、ということにならないように）
     let mut touch_cell = vec![false; if touch.is_empty() { 0 } else { n * n * n }];
@@ -2093,6 +2101,8 @@ fn implicit_solid_with(
     let mut mesh = Mesh::default();
     // 頂点ごとの、頂点を置いたセルの番号（4 の細分で使う）
     let mut vertex_cell: Vec<u32> = Vec::new();
+    // 1 つのセルに頂点を 2 つ以上置いた（近い曲面を分けた）か
+    let mut multi_surface = false;
     let mut cbuf = vec![f32::NAN; BLOCK_BUF * BLOCK_BUF * BLOCK_BUF];
     field.for_blocks(&mut cbuf, |buf, view, _| {
     // セルの角 c の、data の中での位置のずれ
@@ -2111,6 +2121,10 @@ fn implicit_solid_with(
                 let mut mask = 0u8;
                 for (c, off) in corner_off.iter().enumerate() {
                     mask |= ((buf[l + off] < 0.0) as u8) << c;
+                }
+                // 段差をまたぐセルは、枝ごとに別に作る
+                if in_branch_cell(i, j, k) {
+                    continue;
                 }
                 // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
                 let near_touch = marked(i, j, k);
@@ -2159,6 +2173,9 @@ fn implicit_solid_with(
                         *g = 0;
                     }
                     groups = 1;
+                }
+                if groups > 1 {
+                    multi_surface = true;
                 }
                 let touch_group = if groups > 0 { 0 } else { groups }; // 接するだけの辺の組
                 // 交わる辺ごとの組と、交わる点（セルの中の位置）。組ごとに足し合わせる
@@ -2270,6 +2287,29 @@ fn implicit_solid_with(
         mesh.indices.extend_from_slice(&touch_tris);
     }
 
+    // 3'. 段差をまたぐセルの面（枝ごとに作って、切り取ったもの）を足す。ふつうの Surface Nets の頂点と同じ位置の頂点は、
+    //     その頂点を使う（継ぎ目で頂点を共有する）
+    if !branches.mesh.indices.is_empty() {
+        let key = |p: &[f32]| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        let mut at: crate::adaptive::HashMap<[u32; 3], u32> = Default::default();
+        for (v, p) in mesh.positions.chunks_exact(3).enumerate() {
+            at.entry(key(p)).or_insert(v as u32);
+        }
+        let mut map: Vec<u32> = Vec::with_capacity(branches.mesh.positions.len() / 3);
+        for (v, p) in branches.mesh.positions.chunks_exact(3).enumerate() {
+            map.push(match at.get(&key(p)) {
+                Some(&id) => id,
+                None => {
+                    let id = (mesh.positions.len() / 3) as u32;
+                    mesh.positions.extend_from_slice(p);
+                    vertex_cell.push(branches.vertex_cell[v]);
+                    at.insert(key(p), id);
+                    id
+                }
+            });
+        }
+        mesh.indices.extend(branches.mesh.indices.iter().map(|&v| map[v as usize]));
+    }
     // 4'. 定義されない所に延びた面を、定義域の縁で切り落とす（[`trim_undefined`]）
     if !ext.filled.is_empty() {
         trim_undefined(prog, &combos, &mut mesh, &mut vertex_cell, n, &ext.filled);
@@ -2315,6 +2355,30 @@ fn implicit_solid_with(
     }
 
     compute_normals(&mut mesh);
+    // 3''（法線を計算した後に行う）. 大きい曲面につながった細い部分（円錐の先、細い首）を、そこだけ 2 倍の細かさで作り直す（[`stitched_nets`]）。
+    //      極・値が飛ぶ所・定義域の縁・接する所・近い曲面・段差をまたぐセルが無い式だけ（作り直すと、それらの処理が無くなるため）
+    if matches!(refine, Refine::Normal | Refine::Thorough)
+        && ranges.is_empty()
+        && not_zero.is_empty()
+        && touch.is_empty()
+        && nan_pts.is_empty()
+        && branches.mixed.is_empty()
+        && !multi_surface
+        && !mesh.indices.is_empty()
+    {
+        let sel = sharp_blocks(&mesh, &vertex_cell, n, field.nb);
+        if !sel.is_empty() && sel.len() <= MAX_STITCH_BLOCKS {
+            let mut sc = FieldScratch::default();
+            let mut eval = |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
+            let (fine, cells) = stitched_nets(&field, dom, n, &sel, &mut eval);
+            if fine.indices.len() / 3 <= mesh.indices.len() / 3 + MAX_STITCH_TRIANGLES {
+                mesh.positions = fine.positions;
+                mesh.indices = fine.indices;
+                vertex_cell = cells;
+                compute_normals(&mut mesh);
+            }
+        }
+    }
     // 4. 格子より小さい図形（見落とした・角ばった所）を探して、その所だけ細かく作り直す
     if refine != Refine::Off && ranges.is_empty() {
         let before = (mesh.positions.len(), mesh.indices.len());
@@ -2339,6 +2403,656 @@ fn implicit_solid_with(
     let t_end = crate::timing::now_ms();
     mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
     mesh
+}
+
+/// 2 段の細かさの葉のセル（[`stitched_nets`]）
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Leaf {
+    /// 元の格子のセル
+    Coarse([usize; 3]),
+    /// 細かくしたブロックの中の、2 倍の細かさのセル（細かい格子の座標）
+    Fine([usize; 3]),
+}
+
+/// 陰関数を、選んだブロック（`sel`。1 辺 [`BLOCK`] マス）だけ 2 倍の細かさの格子で作る。継ぎ目にひびを作らないよう、
+/// 面は「符号の変わる、一番細かい辺」ごとに張る: その辺を囲む 4 か所を、葉のセル（細かいセルか、元のセル）に写し、
+/// 同じセルが続けて出たら 1 つにまとめて、3 つなら三角形、4 つなら四角形でつなぐ。葉のセルの頂点は、そのセルが
+/// 囲む一番細かい辺の、F = 0 になる点の平均（元のセルは、自分の面の上にある細かい辺の交点も使う）。
+/// `field` は元の格子（`n` マス、範囲 `dom`）の F。細かい格子の、元の格子に無い点の F は `eval` で計算する
+fn stitched_nets(
+    field: &SparseField,
+    dom: Domain,
+    n: usize,
+    sel: &std::collections::HashSet<usize>,
+    eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>,
+) -> (Mesh, Vec<u32>) {
+    let nb = field.nb;
+    let nf = 2 * n; // 細かい格子のマス数
+    let bid = |b: [usize; 3]| b[0] + nb * (b[1] + nb * b[2]);
+    let block_of = |c: [usize; 3]| c.map(|x| (x / BLOCK).min(nb - 1));
+    let selected = |c: [usize; 3]| sel.contains(&bid(block_of(c)));
+    let occupied = |c: [usize; 3]| field.occupied[bid(block_of(c))];
+    // 細かい格子の点の F（元の格子の点は field、ほかは計算する）
+    let mut fine: crate::adaptive::HashMap<[usize; 3], f32> = Default::default();
+    {
+        let mut need: Vec<[usize; 3]> = Vec::new();
+        let mut seen: crate::adaptive::HashSet<[usize; 3]> = Default::default();
+        for &b in sel {
+            let b3 = [b % nb, (b / nb) % nb, b / (nb * nb)];
+            let lo = b3.map(|x| 2 * BLOCK * x);
+            let hi = b3.map(|x| (2 * BLOCK * (x + 1)).min(nf));
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        let q = [x, y, z];
+                        if q.iter().all(|v| v % 2 == 0) {
+                            continue;
+                        }
+                        if seen.insert(q) {
+                            need.push(q);
+                        }
+                    }
+                }
+            }
+        }
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| need.iter().map(|q| dom.at(a, q[a] as f64 / 2.0, n)).collect());
+        let vals = eval([&cols[0], &cols[1], &cols[2]]);
+        for (q, v) in need.into_iter().zip(vals) {
+            fine.insert(q, v as f32);
+        }
+    }
+    let value = |q: [usize; 3]| -> f32 {
+        if q.iter().all(|v| v % 2 == 0) {
+            field.f(q.map(|v| v / 2))
+        } else {
+            fine.get(&q).copied().unwrap_or(f32::NAN)
+        }
+    };
+    // 細かい格子の座標でのセル（細かいセル 1 つ分の場所）を、葉のセルに写す
+    let leaf = |fc: [i64; 3]| -> Option<Leaf> {
+        if fc.iter().any(|&v| v < 0 || v >= nf as i64) {
+            return None;
+        }
+        let fc = fc.map(|v| v as usize);
+        let c = fc.map(|v| v / 2);
+        if !occupied(c) {
+            return None;
+        }
+        Some(if selected(c) { Leaf::Fine(fc) } else { Leaf::Coarse(c) })
+    };
+    // 一番細かい辺（細かい格子の座標で、始点 p、向き a、長さ len = 1 か 2）の一覧
+    let mut edges: Vec<([usize; 3], usize, usize)> = Vec::new();
+    // (i) 細かくしたブロックの、細かい格子の辺（周りに細かいセルが 1 つでもあるもの）
+    {
+        let mut seen: crate::adaptive::HashSet<([usize; 3], usize)> = Default::default();
+        for &b in sel {
+            let b3 = [b % nb, (b / nb) % nb, b / (nb * nb)];
+            let lo = b3.map(|x| 2 * BLOCK * x);
+            let hi = b3.map(|x| (2 * BLOCK * (x + 1)).min(nf));
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        for a in 0..3 {
+                            let p = [x, y, z];
+                            if p[a] + 1 > hi[a] {
+                                continue;
+                            }
+                            let (bx, cx) = ((a + 1) % 3, (a + 2) % 3);
+                            let any_fine = [(0i64, 0i64), (1, 0), (0, 1), (1, 1)].iter().any(|&(db, dc)| {
+                                let mut fc = p.map(|v| v as i64);
+                                fc[bx] -= db;
+                                fc[cx] -= dc;
+                                matches!(leaf(fc), Some(Leaf::Fine(_)))
+                            });
+                            if any_fine && seen.insert((p, a)) {
+                                edges.push((p, a, 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // (ii) 元の格子の辺で、周りのセルが全部元のセルのもの
+    for bz in 0..nb {
+        for by in 0..nb {
+            for bx_ in 0..nb {
+                let b = [bx_, by, bz];
+                if !field.occupied[bid(b)] {
+                    continue;
+                }
+                let lo = b.map(|x| BLOCK * x);
+                let hi = b.map(|x| (BLOCK * (x + 1)).min(n));
+                for z in lo[2]..hi[2] {
+                    for y in lo[1]..hi[1] {
+                        for x in lo[0]..hi[0] {
+                            let c = [x, y, z];
+                            for a in 0..3 {
+                                let (bx, cx) = ((a + 1) % 3, (a + 2) % 3);
+                                let all_coarse = [(0i64, 0i64), (1, 0), (0, 1), (1, 1)].iter().all(|&(db, dc)| {
+                                    let mut fc = c.map(|v| 2 * v as i64);
+                                    fc[bx] -= 2 * db;
+                                    fc[cx] -= 2 * dc;
+                                    !matches!(leaf(fc), Some(Leaf::Fine(_)))
+                                });
+                                if all_coarse && c[a] < n {
+                                    edges.push((c.map(|v| 2 * v), a, 2));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 符号の変わる辺ごとに、交わる点と、周りの葉のセル
+    let mut sums: crate::adaptive::HashMap<Leaf, ([f64; 3], f64)> = Default::default();
+    let mut polys: Vec<(Vec<Leaf>, bool)> = Vec::new();
+    for &(p, a, len) in &edges {
+        let mut q = p;
+        q[a] += len;
+        let (f0, f1) = (value(p), value(q));
+        if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) {
+            continue;
+        }
+        let t = (f0 / (f0 - f1)) as f64;
+        let mut x = p.map(|v| v as f64);
+        x[a] += t * len as f64;
+        let (bx, cx) = ((a + 1) % 3, (a + 2) % 3);
+        let mut ring: Vec<Leaf> = Vec::with_capacity(4);
+        let mut ok = true;
+        for (db, dc) in [(1i64, 1i64), (0, 1), (0, 0), (1, 0)] {
+            let mut fc = p.map(|v| v as i64);
+            fc[bx] -= db * len as i64;
+            fc[cx] -= dc * len as i64;
+            match leaf(fc) {
+                Some(l) => {
+                    if ring.last() != Some(&l) {
+                        ring.push(l);
+                    }
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        for l in &ring {
+            let e = sums.entry(*l).or_insert(([0.0; 3], 0.0));
+            for (s, v) in e.0.iter_mut().zip(x) {
+                *s += v;
+            }
+            e.1 += 1.0;
+        }
+        if ring.len() >= 3 {
+            polys.push((ring, f0 < 0.0));
+        }
+    }
+    let mut mesh = Mesh::default();
+    let mut ids: crate::adaptive::HashMap<Leaf, u32> = Default::default();
+    let mut order: Vec<Leaf> = sums.keys().copied().collect();
+    order.sort_by_key(|l| match l {
+        Leaf::Coarse(c) => (0, c[2], c[1], c[0]),
+        Leaf::Fine(c) => (1, c[2], c[1], c[0]),
+    });
+    let mut cells: Vec<u32> = Vec::with_capacity(order.len());
+    for l in order {
+        let (sum, cnt) = sums[&l];
+        let p = sum.map(|v| v / cnt / 2.0); // 細かい格子の座標 → 元の格子の座標
+        ids.insert(l, mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]));
+        let c = match l {
+            Leaf::Coarse(c) => c,
+            Leaf::Fine(f) => f.map(|v| v / 2),
+        };
+        cells.push((c[0] + n * (c[1] + n * c[2])) as u32);
+    }
+    for (ring, neg) in polys {
+        let v: Vec<u32> = ring.iter().map(|l| ids[l]).collect();
+        let tri = |a: u32, b: u32, c: u32| if neg { [a, b, c] } else { [a, c, b] };
+        if v.len() == 3 {
+            mesh.indices.extend_from_slice(&tri(v[0], v[1], v[2]));
+        } else {
+            mesh.indices.extend_from_slice(&tri(v[0], v[1], v[2]));
+            mesh.indices.extend_from_slice(&tri(v[0], v[2], v[3]));
+        }
+    }
+    (mesh, cells)
+}
+
+/// 細かくするブロックの数と、細かくして足してよい三角形の数の上限（[`stitched_nets`]）
+const MAX_STITCH_BLOCKS: usize = 2_000;
+const MAX_STITCH_TRIANGLES: usize = 300_000;
+
+/// 細かくするブロック: 辺でつながる頂点どうしの法線のなす角が 35° を超える所（細い部分・尖った所）を含むブロックと、
+/// その隣（面・辺・角で接するもの）
+fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> std::collections::HashSet<usize> {
+    let cos = 35f32.to_radians().cos();
+    let nr = &mesh.normals;
+    let block = |v: u32| {
+        let c = vertex_cell[v as usize] as usize;
+        [c % n, (c / n) % n, c / (n * n)].map(|x| (x / BLOCK).min(nb - 1))
+    };
+    let mut hit: std::collections::HashSet<[usize; 3]> = Default::default();
+    for t in mesh.indices.chunks_exact(3) {
+        let (a, b, c) = (3 * t[0] as usize, 3 * t[1] as usize, 3 * t[2] as usize);
+        let dot = |p: usize, q: usize| nr[p] * nr[q] + nr[p + 1] * nr[q + 1] + nr[p + 2] * nr[q + 2];
+        // 3 本の辺のどれかで、法線が大きくずれる（ふつうは無いので、まとめて確かめる）
+        if dot(a, b) >= cos && dot(b, c) >= cos && dot(c, a) >= cos {
+            continue;
+        }
+        for e in 0..3 {
+            let (u, v) = (t[e], t[(e + 1) % 3]);
+            if dot(3 * u as usize, 3 * v as usize) < cos {
+                hit.insert(block(u));
+                hit.insert(block(v));
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for b in hit {
+        for dz in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    let c = [b[0] as i64 + dx, b[1] as i64 + dy, b[2] as i64 + dz];
+                    if c.iter().all(|&v| v >= 0 && v < nb as i64) {
+                        out.insert(c[0] as usize + nb * (c[1] as usize + nb * c[2] as usize));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 段差の元がこれより多い式は、枝ごとに作る道を使わない
+const MAX_BRANCH_SITES: usize = 8;
+/// 1 つのセルに、これより多い種類の枝が出たら、そのセルは枝ごとに作らず、ふつうの Surface Nets に任せる（面が詰まりすぎた所）
+const MAX_CELL_BRANCHES: usize = 2;
+
+/// [`branch_meshes`] の結果
+#[derive(Default)]
+struct BranchMeshes {
+    /// 段差をまたぐセル（ふつうの Surface Nets では頂点を置かない）
+    mixed: crate::adaptive::HashSet<usize>,
+    /// 段差をまたぐセルの面（枝ごとに作って、本当の枝の領域で切り取ったもの）
+    mesh: Mesh,
+    /// 頂点ごとの、頂点を置いたセル
+    vertex_cell: Vec<u32>,
+}
+
+/// `floor`・`mod` などを含む陰関数で、段差をまたぐセル（8 つの角の枝の番号の組 τ が混ざるセル）の面を作る。
+/// 枝の番号を固定した式 F_τ（[`Program::frozen`]。段差の無い、なめらかな続き）で、τ ごとに小さな Surface Nets を作る:
+/// τ の頂点を置くのは、τ を角に持つ段差をまたぐセルと、それと辺を共有するセル（角が全部 τ のふつうのセルの頂点は、
+/// ふつうの Surface Nets と同じ位置になるので、継ぎ目で頂点を共有する。ほかの枝のセルの頂点は、τ の面を段差の向こうまで
+/// 延ばすためのもので、切り取りで消える）。面を張るのは、段差をまたぐセルを囲む辺だけ
+/// （ほかの辺は、ふつうの Surface Nets が張る）。できた面は、本当の枝の番号が τ である所だけを残す（[`trim_by`]）
+fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> BranchMeshes {
+    let m = n + 1;
+    let k = prog.branch_sites();
+    let branch = prog.branches();
+    let idx = |q: [usize; 3]| q[0] + m * (q[1] + m * q[2]);
+    let cell_id = |c: [usize; 3]| c[0] + n * (c[1] + n * c[2]);
+    let pt = |q: [usize; 3]| [0, 1, 2].map(|a| dom.at(a, q[a] as f64, n));
+    // 調べるセル: 角の F の符号が混ざるセル（面が通りうるセル）。符号のそろったセルには、ふつうの F の面も、
+    // その枝の F_τ（= F）の面も通らない
+    let nb = field.nb;
+    let mut cand: Vec<[usize; 3]> = Vec::new();
+    for kz in 0..n {
+        for jy in 0..n {
+            for ix in 0..n {
+                let b = [ix, jy, kz].map(|x| (x / BLOCK).min(nb - 1));
+                if !field.occupied[b[0] + nb * (b[1] + nb * b[2])] {
+                    continue;
+                }
+                let (mut neg, mut pos, mut bad) = (false, false, false);
+                for d in CORNERS {
+                    let v = field.f([ix + d[0], jy + d[1], kz + d[2]]);
+                    if !v.is_finite() {
+                        bad = true;
+                        break;
+                    }
+                    if v < 0.0 { neg = true } else { pos = true }
+                }
+                if !bad && neg && pos {
+                    cand.push([ix, jy, kz]);
+                }
+            }
+        }
+    }
+    // 面で隣り合うセルも調べる（段差の所では、F の符号がそろっていても、隣の枝の F_τ の面が通ることがある）
+    {
+        let mut set: crate::adaptive::HashSet<usize> = cand.iter().map(|&c| cell_id(c)).collect();
+        let mut more: Vec<[usize; 3]> = Vec::new();
+        for &c in &cand {
+            for a in 0..3 {
+                for up in [false, true] {
+                    let mut d = c;
+                    if up {
+                        if d[a] + 1 >= n {
+                            continue;
+                        }
+                        d[a] += 1;
+                    } else {
+                        if d[a] == 0 {
+                            continue;
+                        }
+                        d[a] -= 1;
+                    }
+                    if CORNERS.iter().all(|o| field.f([d[0] + o[0], d[1] + o[1], d[2] + o[2]]).is_finite()) && set.insert(cell_id(d)) {
+                        more.push(d);
+                    }
+                }
+            }
+        }
+        cand.extend(more);
+    }
+    // その角の格子点で、枝の番号の組を計算する（番号をつけて持つ）
+    let mut pts: Vec<usize> = cand.iter().flat_map(|c| CORNERS.map(|d| idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]))).collect();
+    pts.sort_unstable();
+    pts.dedup();
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| pts.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+    let br = branch.eval(&[&cols[0], &cols[1], &cols[2]], pts.len());
+    let key = |b: &[f64]| -> [i64; MAX_BRANCH_SITES] {
+        let mut out = [0i64; MAX_BRANCH_SITES];
+        for (o, &v) in out.iter_mut().zip(b) {
+            *o = if v.is_nan() { i64::MIN } else { v as i64 };
+        }
+        out
+    };
+    let mut ids: crate::adaptive::HashMap<[i64; MAX_BRANCH_SITES], u32> = Default::default();
+    let mut taus: Vec<Vec<f64>> = Vec::new();
+    let mut tau_of: crate::adaptive::HashMap<usize, u32> = Default::default();
+    for (q, &p) in pts.iter().enumerate() {
+        let b = &br[q * k..(q + 1) * k];
+        if b.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let kk = key(b);
+        let id = *ids.entry(kk).or_insert_with(|| {
+            taus.push(b.to_vec());
+            (taus.len() - 1) as u32
+        });
+        tau_of.insert(p, id);
+    }
+    let mut out = BranchMeshes::default();
+    // 段差をまたぐセル（調べるセルのうち、角の τ が混ざるもの）と、そこに出てくる τ
+    let mut cells_of: crate::adaptive::HashMap<u32, Vec<[usize; 3]>> = Default::default();
+    for &c in &cand {
+        let mut ts: [u32; 8] = [u32::MAX; 8];
+        let mut ok = true;
+        for (t, d) in ts.iter_mut().zip(CORNERS) {
+            match tau_of.get(&idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]])) {
+                Some(&id) => *t = id,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let mut uniq: Vec<u32> = ts.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        if uniq.len() == 1 {
+            continue;
+        }
+        // 枝が多すぎるセル（面が詰まりすぎて、枝ごとには描けない所）は、ふつうの Surface Nets に任せる
+        if uniq.len() > MAX_CELL_BRANCHES {
+            continue;
+        }
+        for t in uniq {
+            cells_of.entry(t).or_default().push(c);
+        }
+    }
+    if cells_of.is_empty() {
+        return out;
+    }
+    // τ ごとに作る
+    let mut order: Vec<u32> = cells_of.keys().copied().collect();
+    order.sort_unstable();
+    for t in order {
+        let mixed_cells = &cells_of[&t];
+        let fz = prog.frozen(&taus[t as usize]);
+        // 頂点を置くセル: 段差をまたぐセルと、それと辺を共有するセル
+        let mut cells: crate::adaptive::HashSet<usize> = mixed_cells.iter().map(|&c| cell_id(c)).collect();
+        for &c in mixed_cells {
+            for dz in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        if [dx, dy, dz].iter().filter(|&&d| d != 0).count() > 2 {
+                            continue;
+                        }
+                        let nb = [c[0] as i64 + dx, c[1] as i64 + dy, c[2] as i64 + dz];
+                        if nb.iter().any(|&v| v < 0 || v >= n as i64) {
+                            continue;
+                        }
+                        let d = nb.map(|v| v as usize);
+                        // 角が全部 τ のふつうのセル（継ぎ目）と、ほかの枝のセル（τ の面を段差の向こうまで延ばし、段差の所で切り取る）
+                        if CORNERS.iter().all(|o| field.f([d[0] + o[0], d[1] + o[1], d[2] + o[2]]).is_finite()) {
+                            cells.insert(cell_id(d));
+                        }
+                    }
+                }
+            }
+        }
+        // 角での F_τ（角の枝が τ なら、ふつうの F。そうでなければ、固定した式で計算する）
+        let mut fval: crate::adaptive::HashMap<usize, f64> = Default::default();
+        let mut need: Vec<usize> = Vec::new();
+        for &c in &cells {
+            let q = [c % n, (c / n) % n, c / (n * n)];
+            for d in CORNERS {
+                let p = idx([q[0] + d[0], q[1] + d[1], q[2] + d[2]]);
+                if fval.contains_key(&p) {
+                    continue;
+                }
+                if tau_of.get(&p) == Some(&t) {
+                    fval.insert(p, field.f([p % m, (p / m) % m, p / (m * m)]) as f64);
+                } else {
+                    fval.insert(p, f64::NAN);
+                    need.push(p);
+                }
+            }
+        }
+        if !need.is_empty() {
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| need.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+            let mut v = vec![C::new(0.0, 0.0); need.len()];
+            fz.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut v);
+            for (&p, z) in need.iter().zip(v) {
+                // f32 に丸めて、ふつうの格子の値と同じ精度にする
+                fval.insert(p, (as_real(z) as f32) as f64);
+            }
+        }
+        let f = |q: [usize; 3]| fval.get(&idx(q)).copied().unwrap_or(f64::NAN);
+        // 頂点（セルの中の、辺の上で F_τ = 0 になる点の平均）。ふつうのセルの頂点が、ふつうの Surface Nets と
+        // ビットまで同じ位置になるよう、同じ手順で計算する（f32 の値で補間し、セルの中の位置を足してから格子の座標にする）
+        let mut local = Mesh::default();
+        let mut local_cell: Vec<u32> = Vec::new();
+        let mut vert: crate::adaptive::HashMap<usize, u32> = Default::default();
+        let mut sorted: Vec<usize> = cells.iter().copied().collect();
+        sorted.sort_unstable();
+        for &c in &sorted {
+            let q = [c % n, (c / n) % n, c / (n * n)];
+            let (mut sum, mut cnt) = ([0.0f64; 3], 0.0f64);
+            for [ca, cb] in EDGES {
+                let (a, b) = (CORNERS[ca], CORNERS[cb]);
+                let ax = (0..3).find(|&x| a[x] != b[x]).unwrap_or(0);
+                let pa = [q[0] + a[0], q[1] + a[1], q[2] + a[2]];
+                let pb = [q[0] + b[0], q[1] + b[1], q[2] + b[2]];
+                let (f0, f1) = (f(pa) as f32, f(pb) as f32);
+                if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) {
+                    continue;
+                }
+                let t = (f0 / (f0 - f1)) as f64;
+                let mut r = [a[0] as f64, a[1] as f64, a[2] as f64];
+                r[ax] += t;
+                for x in 0..3 {
+                    sum[x] += r[x];
+                }
+                cnt += 1.0;
+            }
+            if cnt > 0.0 {
+                let p = [q[0] as f64 + sum[0] / cnt, q[1] as f64 + sum[1] / cnt, q[2] as f64 + sum[2] / cnt];
+                let id = local.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
+                vert.insert(c, id);
+                local_cell.push(c as u32);
+            }
+        }
+        // 枝ごとに作るのは、τ の頂点を置いた段差をまたぐセルだけ（どの枝の F_τ にも零点が無いセルの面は、F が飛ぶ所に
+        // しか無いので、ふつうの Surface Nets に任せる）
+        let active: Vec<[usize; 3]> = mixed_cells.iter().copied().filter(|&c| vert.contains_key(&cell_id(c))).collect();
+        for &c in &active {
+            out.mixed.insert(cell_id(c));
+        }
+        // 面: その段差をまたぐセルの辺のうち、F_τ の符号が変わり、周りの 4 セルが全部 τ の頂点を持つもの
+        let mut seen: crate::adaptive::HashSet<(usize, usize)> = Default::default();
+        for &c in &active {
+            for [ca, cb] in EDGES {
+                let (a, b) = (CORNERS[ca], CORNERS[cb]);
+                let ax = (0..3).find(|&x| a[x] != b[x]).unwrap_or(0);
+                let p0 = if a[ax] == 0 { [c[0] + a[0], c[1] + a[1], c[2] + a[2]] } else { [c[0] + b[0], c[1] + b[1], c[2] + b[2]] };
+                if !seen.insert((idx(p0), ax)) {
+                    continue;
+                }
+                let mut p1 = p0;
+                p1[ax] += 1;
+                let (f0, f1) = (f(p0), f(p1));
+                if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) {
+                    continue;
+                }
+                let (bx, cx) = ((ax + 1) % 3, (ax + 2) % 3);
+                let mut around = [NONE; 4];
+                let mut ok = true;
+                for (r, (db, dc)) in [(1usize, 1usize), (0, 1), (0, 0), (1, 0)].into_iter().enumerate() {
+                    let mut s = p0;
+                    if s[bx] < db || s[cx] < dc {
+                        ok = false;
+                        break;
+                    }
+                    s[bx] -= db;
+                    s[cx] -= dc;
+                    if s.iter().any(|&v| v >= n) {
+                        ok = false;
+                        break;
+                    }
+                    match vert.get(&cell_id(s)) {
+                        Some(&v) => around[r] = v,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let [q0, q1, q2, q3] = around;
+                if f0 < 0.0 {
+                    local.indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]);
+                } else {
+                    local.indices.extend_from_slice(&[q0, q2, q1, q0, q3, q2]);
+                }
+            }
+        }
+        if local.indices.is_empty() {
+            continue;
+        }
+        // 本当の枝の番号が τ である所だけ残す
+        let want = key(&taus[t as usize]);
+        let inside = |xyz: [&[f64]; 3]| -> Vec<bool> {
+            let len = xyz[0].len();
+            let b = branch.eval(&xyz, len);
+            (0..len).map(|q| key(&b[q * k..(q + 1) * k]) == want).collect()
+        };
+        trim_by(&mut local, &mut local_cell, &inside, 10);
+        let base = (out.mesh.positions.len() / 3) as u32;
+        out.mesh.positions.extend_from_slice(&local.positions);
+        out.mesh.indices.extend(local.indices.iter().map(|&v| v + base));
+        out.vertex_cell.extend_from_slice(&local_cell);
+    }
+    out
+}
+
+/// メッシュのうち、`inside` が真の所だけを残す。3 頂点とも外の三角形は捨て、混ざる三角形は、辺の上で内側の端を
+/// `rounds` 回の二分で探して、そこまでの多角形に切る（辺の上に求めた点は、隣の三角形と共有する）。
+/// 足した頂点の `vertex_cell` は、内側の頂点のセルにする
+fn trim_by(mesh: &mut Mesh, vertex_cell: &mut Vec<u32>, inside: &dyn Fn([&[f64]; 3]) -> Vec<bool>, rounds: usize) {
+    let nv = mesh.positions.len() / 3;
+    let pos = |mesh: &Mesh, v: usize| [0, 1, 2].map(|a| mesh.positions[3 * v + a] as f64);
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| (0..nv).map(|v| pos(mesh, v)[a]).collect());
+    let ins = inside([&cols[0], &cols[1], &cols[2]]);
+    if ins.iter().all(|&b| b) {
+        return;
+    }
+    let mut edge_pt: crate::adaptive::HashMap<(u32, u32), u32> = Default::default();
+    let mut todo: Vec<(u32, u32)> = Vec::new();
+    for t in mesh.indices.chunks_exact(3) {
+        for e in 0..3 {
+            let (a, b) = (t[e], t[(e + 1) % 3]);
+            for (d, u) in [(a, b), (b, a)] {
+                if ins[d as usize] && !ins[u as usize] && !edge_pt.contains_key(&(d, u)) {
+                    edge_pt.insert((d, u), NONE);
+                    todo.push((d, u));
+                }
+            }
+        }
+    }
+    let (mut ta, mut tb) = (vec![0.0f64; todo.len()], vec![1.0f64; todo.len()]);
+    let lerp = |mesh: &Mesh, (d, u): (u32, u32), t: f64, a: usize| {
+        let (p, q) = (pos(mesh, d as usize)[a], pos(mesh, u as usize)[a]);
+        p + (q - p) * t
+    };
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for _ in 0..rounds {
+        for (a, col) in cols.iter_mut().enumerate() {
+            col.clear();
+            col.extend(todo.iter().enumerate().map(|(k, &e)| lerp(mesh, e, 0.5 * (ta[k] + tb[k]), a)));
+        }
+        let v = inside([&cols[0], &cols[1], &cols[2]]);
+        for k in 0..todo.len() {
+            let t = 0.5 * (ta[k] + tb[k]);
+            if v[k] { ta[k] = t } else { tb[k] = t }
+        }
+    }
+    for (k, &e) in todo.iter().enumerate() {
+        let p = [0, 1, 2].map(|a| lerp(mesh, e, ta[k], a));
+        let id = mesh.push_vertex(p);
+        vertex_cell.push(vertex_cell[e.0 as usize]);
+        edge_pt.insert(e, id);
+    }
+    let mut out: Vec<u32> = Vec::with_capacity(mesh.indices.len());
+    for t in mesh.indices.chunks_exact(3) {
+        let bad = t.iter().filter(|&&v| !ins[v as usize]).count();
+        if bad == 0 {
+            out.extend_from_slice(t);
+            continue;
+        }
+        if bad == 3 {
+            continue;
+        }
+        let mut poly: Vec<u32> = Vec::with_capacity(4);
+        for e in 0..3 {
+            let (a, b) = (t[e], t[(e + 1) % 3]);
+            let (ia, ib) = (ins[a as usize], ins[b as usize]);
+            if ia {
+                poly.push(a);
+            }
+            if ia != ib {
+                poly.push(if ia { edge_pt[&(a, b)] } else { edge_pt[&(b, a)] });
+            }
+        }
+        for k in 1..poly.len().saturating_sub(1) {
+            out.extend_from_slice(&[poly[0], poly[k], poly[k + 1]]);
+        }
+    }
+    mesh.indices = out;
 }
 
 /// 陰関数のメッシュの三角形の数の上限。超えたら、F の格子を間引いた版を本体にする
@@ -7931,6 +8645,98 @@ mod tests {
         assert!(off_edge <= 0.05, "縁の頂点が定義域の縁から {off_edge} 離れている");
         assert!(off_sphere <= 0.05, "縁の頂点が半球から {off_sphere} 離れている");
         assert!(top <= 0.5, "縁の頂点の高さが {top}");
+    }
+
+    #[test]
+    fn implicit_step_edge_is_straight() {
+        // floor(x) − z + y/5 = 0（陽関数に直さず、陰関数のまま）。面は段差 x = n の所で終わり、その縁の辺（三角形が 1 つだけの辺）は
+        // 平面 x = n にまっすぐ乗る（格子の間隔 0.25。枝ごとに作って切り取る前は、格子に沿ってギザギザだった）
+        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let m = implicit_surface(&prog("floor(x) - z + y/5", &AXES), d, 80);
+        let mut count: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        for t in m.indices.chunks_exact(3) {
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let (mut border, mut worst) = (0, 0.0f64);
+        for (&(a, b), &c) in &count {
+            if c != 1 {
+                continue;
+            }
+            for v in [a, b] {
+                let q = [0, 1, 2].map(|k| m.positions[3 * v as usize + k] as f64);
+                if q.iter().any(|x| x.abs() >= 9.9) {
+                    continue;
+                }
+                border += 1;
+                worst = worst.max((q[0] - q[0].round()).abs());
+            }
+        }
+        assert!(border > 100, "縁の頂点 {border} 個");
+        assert!(worst <= 0.02, "縁が整数の平面から {worst} 離れている");
+    }
+
+    /// 縁の辺（三角形が 1 つだけの辺。範囲 `inner` の外の頂点を持つものは数えない）と、3 つ以上の三角形が集まる辺の数
+    fn crack_counts(m: &Mesh, inner: f64) -> (usize, usize) {
+        let mut count: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        for t in m.indices.chunks_exact(3) {
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                *count.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let inside = |v: u32| (0..3).all(|k| (m.positions[3 * v as usize + k] as f64).abs() < inner);
+        let border = count.iter().filter(|(&(a, b), &c)| c == 1 && inside(a) && inside(b)).count();
+        let many = count.values().filter(|&&c| c >= 3).count();
+        (border, many)
+    }
+
+    #[test]
+    fn stitched_refinement_has_no_cracks() {
+        // 細い部分（円錐の先・細い首）を 2 倍の細かさで作り直しても、継ぎ目にひびが無い
+        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        for src in ["x^2 + y^2 - z^2", "(x^2+y^2+z^2)^2 - 30 x y z", "x^2 + y^2 - (z^2 - 4)^2 / 20 - 0.01"] {
+            let m = implicit_surface(&prog(src, &AXES), d, 80);
+            assert_eq!(crack_counts(&m, 9.9), (0, 0), "{src}");
+        }
+        // 円錐の先: 原点の近くに頂点がある（作り直す前は、格子の間隔 0.25 で丸まる）
+        let m = implicit_surface(&prog("x^2 + y^2 - z^2", &AXES), d, 80);
+        let before = implicit_solid_opt(&prog("x^2 + y^2 - z^2", &AXES), d, 80, &[], 0, Refine::Off);
+        let tip = |m: &Mesh| m.positions.chunks_exact(3).map(|q| q.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt()).fold(f64::INFINITY, f64::min);
+        eprintln!("TIP {} (before {})", tip(&m), tip(&before));
+        assert!(tip(&m) < tip(&before), "{} / {}", tip(&m), tip(&before));
+    }
+
+    #[test]
+    fn stitched_seams_have_no_cracks() {
+        // ブロックを市松模様に選んで 2 倍の細かさにし（継ぎ目がたくさんある状態）、継ぎ目にひびが無いか。
+        // 円錐の先・細い首・(x² + y² + z²)² = 30 x y z
+        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let n = 40;
+        for src in ["x^2 + y^2 - z^2", "(x^2+y^2+z^2)^2 - 30 x y z", "x^2 + y^2 - (z^2 - 4)^2 / 20 - 0.01"] {
+            let p = prog(src, &AXES);
+            let combos = sample_combos(&[], 0);
+            let field = SparseField::build(&p, &combos, &[], d, n, true);
+            let nb = field.nb;
+            let mut sel = std::collections::HashSet::new();
+            for bz in 0..nb {
+                for by in 0..nb {
+                    for bx in 0..nb {
+                        if (bx + by + bz) % 2 == 0 {
+                            sel.insert(bx + nb * (by + nb * bz));
+                        }
+                    }
+                }
+            }
+            let mut sc = FieldScratch::default();
+            let mut eval = |xyz: [&[f64]; 3]| field_values_with(&p, &combos, xyz, &mut sc).to_vec();
+            let (mut m, _) = stitched_nets(&field, d, n, &sel, &mut eval);
+            compute_normals(&mut m);
+            assert!(m.indices.len() > 1000, "{src}");
+            assert_eq!(crack_counts(&m, 4.5), (0, 0), "{src}");
+        }
     }
 
     #[test]
