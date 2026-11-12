@@ -4,6 +4,8 @@ use crate::equation::others;
 use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
+mod pieces;
+
 /// 表示範囲（直方体）。添字 0, 1, 2 が x, y, z。
 #[derive(Debug, Clone, Copy)]
 pub struct Domain {
@@ -1941,6 +1943,12 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
 
 /// [`implicit_solid`] で、格子より小さい図形を探して細かく作り直すか（`refine`）を選ぶ版
 pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize, refine: Refine) -> Mesh {
+    // 式を変形して部品に分けられるなら、部品ごとに描く（因数・段差の枝。pieces.rs）
+    if ranges.is_empty() && refine != Refine::Off {
+        if let Some(mesh) = pieces::implicit_by_pieces(prog, dom, n, refine) {
+            return mesh;
+        }
+    }
     implicit_solid_with(prog, dom, n, ranges, samples, false, refine)
 }
 
@@ -1987,7 +1995,8 @@ fn implicit_solid_with(
     //    f32 で保存する（[`SparseField`]）
     // F の計算の仕方（ふつうは全部ここで計算する。重い式は、Worker が計算を分けるために計画だけ・一部だけを頼む）
     let field = {
-        let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks);
+        let mask = pieces::BLOCK_MASK.with(|m| m.borrow_mut().take());
+        let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks, mask.as_deref());
         let vals = FIELD_MODE.with(|mode| {
             let mut mode = mode.borrow_mut();
             FIELD_OUT.with(|out| {
@@ -5652,17 +5661,31 @@ impl FieldPlan {
 impl SparseField {
     #[cfg(test)]
     fn build(prog: &Program, combos: &[Vec<f64>], ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool) -> SparseField {
-        let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks);
+        let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks, None);
         let vals = plan.values(prog, combos, dom, 0..plan.chunks());
         plan.fill(&vals);
         plan.field
     }
 
     /// F の値を入れる前の形（あるブロック・値の置き場所）と、F を計算する点の一覧（[`FieldPlan`]）
-    fn plan(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool) -> FieldPlan {
+    fn plan(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool, mask: Option<&[bool]>) -> FieldPlan {
         let m = n + 1;
         let nb = n.div_ceil(BLOCK);
-        let occupied = if all_blocks { vec![true; nb * nb * nb] } else { block_occupancy(prog, ranges, dom, n, nb) };
+        // 面を作るブロックを絞る（部品に分けて描くとき。pieces.rs）。絞ったブロックでは、区間演算で空かどうかを調べない
+        // （小さい部品をたくさん作るとき、全部のブロックを調べる手間のほうが大きい）
+        let occupied = match mask.filter(|k| k.len() == nb * nb * nb) {
+            // 大きい部品（何枚も重なる大きな面）は、絞ったうえで、区間演算でも空のブロックを外す
+            Some(mask) if mask.iter().filter(|&&k| k).count() > 64 => {
+                let mut occ = block_occupancy(prog, ranges, dom, n, nb);
+                for (o, &k) in occ.iter_mut().zip(mask) {
+                    *o &= k;
+                }
+                occ
+            }
+            Some(mask) => mask.to_vec(),
+            None if all_blocks => vec![true; nb * nb * nb],
+            None => block_occupancy(prog, ranges, dom, n, nb),
+        };
         let np = m.div_ceil(8);
         let mut field =
             SparseField { m, nb, occupied, np, pages: Vec::new(), vals: Vec::new(), dense: false };

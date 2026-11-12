@@ -28,10 +28,12 @@ for rev in "$@"; do
     cp "$example" "$core/examples/dump_meshes.rs"
   fi
   echo "== $name: ビルド"
-  # ビルドの成果物は 1 か所にまとめる（依存のビルドを使い回す）
-  CARGO_TARGET_DIR="$out/.target" cargo build --quiet --release --example dump_meshes --manifest-path "$core/Cargo.toml"
+  # ビルドの置き場はコミットごとに分ける（共有すると、実行ファイルが別のコミットのもので上書きされたままになる）。
+  # WORK は core/target（ふだんの置き場）を使う
+  if [ "$rev" = WORK ]; then target="$core/target"; else target="$out/.target-$name"; fi
+  CARGO_TARGET_DIR="$target" cargo build --quiet --release --example dump_meshes --manifest-path "$core/Cargo.toml"
   echo "== $name: 書き出し"
-  "$out/.target/release/examples/dump_meshes" "$cases" "$out/$name" 2>/dev/null
+  "$target/release/examples/dump_meshes" "$cases" "$out/$name" 2>/dev/null
   git -C "$root" log -1 --format='%h %s' "${rev/WORK/HEAD}" > "$out/$name/rev.txt"
   [ "$rev" = WORK ] && echo "WORK（作業中の変更）" > "$out/$name/rev.txt"
 done

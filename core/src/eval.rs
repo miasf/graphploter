@@ -23,6 +23,9 @@ use num_complex::Complex64 as C;
 use std::collections::HashMap;
 use std::f64::consts::{E, PI};
 
+mod pieces;
+pub use pieces::Cond;
+
 /// 一度にまとめて計算する点の数
 const CHUNK: usize = 256;
 
