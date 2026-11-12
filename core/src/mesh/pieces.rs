@@ -707,7 +707,7 @@ mod tests {
 
     /// 点 q の近く（1 辺 h の箱で、隣の箱まで）にメッシュの頂点があるか調べる関数
     fn near_fn(m: &Mesh, h: f64) -> impl Fn([f64; 3]) -> bool {
-        let cells: std::collections::HashSet<[i64; 3]> =
+        let cells: crate::adaptive::HashSet<[i64; 3]> =
             m.positions.chunks_exact(3).map(|p| [0, 1, 2].map(|a| (p[a] as f64 / h).floor() as i64)).collect();
         move |q: [f64; 3]| {
             let c = q.map(|v| (v / h).floor() as i64);
@@ -717,7 +717,7 @@ mod tests {
 
     /// 頂点（位置でまとめる）でつながった成分ごとの三角形の数
     fn component_sizes(m: &Mesh) -> Vec<usize> {
-        let mut ids: std::collections::HashMap<[i64; 3], usize> = Default::default();
+        let mut ids: crate::adaptive::HashMap<[i64; 3], usize> = Default::default();
         let vid: Vec<usize> = m
             .positions
             .chunks_exact(3)
@@ -741,7 +741,7 @@ mod tests {
                 parent[b] = a;
             }
         }
-        let mut sizes: std::collections::HashMap<usize, usize> = Default::default();
+        let mut sizes: crate::adaptive::HashMap<usize, usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
             *sizes.entry(root(&mut parent, vid[t[0] as usize])).or_default() += 1;
         }
