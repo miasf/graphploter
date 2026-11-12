@@ -1,0 +1,116 @@
+# 見た目の比較に使う式。名前<TAB>壁(0/1)<TAB>式
+# サンプル（アプリのサンプルと同じ設定）
+s_stairs	1	z=floor(x)/2+floor(y)/4
+s_saddle	0	z=(x^2-y^2)/4
+s_gauss	0	z=2 e^(-(x^2+y^2)/4)-1
+s_sphere	0	x^2+y^2+z^2=4
+s_ring	0	(x^2+y^2-4)^2 (z-1)^2=0
+s_gyroid	0	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
+s_absgamma	0	z=abs(gamma(x+i y))
+s_abszeta	0	z=abs(zeta(x+i y))
+s_bessel	0	z=2 besselJ(0,2 sqrt(x^2+y^2))
+u_modxyz0	0	mod(x y, z) = 0
+# 陽関数（core/tests/shape.rs の EXPLICIT）
+e01	0	sin(x) cos(y)
+e02	0	floor(x) + floor(y)
+e03	0	floor(x y / 4)
+e04	0	floor(sqrt(x^2+y^2))
+e05	0	3 (x/2 - floor(x/2))
+e06	0	2 sign(sin(x) sin(y))
+e07	0	tan(x + y)
+e08	0	1/(x^2+y^2)
+e09	0	1/(x y)
+e10	0	1/(sin(x) + cos(y))
+e11	0	3 sin(1/x)
+e12	0	3 sin(10/(x^2+y^2+0.1))
+e13	0	sqrt(36 - x^2 - y^2)
+e14	0	sqrt(4 sin(x) sin(y))
+e15	0	ln(x y)
+e16	0	abs(x) + abs(y) - 5
+e17	0	3 max(sin(x), cos(y))
+e18	0	5 exp(-50((x-1.23)^2 + (y-0.77)^2))
+e19	0	5 exp(-2000((x-1.23)^2 + (y-0.77)^2))
+e20	0	3 sin((x^2 + y^2)/3)
+e21	0	3 sin(5x) sin(5y)
+e22	0	4 x y / (x^2 + y^2)
+e23	0	arg(x + i y)
+e24	0	arctan(y/x)
+e25	0	floor(x) sin(y)
+e26	0	sign(x) y / 2
+e27	0	floor(3 sin(x) cos(y))
+e28	0	floor(3x)/3
+e29	0	tan(x y / 5)
+e30	0	sqrt(abs(x)) - sqrt(abs(y))
+e31	0	sin(x)+sin(3x)/2+sin(9x)/4+sin(27x)/8 + y/5
+e32	0	gamma(x) / 5 + y/5
+e33	0	mod(x, 2) mod(y, 2)
+e34	0	(x^2+y^2)^(1/3) sin(4 arg(x + i y))
+e35	0	x^y / 10
+e36	0	round(x) round(y) / 8
+# 段差のある陽関数を壁つきで
+w02	1	floor(x) + floor(y)
+w03	1	floor(x y / 4)
+w04	1	floor(sqrt(x^2+y^2))
+w05	1	3 (x/2 - floor(x/2))
+w06	1	2 sign(sin(x) sin(y))
+w25	1	floor(x) sin(y)
+w26	1	sign(x) y / 2
+w27	1	floor(3 sin(x) cos(y))
+w28	1	floor(3x)/3
+w33	1	mod(x, 2) mod(y, 2)
+w36	1	round(x) round(y) / 8
+# 陽関数の追加の組（EXPLICIT_EXTRA）
+x01	0	mod(x, y)
+x02	0	mod(x y, 3)
+x03	0	mod(x^2 + y^2, 4)
+x04	0	mod(x, 1.5) + mod(y, 1.5)
+x05	0	mod(x, sin(y) + 1.5)
+x06	0	mod(floor(x), 3) + y/5
+x07	0	5 mod(x, 0.4)
+x08	0	mod(x + y, 2) mod(x - y, 2)
+x09	0	max(x, y)/2
+x10	0	min(abs(x), abs(y))
+x11	0	min(tan(x), y)
+x12	0	max(x^2 - 9, min(y^2 - 4, 3))/2
+x13	0	2 max(mod(x, 2), mod(y, 2))
+x14	0	max(floor(x), y)/2
+x15	0	min(1/x, max(1/y, x y))
+x16	0	max(sin(3x), min(cos(3y), x/5)) 3
+x17	0	nCr(x, y)
+x18	0	nCr(x, 3)/20
+x19	0	nCr(5, x) + y/5
+x20	0	nCr(x, y)/nCr(y, x)
+x21	0	nCr(floor(x), floor(y))/10
+x22	0	nPr(x, y)/10
+x23	0	nPr(x, 2)/10 + y/5
+x24	0	nPr(floor(x), floor(y/2))/20
+# 陰関数（IMPLICIT）
+i01	0	sqrt(x)+sqrt(y)+sqrt(z)=3
+i02	0	max(abs(x),max(abs(y),abs(z))) = 4
+i03	0	abs(x)+abs(y)+abs(z)=6
+i04	0	x^2+y^2 = z^2
+i05	0	x y z = 1
+i06	0	sin(x) sin(y) sin(z) = 0.001
+i07	0	x y = 0.0001
+i08	0	x^2 y^2 + y^2 z^2 + z^2 x^2 = 1
+i09	0	ln(x) + ln(y) + ln(z) = 1
+i10	0	tan(x) = z y
+i11	0	arcsin(x/5) + arcsin(y/5) = z
+i12	0	sin(40/(x^2+y^2+z^2+1)) = 0.5
+i13	0	x^(2/3) + y^(2/3) + z^(2/3) = 4
+i14	0	z^2 = sin(x) sin(y)
+i15	0	sqrt(36 - x^2 - y^2) - z = 0
+i16	0	1/(x y) - z = 0
+# 陰関数の追加の組（IMPLICIT_EXTRA）
+j01	0	mod(x y, z) = 1
+j02	0	z = mod(x y, z)
+j03	0	mod(x y, z) = z/2
+j04	0	mod(x + y, z) = 0.5
+j05	0	mod(x^2 + y^2, z) = 1
+j06	0	mod(x, 2) + mod(y, 2) + mod(z, 2) = 2
+j07	0	mod(x y z, 4) = 2
+j08	0	max(x y, z) = 2
+j09	0	min(x y, z) = mod(x, 2)
+j10	0	floor(x) + floor(y) + z = mod(x y, 3)
+j11	0	mod(z, x y) = 1
+j12	0	floor(x y) = z floor(z)

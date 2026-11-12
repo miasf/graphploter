@@ -654,28 +654,40 @@ fn explicit_surface_scaled(
         }
         // 飛ぶ辺ごとの (三角形の辺の始点の側の頂点, 終点の側の頂点)
         let mut jv: [Option<(u32, u32)>; 3] = [None; 3];
+        // 辺 e の飛ぶ所の (u, v)
+        let jump_at = |e: usize| {
+            let (id, _) = edges[e];
+            let jp = jumps[&id];
+            let (k0, k1) = (id.0 as usize, id.1 as usize);
+            (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t)
+        };
+        // 3 辺とも飛ぶとき、頂点 k の段の、辺 k（k の側）・辺 k + 2（k の側）の飛ぶ所での値
+        let mut side_vals: [[C; 2]; 3] = [[C::new(0.0, 0.0); 2]; 3];
         if jumped.len() == 3 {
             // 3辺とも飛ぶ: 辺にもう 1 つ段差がありそうで、それが頂点 p の側にあるときは、見つけた段差の手前の値は
             // p の段の値ではないので、p の値で頂点を置く（頂点を足す順番は、角の三角形を描く順）
             let mut sides = [[NONE; 2]; 3];
-            let near = |mesh: &mut Mesh, e: usize, p: u32| {
+            // 頂点 p の側の頂点と、その値
+            let near = |mesh: &mut Mesh, e: usize, p: u32| -> (u32, C) {
                 let (id, _) = edges[e];
                 let (a, b) = jump_vertex[&id];
                 let jp = jumps[&id];
                 let at_start = id.0 == p;
                 if jp.multi && jp.rest_at_start == at_start {
-                    let (k0, k1) = (id.0 as usize, id.1 as usize);
-                    let (u, v) = (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t);
-                    push(mesh, u, v, vals[p as usize])
+                    let (u, v) = jump_at(e);
+                    (push(mesh, u, v, vals[p as usize]), vals[p as usize])
                 } else if at_start {
-                    a
+                    (a, jp.before)
                 } else {
-                    b
+                    (b, jp.after)
                 }
             };
             for k in 0..3 {
-                sides[k][0] = near(&mut mesh, k, t[k]);
-                sides[(k + 2) % 3][1] = near(&mut mesh, (k + 2) % 3, t[k]);
+                let (i0, z0) = near(&mut mesh, k, t[k]);
+                let (i1, z1) = near(&mut mesh, (k + 2) % 3, t[k]);
+                sides[k][0] = i0;
+                sides[(k + 2) % 3][1] = i1;
+                side_vals[k] = [z0, z1];
             }
             for k in 0..3 {
                 jv[k] = Some((sides[k][0], sides[k][1]));
@@ -691,6 +703,42 @@ fn explicit_surface_scaled(
         let (pieces, lone) = cut_by_jumps(ids, jv);
         for piece in pieces {
             emit(&mut mesh, piece);
+        }
+        if jumped.len() == 3 {
+            // 段差の線の交わる所: 3 つの飛ぶ所への距離の和がいちばん小さい点 c（フェルマー点）を、段差の線が交わる点とみなす。
+            // 重心にすると、細長い三角形では、交わる点から段差の線に沿ってずれ、向きの違う壁ができる
+            // 頂点 k の段を c まで延ばし（真ん中の三角形を 3 つに分ける）、隣の段との間（飛ぶ所 → c）に壁を立てる。
+            // 真ん中を空けたままにすると、段の角に、向こうが見える隙間が開く
+            let at: [(f64, f64); 3] = [jump_at(0), jump_at(1), jump_at(2)];
+            let (cu, cv) = fermat_point(at);
+            for k in 0..3 {
+                let (jk, jprev) = jv[k].zip(jv[(k + 2) % 3]).map(|(a, b)| (a.0, b.1)).unwrap();
+                // c での頂点 k の段の値（2 つの飛ぶ所の値の平均。floor などの段ではどちらも同じ）
+                let zc = (side_vals[k][0] + side_vals[k][1]) * 0.5;
+                let c = push(&mut mesh, cu, cv, zc);
+                emit(&mut mesh, [jk, c, jprev]);
+            }
+            if walls {
+                // 辺 k の飛ぶ所 → c の壁。頂点 k の段（辺 k の始点の側）と、頂点 k + 1 の段（辺 k の終点の側）の間
+                for k in 0..3 {
+                    let k1 = (k + 1) % 3;
+                    let (near_j, far_j) = (side_vals[k][0], side_vals[k1][1]);
+                    let near_c = (side_vals[k][0] + side_vals[k][1]) * 0.5;
+                    let far_c = (side_vals[k1][0] + side_vals[k1][1]) * 0.5;
+                    let p = vtx[k];
+                    wall_quads.push(([(at[k].0, at[k].1, near_j, far_j), (cu, cv, near_c, far_c)], (us[p], vs[p])));
+                }
+            }
+        } else if jumped.len() == 1 && walls {
+            // 段差の線が三角形の中で終わる: 飛ぶ所から向かいの頂点 w まで、段差が細くなって消える三角形の壁
+            // （2 つの側の面は w でつながるが、飛ぶ所では高さが違うので、間に隙間が開く）
+            let e = jumped[0];
+            let (id, forward) = edges[e];
+            let jp = jumps[&id];
+            let (start, end) = if forward { (jp.before, jp.after) } else { (jp.after, jp.before) };
+            let (ju, jv_) = jump_at(e);
+            let (p, w) = (vtx[e], vtx[(e + 2) % 3]);
+            wall_quads.push(([(ju, jv_, start, end), (us[w], vs[w], vals[w], vals[w])], (us[p], vs[p])));
         }
         // 段差の壁（段差の線が三角形を横切る所）
         if let (Some(lone), true) = (lone, walls) {
@@ -743,7 +791,13 @@ fn explicit_surface_scaled(
         // 明るさが交互に変わる（壁が縞模様になる）
         let horizontal = cross(at(u1 - u0, v1 - v0, 0.0), at(0.0, 0.0, 1.0));
         let to_lone = at(lu - 0.5 * (u0 + u1), lv - 0.5 * (v0 + v1), 0.0);
-        let (near, far) = (clamped(n0) + clamped(n1), clamped(f0) + clamped(f1));
+        // どちらの段が低いかは、高さの差が大きいほうの端で決める（段差の線の交わる所では、
+        // 交わる点の側の端で、段の組み合わせが変わって差が小さくなったり 0 になったりする）
+        let (near, far) = if (clamped(n0) - clamped(f0)).abs() >= (clamped(n1) - clamped(f1)).abs() {
+            (clamped(n0), clamped(f0))
+        } else {
+            (clamped(n1), clamped(f1))
+        };
         let toward_near = if dot(horizontal, to_lone) >= 0.0 { horizontal } else { horizontal.map(|c| -c) };
         let nv = if near <= far { toward_near } else { toward_near.map(|c| -c) };
         // 三角形の向き（表側）も法線にそろえる
@@ -759,6 +813,31 @@ fn explicit_surface_scaled(
         }
     }
     mesh
+}
+
+/// 3 点への距離の和がいちばん小さい点（フェルマー点）。120° 以上の角があればその頂点、なければ Weiszfeld 法で求める
+fn fermat_point(p: [(f64, f64); 3]) -> (f64, f64) {
+    for k in 0..3 {
+        let (a, b, c) = (p[k], p[(k + 1) % 3], p[(k + 2) % 3]);
+        let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - a.0, c.1 - a.1));
+        let (lu, lv) = ((u.0 * u.0 + u.1 * u.1).sqrt(), (v.0 * v.0 + v.1 * v.1).sqrt());
+        // 2 点が重なっている（長さ 0 の辺がある）か、角が 120° 以上
+        if lu * lv == 0.0 || (u.0 * v.0 + u.1 * v.1) <= -0.5 * lu * lv {
+            return a;
+        }
+    }
+    let mut x = ((p[0].0 + p[1].0 + p[2].0) / 3.0, (p[0].1 + p[1].1 + p[2].1) / 3.0);
+    for _ in 0..40 {
+        let (mut su, mut sv, mut sw) = (0.0, 0.0, 0.0);
+        for q in p {
+            let d = ((q.0 - x.0).powi(2) + (q.1 - x.1).powi(2)).sqrt().max(1e-300);
+            su += q.0 / d;
+            sv += q.1 / d;
+            sw += 1.0 / d;
+        }
+        x = (su / sw, sv / sw);
+    }
+    x
 }
 
 /// 値が飛ぶ辺のある三角形を、飛ぶ所で切り分ける（陽関数と媒介変数の曲面で共通。頂点の中身によらない）。
@@ -8144,6 +8223,47 @@ mod tests {
         assert_eq!(slopes, 0);
     }
 
+    /// 表示範囲の内側（縁から少し離れた所）で、1 つの三角形にしか使われていない辺の数（向こうが見える隙間の縁）。
+    /// 壁は頂点を共有しないので、頂点の座標で辺をまとめる
+    fn open_edges_inside(m: &Mesh, d: Domain) -> usize {
+        let key = |i: u32| {
+            let k = i as usize * 3;
+            [0, 1, 2].map(|a| (m.positions[k + a] as f64 * 1e4).round() as i64)
+        };
+        let inside = |i: u32| {
+            let k = i as usize * 3;
+            (0..3).all(|a| {
+                let x = m.positions[k + a] as f64;
+                x > d.lo[a] + 1e-3 && x < d.hi[a] - 1e-3
+            })
+        };
+        let mut count: std::collections::HashMap<([i64; 3], [i64; 3]), usize> = Default::default();
+        for t in m.indices.chunks_exact(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (ka, kb) = (key(a), key(b));
+                // 壁の縦の辺は数えない（段の高さが場所で変わると、壁の端が隣の壁の途中に当たる T 字のつなぎ目になり、
+                // 閉じていても 1 回しか使われない）
+                if ka == kb || (ka[0] == kb[0] && ka[1] == kb[1]) || !inside(a) || !inside(b) {
+                    continue;
+                }
+                *count.entry(if ka < kb { (ka, kb) } else { (kb, ka) }).or_default() += 1;
+            }
+        }
+        count.values().filter(|&&c| c == 1).count()
+    }
+
+    #[test]
+    fn step_corners_have_no_gaps() {
+        // 段差の線が交わる所・三角形の中で終わる所に、向こうが見える隙間が開かない（壁つき）。
+        // 段の角で、真ん中の三角形を空けたまま壁を立てていなかったとき、階段のサンプルで白い隙間が見えた
+        for src in ["floor(x)/2 + floor(y)/4", "floor(x) + floor(y)", "round(x) round(y) / 8"] {
+            let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+            let m = explicit_surface_full(&prog(src, &["x", "y"]), d, 150, 2, ComplexMode::Off, true);
+            // 修正前は 678・32・508 本
+            assert_eq!(open_edges_inside(&m, d), 0, "{src}");
+        }
+    }
+
     #[test]
     fn wall_normals_face_lower_side() {
         // 段差の壁の法線は、三角形の向き（表側）と同じで、段の低い側を向く。
@@ -9616,3 +9736,4 @@ mod tests {
         println!("媒介変数表示の曲面 n = 400: {:?}, 点 {}", t.elapsed(), shape.points.len() / 3);
     }
 }
+

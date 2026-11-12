@@ -2,6 +2,7 @@
   // 数式の入力欄（MathLive の <math-field>）。値は LaTeX でやりとりする。
   import type { MathfieldElement } from 'mathlive'
   import { onMount } from 'svelte'
+  import { fenceBareDelimiters } from './latex'
   import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SHORTCUTS } from './mathSetup'
 
   interface Props {
@@ -142,7 +143,9 @@
   $effect(() => {
     if (el && value !== lastEmitted) {
       lastEmitted = value
-      el.value = value
+      // 裸の ⌊ ⌋（\lfloor … \rfloor）は \left … \right の形にして入れる。
+      // そのままだと MathLive が1組の括弧として扱わず、⌊x⌋ の後ろで / を打つと z= まで分子に入る
+      el.value = fenceBareDelimiters(value)
     }
   })
 
