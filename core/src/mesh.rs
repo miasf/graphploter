@@ -357,7 +357,7 @@ fn explicit_surface_scaled(
     }
     // 段差のある辺（細かくしない）
     let mut steps: crate::adaptive::HashSet<(u32, u32)> = Default::default();
-    let base_jumps: crate::adaptive::HashMap<(u32, u32), Jump> = {
+    let mut base_jumps: crate::adaptive::HashMap<(u32, u32), Jump> = {
         let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
         let mut out: crate::adaptive::HashMap<(u32, u32), Jump> = Default::default();
         for (e, jp) in find_jumps(
@@ -379,13 +379,44 @@ fn explicit_surface_scaled(
     };
 
     // 格子より細い山・谷・極の「種」（[`hidden_features`]）。再生・ドラッグ中は探さない
-    let seeds = if refine {
+    let mut seeds = if refine {
         let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
         let interval = mode == ComplexMode::Off && prog.supports_interval();
         hidden_features(prog, dom, (ua, va), n, &hs, h, (dom.lo[axis], dom.hi[axis]), &clamped, interval, base_ms)
     } else {
         SeedMap::default()
     };
+    // 細い極の線: 最初の格子の辺の上で極の位置を探して、段差と同じように切り分ける（細分で追いかけない）。線に沿ってたどる
+    if refine {
+        let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+        // 差が範囲の幅の 10% を超える段差（floor などのふつうの段差は、ふつうここまで大きくない）
+        let known: Vec<(usize, usize)> = base_jumps
+            .iter()
+            .filter(|(_, j)| (clamped(j.after) - clamped(j.before)).abs() > 0.1 * (whi - wlo))
+            .map(|(&(a, b), _)| (a as usize, b as usize))
+            .collect();
+        let poles =
+            trace_poles(prog, &us, &vs, &hs, n, &seeds, (dom.lo[axis], dom.hi[axis]), (wlo, whi), &clamped, base_ms, &known);
+        for (e, jp) in poles {
+            steps.insert(e);
+            base_jumps.insert(e, jp);
+        }
+    }
+    // 段差・極の辺を持つマスの種は使わない（段差・極の切り分けで描く。極の隣の急な斜面の種で細かくすると、三角形の上限を使い切る）
+    if !seeds.is_empty() && !steps.is_empty() {
+        let cell_of = |k: u32| ((k as usize) % m, (k as usize) / m);
+        let mut cells: crate::adaptive::HashSet<usize> = Default::default();
+        for &(a, b) in steps.iter() {
+            let ((i0, j0), (i1, j1)) = (cell_of(a), cell_of(b));
+            // 辺を持つマス（辺の向きによって 1〜2 個。周りのマスもまとめて外す）
+            for j in j0.saturating_sub(1)..=j1.min(n - 1) {
+                for i in i0.saturating_sub(1)..=i1.min(n - 1) {
+                    cells.insert(j * n + i);
+                }
+            }
+        }
+        seeds.cells.retain(|c, _| !cells.contains(c));
+    }
 
     let mut eval = |a: &[f64], b: &[f64]| {
         let mut out = vec![C::new(0.0, 0.0); a.len()];
@@ -757,6 +788,271 @@ fn explicit_surface_scaled(
     mesh
 }
 
+/// 細い極の線（`nCr(x, y)` の x = −1, −2, … など）を、最初の格子の辺の上で探す。極は「辺の上のどこか 1 点で、値が
+/// 上の端から下の端へ飛ぶ所」なので、見つかった辺を段差と同じように切り分ければ、極を細分で追いかけなくてよい
+/// （細分で追いかけると、極の線が何本もある式では三角形の上限を使い切り、壁が途切れる）。
+///
+/// 1. 調べ始める辺: S21 の種を含むマスの辺と、辺の中点の値が見える高さの外で、両端は中にある辺
+///    （中点は、区間演算の使えない式なら [`hidden_features`] が計算してある。使える式では計算しない。
+///    使えない式でも最初の格子の計算が 3 ms 以上なら、計算していないので、4 辺に 1 辺だけ中点を計算する）
+/// 2. 辺を 16 等分した点で f を計算し、隣どうしの点の高さ（範囲 `ends` にそろえたもの）の差がいちばん大きい区間を、
+///    差の大きいほうの半分に狭めて 30 回二分する。狭めた両側が、一方は上の端の近く、もう一方は下の端の近くに届いているか、
+///    差が最初の 4 倍以上に広がって範囲の幅の 10% を超えていれば、極とみなし、両側の値を [`Jump`] にする（ふつうの零点・なめらかな所は差が縮むので外れる。両側とも同じ向きに大きくなる極、
+///    `1/(x^2+y^2)` などは、細分で描けるので扱わない）。段差探しで見つかった差の大きい段差の辺の隣からも、たどり始める
+/// 3. 極の見つかった辺を持つ三角形の、残りの辺を同じように調べ、見つかれば隣の三角形へ進む（合わせて 30,000 辺まで）
+#[allow(clippy::too_many_arguments)]
+fn trace_poles(
+    prog: &Program,
+    us: &[f64],
+    vs: &[f64],
+    hs: &[f64],
+    n: usize,
+    seeds: &SeedMap,
+    visible: (f64, f64),
+    ends: (f64, f64),
+    height: &dyn Fn(C) -> f64,
+    base_ms: f64,
+    known: &[(usize, usize)],
+) -> crate::adaptive::HashMap<(u32, u32), Jump> {
+    const SAMPLES: usize = 16;
+    // 細い極（nCr(x, y) の x = −8 は、極から 10⁻⁶ ほどの所でしか端に届かない）まで狭める
+    const ROUNDS: usize = 30;
+    const MAX_EDGES: usize = 30_000;
+    let m = n + 1;
+    let (lo, hi) = visible;
+    let (wlo, whi) = ends;
+    // 端の近く（範囲の幅の 5% 以内）
+    let near = 0.05 * (whi - wlo);
+    let at_top = |h: f64| h.is_finite() && h >= whi - near;
+    let at_bottom = |h: f64| h.is_finite() && h <= wlo + near;
+    let key = |a: usize, b: usize| if a < b { (a, b) } else { (b, a) };
+    // 格子の三角形（マス (i, j) の 0: (a, b, d)、1: (a, d, c)）の辺
+    let tri_edges = |i: usize, j: usize, t: usize| -> [(usize, usize); 3] {
+        let a = j * m + i;
+        let (b, c, d) = (a + 1, a + m, a + m + 1);
+        if t == 0 { [key(a, b), key(b, d), key(a, d)] } else { [key(a, d), key(d, c), key(a, c)] }
+    };
+    // 辺を持つ三角形（1 つか 2 つ）
+    let edge_tris = |e: (usize, usize)| -> Vec<(usize, usize, usize)> {
+        let (k0, k1) = e;
+        let (i, j) = (k0 % m, k0 / m);
+        let mut out = Vec::with_capacity(2);
+        if k1 == k0 + 1 {
+            // 横の辺: 下のマスの 0、上のマス (j − 1) の 1
+            if j < n {
+                out.push((i, j, 0));
+            }
+            if j > 0 {
+                out.push((i, j - 1, 1));
+            }
+        } else if k1 == k0 + m {
+            // 縦の辺: このマスの 1、左のマスの 0
+            if i < n {
+                out.push((i, j, 1));
+            }
+            if i > 0 {
+                out.push((i - 1, j, 0));
+            }
+        } else {
+            out.push((i, j, 0));
+            out.push((i, j, 1));
+        }
+        out
+    };
+
+    // 1. 調べ始める辺
+    let mut start: Vec<(usize, usize)> = Vec::new();
+    for (&c, _) in seeds.cells.iter() {
+        let (i, j) = (c % n, c / n);
+        for t in 0..2 {
+            start.extend_from_slice(&tri_edges(i, j, t));
+        }
+    }
+    let outside = |h: f64| !h.is_finite() || h > hi || h < lo;
+    let inside = |h: f64| h.is_finite() && (lo..=hi).contains(&h);
+    if !seeds.mids.is_empty() {
+        for &(e, h) in &seeds.mids {
+            if outside(h) && inside(hs[e.0]) && inside(hs[e.1]) {
+                start.push(key(e.0, e.1));
+            }
+        }
+    } else if base_ms >= 3.0 && !prog.supports_interval() {
+        // 重い式: 4 辺に 1 辺だけ中点を計算する
+        let mut edges: Vec<(usize, usize)> = Vec::new();
+        let mut c = 0usize;
+        for j in 0..m {
+            for i in 0..m {
+                let k = j * m + i;
+                for (ok, e) in [(i + 1 < m, (k, k + 1)), (j + 1 < m, (k, k + m)), (i + 1 < m && j + 1 < m, (k, k + m + 1))] {
+                    if ok {
+                        if c % 4 == 0 && inside(hs[e.0]) && inside(hs[e.1]) {
+                            edges.push(e);
+                        }
+                        c += 1;
+                    }
+                }
+            }
+        }
+        let xs: Vec<f64> = edges.iter().map(|e| 0.5 * (us[e.0] + us[e.1])).collect();
+        let ys: Vec<f64> = edges.iter().map(|e| 0.5 * (vs[e.0] + vs[e.1])).collect();
+        let mut out = vec![C::new(0.0, 0.0); edges.len()];
+        prog.eval_batch(&[&xs, &ys], &mut out);
+        for (e, z) in edges.into_iter().zip(out) {
+            if outside(height(z)) {
+                start.push(e);
+            }
+        }
+    }
+    // 段差探し（[`find_jumps`]）で見つかった、差の大きい段差（極かもしれない）の辺の隣からもたどる
+    // （その辺そのものは、段差探しが極のすぐそばまで狭めてあるので、調べ直さない）
+    let mut checked: crate::adaptive::HashSet<(usize, usize)> = Default::default();
+    for &e in known {
+        checked.insert(e);
+        for (i, j, t) in edge_tris(e) {
+            start.extend(tri_edges(i, j, t).into_iter().filter(|x| *x != e));
+        }
+    }
+    let mut found: crate::adaptive::HashMap<(u32, u32), Jump> = Default::default();
+    if start.is_empty() {
+        return found;
+    }
+    start.sort_unstable();
+    start.dedup();
+    let mut todo = start;
+    while !todo.is_empty() && checked.len() < MAX_EDGES {
+        let room = MAX_EDGES - checked.len();
+        let batch: Vec<(usize, usize)> = todo.drain(..).filter(|e| checked.insert(*e)).take(room).collect();
+        if batch.is_empty() {
+            break;
+        }
+        // 2. 辺を 16 等分した点
+        let mut xs = Vec::with_capacity(batch.len() * (SAMPLES - 1));
+        let mut ys = Vec::with_capacity(batch.len() * (SAMPLES - 1));
+        for &(k0, k1) in &batch {
+            for s in 1..SAMPLES {
+                let t = s as f64 / SAMPLES as f64;
+                xs.push(us[k0] + (us[k1] - us[k0]) * t);
+                ys.push(vs[k0] + (vs[k1] - vs[k0]) * t);
+            }
+        }
+        let mut zs = vec![C::new(0.0, 0.0); xs.len()];
+        prog.eval_batch(&[&xs, &ys], &mut zs);
+        // 区間 (辺の番号, ta, tb, 値 a, 値 b)
+        let mut iv: Vec<(usize, f64, f64, C, C)> = Vec::new();
+        // 区間ごとの、最初の差
+        let mut first: Vec<f64> = Vec::new();
+        for (b, &(k0, k1)) in batch.iter().enumerate() {
+            let z_at = |s: usize| -> Option<C> {
+                if s == 0 || s == SAMPLES {
+                    return None;
+                }
+                Some(zs[b * (SAMPLES - 1) + s - 1])
+            };
+            let h_at = |s: usize| -> f64 {
+                match s {
+                    0 => hs[k0],
+                    _ if s == SAMPLES => hs[k1],
+                    _ => height(z_at(s).unwrap_or(C::new(f64::NAN, 0.0))),
+                }
+            };
+            // 差がいちばん大きい隣どうしの区間（極なら、そこで値が上の端と下の端へ分かれていく）
+            let mut best: Option<(usize, f64)> = None;
+            for s in 0..SAMPLES {
+                let (ha, hb) = (h_at(s), h_at(s + 1));
+                let d = (hb - ha).abs();
+                if d.is_finite() && best.is_none_or(|(_, bd)| d > bd) {
+                    best = Some((s, d));
+                }
+            }
+            if let Some((s, d0)) = best {
+                first.push(d0);
+                // 区間の両端の値（格子点は高さしか持っていないので、下でまとめて計算し直す）
+                iv.push((b, s as f64 / SAMPLES as f64, (s + 1) as f64 / SAMPLES as f64, C::new(f64::NAN, 0.0), C::new(f64::NAN, 0.0)));
+            }
+        }
+        // 区間の両端の値を計算し直してから、二分する
+        {
+            let mut xs = Vec::with_capacity(2 * iv.len());
+            let mut ys = Vec::with_capacity(2 * iv.len());
+            for &(b, ta, tb, ..) in &iv {
+                let (k0, k1) = batch[b];
+                for t in [ta, tb] {
+                    xs.push(us[k0] + (us[k1] - us[k0]) * t);
+                    ys.push(vs[k0] + (vs[k1] - vs[k0]) * t);
+                }
+            }
+            let mut zs = vec![C::new(0.0, 0.0); xs.len()];
+            prog.eval_batch(&[&xs, &ys], &mut zs);
+            for (q, c) in iv.iter_mut().enumerate() {
+                c.3 = zs[2 * q];
+                c.4 = zs[2 * q + 1];
+            }
+        }
+        // 3 回目の二分の後の差（そこから縮まなければ、値が飛んでいる）
+        let mut mid_diff = vec![f64::NAN; iv.len()];
+        for round in 0..ROUNDS {
+            if round == 3 {
+                for (d, c) in mid_diff.iter_mut().zip(&iv) {
+                    *d = (height(c.4) - height(c.3)).abs();
+                }
+            }
+            let mut xs = Vec::with_capacity(iv.len());
+            let mut ys = Vec::with_capacity(iv.len());
+            for &(b, ta, tb, ..) in &iv {
+                let (k0, k1) = batch[b];
+                let t = 0.5 * (ta + tb);
+                xs.push(us[k0] + (us[k1] - us[k0]) * t);
+                ys.push(vs[k0] + (vs[k1] - vs[k0]) * t);
+            }
+            let mut zs = vec![C::new(0.0, 0.0); xs.len()];
+            prog.eval_batch(&[&xs, &ys], &mut zs);
+            for (c, &z) in iv.iter_mut().zip(&zs) {
+                let t = 0.5 * (c.1 + c.2);
+                let (ha, hb, hm) = (height(c.3), height(c.4), height(z));
+                if !hm.is_finite() || (hm - ha).abs() >= (hb - hm).abs() {
+                    c.2 = t;
+                    c.4 = z;
+                } else {
+                    c.1 = t;
+                    c.3 = z;
+                }
+            }
+        }
+        for ((&(b, ta, tb, fa, fb), &d0), &d3) in iv.iter().zip(&first).zip(&mid_diff) {
+            let (ha, hb) = (height(fa), height(fb));
+            // 極とみなすのは、狭めた後に次のどれか:
+            // - 上の端と下の端の両方に届いている
+            // - 差が最初の 4 倍以上に広がり、範囲の幅の 10% を超えている（極のすぐそばでも端まで届かない細い極）
+            // - 差が 3 回目の二分の後から縮んでおらず、片側が端に届いている（格子の点が極のすぐ隣にあり、最初から片側が端にある）
+            // 零点・なめらかな所は差が縮むので外れる。floor などの段差は、ふつう端（見える範囲のさらに外）に届かないので外れる
+            let d = (hb - ha).abs();
+            let spans = (at_top(ha) && at_bottom(hb)) || (at_bottom(ha) && at_top(hb));
+            let grows = d.is_finite() && d >= 4.0 * d0 && d > 0.1 * (whi - wlo);
+            let one_end = [ha, hb].iter().any(|&x| at_top(x) || at_bottom(x));
+            let kept = d.is_finite() && d >= 0.9 * d3 && d > 0.1 * (whi - wlo) && one_end;
+            if !(spans || grows || kept) {
+                continue;
+            }
+            let (k0, k1) = batch[b];
+            found.insert(
+                (k0 as u32, k1 as u32),
+                Jump { t: 0.5 * (ta + tb), before: fa, after: fb, multi: false, rest_at_start: false },
+            );
+            // 3. 線をたどる: この辺を持つ三角形の、残りの辺
+            for (i, j, t) in edge_tris((k0, k1)) {
+                for e in tri_edges(i, j, t) {
+                    if !checked.contains(&e) {
+                        todo.push(e);
+                    }
+                }
+            }
+        }
+        todo.sort_unstable();
+        todo.dedup();
+    }
+    found
+}
+
 /// 陽関数の細分のパスの数（種の無い三角形）と、種のある三角形のパスの数
 const NORMAL_PASSES: usize = 6;
 const SEED_PASSES: usize = 16;
@@ -783,6 +1079,8 @@ struct SeedMap {
     u: (f64, f64),
     v: (f64, f64),
     cells: crate::adaptive::HashMap<usize, Vec<Seed>>,
+    /// 区間演算が使えない式で計算した、最初の格子の辺の中点の高さ（辺の両端の格子点の番号, 高さ）。[`trace_poles`] が使う
+    mids: Vec<((usize, usize), f64)>,
 }
 
 impl SeedMap {
@@ -874,7 +1172,7 @@ fn hidden_features(
     const MAX_INTERVALS: usize = 30_000;
     let m = n + 1;
     let (u0, u1, v0, v1) = (dom.lo[ua], dom.hi[ua], dom.lo[va], dom.hi[va]);
-    let mut out = SeedMap { n, u: (u0, u1), v: (v0, v1), cells: Default::default() };
+    let mut out = SeedMap { n, u: (u0, u1), v: (v0, v1), cells: Default::default(), mids: Vec::new() };
     let total = n as i64 * UNIT;
     let pu = |iu: i64| u0 + (u1 - u0) * iu as f64 / total as f64;
     let pv = |iv: i64| v0 + (v1 - v0) * iv as f64 / total as f64;
@@ -936,6 +1234,15 @@ fn hidden_features(
         let vals = eval_points(&pts);
         for (&(iu, iv), &val) in pts.iter().zip(&vals) {
             consider(iu, iv, val, 0.5 * du, &mut out);
+            // 中点を持つ辺（マスの中心は対角線 (i, j)–(i+1, j+1) の中点）
+            let (i, j) = ((iu / UNIT) as usize, (iv / UNIT) as usize);
+            let k = j * m + i;
+            let e = match (iu % UNIT != 0, iv % UNIT != 0) {
+                (true, true) => (k, k + m + 1),
+                (true, false) => (k, k + 1),
+                _ => (k, k + m),
+            };
+            out.mids.push((e, val));
         }
         return out;
     }
@@ -1298,6 +1605,9 @@ fn find_jumps_with(
     early_exit: bool,
 ) -> std::collections::HashMap<usize, Jump> {
     const ROUNDS: usize = 12;
+    // 差が threshold の POLE_JUMP 倍（細かくするときは高さの範囲の 0.3 倍）より大きい段差は、さらに POLE_ROUNDS 回二分する
+    const POLE_JUMP: f64 = 60.0;
+    const POLE_ROUNDS: usize = 18;
     // この回数だけ二分した後、差が最初の差の EARLY_KEEP 倍より小さい候補は外す
     const EARLY_ROUND: usize = 3;
     const EARLY_KEEP: f64 = 0.3;
@@ -1388,6 +1698,56 @@ fn find_jumps_with(
             mu.truncate(cands.len());
             mv.truncate(cands.len());
             out.truncate(cands.len());
+        }
+    }
+    // 差の大きい段差（極かもしれない）は、さらに二分して、極のすぐそばまで狭める。細い極（nPr(x, y) の x = −8 など）は、
+    // 12 回の二分（辺の 1/4096）では極の手前で止まり、そこで切ると壁が上下の端まで届かない
+    {
+        let big: Vec<usize> = (0..cands.len())
+            .filter(|&k| {
+                let d = (height(cands[k].fb) - height(cands[k].fa)).abs();
+                d.is_finite() && d > POLE_JUMP * threshold
+            })
+            .collect();
+        if !big.is_empty() {
+            let mut mu = vec![0.0; big.len()];
+            let mut mv = vec![0.0; big.len()];
+            let mut out = vec![C::new(0.0, 0.0); big.len()];
+            // 範囲の端に張り付いた値（1,000 倍しても、範囲にそろえた高さが変わらない）
+            let stuck = |z: C| {
+                let h0 = height(z);
+                h0 != 0.0 && h0 == height(z * 1000.0)
+            };
+            let mut big = big;
+            for _ in 0..POLE_ROUNDS {
+                // 両側とも端に張り付いた段差は、それ以上狭めても変わらないので外す
+                big.retain(|&k| !(stuck(cands[k].fa) && stuck(cands[k].fb)));
+                if big.is_empty() {
+                    break;
+                }
+                mu.truncate(big.len());
+                mv.truncate(big.len());
+                out.truncate(big.len());
+                for (q, &k) in big.iter().enumerate() {
+                    let c = &cands[k];
+                    let t = 0.5 * (c.ta + c.tb);
+                    mu[q] = us[c.k0] + (us[c.k1] - us[c.k0]) * t;
+                    mv[q] = vs[c.k0] + (vs[c.k1] - vs[c.k0]) * t;
+                }
+                prog.eval_batch(&[&mu, &mv], &mut out);
+                for (q, &k) in big.iter().enumerate() {
+                    let c = &mut cands[k];
+                    let t = 0.5 * (c.ta + c.tb);
+                    let (ha, hb, hm) = (height(c.fa), height(c.fb), height(out[q]));
+                    if !hm.is_finite() || (hm - ha).abs() >= (hb - hm).abs() {
+                        c.tb = t;
+                        c.fb = out[q];
+                    } else {
+                        c.ta = t;
+                        c.fa = out[q];
+                    }
+                }
+            }
         }
     }
     let mut jumps = std::collections::HashMap::new();

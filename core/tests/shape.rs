@@ -1155,3 +1155,22 @@ fn fragments_are_dropped_but_small_shapes_stay() {
     assert!(m <= 2.0, "欠け {m:.3}%");
     assert_eq!(fragments(&r.positions(), &r.indices()), 0);
 }
+
+#[test]
+fn pole_walls_are_continuous() {
+    // S25: 極の線（x = −2, −4, −6, −8）に沿った壁が途切れない（80 区間のうち 72 以上が、上端と下端の両方に届く）。
+    // （三角形の数の条件は、極の細分ではなく、表示範囲の端を横切る急な斜面の細分で上限に張り付くので、確かめない）
+    for (f, poles) in [
+        ("nCr(x, y)", vec![-2.0, -4.0, -6.0, -8.0]),
+        ("nPr(x, y)/10", vec![-2.0, -4.0, -6.0, -8.0]),
+        ("gamma(x) / 5 + y/5", vec![-1.0, -2.0, -3.0, -4.0, -5.0]),
+    ] {
+        let (r, _) = mesh(&format!("z = {f}"), Rot::None, IRES);
+        let pos = r.positions();
+        for x in poles {
+            let c = wall_coverage(&pos, x);
+            assert!(c >= 72, "z = {f} の x = {x} の壁が {c}/80");
+        }
+    }
+}
+
