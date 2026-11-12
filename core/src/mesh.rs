@@ -495,7 +495,9 @@ fn explicit_surface_scaled(
     // 法線が axis の正の向きになるように三角形の向きを決める
     // （(ua, va, axis) が x→y→z の順の巡回なら、そのままで正の向き）
     let flip = (ua + 1) % 3 != va;
-    let mut wall_quads: Vec<[(f64, f64, C, C); 2]> = Vec::new();
+    // 壁の四角形: 段差の線の両端の (u, v, lone の側の値, 反対側の値) と、lone の頂点の (u, v)
+    type WallEnd = (f64, f64, C, C);
+    let mut wall_quads: Vec<([WallEnd; 2], (f64, f64))> = Vec::new();
 
     // 段差の無い三角形（表示範囲の上端・下端で切ってから描く）
     let mut plain: Vec<[usize; 3]> = Vec::new();
@@ -576,7 +578,7 @@ fn explicit_surface_scaled(
                         };
                         (u, v, near, far)
                     };
-                    wall_quads.push([info(e_out), info(e_in)]);
+                    wall_quads.push(([info(e_out), info(e_in)], (us[p], vs[p])));
                 }
             }
             1 => {
@@ -601,27 +603,38 @@ fn explicit_surface_scaled(
     mesh.keep_full = !jumps.is_empty();
 
     // 段差の壁: 段差の線に沿って、lone の側の縁と反対側の縁を結ぶ縦の四角形（頂点は共有しない）
-    for [(u0, v0, n0, f0), (u1, v1, n1, f1)] in wall_quads {
+    for ([(u0, v0, n0, f0), (u1, v1, n1, f1)], (lu, lv)) in wall_quads {
         let base = mesh.positions.len() as u32 / 3;
         for (u, v, z) in [(u0, v0, n0), (u1, v1, n1), (u1, v1, f1), (u0, v0, f0)] {
             push(&mut mesh, u, v, z);
         }
-        mesh.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        // 法線: 段差の線の向き × 縦の向き（どちら向きでも両面を描くので、明るさが合えばよい）
-        let mut dir = [0.0; 3];
-        dir[ua] = u1 - u0;
-        dir[va] = v1 - v0;
-        let mut up = [0.0; 3];
-        up[axis] = 1.0;
-        let nv = [
-            dir[1] * up[2] - dir[2] * up[1],
-            dir[2] * up[0] - dir[0] * up[2],
-            dir[0] * up[1] - dir[1] * up[0],
-        ];
-        let len = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2])
-            .sqrt()
-            .max(1e-300);
+        // 表示中の座標の点（u, v は高さでない 2 つの軸、h は高さの軸）
+        let at = |u: f64, v: f64, h: f64| {
+            let mut q = [0.0; 3];
+            q[ua] = u;
+            q[va] = v;
+            q[axis] = h;
+            q
+        };
+        let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        // 法線: 段差の線に垂直な水平の向きのうち、段の低い側（外から壁が見える側）を向くもの。
+        // 段差の線の向きは三角形ごとに入れ替わるので、線の向きだけで決めると、隣の区間と法線が逆になって
+        // 明るさが交互に変わる（壁が縞模様になる）
+        let horizontal = cross(at(u1 - u0, v1 - v0, 0.0), at(0.0, 0.0, 1.0));
+        let to_lone = at(lu - 0.5 * (u0 + u1), lv - 0.5 * (v0 + v1), 0.0);
+        let (near, far) = (clamped(n0) + clamped(n1), clamped(f0) + clamped(f1));
+        let toward_near = if dot(horizontal, to_lone) >= 0.0 { horizontal } else { horizontal.map(|c| -c) };
+        let nv = if near <= far { toward_near } else { toward_near.map(|c| -c) };
+        // 三角形の向き（表側）も法線にそろえる
+        let (p0, p1, p2) = (at(u0, v0, clamped(n0)), at(u1, v1, clamped(n1)), at(u1, v1, clamped(f1)));
+        if dot(cross(sub(p1, p0), sub(p2, p0)), nv) >= 0.0 {
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        } else {
+            mesh.indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
+        let len = dot(nv, nv).sqrt().max(1e-300);
         for _ in 0..4 {
             mesh.normals.extend(nv.iter().map(|c| (c / len) as f32));
         }
@@ -5491,6 +5504,36 @@ mod tests {
         let p = prog("20 x", &["x", "y"]);
         let full = explicit_surface(&p, Domain { lo: [-1.0, -1.0, -30.0], hi: [1.0, 1.0, 30.0] }, 10, 2);
         assert_eq!(full.positions.len(), 11 * 11 * 3);
+    }
+
+    #[test]
+    fn wall_normals_face_lower_side() {
+        // 段差の壁の法線は、三角形の向き（表側）と同じで、段の低い側を向く。
+        // 段差の線の向きは三角形ごとに入れ替わるので、そろっていないと壁が縞模様になる
+        for (src, low) in [("floor(2 x)", -1.0), ("floor(-2 x)", 1.0), ("floor(2 x) + floor(2 y)", -1.0)] {
+            let m = explicit_surface_full(&prog(src, &["x", "y"]), Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 3.0] }, 13, 2, ComplexMode::Off, true);
+            let v = |i: u32| {
+                let k = i as usize * 3;
+                [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+            };
+            let mut walls = 0;
+            for t in m.indices.chunks_exact(3) {
+                let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+                let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+                let g = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+                // x = 0.5 の段差の壁（法線がほぼ ±x）
+                if len < 1e-9 || (g[0] / len).abs() < 0.99 || ((a[0] + b[0] + c[0]) / 3.0 - 0.5).abs() > 1e-3 {
+                    continue;
+                }
+                walls += 1;
+                assert!(g[0] * low > 0.0, "{src}: 壁が段の高い側を向いている");
+                for &i in t {
+                    assert!(m.normals[i as usize * 3] as f64 * g[0] > 0.0, "{src}: 頂点の法線が面と逆");
+                }
+            }
+            assert!(walls > 0, "{src}: 壁が無い");
+        }
     }
 
     /// 三角形でつながった部分（曲面）の数
