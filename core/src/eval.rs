@@ -548,6 +548,127 @@ impl Program {
         self.code.run(inputs, n, &mut Out(out));
     }
 
+    /// 段差の元（`floor`・`ceil`・`round`・`sign`・`mod` の呼び出し）の命令の番号（出てくる順）。
+    /// 実数だけで計算できない式（複素数・特殊関数）では空
+    fn branch_site_ops(&self) -> Vec<usize> {
+        if !self.code.real {
+            return Vec::new();
+        }
+        self.code
+            .ops
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| {
+                matches!(op, Op::Call1(Func::Floor | Func::Ceil | Func::Round | Func::Sign, _) | Op::Call2(Func::Mod, _, _))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 段差の元の数（[`Program::eval_branches`]・[`Program::frozen`] で使う）。実数だけで計算できない式では 0
+    pub fn branch_sites(&self) -> usize {
+        self.branch_site_ops().len()
+    }
+
+    /// 点ごとに、段差の元ごとの枝の番号（`floor(a)`・`ceil(a)`・`round(a)` はその値、`sign(a)` は符号、`mod(a, b)` は ⌊a/b⌋）。
+    /// 結果は点の順に、段差の元の数ずつ並べる。何度も計算するときは [`Program::branches`] で作ったものを使う
+    pub fn eval_branches(&self, inputs: &[&[f64]], n: usize) -> Vec<f64> {
+        self.branches().eval(inputs, n)
+    }
+
+    /// 枝の番号を計算する命令の列（[`Program::eval_branches`] を何度も呼ぶときに、組み立て直さないように）
+    pub fn branches(&self) -> Branches {
+        let sites = self.branch_site_ops();
+        let k = sites.len();
+        if k == 0 {
+            return Branches { code: None, k: 0 };
+        }
+        let mut b = Builder::default();
+        let at = b.append(&self.code.ops, &|v| Op::Var(v));
+        let outs: Vec<usize> = sites
+            .iter()
+            .map(|&i| match &self.code.ops[i] {
+                Op::Call2(Func::Mod, a, d) => {
+                    let q = b.push(Op::Bin(BinOp::Div, at[*a], at[*d]));
+                    b.push(Op::Call1(Func::Floor, q))
+                }
+                _ => at[i],
+            })
+            .collect();
+        Branches { code: Some(Code::new(b, outs)), k }
+    }
+}
+
+/// 枝の番号を計算する命令の列（[`Program::branches`]）
+pub struct Branches {
+    code: Option<Code>,
+    k: usize,
+}
+
+impl Branches {
+    /// 点ごとの枝の番号（点の順に、段差の元の数ずつ）
+    pub fn eval(&self, inputs: &[&[f64]], n: usize) -> Vec<f64> {
+        let Some(code) = &self.code else { return Vec::new() };
+        let k = self.k;
+        struct Out<'a> {
+            k: usize,
+            vals: &'a mut [f64],
+        }
+        impl Sink for Out<'_> {
+            fn real(&mut self, out: usize, start: usize, vals: &[f64]) {
+                for (j, v) in vals.iter().enumerate() {
+                    self.vals[(start + j) * self.k + out] = *v;
+                }
+            }
+            fn complex(&mut self, out: usize, start: usize, vals: &[C]) {
+                for (j, v) in vals.iter().enumerate() {
+                    self.vals[(start + j) * self.k + out] = if v.im == 0.0 { v.re } else { f64::NAN };
+                }
+            }
+        }
+        let mut vals = vec![f64::NAN; n * k];
+        code.run(inputs, n, &mut Out { k, vals: &mut vals });
+        vals
+    }
+}
+
+impl Program {
+
+    /// 段差の元を、渡した枝の番号 `k`（[`Program::eval_branches`] と同じ順）で置き換えた式（枝の中での、なめらかな続き）。
+    /// `floor(a)`・`ceil(a)`・`round(a)`・`sign(a)` → k、`mod(a, b)` → a − b k
+    pub fn frozen(&self, k: &[f64]) -> Program {
+        let sites = self.branch_site_ops();
+        assert_eq!(sites.len(), k.len());
+        let mut b = Builder::default();
+        let mut at: Vec<usize> = Vec::with_capacity(self.code.ops.len());
+        for (i, op) in self.code.ops.iter().enumerate() {
+            let new = if let Some(s) = sites.iter().position(|&x| x == i) {
+                match op {
+                    Op::Call2(Func::Mod, a, d) => {
+                        let c = b.push(Op::Const(C::new(k[s], 0.0)));
+                        let m = b.push(Op::Bin(BinOp::Mul, at[*d], c));
+                        at.push(b.push(Op::Bin(BinOp::Sub, at[*a], m)));
+                        continue;
+                    }
+                    _ => Op::Const(C::new(k[s], 0.0)),
+                }
+            } else {
+                match op {
+                    Op::Const(c) => Op::Const(*c),
+                    Op::Var(v) => Op::Var(*v),
+                    Op::Neg(a) => Op::Neg(at[*a]),
+                    Op::Bin(o, a, c) => Op::Bin(*o, at[*a], at[*c]),
+                    Op::Call1(f, a) => Op::Call1(*f, at[*a]),
+                    Op::Call2(f, a, c) => Op::Call2(*f, at[*a], at[*c]),
+                    Op::CallN(f, args) => Op::CallN(*f, args.iter().map(|&a| at[a]).collect()),
+                }
+            };
+            at.push(b.push(new));
+        }
+        let outs = self.code.outs.iter().map(|&o| at[o]).collect();
+        Program { code: Code::new(b, outs), vars: self.vars.clone(), used_params: self.used_params.clone() }
+    }
+
     /// 区間演算が使える式か（定数がすべて実数で、関数が初等関数だけ。特殊関数・虚数の定数を使う式は使えない）
     pub fn supports_interval(&self) -> bool {
         self.code.real
@@ -738,6 +859,51 @@ mod tests {
         let mut out = [C::new(0.0, 0.0)];
         p.eval_batch(&[&[x], &[y]], &mut out);
         out[0]
+    }
+
+    #[test]
+    fn frozen_matches_plain() {
+        // 点ごとの枝の番号を渡して固定した式（なめらかな続き）の値が、その点ではふつうの計算と一致する
+        let srcs = [
+            "floor(x) + floor(y) + z - mod(x y, 3)",
+            "mod(x y, z) - 1",
+            "round(x z) / 3 + ceil(y - z) - x",
+            "sign(sin(x) y) z + floor(x + y) - mod(z, x y)",
+            "mod(floor(x) + round(y), 3) + ceil(z) sign(x - y) - z",
+        ];
+        // 決まった乱数（線形合同法）
+        let mut seed: u64 = 12345;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 / (1u64 << 53) as f64) * 20.0 - 10.0
+        };
+        let (xs, ys, zs): (Vec<f64>, Vec<f64>, Vec<f64>) = (0..1000).map(|_| (rnd(), rnd(), rnd())).fold(
+            (Vec::new(), Vec::new(), Vec::new()),
+            |(mut a, mut b, mut c), (x, y, z)| {
+                a.push(x);
+                b.push(y);
+                c.push(z);
+                (a, b, c)
+            },
+        );
+        for src in srcs {
+            let p = Program::compile(&parse(src).unwrap(), &["x", "y", "z"]).unwrap();
+            let k = p.branch_sites();
+            assert!(k > 0, "{src}");
+            let mut plain = vec![C::new(0.0, 0.0); 1000];
+            p.eval_batch(&[&xs, &ys, &zs], &mut plain);
+            let br = p.eval_branches(&[&xs, &ys, &zs], 1000);
+            for i in 0..1000 {
+                let f = p.frozen(&br[i * k..(i + 1) * k]);
+                let mut out = [C::new(0.0, 0.0)];
+                f.eval_batch(&[&xs[i..i + 1], &ys[i..i + 1], &zs[i..i + 1]], &mut out);
+                let (a, b) = (plain[i].re, out[0].re);
+                assert!((a - b).abs() <= 1e-9 * (1.0 + a.abs()), "{src} の点 {i}: {a} と {b}");
+            }
+        }
+        // 段差の元が無い式・複素数の式は 0
+        assert_eq!(Program::compile(&parse("x^2 + y^2 - z").unwrap(), &["x", "y", "z"]).unwrap().branch_sites(), 0);
+        assert_eq!(Program::compile(&parse("floor(x) + i").unwrap(), &["x", "y", "z"]).unwrap().branch_sites(), 0);
     }
 
     #[test]

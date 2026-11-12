@@ -640,10 +640,12 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
+            b.kind.push_str(&b.inner.note);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
         }
         P::Solid { prog, ranges, .. } => {
             b.inner = mesh::implicit_solid(prog, dom, ctx.implicit_resolution, ranges, space.samples);
+            b.kind.push_str(&b.inner.note);
             b.fields.push(mesh::Field::new(prog, ranges, space.samples, dom));
         }
         // 媒介変数表示: n 次元の点を計算してから、回転・射影する

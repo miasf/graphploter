@@ -112,7 +112,7 @@ type PlotObject =
       kind: 'curve'
       line: LineSegments2
       /** 長さの無い曲線（点。複素平面の点 1 + 2i や組 (1, 2, 3)）を描く丸。line の子 */
-      dots: THREE.Points
+      dots: THREE.InstancedMesh
     }
 
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
@@ -874,6 +874,7 @@ export class Viewer {
     this.applyClipping()
     for (const p of this.plots.values()) {
       if (p.kind === 'surface') p.grid.uHeatRange.value.set(d.zmin, d.zmax)
+      else this.placeDots(p.dots)
     }
 
     this.buildFrame(d)
@@ -1039,8 +1040,13 @@ export class Viewer {
       if (old.kind === 'curve') {
         old.line.geometry.dispose()
         old.line.geometry = this.curveGeometry(mesh.positions)
-        old.dots.geometry.dispose()
-        old.dots.geometry = dotGeometry(mesh.positions)
+        // 点の数が変わるので、点の球は作り直す（材質はそのまま使う）
+        const mat = old.dots.material as THREE.MeshStandardMaterial
+        const scale = old.dots.userData.scale
+        old.line.remove(old.dots)
+        old.dots.dispose()
+        old.dots = this.makeDots(mesh.positions, mat, scale)
+        old.line.add(old.dots)
       } else {
         disposeGeometry(old.geo)
         old.geo = this.surfaceGeometry(mesh)
@@ -1316,25 +1322,43 @@ export class Viewer {
     return geo
   }
 
+  /**
+   * 点（曲線の中で、1 点に縮んだ所）を、小さな球として置く。球の半径は表示範囲のいちばん長い辺の 0.8%（× 線の太さの倍率）。
+   * 表示範囲・太さが変わったら [`placeDots`] で置き直す
+   */
+  private makeDots(pts: Float32Array, mat: THREE.MeshStandardMaterial, scale = 1): THREE.InstancedMesh {
+    const pos = dotPositions(pts)
+    const dots = new THREE.InstancedMesh(dotSphere(), mat, pos.length / 3)
+    dots.frustumCulled = false
+    dots.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
+    dots.userData.pos = pos
+    dots.userData.scale = scale
+    this.placeDots(dots)
+    return dots
+  }
+
+  /** 点の球の位置と大きさを、今の表示範囲と太さに合わせる */
+  private placeDots(dots: THREE.InstancedMesh) {
+    const d = this.domain
+    const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin, this.flat ? 0 : d.zmax - d.zmin) : 10
+    const r = span * 0.008 * dots.userData.scale
+    const pos = dots.userData.pos as number[]
+    const m = new THREE.Matrix4()
+    for (let i = 0; i < dots.count; i++) {
+      m.makeScale(r, r, r).setPosition(pos[3 * i], pos[3 * i + 1], pos[3 * i + 2])
+      dots.setMatrixAt(i, m)
+    }
+    dots.instanceMatrix.needsUpdate = true
+    this.dirty = true
+  }
+
   private setCurve(id: number, pts: Float32Array) {
     const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
     mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
     const line = new LineSegments2(this.curveGeometry(pts), mat)
-    const dotMat = new THREE.PointsMaterial({
-      size: 9,
-      sizeAttenuation: false,
-      map: dotTexture(),
-      alphaTest: 0.5,
-      clippingPlanes: this.clipPlanes,
-    })
-    const dots = new THREE.Points(dotGeometry(pts), dotMat)
-    dots.frustumCulled = false
-    dots.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
-    // 点の大きさは画面の画素で決める（画素密度を下げても同じ大きさに見えるように）
-    dots.onBeforeRender = (r) => {
-      dotMat.size = dots.userData.size * r.getPixelRatio()
-    }
-    dots.userData.size = 9
+    // 点は、光の当たった小さな球として空間に置く（画面に貼った円ではなく、遠近で大きさが変わり、面の陰に隠れる）
+    const dotMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05, clippingPlanes: this.clipPlanes })
+    const dots = this.makeDots(pts, dotMat)
     line.add(dots)
     this.plots.set(id, { kind: 'curve', line, dots })
     this.scene.add(line)
@@ -1356,8 +1380,10 @@ export class Viewer {
       const m = p.line.material as LineMaterial
       m.color.copy(c)
       m.linewidth = style.lineWidth
-      ;(p.dots.material as THREE.PointsMaterial).color.copy(c)
-      p.dots.userData.size = Math.max(7, style.lineWidth * 3)
+      ;(p.dots.material as THREE.MeshStandardMaterial).color.copy(c)
+      // 線の太さ 3 で 1 倍。細くしても小さくなりすぎないように
+      p.dots.userData.scale = Math.max(0.7, style.lineWidth / 3)
+      this.placeDots(p.dots)
       return
     }
 
@@ -1425,7 +1451,7 @@ export class Viewer {
     if (p.kind === 'curve') {
       p.line.geometry.dispose()
       ;(p.line.material as THREE.Material).dispose()
-      p.dots.geometry.dispose()
+      p.dots.dispose()
       ;(p.dots.material as THREE.Material).dispose()
       this.scene.remove(p.line)
     } else {
@@ -1443,10 +1469,10 @@ export class Viewer {
 }
 
 /**
- * 曲線の点の列のうち、長さの無い部分（NaN で区切られた一続きの点がすべて同じ位置）を、点として描く形にする。
+ * 曲線の点の列のうち、長さの無い部分（NaN で区切られた一続きの点がすべて同じ位置）を、点として描く位置の列 [x, y, z, …] にする。
  * 複素平面の点（1 + 2i など）や組 (1, 2, 3) は、同じ位置の点の列として届く
  */
-function dotGeometry(pts: Float32Array): THREE.BufferGeometry {
+function dotPositions(pts: Float32Array): number[] {
   const out: number[] = []
   const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
   let k = 0
@@ -1467,23 +1493,12 @@ function dotGeometry(pts: Float32Array): THREE.BufferGeometry {
     if (same) out.push(x, y, z)
     k = end
   }
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(out, 3))
-  return geo
+  return out
 }
 
-/** 点を丸く描くための、白い円の絵（1つだけ作って使い回す） */
-let dotTex: THREE.Texture | null = null
-function dotTexture(): THREE.Texture {
-  if (dotTex) return dotTex
-  const n = 64
-  const canvas = document.createElement('canvas')
-  canvas.width = canvas.height = n
-  const g = canvas.getContext('2d')!
-  g.fillStyle = '#fff'
-  g.beginPath()
-  g.arc(n / 2, n / 2, n / 2 - 1, 0, Math.PI * 2)
-  g.fill()
-  dotTex = new THREE.CanvasTexture(canvas)
-  return dotTex
+/** 点を描く球の形（半径 1。1つだけ作って使い回す） */
+let dotSphereGeo: THREE.BufferGeometry | null = null
+function dotSphere(): THREE.BufferGeometry {
+  if (!dotSphereGeo) dotSphereGeo = new THREE.SphereGeometry(1, 24, 16)
+  return dotSphereGeo
 }

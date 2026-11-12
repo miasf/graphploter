@@ -955,39 +955,50 @@ fn shape_report() {
 }
 
 /// ふつうの `cargo test` で動く小さい確かめ（速い陽関数の正解だけ）。
-/// 欠け（1 箱）が決めた値（0.5%・1%）以下。以後のステップで、直した式をここに足していく
+/// 欠け（1 箱）が決めた値（0.5%・1%）以下。余計（1 箱）も、値を決めた式だけ確かめる。以後のステップで、直した式をここに足していく
 #[test]
 fn shape_regression() {
     let cases = [
-        ("sin(x) cos(y)", Rot::None, 0.5),
-        ("floor(x y / 4)", Rot::None, 0.5),
-        ("1/(x y)", Rot::None, 0.5),
-        ("sqrt(36 - x^2 - y^2)", Rot::None, 0.5),
-        ("tan(x + y)", Rot::None, 0.5),
+        // (式, 回転, 欠けの上限, 余計の上限)
+        ("sin(x) cos(y)", Rot::None, 0.5, None),
+        ("floor(x y / 4)", Rot::None, 0.5, None),
+        ("1/(x y)", Rot::None, 0.5, None),
+        ("sqrt(36 - x^2 - y^2)", Rot::None, 0.5, None),
+        ("tan(x + y)", Rot::None, 0.5, None),
         // S18: 表示中の座標どうしの回転で、極の近くの面が欠けない（xy 回転は M が回転行列そのものなので、陽関数の正解が使える）
-        ("1/(x y)", Rot::Xy, 0.5),
+        ("1/(x y)", Rot::Xy, 0.5, None),
         // S19: 表示していない w が絡む回転でも、傾いた座標系の陽関数として描く
-        ("1/(x y)", Rot::Xw, 1.0),
-        ("floor(x y / 4)", Rot::Xw, 1.0),
-        ("sqrt(36 - x^2 - y^2)", Rot::Xw, 1.0),
+        ("1/(x y)", Rot::Xw, 1.0, None),
+        ("floor(x y / 4)", Rot::Xw, 1.0, None),
+        ("sqrt(36 - x^2 - y^2)", Rot::Xw, 1.0, None),
+        // S20: 段差の交わる所に針が立たず、低い段差も段として描く
+        ("floor(x) + floor(y)", Rot::None, 0.5, Some(1.0)),
+        ("floor(3x)/3", Rot::None, 0.5, Some(1.0)),
+        ("2 sign(sin(x) sin(y))", Rot::None, 0.5, Some(0.5)),
+        ("round(x) round(y) / 8", Rot::None, 0.5, Some(0.5)),
     ];
     // 式ごとに別のスレッドで（デバッグビルドでも時間がかからないように）
-    let results: Vec<(String, f64, f64)> = std::thread::scope(|s| {
+    type Res = (String, f64, f64, f64, Option<f64>);
+    let results: Vec<Res> = std::thread::scope(|s| {
         let handles: Vec<_> = cases
             .iter()
-            .map(|&(f, rot, limit)| {
+            .map(|&(f, rot, limit, extra_limit)| {
                 s.spawn(move || {
                     let (r, _) = mesh(&format!("z = {f}"), rot, IRES);
                     let reference = reference_explicit(f, rot).unwrap();
                     let got = voxels_of_mesh(&r.positions(), &r.indices());
-                    (format!("z = {f}（{}）", rot.label()), miss(&reference, &got, 1), limit)
+                    let label = format!("z = {f}（{}）", rot.label());
+                    (label, miss(&reference, &got, 1), limit, miss(&got, &reference, 1), extra_limit)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    for (label, m, limit) in results {
+    for (label, m, limit, x, extra_limit) in results {
         assert!(m <= limit, "{label} の欠けが {m:.3}%（{limit}% 以下のはず）");
+        if let Some(e) = extra_limit {
+            assert!(x <= e, "{label} の余計が {x:.3}%（{e}% 以下のはず）");
+        }
     }
 }
 
@@ -1128,4 +1139,54 @@ fn tilted_walls_and_colors() {
     assert!(l.kind().contains("回したもの") && !l.kind().contains("陰関数"), "{}", l.kind());
     let (one, _) = mesh("z = floor(x)", Rot::Xw, IRES);
     assert!(l.indices().len() > one.indices().len());
+}
+
+#[test]
+fn fragments_are_dropped_but_small_shapes_stay() {
+    // S22: 混ぜた回転の 1/(x y) − z = 0 は、極の近くに紙吹雪のような破片が出ていた（変更前は 135 個）
+    let (r, _) = mesh("1/(x y) - z = 0", Rot::Mixed, IRES);
+    let f = fragments(&r.positions(), &r.indices());
+    assert!(f <= 5, "破片 {f} 個");
+    // 定義域の縁: 欠けが小さく、破片も無い
+    let (r, _) = mesh("sqrt(36 - x^2 - y^2) - z = 0", Rot::Mixed, IRES);
+    let reference = reference_implicit("sqrt(36 - x^2 - y^2) - z = 0", Rot::Mixed);
+    let got = voxels_of_mesh(&r.positions(), &r.indices());
+    let m = miss(&reference, &got, 1);
+    assert!(m <= 2.0, "欠け {m:.3}%");
+    assert_eq!(fragments(&r.positions(), &r.indices()), 0);
+}
+
+#[test]
+fn pole_walls_are_continuous() {
+    // S25: 極の線（x = −2, −4, −6, −8）に沿った壁が途切れない（80 区間のうち 72 以上が、上端と下端の両方に届く）。
+    // （三角形の数の条件は、極の細分ではなく、表示範囲の端を横切る急な斜面の細分で上限に張り付くので、確かめない）
+    for (f, poles) in [
+        ("nCr(x, y)", vec![-2.0, -4.0, -6.0, -8.0]),
+        ("nPr(x, y)/10", vec![-2.0, -4.0, -6.0, -8.0]),
+        ("gamma(x) / 5 + y/5", vec![-1.0, -2.0, -3.0, -4.0, -5.0]),
+    ] {
+        let (r, _) = mesh(&format!("z = {f}"), Rot::None, IRES);
+        let pos = r.positions();
+        for x in poles {
+            let c = wall_coverage(&pos, x);
+            assert!(c >= 72, "z = {f} の x = {x} の壁が {c}/80");
+        }
+    }
+}
+
+
+
+
+#[test]
+fn pole_hugging_surfaces_are_drawn() {
+    // S23: 極のすぐ隣を走る面（変更前は、回転なしで欠け 54%・47%）
+    for (src, limit) in [("1/(x y) - z = 0", 10.0), ("tan(x) = z y", 15.0)] {
+        let (r, _) = mesh(src, Rot::None, IRES);
+        let reference = reference_implicit(src, Rot::None);
+        let got = voxels_of_mesh(&r.positions(), &r.indices());
+        let m = miss(&reference, &got, 1);
+        assert!(m <= limit, "{src} の欠けが {m:.2}%");
+        let x = miss(&got, &reference, 3);
+        assert!(x <= 1.0, "{src} の余計（3 箱）が {x:.2}%");
+    }
 }

@@ -58,6 +58,10 @@ pub struct Candidate<'a, V> {
     pub mid: &'a V,
     /// この三角形を作った分割のずれ（親）と、その前の分割のずれ（祖父母）。最初の格子の三角形は NaN
     pub history: [f64; 2],
+    /// 頂点の (u, v)（ids と同じ順）
+    pub pos: [[f64; 2]; 3],
+    /// 何回目のパスか（0 から）
+    pub pass: usize,
 }
 
 /// 細かくした結果
@@ -268,6 +272,62 @@ pub fn refine<V: Clone>(
     decide: &mut dyn FnMut(&Candidate<V>) -> Option<f64>,
     limits: Limits,
 ) -> Refined<V> {
+    refine_keep(n, u, v, base, eval, decide, limits).finish()
+}
+
+/// 細かくしている途中の三角形分割。[`refine_keep`] の結果を、[`Triangulation::bisect`] でさらに分けられる
+pub struct Triangulation<V> {
+    st: State<V>,
+}
+
+impl<V: Clone> Triangulation<V> {
+    /// 頂点の (u, v)（[`Refined::uv`] と同じ）
+    pub fn uv(&self) -> &[[f64; 2]] {
+        &self.st.uv
+    }
+
+    /// 頂点の値
+    pub fn vals(&self) -> &[V] {
+        &self.st.vals
+    }
+
+    /// 生きている三角形（向きと頂点の並びは [`Refined::tris`] と同じ）
+    pub fn tris(&self) -> Vec<[u32; 3]> {
+        self.st.tris.iter().filter(|t| t.alive).map(|t| [t.v[2], t.v[0], t.v[1]]).collect()
+    }
+
+    /// 三角形 `tris`（[`Triangulation::tris`] の並びのもの）を、それぞれの斜辺で二分する。継ぎ目が合うように、
+    /// 隣の三角形も必要なら分ける。今の分割に無い三角形は無視する。戻り値は増えた三角形の数
+    pub fn bisect(&mut self, tris: &[[u32; 3]], eval: &mut Eval<'_, V>) -> usize {
+        // [v2, v0, v1] の並びなので、斜辺は v0–v1 = 2 番目と 3 番目
+        let edges: Vec<(Edge, f64)> = tris
+            .iter()
+            .filter(|t| {
+                let e = key(t[1], t[2]);
+                self.st.adjacent(e).iter().any(|&k| k != NO && self.st.tris[k as usize].v == [t[1], t[2], t[0]])
+            })
+            .map(|t| (key(t[1], t[2]), f64::NAN))
+            .collect();
+        split_marked(&mut self.st, edges, eval)
+    }
+
+    /// 細かくした結果
+    pub fn finish(self) -> Refined<V> {
+        let tris = self.tris();
+        Refined { uv: self.st.uv, vals: self.st.vals, tris }
+    }
+}
+
+/// [`refine`] と同じだが、結果をさらに分けられる形で返す
+pub fn refine_keep<V: Clone>(
+    n: usize,
+    u: (f64, f64),
+    v: (f64, f64),
+    base: Vec<V>,
+    eval: &mut Eval<'_, V>,
+    decide: &mut dyn FnMut(&Candidate<V>) -> Option<f64>,
+    limits: Limits,
+) -> Triangulation<V> {
     let m = n + 1;
     assert_eq!(base.len(), m * m);
     let at = |a: (f64, f64), k: usize| a.0 + (a.1 - a.0) * k as f64 / n as f64;
@@ -346,6 +406,8 @@ pub fn refine<V: Clone>(
                     ],
                     mid,
                     history: tri.history,
+                    pos: [st.uv[tri.v[0] as usize], st.uv[tri.v[1] as usize], st.uv[tri.v[2] as usize]],
+                    pass,
                 };
                 if let Some(err) = decide(&c) {
                     marked.push((err, t as u32));
@@ -381,6 +443,8 @@ pub fn refine<V: Clone>(
                     ],
                     mid,
                     history: tri.history,
+                    pos: [st.uv[tri.v[0] as usize], st.uv[tri.v[1] as usize], st.uv[tri.v[2] as usize]],
+                    pass,
                 };
                 if let Some(err) = decide(&c) {
                     marked.push((err, t));
@@ -396,51 +460,48 @@ pub fn refine<V: Clone>(
             marked.sort_by(|a, b| b.0.total_cmp(&a.0));
             marked.truncate(room.max(1));
         }
-        // 分ける辺: 分けたい三角形の斜辺と、継ぎ目を合わせるために先に分ける向こうの三角形の斜辺（たどれるだけ）
-        let mut split: HashSet<Edge> = HashSet::default();
-        let mut order: Vec<(Edge, f64)> = Vec::new();
-        let mut stack: Vec<Edge> = Vec::new();
-        let mut err_of: HashMap<Edge, f64> = HashMap::default();
-        for &(err, t) in &marked {
-            let e = st.tris[t as usize].edge();
-            let x = err_of.entry(e).or_insert(err);
-            *x = x.max(err);
-            stack.push(e);
-        }
-        while let Some(e) = stack.pop() {
-            if !split.insert(e) {
-                continue;
-            }
-            order.push((e, err_of.get(&e).copied().unwrap_or(f64::NAN)));
-            for t in st.adjacent(e).into_iter().filter(|&t| t != NO) {
-                let r = st.tris[t as usize].edge();
-                if r != e {
-                    stack.push(r);
-                }
-            }
-        }
-        evaluate_mids(&mut st, order.iter().map(|&(e, _)| e).collect(), eval);
-        st.born.clear();
-        let before = st.tris.iter().filter(|t| t.alive).count();
-        for (e, err) in order {
-            st.split_edge(e, err, eval);
-        }
-        added += st.tris.iter().filter(|t| t.alive).count() - before;
+        let edges: Vec<(Edge, f64)> = marked.iter().map(|&(err, t)| (st.tris[t as usize].edge(), err)).collect();
+        added += split_marked(&mut st, edges, eval);
         cands = std::mem::take(&mut st.born)
             .into_iter()
             .filter(|&t| st.tris[t as usize].alive)
             .collect();
     }
-    Refined {
-        uv: st.uv,
-        vals: st.vals,
-        tris: st
-            .tris
-            .iter()
-            .filter(|t| t.alive)
-            .map(|t| [t.v[2], t.v[0], t.v[1]])
-            .collect(),
+    Triangulation { st }
+}
+
+/// 辺 `marked`（と、分けると決めた三角形のずれ）を二分する。継ぎ目を合わせるために先に分ける向こうの三角形の斜辺も
+/// たどれるだけたどり、中点をまとめて計算してから分ける。このパスで作った三角形は `st.born` に入る。
+/// 戻り値は増えた三角形の数
+fn split_marked<V: Clone>(st: &mut State<V>, marked: Vec<(Edge, f64)>, eval: &mut Eval<'_, V>) -> usize {
+    let mut split: HashSet<Edge> = HashSet::default();
+    let mut order: Vec<(Edge, f64)> = Vec::new();
+    let mut stack: Vec<Edge> = Vec::new();
+    let mut err_of: HashMap<Edge, f64> = HashMap::default();
+    for (e, err) in marked {
+        let x = err_of.entry(e).or_insert(err);
+        *x = x.max(err);
+        stack.push(e);
     }
+    while let Some(e) = stack.pop() {
+        if !split.insert(e) {
+            continue;
+        }
+        order.push((e, err_of.get(&e).copied().unwrap_or(f64::NAN)));
+        for t in st.adjacent(e).into_iter().filter(|&t| t != NO) {
+            let r = st.tris[t as usize].edge();
+            if r != e {
+                stack.push(r);
+            }
+        }
+    }
+    evaluate_mids(st, order.iter().map(|&(e, _)| e).collect(), eval);
+    st.born.clear();
+    let before = st.tris.iter().filter(|t| t.alive).count();
+    for (e, err) in order {
+        st.split_edge(e, err, eval);
+    }
+    st.tris.iter().filter(|t| t.alive).count() - before
 }
 
 /// 辺の中点のうち、まだ計算していないものをまとめて計算する
