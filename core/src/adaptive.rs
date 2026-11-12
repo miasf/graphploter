@@ -58,6 +58,10 @@ pub struct Candidate<'a, V> {
     pub mid: &'a V,
     /// この三角形を作った分割のずれ（親）と、その前の分割のずれ（祖父母）。最初の格子の三角形は NaN
     pub history: [f64; 2],
+    /// 頂点の (u, v)（ids と同じ順）
+    pub pos: [[f64; 2]; 3],
+    /// 何回目のパスか（0 から）
+    pub pass: usize,
 }
 
 /// 細かくした結果
@@ -402,6 +406,8 @@ pub fn refine_keep<V: Clone>(
                     ],
                     mid,
                     history: tri.history,
+                    pos: [st.uv[tri.v[0] as usize], st.uv[tri.v[1] as usize], st.uv[tri.v[2] as usize]],
+                    pass,
                 };
                 if let Some(err) = decide(&c) {
                     marked.push((err, t as u32));
@@ -437,6 +443,8 @@ pub fn refine_keep<V: Clone>(
                     ],
                     mid,
                     history: tri.history,
+                    pos: [st.uv[tri.v[0] as usize], st.uv[tri.v[1] as usize], st.uv[tri.v[2] as usize]],
+                    pass,
                 };
                 if let Some(err) = decide(&c) {
                     marked.push((err, t));

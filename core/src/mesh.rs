@@ -325,7 +325,9 @@ fn explicit_surface_scaled(
 
     // まとめて計算
     let mut vals = vec![C::new(0.0, 0.0); m * m];
+    let t_base = crate::timing::now_ms();
     prog.eval_batch(&[&us, &vs], &mut vals);
+    let base_ms = crate::timing::now_ms() - t_base;
 
     // 表示範囲の上下に、範囲の高さ1つ分の余裕を持たせる。
     // はみ出た部分は描画側（Three.js のクリッピング）で切り落とす。
@@ -376,6 +378,15 @@ fn explicit_surface_scaled(
         out
     };
 
+    // 格子より細い山・谷・極の「種」（[`hidden_features`]）。再生・ドラッグ中は探さない
+    let seeds = if refine {
+        let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+        let interval = mode == ComplexMode::Off && prog.supports_interval();
+        hidden_features(prog, dom, (ua, va), n, &hs, h, (dom.lo[axis], dom.hi[axis]), &clamped, interval, base_ms)
+    } else {
+        SeedMap::default()
+    };
+
     let mut eval = |a: &[f64], b: &[f64]| {
         let mut out = vec![C::new(0.0, 0.0); a.len()];
         prog.eval_batch(&[a, b], &mut out);
@@ -393,6 +404,14 @@ fn explicit_surface_scaled(
                 .any(|e| steps.contains(e))
             {
                 return None; // 段差のある三角形は、段差の切り分けで描く
+            }
+            // 種を含む三角形は、斜辺が種の大きさの 2 倍になるまで必ず分ける（いちばん先に）
+            if let Some(x) = seeds.force(&c.pos) {
+                return Some(SEED_PRIORITY * h + x);
+            }
+            // 種の無い三角形は、今までどおり 6 回のパスまで（種のある三角形は、ずれで分けるのも 16 回まで続ける）
+            if c.pass >= NORMAL_PASSES && !seeds.touches(&c.pos) {
+                return None;
             }
             let hv = [
                 clamped(*c.vals[0]),
@@ -423,7 +442,7 @@ fn explicit_surface_scaled(
         };
         let base_tris = 2 * n * n;
         let limits = crate::adaptive::Limits {
-            passes: if refine { 6 } else { 0 },
+            passes: if !refine { 0 } else if seeds.is_empty() { NORMAL_PASSES } else { SEED_PASSES },
             max_new_triangles: base_tris.max(30_000),
         };
         let (u0, u1) = (dom.lo[ua], dom.hi[ua]);
@@ -736,6 +755,294 @@ fn explicit_surface_scaled(
         }
     }
     mesh
+}
+
+/// 陽関数の細分のパスの数（種の無い三角形）と、種のある三角形のパスの数
+const NORMAL_PASSES: usize = 6;
+const SEED_PASSES: usize = 16;
+/// 種を含む三角形のずれ（ほかのどの三角形より先に分ける）
+const SEED_PRIORITY: f64 = 1e9;
+/// 区間のはみ出しの許し τ = 0.02 h + TAU_SPREAD (M − m) の係数
+const TAU_SPREAD: f64 = 0.1;
+
+/// 格子より細い山・谷・極の見つかった点（[`hidden_features`]）
+#[derive(Clone, Copy, Debug)]
+struct Seed {
+    u: f64,
+    v: f64,
+    /// 見つけたときの箱の大きさ（u の幅）
+    size: f64,
+    /// 最初の格子の双 1 次補間からのずれ
+    excess: f64,
+}
+
+/// 種を、最初の格子のマスごとに分けて持つ（三角形に入る種を速く探すため）
+#[derive(Default)]
+struct SeedMap {
+    n: usize,
+    u: (f64, f64),
+    v: (f64, f64),
+    cells: crate::adaptive::HashMap<usize, Vec<Seed>>,
+}
+
+impl SeedMap {
+    fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    fn cell_of(&self, p: [f64; 2]) -> (usize, usize) {
+        let n = self.n as f64;
+        let i = ((p[0] - self.u.0) / (self.u.1 - self.u.0) * n).floor().clamp(0.0, n - 1.0) as usize;
+        let j = ((p[1] - self.v.0) / (self.v.1 - self.v.0) * n).floor().clamp(0.0, n - 1.0) as usize;
+        (i, j)
+    }
+
+    fn insert(&mut self, s: Seed) {
+        let (i, j) = self.cell_of([s.u, s.v]);
+        self.cells.entry(j * self.n + i).or_default().push(s);
+    }
+
+    /// 三角形 `pos` が、まだ分けなければならない種（斜辺が種の大きさの 2 倍より長い）を含むなら、その種のずれ（いちばん大きいもの）
+    fn force(&self, pos: &[[f64; 2]; 3]) -> Option<f64> {
+        self.find(pos, true)
+    }
+
+    /// 三角形 `pos` が種を含むか
+    fn touches(&self, pos: &[[f64; 2]; 3]) -> bool {
+        self.find(pos, false).is_some()
+    }
+
+    fn find(&self, pos: &[[f64; 2]; 3], must_split: bool) -> Option<f64> {
+        if self.cells.is_empty() {
+            return None;
+        }
+        let hyp = ((pos[1][0] - pos[0][0]).powi(2) + (pos[1][1] - pos[0][1]).powi(2)).sqrt();
+        let lo = [0, 1].map(|a| pos.iter().map(|p| p[a]).fold(f64::INFINITY, f64::min));
+        let hi = [0, 1].map(|a| pos.iter().map(|p| p[a]).fold(f64::NEG_INFINITY, f64::max));
+        let (i0, j0) = self.cell_of(lo);
+        let (i1, j1) = self.cell_of(hi);
+        // 三角形の中か（辺の上も含める）
+        let cross = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        let area = cross(pos[0], pos[1], pos[2]);
+        let eps = 1e-12 * (hyp * hyp + 1e-300);
+        let inside = |p: [f64; 2]| {
+            (0..3).all(|k| cross(pos[k], pos[(k + 1) % 3], p) * area.signum() >= -eps)
+        };
+        let mut best: Option<f64> = None;
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let Some(list) = self.cells.get(&(j * self.n + i)) else { continue };
+                for s in list {
+                    if (!must_split || hyp > 2.0 * s.size) && inside([s.u, s.v]) {
+                        best = Some(best.map_or(s.excess, |b: f64| b.max(s.excess)));
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// 格子の点がたまたま乗らないと見えない、格子より細い山・谷・極を探して、その点（種）を返す。
+///
+/// 区間演算が使える式（`interval`）: 最初の格子（`n` マス、値は `hs`。表示範囲の高さ `h`、見える高さ `visible`）を
+/// 小さいブロック（細かさ 150 なら 2 × 2 マス）に分け、ブロックの上で f の値が入る区間を求める。区間を見える高さに切ったもの [a, b] が、
+/// ブロックの中の格子点の値の範囲 [m, M] から τ = 0.02 h + 0.1 (M − m) より外にはみ出していれば（`Unknown` も）疑わしい。
+/// 疑わしい箱は、はみ出しの大きい順に四つに分け、新しい点（中心と辺の中点）で f を計算して、小さい箱ごとに調べ直す
+/// （深さ 8 段、最初の格子の 1 マスの 1/32 まで。区間演算は合わせて 30,000 回まで）。
+/// 計算した点の値が、最初の格子の双 1 次補間から 0.004 h より離れていて、見える高さにかかっていれば種にする。
+///
+/// 区間演算が使えない式（特殊関数・色分け）: 最初の格子の計算（`base_ms`）が 3 ms 未満のときだけ、全部のマスの中心と
+/// 辺の中点で f を計算して、同じ基準で種にする（それより重い式では何もしない）
+#[allow(clippy::too_many_arguments)]
+fn hidden_features(
+    prog: &Program,
+    dom: Domain,
+    (ua, va): (usize, usize),
+    n: usize,
+    hs: &[f64],
+    h: f64,
+    visible: (f64, f64),
+    clamped: &dyn Fn(C) -> f64,
+    interval: bool,
+    base_ms: f64,
+) -> SeedMap {
+    use crate::interval::{Interval, Range};
+    const UNIT: i64 = 64; // 最初の格子の 1 マス = 64 単位（1/32 マスの箱でも、中点が整数になる）
+    // 深さ（最初の格子の 1 マスの 1/32 まで）
+    const MAX_DEPTH: u32 = 8;
+    const MAX_INTERVALS: usize = 30_000;
+    let m = n + 1;
+    let (u0, u1, v0, v1) = (dom.lo[ua], dom.hi[ua], dom.lo[va], dom.hi[va]);
+    let mut out = SeedMap { n, u: (u0, u1), v: (v0, v1), cells: Default::default() };
+    let total = n as i64 * UNIT;
+    let pu = |iu: i64| u0 + (u1 - u0) * iu as f64 / total as f64;
+    let pv = |iv: i64| v0 + (v1 - v0) * iv as f64 / total as f64;
+    let du = (u1 - u0) / n as f64;
+    let tol = 0.004 * h;
+    let (lo, hi) = visible;
+    // 最初の格子の双 1 次補間
+    let bilinear = |iu: i64, iv: i64| -> f64 {
+        let (i, j) = ((iu / UNIT).min(n as i64 - 1) as usize, (iv / UNIT).min(n as i64 - 1) as usize);
+        let (fu, fv) = ((iu - i as i64 * UNIT) as f64 / UNIT as f64, (iv - j as i64 * UNIT) as f64 / UNIT as f64);
+        let g = |a: usize, b: usize| hs[b * m + a];
+        let (a, b, c, d) = (g(i, j), g(i + 1, j), g(i, j + 1), g(i + 1, j + 1));
+        a * (1.0 - fu) * (1.0 - fv) + b * fu * (1.0 - fv) + c * (1.0 - fu) * fv + d * fu * fv
+    };
+    // 計算した点の値を調べて、種にする
+    let consider = |iu: i64, iv: i64, val: f64, size: f64, out: &mut SeedMap| {
+        if !val.is_finite() {
+            return;
+        }
+        let base = bilinear(iu, iv);
+        if !base.is_finite() {
+            return;
+        }
+        let dev = (val - base).abs();
+        // 見える高さにかかる（補間の値から計算した値までの区間が、見える範囲と重なる）
+        if dev > tol && val.max(base) >= lo && val.min(base) <= hi {
+            out.insert(Seed { u: pu(iu), v: pv(iv), size, excess: dev });
+        }
+    };
+    let eval_points = |pts: &[(i64, i64)]| -> Vec<f64> {
+        let xs: Vec<f64> = pts.iter().map(|p| pu(p.0)).collect();
+        let ys: Vec<f64> = pts.iter().map(|p| pv(p.1)).collect();
+        let mut v = vec![C::new(0.0, 0.0); pts.len()];
+        prog.eval_batch(&[&xs, &ys], &mut v);
+        v.into_iter().map(clamped).collect()
+    };
+
+    if !interval {
+        // 区間演算が使えない式: 軽い式だけ、マスの中心と辺の中点を調べる
+        if base_ms >= 3.0 {
+            return out;
+        }
+        let half = UNIT / 2;
+        let mut pts: Vec<(i64, i64)> = Vec::with_capacity(3 * m * m);
+        for j in 0..=n as i64 {
+            for i in 0..=n as i64 {
+                let (x, y) = (i * UNIT, j * UNIT);
+                if i < n as i64 && j < n as i64 {
+                    pts.push((x + half, y + half));
+                }
+                if i < n as i64 {
+                    pts.push((x + half, y));
+                }
+                if j < n as i64 {
+                    pts.push((x, y + half));
+                }
+            }
+        }
+        let vals = eval_points(&pts);
+        for (&(iu, iv), &val) in pts.iter().zip(&vals) {
+            consider(iu, iv, val, 0.5 * du, &mut out);
+        }
+        return out;
+    }
+
+    // 区間演算が使える式
+    // 点の値（単位の座標 → 値）。最初は最初の格子の点
+    let mut known: crate::adaptive::HashMap<(i64, i64), f64> = Default::default();
+    let grid = |iu: i64, iv: i64| -> Option<f64> {
+        (iu % UNIT == 0 && iv % UNIT == 0).then(|| hs[(iv / UNIT) as usize * m + (iu / UNIT) as usize])
+    };
+    let value = |known: &crate::adaptive::HashMap<(i64, i64), f64>, p: (i64, i64)| grid(p.0, p.1).or_else(|| known.get(&p).copied());
+    let mut intervals = 0usize;
+    // 箱 [x0, x1] × [y0, y1]（単位）のはみ出し（疑わしくなければ None）。`vals` は箱の角と中の点の値
+    let excess = |x0: i64, x1: i64, y0: i64, y1: i64, vals: &[f64], intervals: &mut usize| -> Option<f64> {
+        let fin: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+        if fin.is_empty() {
+            return None;
+        }
+        let (mn, mx) = fin.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        *intervals += 1;
+        let r = prog.eval_interval(&[Interval::new(pu(x0), pu(x1)), Interval::new(pv(y0), pv(y1))]);
+        let Range::Known(iv) = r else { return Some(h) };
+        let (a, b) = (iv.lo.clamp(lo, hi), iv.hi.clamp(lo, hi));
+        let tau = 0.02 * h + TAU_SPREAD * (mx - mn);
+        let e = (b - (mx + tau)).max((mn - tau) - a);
+        (e > 0.0).then_some(e)
+    };
+    // 最初のブロック
+    let mut frontier: Vec<(f64, [i64; 4], u32)> = Vec::new();
+    // 最初の箱の 1 辺のマス数（ブロックの数が 8,000 個ほどまでになるように。細かさ 150 なら 2 マス）。
+    // 大きいブロックだと、ブロックの別の所で格子の点が山の頂上の近くに乗ると、ブロック全体の値の範囲が広くなり、
+    // 細い尾根の見落としを疑わなくなる
+    let block_cells = ((n as f64 / 89.0).ceil() as i64).clamp(2, 8);
+    let nb = (n as i64 + block_cells - 1) / block_cells;
+    for bj in 0..nb {
+        for bi in 0..nb {
+            let (i0, i1) = (bi * block_cells, ((bi + 1) * block_cells).min(n as i64));
+            let (j0, j1) = (bj * block_cells, ((bj + 1) * block_cells).min(n as i64));
+            let mut vals = Vec::with_capacity(81);
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    vals.push(hs[j as usize * m + i as usize]);
+                }
+            }
+            // 全部の点が見える範囲の外（同じ側）なら調べない
+            if vals.iter().all(|&v| v.is_finite() && v > hi) || vals.iter().all(|&v| v.is_finite() && v < lo) {
+                continue;
+            }
+            let b = [i0 * UNIT, i1 * UNIT, j0 * UNIT, j1 * UNIT];
+            if let Some(e) = excess(b[0], b[1], b[2], b[3], &vals, &mut intervals) {
+                frontier.push((e, b, 0));
+            }
+        }
+    }
+    // 疑わしい箱を、はみ出しの大きい順に四つに分けていく
+    while !frontier.is_empty() && intervals < MAX_INTERVALS {
+        frontier.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // 子の区間演算の回数（4 回ずつ）が上限を超えない分だけ
+        let room = (MAX_INTERVALS - intervals) / 4;
+        frontier.truncate(room.max(1));
+        let boxes: Vec<([i64; 4], u32)> = frontier.drain(..).map(|(_, b, d)| (b, d)).collect();
+        // 新しい点（中心と辺の中点）をまとめて計算する
+        let mut pts: Vec<(i64, i64)> = Vec::new();
+        for &([x0, x1, y0, y1], _) in &boxes {
+            let (xm, ym) = ((x0 + x1) / 2, (y0 + y1) / 2);
+            for p in [(xm, ym), (xm, y0), (xm, y1), (x0, ym), (x1, ym)] {
+                if value(&known, p).is_none() {
+                    pts.push(p);
+                }
+            }
+        }
+        pts.sort_unstable();
+        pts.dedup();
+        let vals = eval_points(&pts);
+        for (&p, &val) in pts.iter().zip(&vals) {
+            known.insert(p, val);
+        }
+        for &([x0, x1, y0, y1], d) in &boxes {
+            let (xm, ym) = ((x0 + x1) / 2, (y0 + y1) / 2);
+            let size = (u1 - u0) * ((xm - x0) as f64 / total as f64);
+            for p in [(xm, ym), (xm, y0), (xm, y1), (x0, ym), (x1, ym)] {
+                if let Some(val) = value(&known, p) {
+                    if grid(p.0, p.1).is_none() {
+                        consider(p.0, p.1, val, size, &mut out);
+                    }
+                }
+            }
+            if d + 1 >= MAX_DEPTH || x1 - x0 < 4 || y1 - y0 < 4 {
+                continue;
+            }
+            for (a0, a1) in [(x0, xm), (xm, x1)] {
+                for (b0, b1) in [(y0, ym), (ym, y1)] {
+                    let corners: Vec<f64> = [(a0, b0), (a1, b0), (a0, b1), (a1, b1)]
+                        .iter()
+                        .filter_map(|&p| value(&known, p))
+                        .collect();
+                    if intervals >= MAX_INTERVALS {
+                        break;
+                    }
+                    if let Some(e) = excess(a0, a1, b0, b1, &corners, &mut intervals) {
+                        frontier.push((e, [a0, a1, b0, b1], d + 1));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 陽関数の段差の無い三角形 `tris`（細かくした格子の頂点の番号）を、定義域の縁と、表示範囲の高さ `[lo, hi]` の
@@ -6411,6 +6718,52 @@ mod tests {
         for src in ["sin(x) cos(y)", "x^2 - y^2"] {
             let m = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2);
             assert_eq!(m.indices.len() / 3, 45_000, "{src}");
+        }
+    }
+
+    /// 形の正しさの報告（7.1）と同じ表示範囲
+    const SHAPE_DOM: Domain = Domain { lo: [-10.0, -10.0, -6.4], hi: [10.0, 10.0, 6.4] };
+
+    #[test]
+    fn thin_peak_is_found() {
+        // 幅 0.02 の山（格子の間隔 0.13）。格子の点がたまたま乗らないので、細分の前は、ほぼ平らなまま
+        let m = explicit_surface(&prog("5 exp(-2000((x-1.23)^2 + (y-0.77)^2))", &["x", "y"]), SHAPE_DOM, 150, 2);
+        let top = m.positions.chunks_exact(3).filter(|q| q[2] >= 4.5).count();
+        assert!(top >= 1, "高さ 4.5 以上の頂点が無い");
+    }
+
+    #[test]
+    fn thin_ridge_is_continuous() {
+        // 幅 0.05 の曲がった尾根。どの x の所でも、尾根の上の頂点がある
+        let m = explicit_surface(&prog("3 exp(-400 (y - sin(x))^2)", &["x", "y"]), SHAPE_DOM, 150, 2);
+        for k in 0..39 {
+            let x = -9.5 + 0.5 * k as f64;
+            let top = m
+                .positions
+                .chunks_exact(3)
+                .filter(|q| (q[0] as f64 - x).abs() < 0.1)
+                .map(|q| q[2] as f64)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(top >= 2.5, "x = {x} の所の高さの最大が {top}");
+        }
+    }
+
+    #[test]
+    fn thin_pole_is_found() {
+        // 極の半径は、高さ 6 で 0.02。表示範囲の上端（z ≥ 6.3）にかかる頂点がある
+        let m = explicit_surface(&prog("1/(400 ((x-0.31)^2 + (y+0.57)^2))", &["x", "y"]), SHAPE_DOM, 150, 2);
+        let top = m.positions.chunks_exact(3).filter(|q| q[2] >= 6.3).count();
+        assert!(top >= 8, "上端にかかる頂点 {top} 個");
+    }
+
+    #[test]
+    fn repeated_variables_are_not_refined_much() {
+        // 同じ変数が何度も出る式（区間演算が広めになる）でも、三角形はほとんど増えない
+        let d = Domain { lo: [-5.0, -5.0, -30.0], hi: [5.0, 5.0, 30.0] };
+        for src in ["x sin(x) cos(y) / 3", "(x - y)(x + y)/10"] {
+            let a = explicit_surface_opt(&prog(src, &["x", "y"]), d, 150, 2, ComplexMode::Off, false, false).indices.len();
+            let b = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2).indices.len();
+            assert!(b as f64 <= 1.05 * a as f64, "{src}: {} → {}", a / 3, b / 3);
         }
     }
 
