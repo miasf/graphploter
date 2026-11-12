@@ -648,99 +648,72 @@ fn explicit_surface_scaled(
             mesh.indices
                 .extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
         };
-        match jumped.len() {
-            0 => plain.push(vtx), // 表示範囲の上端・下端で切るものがあるので、後でまとめて描く
-            2 => {
-                // 2つの辺に共通の頂点が、段差の片側に1つだけある頂点。
-                // 辺 e は頂点 e → e+1 なので、飛ばない辺 ne の反対の頂点は ne + 2
-                let ne = (0..3).find(|e| !jumped.contains(e)).unwrap_or(0);
-                let lone = (ne + 2) % 3;
-                // lone 番目の頂点の前後の辺: 辺 (lone−1) は lone に入る辺、辺 lone は lone から出る辺
-                let e_in = (lone + 2) % 3;
-                let e_out = lone;
-                // 辺の上の頂点のうち、指定した側（lone の側か、反対側か）のもの
-                let side = |e: usize, lone_side: bool| -> u32 {
-                    let (id, forward) = edges[e];
-                    let (start, end) = jump_vertex[&id];
-                    // 三角形の辺の向きで、lone は辺 e_out の始点・辺 e_in の終点
-                    let lone_is_start = (e == e_out) == forward;
-                    if lone_is_start == lone_side {
-                        start
-                    } else {
-                        end
-                    }
-                };
-                let p = vtx[lone];
-                let q = vtx[(lone + 1) % 3];
-                let rr = vtx[(lone + 2) % 3];
-                // lone の側: 三角形 (lone, 辺 e_out の点, 辺 e_in の点)
-                emit(
-                    &mut mesh,
-                    [index_of[p], side(e_out, true), side(e_in, true)],
-                );
-                // 反対側: 四角形 (辺 e_out の点, q, r, 辺 e_in の点)
-                let (x, y) = (side(e_out, false), side(e_in, false));
-                emit(&mut mesh, [x, index_of[q], index_of[rr]]);
-                emit(&mut mesh, [x, index_of[rr], y]);
-                if walls {
-                    let info = |e: usize| {
-                        let (id, forward) = edges[e];
-                        let jp = jumps[&id];
-                        let (k0, k1) = (id.0 as usize, id.1 as usize);
-                        let (u, v) = (
-                            us[k0] + (us[k1] - us[k0]) * jp.t,
-                            vs[k0] + (vs[k1] - vs[k0]) * jp.t,
-                        );
-                        let lone_is_start = (e == e_out) == forward;
-                        let (near, far) = if lone_is_start {
-                            (jp.before, jp.after)
-                        } else {
-                            (jp.after, jp.before)
-                        };
-                        (u, v, near, far)
-                    };
-                    wall_quads.push(([info(e_out), info(e_in)], (us[p], vs[p])));
+        if jumped.is_empty() {
+            plain.push(vtx); // 表示範囲の上端・下端で切るものがあるので、後でまとめて描く
+            continue;
+        }
+        // 飛ぶ辺ごとの (三角形の辺の始点の側の頂点, 終点の側の頂点)
+        let mut jv: [Option<(u32, u32)>; 3] = [None; 3];
+        if jumped.len() == 3 {
+            // 3辺とも飛ぶ: 辺にもう 1 つ段差がありそうで、それが頂点 p の側にあるときは、見つけた段差の手前の値は
+            // p の段の値ではないので、p の値で頂点を置く（頂点を足す順番は、角の三角形を描く順）
+            let mut sides = [[NONE; 2]; 3];
+            let near = |mesh: &mut Mesh, e: usize, p: u32| {
+                let (id, _) = edges[e];
+                let (a, b) = jump_vertex[&id];
+                let jp = jumps[&id];
+                let at_start = id.0 == p;
+                if jp.multi && jp.rest_at_start == at_start {
+                    let (k0, k1) = (id.0 as usize, id.1 as usize);
+                    let (u, v) = (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t);
+                    push(mesh, u, v, vals[p as usize])
+                } else if at_start {
+                    a
+                } else {
+                    b
                 }
+            };
+            for k in 0..3 {
+                sides[k][0] = near(&mut mesh, k, t[k]);
+                sides[(k + 2) % 3][1] = near(&mut mesh, (k + 2) % 3, t[k]);
             }
-            1 => {
-                // 段差の線が三角形の中で終わる（極のそばの急な所など）: 飛ぶ辺の上の点と向かいの頂点を結ぶ線で
-                // 2つに分け、それぞれの側の値で描く（段差は向かいの頂点に向かって細くなる）。
-                // 描かないと、そこだけ穴が空く
-                let e = jumped[0];
+            for k in 0..3 {
+                jv[k] = Some((sides[k][0], sides[k][1]));
+            }
+        } else {
+            for &e in &jumped {
                 let (id, forward) = edges[e];
                 let (start, end) = jump_vertex[&id];
-                // 三角形の辺 e は 頂点 e → e+1。辺の名前と同じ向きなら、頂点 e の側が始点の側
-                let (near_p, near_q) = if forward { (start, end) } else { (end, start) };
-                let (p, q, w) = (vtx[e], vtx[(e + 1) % 3], vtx[(e + 2) % 3]);
-                emit(&mut mesh, [index_of[p], near_p, index_of[w]]);
-                emit(&mut mesh, [near_q, index_of[q], index_of[w]]);
+                jv[e] = Some(if forward { (start, end) } else { (end, start) });
             }
-            // 3辺とも飛ぶ（段差の線の交わる所・値が細かく暴れる所）: 頂点ごとに、頂点とその両側の辺の飛ぶ所
-            // （頂点の側の値）を結ぶ三角形を描く。真ん中（3 つの飛ぶ所を結ぶ三角形）は値が決まらないので描かない。
-            // そのまま描くと 3 つの段にまたがる針になり、全部描かないと穴が空く
-            _ => {
-                // 辺 e の飛ぶ所の、頂点 p の側の頂点。辺にもう 1 つ段差がありそうで、それが p の側にあるときは、
-                // 見つけた段差の手前の値は p の段の値ではないので、p の値で頂点を置く
-                let near = |mesh: &mut Mesh, e: usize, p: u32| {
-                    let (id, _) = edges[e];
-                    let (a, b) = jump_vertex[&id];
-                    let jp = jumps[&id];
-                    let at_start = id.0 == p;
-                    if jp.multi && jp.rest_at_start == at_start {
-                        let (k0, k1) = (id.0 as usize, id.1 as usize);
-                        let (u, v) = (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t);
-                        push(mesh, u, v, vals[p as usize])
-                    } else if at_start {
-                        a
-                    } else {
-                        b
-                    }
+        }
+        let ids = [index_of[vtx[0]], index_of[vtx[1]], index_of[vtx[2]]];
+        let (pieces, lone) = cut_by_jumps(ids, jv);
+        for piece in pieces {
+            emit(&mut mesh, piece);
+        }
+        // 段差の壁（段差の線が三角形を横切る所）
+        if let (Some(lone), true) = (lone, walls) {
+            let e_in = (lone + 2) % 3;
+            let e_out = lone;
+            let p = vtx[lone];
+            let info = |e: usize| {
+                let (id, forward) = edges[e];
+                let jp = jumps[&id];
+                let (k0, k1) = (id.0 as usize, id.1 as usize);
+                let (u, v) = (
+                    us[k0] + (us[k1] - us[k0]) * jp.t,
+                    vs[k0] + (vs[k1] - vs[k0]) * jp.t,
+                );
+                let lone_is_start = (e == e_out) == forward;
+                let (near, far) = if lone_is_start {
+                    (jp.before, jp.after)
+                } else {
+                    (jp.after, jp.before)
                 };
-                for k in 0..3 {
-                    let (x, y) = (near(&mut mesh, k, t[k]), near(&mut mesh, (k + 2) % 3, t[k]));
-                    emit(&mut mesh, [index_of[vtx[k]], x, y]);
-                }
-            }
+                (u, v, near, far)
+            };
+            wall_quads.push(([info(e_out), info(e_in)], (us[p], vs[p])));
         }
     }
     clip_to_height_range(prog, &mut mesh, &plain, &us, &vs, &vals, &index_of, axis, mode, (dom.lo[axis], dom.hi[axis]), flip, &push);
@@ -786,6 +759,46 @@ fn explicit_surface_scaled(
         }
     }
     mesh
+}
+
+/// 値が飛ぶ辺のある三角形を、飛ぶ所で切り分ける（陽関数と媒介変数の曲面で共通。頂点の中身によらない）。
+/// `t` は三角形の頂点の番号、`jv[e]` は辺 e（頂点 e → e+1）が飛ぶなら、飛ぶ所に置いた (頂点 e の側の頂点, 頂点 e+1 の側の頂点)。
+/// 戻り値は、三角形の一覧（向きは `t` と同じ）と、2 辺で飛ぶときの「段差の片側に 1 つだけある頂点」（壁を作るのに使う）。
+/// - 2 辺で飛ぶ（段差の線が横切る）: 1 つだけの頂点の側の三角形と、反対側の四角形（三角形 2 つ）
+/// - 1 辺だけ飛ぶ（段差の線が三角形の中で終わる）: 飛ぶ所と向かいの頂点を結ぶ線で 2 つに分け、それぞれの側の値で描く
+///   （段差は向かいの頂点に向かって細くなる。描かないと、そこだけ穴が空く）
+/// - 3 辺とも飛ぶ（段差の線の交わる所・値が細かく暴れる所）: 頂点ごとに、頂点とその両側の辺の飛ぶ所（頂点の側）を結ぶ
+///   三角形を描く。真ん中（3 つの飛ぶ所を結ぶ三角形）は値が決まらないので描かない
+fn cut_by_jumps(t: [u32; 3], jv: [Option<(u32, u32)>; 3]) -> (Vec<[u32; 3]>, Option<usize>) {
+    let jumped: Vec<usize> = (0..3).filter(|&e| jv[e].is_some()).collect();
+    match jumped.len() {
+        0 => (vec![t], None),
+        1 => {
+            let e = jumped[0];
+            let (near_p, near_q) = jv[e].unwrap();
+            let (p, q, w) = (t[e], t[(e + 1) % 3], t[(e + 2) % 3]);
+            (vec![[p, near_p, w], [near_q, q, w]], None)
+        }
+        2 => {
+            // 辺 e は頂点 e → e+1 なので、飛ばない辺 ne の反対の頂点は ne + 2
+            let ne = (0..3).find(|e| !jumped.contains(e)).unwrap_or(0);
+            let lone = (ne + 2) % 3;
+            // lone から出る辺 e_out の始点の側と、lone に入る辺 e_in の終点の側が、lone の側
+            let (e_out, e_in) = (lone, (lone + 2) % 3);
+            let (out_lone, out_far) = jv[e_out].unwrap();
+            let (in_far, in_lone) = jv[e_in].unwrap();
+            let (p, q, r) = (t[lone], t[(lone + 1) % 3], t[(lone + 2) % 3]);
+            (vec![[p, out_lone, in_lone], [out_far, q, r], [out_far, r, in_far]], Some(lone))
+        }
+        _ => {
+            let mut out = Vec::with_capacity(3);
+            for k in 0..3 {
+                // 辺 k（k → k+1）の k の側と、辺 k+2（k+2 → k）の k の側
+                out.push([t[k], jv[k].unwrap().0, jv[(k + 2) % 3].unwrap().1]);
+            }
+            (out, None)
+        }
+    }
 }
 
 /// 細い極の線（`nCr(x, y)` の x = −1, −2, … など）を、最初の格子の辺の上で探す。極は「辺の上のどこか 1 点で、値が
@@ -862,7 +875,7 @@ fn trace_poles(
 
     // 1. 調べ始める辺
     let mut start: Vec<(usize, usize)> = Vec::new();
-    for (&c, _) in seeds.cells.iter() {
+    for &c in seeds.cells.keys() {
         let (i, j) = (c % n, c / n);
         for t in 0..2 {
             start.extend_from_slice(&tri_edges(i, j, t));
@@ -885,7 +898,7 @@ fn trace_poles(
                 let k = j * m + i;
                 for (ok, e) in [(i + 1 < m, (k, k + 1)), (j + 1 < m, (k, k + m)), (i + 1 < m && j + 1 < m, (k, k + m + 1))] {
                     if ok {
-                        if c % 4 == 0 && inside(hs[e.0]) && inside(hs[e.1]) {
+                        if c.is_multiple_of(4) && inside(hs[e.0]) && inside(hs[e.1]) {
                             edges.push(e);
                         }
                         c += 1;
@@ -5202,6 +5215,178 @@ pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64)
     parametric_surface_nd_opt(sets, u, v, n, None)
 }
 
+/// 媒介変数の曲面の、値が飛ぶ所（[`param_jumps`]）
+struct ParamJump {
+    /// 辺の上の位置（0: 番号の小さい端, 1: 大きい端）
+    t: f64,
+    /// 飛ぶ直前（番号の小さい端の側）と直後の点
+    before: Vec<f64>,
+    after: Vec<f64>,
+}
+
+/// [`param_jumps`] の結果
+struct ParamCut {
+    /// 値が飛ぶ辺（番号の小さい頂点, 大きい頂点）
+    jumps: crate::adaptive::HashMap<(u32, u32), ParamJump>,
+    /// 極の先の点を、遠くにそろえた（射影で捨てないよう、[`NdShape::keep_far`] を立てる）
+    far: bool,
+}
+
+/// 媒介変数の曲面で、値が飛ぶ所（`floor` の段差、`tan` の極）を探す。細分の後の辺のうち、両端の n 次元の距離が
+/// 表示範囲の対角線 `diag` の 2% を超えるものを、(u, v) の上で距離の大きいほうの半分に狭めて 12 回二分する。
+/// 距離が最初の半分以上残れば「飛び」とする（なめらかなら 1/4096 ほどに縮む）。陽関数の段差探しと同じく、
+/// 1・2 回目の二分の中点がどちらも両端の平均に近い辺と、3 回二分して距離が 0.3 倍より小さくなった辺は、早めに外す。
+/// 片側が無限大に飛ぶ極（`tan(u)`）: 二分した先の点が、その側の頂点から対角線の 100 倍より遠ければ、その向きに対角線の
+/// 2 倍だけ離れた点にそろえる。
+/// その後、陽関数（S20）と同じく、段差の線が三角形の中で終わる・交わる所（1 辺だけ・3 辺とも飛ぶ三角形）だけを、
+/// 5 回まで二分する（足す三角形は 20,000 個まで）
+fn param_jumps(
+    r: &mut crate::adaptive::Triangulation<Vec<f64>>,
+    eval: &mut crate::adaptive::Eval<'_, Vec<f64>>,
+    diag: f64,
+) -> ParamCut {
+    const ROUNDS: usize = 12;
+    let threshold = 0.02 * diag;
+    let dist = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt();
+    let ek = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+    let mut far = false;
+    // 辺の一覧（`from` 以上の番号の頂点を持つ辺だけ）で段差を探す
+    let mut search = |r: &crate::adaptive::Triangulation<Vec<f64>>,
+                      tris: &[[u32; 3]],
+                      from: usize,
+                      eval: &mut crate::adaptive::Eval<'_, Vec<f64>>,
+                      out: &mut crate::adaptive::HashMap<(u32, u32), ParamJump>| {
+        let (uv, vals) = (r.uv(), r.vals());
+        let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+        struct Cand {
+            e: (u32, u32),
+            ta: f64,
+            tb: f64,
+            pa: Vec<f64>,
+            pb: Vec<f64>,
+            first: f64,
+            smooth: bool,
+        }
+        let mut cands: Vec<Cand> = Vec::new();
+        for t in tris {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let e = ek(a, b);
+                if (e.1 as usize) < from || !seen.insert(e) {
+                    continue;
+                }
+                let (pa, pb) = (&vals[e.0 as usize], &vals[e.1 as usize]);
+                if !finite(pa) || !finite(pb) {
+                    continue;
+                }
+                let d = dist(pa, pb);
+                if d > threshold {
+                    cands.push(Cand { e, ta: 0.0, tb: 1.0, pa: pa.clone(), pb: pb.clone(), first: d, smooth: false });
+                }
+            }
+        }
+        for round in 0..ROUNDS {
+            if round == 3 {
+                cands.retain(|c| dist(&c.pa, &c.pb) >= 0.3 * c.first);
+            }
+            if cands.is_empty() {
+                break;
+            }
+            let (mut us, mut vs) = (Vec::with_capacity(cands.len()), Vec::with_capacity(cands.len()));
+            for c in &cands {
+                let (a, b) = (uv[c.e.0 as usize], uv[c.e.1 as usize]);
+                let t = 0.5 * (c.ta + c.tb);
+                us.push(a[0] + (b[0] - a[0]) * t);
+                vs.push(a[1] + (b[1] - a[1]) * t);
+            }
+            let mids = eval(&us, &vs);
+            let mut keep = vec![true; cands.len()];
+            for ((c, pm), keep) in cands.iter_mut().zip(mids).zip(keep.iter_mut()) {
+                let t = 0.5 * (c.ta + c.tb);
+                let ok = finite(&pm);
+                if round < 2 {
+                    let avg: Vec<f64> = c.pa.iter().zip(&c.pb).map(|(x, y)| 0.5 * (x + y)).collect();
+                    let smooth = ok && dist(&pm, &avg) < 0.2 * dist(&c.pa, &c.pb);
+                    if round == 0 {
+                        c.smooth = smooth;
+                    } else if smooth && c.smooth {
+                        *keep = false;
+                        continue;
+                    }
+                }
+                if !ok || dist(&pm, &c.pa) >= dist(&c.pb, &pm) {
+                    c.tb = t;
+                    c.pb = pm;
+                } else {
+                    c.ta = t;
+                    c.pa = pm;
+                }
+            }
+            let mut it = keep.iter();
+            cands.retain(|_| *it.next().unwrap());
+        }
+        for mut c in cands {
+            let d = dist(&c.pa, &c.pb);
+            if !(d.is_finite() && d >= 0.5 * c.first && finite(&c.pa) && finite(&c.pb)) {
+                continue;
+            }
+            // 極の先の点を、その側の頂点から対角線の 2 倍の所にそろえる
+            for (p, base) in [(&mut c.pa, &vals[c.e.0 as usize]), (&mut c.pb, &vals[c.e.1 as usize])] {
+                let l = dist(p, base);
+                if l > 100.0 * diag {
+                    for (x, b) in p.iter_mut().zip(base) {
+                        *x = b + (*x - b) / l * 2.0 * diag;
+                    }
+                    far = true;
+                }
+            }
+            out.insert(c.e, ParamJump { t: 0.5 * (c.ta + c.tb), before: c.pa, after: c.pb });
+        }
+    };
+    let mut jumps: crate::adaptive::HashMap<(u32, u32), ParamJump> = Default::default();
+    let mut tris = r.tris();
+    search(r, &tris, 0, eval, &mut jumps);
+    if !jumps.is_empty() {
+        const PASSES: usize = 5;
+        const MAX_NEW: usize = 20_000;
+        let mut added = 0;
+        for _ in 0..PASSES {
+            let vals = r.vals();
+            let mut marked: Vec<[u32; 3]> = tris
+                .iter()
+                .filter(|t| {
+                    t.iter().all(|&k| finite(&vals[k as usize])) && {
+                        let c = [ek(t[0], t[1]), ek(t[1], t[2]), ek(t[2], t[0])].iter().filter(|e| jumps.contains_key(e)).count();
+                        c == 1 || c == 3
+                    }
+                })
+                .copied()
+                .collect();
+            if marked.is_empty() || added >= MAX_NEW {
+                break;
+            }
+            let room = (MAX_NEW - added) / 2;
+            let last = marked.len() > room;
+            marked.truncate(room.max(1));
+            let from = r.uv().len();
+            added += r.bisect(&marked, eval);
+            tris = r.tris();
+            search(r, &tris, from, eval, &mut jumps);
+            if last {
+                break;
+            }
+        }
+        // 分けられて無くなった辺の段差は消す
+        let mut alive: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+        for t in &tris {
+            for e in [ek(t[0], t[1]), ek(t[1], t[2]), ek(t[2], t[0])] {
+                alive.insert(e);
+            }
+        }
+        jumps.retain(|e, _| alive.contains(e));
+    }
+    ParamCut { jumps, far }
+}
+
 /// [`parametric_surface_nd`] で、`tol` があれば、急に曲がる所・定義域の縁を細かくする（[`crate::adaptive`]）。
 /// 分けるのは、斜辺の中点の点と、斜辺の両端の点の中点との n 次元の距離が `tol` を超える三角形と、
 /// 頂点・中点で定義される所とされない所が混ざる三角形。回転は距離を変えず、射影は距離を縮めるだけなので、
@@ -5240,6 +5425,9 @@ pub fn parametric_surface_nd_opt(
     let base = sets.len() * m * m;
     let (mut extra_points, mut extra_grid, mut tris) = (Vec::new(), Vec::new(), Vec::new());
     let mut refined_any = false;
+    let (mut keep_full, mut keep_far) = (false, false);
+    // 表示範囲の対角線（`tol` は対角線の 10⁻³ 倍。lib.rs を参照）
+    let diag = tol * 1e3;
     for (s, progs) in sets.iter().enumerate() {
         let set = ProgramSet::new(progs);
         let first: Vec<Vec<f64>> = points[s * m * m * dims..(s + 1) * m * m * dims].chunks_exact(dims).map(|p| p.to_vec()).collect();
@@ -5268,24 +5456,57 @@ pub fn parametric_surface_nd_opt(
             Some(e)
         };
         let limits = crate::adaptive::Limits { passes: 6, max_new_triangles: (2 * n * n).max(30_000) };
-        let r = crate::adaptive::refine(n, u, v, first, &mut eval, &mut decide, limits);
-        if r.uv.len() > m * m {
+        let mut r = crate::adaptive::refine_keep(n, u, v, first, &mut eval, &mut decide, limits);
+        // 値が飛ぶ所（floor の段差、tan の極）を探して、三角形を切り分ける（S20 と同じく、段差の線が終わる・交わる所だけ細かくする）
+        let mut cut = param_jumps(&mut r, &mut eval, diag);
+        let r = r.finish();
+        if r.uv.len() > m * m || !cut.jumps.is_empty() {
             refined_any = true;
         }
+        keep_full |= !cut.jumps.is_empty();
+        keep_far |= cut.far;
         let offset = base + extra_points.len() / dims;
         for (p, w) in r.uv[m * m..].iter().zip(&r.vals[m * m..]) {
             extra_points.extend_from_slice(w);
             extra_grid.extend_from_slice(&[(p[0] - u.0) as f32, (p[1] - v.0) as f32]);
         }
         let map = |k: u32| if (k as usize) < m * m { (s * m * m) as u32 + k } else { (offset + k as usize - m * m) as u32 };
-        tris.extend(r.tris.iter().flat_map(|t| t.map(map)));
+        // 飛ぶ所の 2 つの点（直前・直後）を、点の列の後ろに足す
+        let mut jump_vertex: crate::adaptive::HashMap<(u32, u32), (u32, u32)> = Default::default();
+        let mut keys: Vec<(u32, u32)> = cut.jumps.keys().copied().collect();
+        keys.sort_unstable();
+        for e in keys {
+            let jp = cut.jumps.remove(&e).unwrap();
+            let (a, b) = (r.uv[e.0 as usize], r.uv[e.1 as usize]);
+            let uv = [a[0] + (b[0] - a[0]) * jp.t, a[1] + (b[1] - a[1]) * jp.t];
+            let mut ids = [0u32; 2];
+            for (q, pt) in [jp.before, jp.after].into_iter().enumerate() {
+                ids[q] = (base + (extra_points.len() / dims)) as u32;
+                extra_points.extend_from_slice(&pt);
+                extra_grid.extend_from_slice(&[(uv[0] - u.0) as f32, (uv[1] - v.0) as f32]);
+            }
+            jump_vertex.insert(e, (ids[0], ids[1]));
+        }
+        for t in &r.tris {
+            let mut jv: [Option<(u32, u32)>; 3] = [None; 3];
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                if let Some(&(start, end)) = jump_vertex.get(&(a.min(b), a.max(b))) {
+                    jv[e] = Some(if a < b { (start, end) } else { (end, start) });
+                }
+            }
+            let (pieces, _) = cut_by_jumps(t.map(map), jv);
+            for piece in pieces {
+                tris.extend_from_slice(&piece);
+            }
+        }
     }
     if !refined_any {
         return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false };
     }
     points.extend_from_slice(&extra_points);
     grid.extend_from_slice(&extra_grid);
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)), keep_full: false, keep_far: false }
+    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)), keep_full, keep_far }
 }
 
 /// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
@@ -7125,6 +7346,50 @@ mod tests {
             let b = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2).indices.len();
             assert!(b as f64 <= 1.05 * a as f64, "{src}: {} → {}", a / 3, b / 3);
         }
+    }
+
+    /// 媒介変数の曲面の三角形（3 頂点の点）
+    fn shape_tris(s: &NdShape) -> Vec<[[f64; 3]; 3]> {
+        let p = |k: u32| {
+            let k = k as usize * s.dims;
+            [s.points[k], s.points[k + 1], s.points[k + 2]]
+        };
+        let (_, tris) = s.tris.as_ref().expect("細かくした三角形");
+        tris.chunks_exact(3).map(|t| [p(t[0]), p(t[1]), p(t[2])]).collect()
+    }
+
+    #[test]
+    fn parametric_steps_are_cut() {
+        // 段と段を結ぶ三角形（3 頂点の z の差が 0.4 を超えるもの）が無い（変更前は 4,500 個・13,500 個）
+        let r = (-5.0, 5.0);
+        let tol = 3f64.sqrt() * 10.0 * 1e-3;
+        for src in [["u", "v", "floor(u)"], ["u cos(v)", "u sin(v)", "floor(3u)/2"]] {
+            let s = parametric_surface_nd_opt(&[progs3(src, &["u", "v"])], r, r, 150, Some(tol));
+            assert!(s.keep_full, "{src:?}");
+            let bad = shape_tris(&s)
+                .iter()
+                .filter(|t| t.iter().all(|q| q.iter().all(|x| x.is_finite())))
+                .filter(|t| {
+                    let z = t.map(|q| q[2]);
+                    z.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)) - z.iter().fold(f64::INFINITY, |a, &b| a.min(b)) > 0.4
+                })
+                .count();
+            assert_eq!(bad, 0, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn parametric_pole_has_no_bridge() {
+        // tan(u) の極をまたぐ偽の面（z > 3 と z < −3 の頂点を両方持つ三角形）が無い
+        let r = (-5.0, 5.0);
+        let tol = 3f64.sqrt() * 10.0 * 1e-3;
+        let s = parametric_surface_nd_opt(&[progs3(["u", "v", "tan(u)"], &["u", "v"])], r, r, 150, Some(tol));
+        let bridges = shape_tris(&s)
+            .iter()
+            .filter(|t| t.iter().any(|q| q[2] > 3.0) && t.iter().any(|q| q[2] < -3.0))
+            .count();
+        assert_eq!(bridges, 0);
+        assert!(s.keep_far);
     }
 
     #[test]
