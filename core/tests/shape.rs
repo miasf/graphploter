@@ -1176,3 +1176,17 @@ fn pole_walls_are_continuous() {
 
 
 
+
+#[test]
+fn pole_hugging_surfaces_are_drawn() {
+    // S23: 極のすぐ隣を走る面（変更前は、回転なしで欠け 54%・47%）
+    for (src, limit) in [("1/(x y) - z = 0", 10.0), ("tan(x) = z y", 15.0)] {
+        let (r, _) = mesh(src, Rot::None, IRES);
+        let reference = reference_implicit(src, Rot::None);
+        let got = voxels_of_mesh(&r.positions(), &r.indices());
+        let m = miss(&reference, &got, 1);
+        assert!(m <= limit, "{src} の欠けが {m:.2}%");
+        let x = miss(&got, &reference, 3);
+        assert!(x <= 1.0, "{src} の余計（3 箱）が {x:.2}%");
+    }
+}

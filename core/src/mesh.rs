@@ -2053,6 +2053,13 @@ fn implicit_solid_with(
         }
     }
     let marked = |i: usize, j: usize, k: usize| !touch_cell.is_empty() && touch_cell[cell(i, j, k)];
+    // 1'''''. 極に張り付く面: 極の近くのセルだけ、辺を細かく調べて零点を数え直し、別に作る（[`pole_meshes`]）。
+    //         ふつうの Surface Nets では、そのセルに頂点を置かない
+    let poles = if refine != Refine::Off && ranges.is_empty() && (!not_zero.is_empty() || !nan_pts.is_empty()) {
+        pole_meshes(prog, &combos, &field, dom, n, &not_zero, &nan_pts, &ext.filled, &branches.mixed)
+    } else {
+        BranchMeshes::default()
+    };
     let t_touch = crate::timing::now_ms();
 
     // 格子の辺 p → p + e_a の上で曲面と交わる位置 t（0〜1）と、F の符号（接するだけの所は None）。
@@ -2122,8 +2129,8 @@ fn implicit_solid_with(
                 for (c, off) in corner_off.iter().enumerate() {
                     mask |= ((buf[l + off] < 0.0) as u8) << c;
                 }
-                // 段差をまたぐセルは、枝ごとに別に作る
-                if in_branch_cell(i, j, k) {
+                // 段差をまたぐセルは枝ごとに、極の近くのセルは零点を数え直して、別に作る
+                if in_branch_cell(i, j, k) || (!poles.mixed.is_empty() && poles.mixed.contains(&cell(i, j, k))) {
                     continue;
                 }
                 // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
@@ -2287,29 +2294,10 @@ fn implicit_solid_with(
         mesh.indices.extend_from_slice(&touch_tris);
     }
 
-    // 3'. 段差をまたぐセルの面（枝ごとに作って、切り取ったもの）を足す。ふつうの Surface Nets の頂点と同じ位置の頂点は、
-    //     その頂点を使う（継ぎ目で頂点を共有する）
-    if !branches.mesh.indices.is_empty() {
-        let key = |p: &[f32]| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
-        let mut at: crate::adaptive::HashMap<[u32; 3], u32> = Default::default();
-        for (v, p) in mesh.positions.chunks_exact(3).enumerate() {
-            at.entry(key(p)).or_insert(v as u32);
-        }
-        let mut map: Vec<u32> = Vec::with_capacity(branches.mesh.positions.len() / 3);
-        for (v, p) in branches.mesh.positions.chunks_exact(3).enumerate() {
-            map.push(match at.get(&key(p)) {
-                Some(&id) => id,
-                None => {
-                    let id = (mesh.positions.len() / 3) as u32;
-                    mesh.positions.extend_from_slice(p);
-                    vertex_cell.push(branches.vertex_cell[v]);
-                    at.insert(key(p), id);
-                    id
-                }
-            });
-        }
-        mesh.indices.extend(branches.mesh.indices.iter().map(|&v| map[v as usize]));
-    }
+    // 3'. 段差をまたぐセルの面（枝ごとに作って、切り取ったもの）と、極の近くの面を足す。ふつうの Surface Nets の頂点と
+    //     同じ位置の頂点は、その頂点を使う（継ぎ目で頂点を共有する）
+    weld_append(&mut mesh, &mut vertex_cell, &branches);
+    weld_append(&mut mesh, &mut vertex_cell, &poles);
     // 4'. 定義されない所に延びた面を、定義域の縁で切り落とす（[`trim_undefined`]）
     if !ext.filled.is_empty() {
         trim_undefined(prog, &combos, &mut mesh, &mut vertex_cell, n, &ext.filled);
@@ -2668,6 +2656,333 @@ fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> std::c
         }
     }
     out
+}
+
+/// 極に張り付く面（`1/(x y) = z` の壁など）を描く。極のすぐ隣を走る面は、格子の辺の上に「極と零点が 1 つずつ」入るので、
+/// 両端の符号がそろってしまい、ふつうの Surface Nets では見落とす。面を張るのは本当は「辺の上の零点の数が奇数の辺」なので、
+/// 極の近くのセルだけ、辺を 32 等分して零点を数え直し、その範囲の面を作り直す:
+/// 1. 調べ始めるセル: S4 で零点でないとされた辺（極・飛び）を持つセルと、有限でない角（`bad_pts`）を持つセル
+/// 2. その辺を 32 等分した点で F を計算し、符号の変わる小さい区間ごとに、二分して |F| が縮むか（零点）、縮まないか（極・飛び）で分ける。
+///    零点がちょうど 1 つの辺を交点にする（その前後の F の符号で、面の向きを決める）。両端の符号が違い、零点ではないとされていない辺は、
+///    ふつうと同じ直線の補間の交点にする。辺を 32 等分して交点が見つかったら、その辺を囲むセルも調べる（合わせて 200,000 辺まで）
+/// 3. 調べたセルと、それと辺を共有するセル（ふつうの交点だけで、ふつうの Surface Nets と同じ位置の頂点）に頂点を置き、
+///    調べたセルの辺に面を張る。調べたセルには、ふつうの Surface Nets は頂点を置かない
+/// 1 つのセルの中で、極をはさんで両側に零点がある所も、頂点は 1 つにまとめる（分けない）
+#[allow(clippy::too_many_arguments)]
+fn pole_meshes(
+    prog: &Program,
+    combos: &[Vec<f64>],
+    field: &SparseField,
+    dom: Domain,
+    n: usize,
+    not_zero: &std::collections::HashSet<usize>,
+    bad_pts: &[usize],
+    filled: &std::collections::HashSet<usize>,
+    skip: &crate::adaptive::HashSet<usize>,
+) -> BranchMeshes {
+    const SAMPLES: usize = 32;
+    const ROUNDS: usize = 12;
+    const MAX_EDGES: usize = 200_000;
+    let m = n + 1;
+    let idx = |q: [usize; 3]| q[0] + m * (q[1] + m * q[2]);
+    let cell_id = |c: [usize; 3]| c[0] + n * (c[1] + n * c[2]);
+    let pt = |q: [usize; 3]| [0, 1, 2].map(|a| dom.at(a, q[a] as f64, n));
+    let nb = field.nb;
+    let occupied = |c: [usize; 3]| field.occupied[(c[0] / BLOCK).min(nb - 1) + nb * ((c[1] / BLOCK).min(nb - 1) + nb * (c[2] / BLOCK).min(nb - 1))];
+    // 使えるセル: 格子の中、値を持っている、段差をまたぐセル・埋めた角のセルでない
+    let usable = |c: [usize; 3]| {
+        c.iter().all(|&v| v < n)
+            && occupied(c)
+            && !skip.contains(&cell_id(c))
+            && CORNERS.iter().all(|d| {
+                let q = [c[0] + d[0], c[1] + d[1], c[2] + d[2]];
+                field.at(q) != usize::MAX && (filled.is_empty() || !filled.contains(&idx(q)))
+            })
+    };
+    // 辺（始点 p、向き a）を囲む 4 つのセル
+    let around = |p: [usize; 3], a: usize| -> Vec<[usize; 3]> {
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        let mut out = Vec::with_capacity(4);
+        for (db, dc) in [(1usize, 1usize), (0, 1), (0, 0), (1, 0)] {
+            if p[b] < db || p[c] < dc {
+                continue;
+            }
+            let mut s = p;
+            s[b] -= db;
+            s[c] -= dc;
+            out.push(s);
+        }
+        out
+    };
+    // 1. 調べ始めるセル
+    let mut region: crate::adaptive::HashSet<usize> = Default::default();
+    let mut frontier: Vec<[usize; 3]> = Vec::new();
+    let add = |c: [usize; 3], region: &mut crate::adaptive::HashSet<usize>, frontier: &mut Vec<[usize; 3]>| {
+        if usable(c) && region.insert(cell_id(c)) {
+            frontier.push(c);
+        }
+    };
+    for &id in not_zero {
+        let (a, q) = (id % 3, id / 3);
+        let p = [q % m, (q / m) % m, q / (m * m)];
+        for c in around(p, a) {
+            add(c, &mut region, &mut frontier);
+        }
+    }
+    // 有限でない格子点（`bad_pts`）を角に持つセルのうち、有限な角もあるもの
+    for &p in bad_pts {
+        let q = [p % m, (p / m) % m, p / (m * m)];
+        for d in CORNERS {
+            if q.iter().zip(d).any(|(&v, o)| v < o) {
+                continue;
+            }
+            let c = [q[0] - d[0], q[1] - d[1], q[2] - d[2]];
+            if c.iter().any(|&v| v >= n) || !occupied(c) {
+                continue;
+            }
+            if CORNERS.iter().any(|o| field.f([c[0] + o[0], c[1] + o[1], c[2] + o[2]]).is_finite()) {
+                add(c, &mut region, &mut frontier);
+            }
+        }
+    }
+    let mut out = BranchMeshes::default();
+    if region.is_empty() {
+        return out;
+    }
+    // 2. 辺ごとの交点（辺の番号 → (位置 t, 始点の側の F が負か)。交点が無ければ None）
+    let mut cross: crate::adaptive::HashMap<usize, Option<(f64, bool)>> = Default::default();
+    let mut sc = FieldScratch::default();
+    let mut checked = 0usize;
+    while !frontier.is_empty() && checked < MAX_EDGES {
+        // 新しいセルの辺のうち、まだ調べていないもの
+        let mut todo: Vec<([usize; 3], usize)> = Vec::new();
+        for c in std::mem::take(&mut frontier) {
+            for [ca, cb] in EDGES {
+                let (a, b) = (CORNERS[ca], CORNERS[cb]);
+                let ax = (0..3).find(|&x| a[x] != b[x]).unwrap_or(0);
+                let p = [c[0] + a[0], c[1] + a[1], c[2] + a[2]];
+                let id = 3 * idx(p) + ax;
+                if let std::collections::hash_map::Entry::Vacant(e) = cross.entry(id) {
+                    e.insert(None);
+                    todo.push((p, ax));
+                }
+            }
+        }
+        checked += todo.len();
+        // ふつうの辺（両端が有限で符号が違い、零点でないとされていない）は、直線の補間。ほかは 32 等分して調べる
+        let mut sample: Vec<([usize; 3], usize)> = Vec::new();
+        for &(p, ax) in &todo {
+            let mut q = p;
+            q[ax] += 1;
+            let (f0, f1) = (field.f(p), field.f(q));
+            let id = 3 * idx(p) + ax;
+            if f0.is_finite() && f1.is_finite() && (f0 < 0.0) != (f1 < 0.0) {
+                // 両端の符号が違う辺: ふつうは直線の補間。零点でないとされた辺（極が 1 つ）は、零点が偶数個（0 か 2）なので、
+                // 零点がちょうど 1 つにはならない（調べない）
+                if !not_zero.contains(&id) {
+                    cross.insert(id, Some(((f0 / (f0 - f1)) as f64, f0 < 0.0)));
+                }
+            } else {
+                sample.push((p, ax));
+            }
+        }
+        if sample.is_empty() {
+            continue;
+        }
+        let at = |p: [usize; 3], ax: usize, t: f64| {
+            let mut x = pt(p);
+            x[ax] += (dom.at(ax, 1.0, n) - dom.at(ax, 0.0, n)) * t;
+            x
+        };
+        let mut cols: [Vec<f64>; 3] = Default::default();
+        for &(p, ax) in &sample {
+            for s in 0..=SAMPLES {
+                let x = at(p, ax, s as f64 / SAMPLES as f64);
+                for k in 0..3 {
+                    cols[k].push(x[k]);
+                }
+            }
+        }
+        let vals = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc).to_vec();
+        // 符号の変わる小さい区間 (辺, ta, tb, fa, fb, 最初の |fa| + |fb|)
+        let mut iv: Vec<(usize, f64, f64, f64, f64, f64)> = Vec::new();
+        for (e, _) in sample.iter().enumerate() {
+            let v = &vals[e * (SAMPLES + 1)..(e + 1) * (SAMPLES + 1)];
+            for s in 0..SAMPLES {
+                let (a, b) = (v[s], v[s + 1]);
+                if a.is_finite() && b.is_finite() && (a < 0.0) != (b < 0.0) {
+                    iv.push((e, s as f64 / SAMPLES as f64, (s + 1) as f64 / SAMPLES as f64, a, b, a.abs() + b.abs()));
+                }
+            }
+        }
+        for _ in 0..ROUNDS {
+            let mut cols: [Vec<f64>; 3] = Default::default();
+            for &(e, ta, tb, ..) in &iv {
+                let (p, ax) = sample[e];
+                let x = at(p, ax, 0.5 * (ta + tb));
+                for k in 0..3 {
+                    cols[k].push(x[k]);
+                }
+            }
+            let mid = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc).to_vec();
+            for (c, &f) in iv.iter_mut().zip(&mid) {
+                let t = 0.5 * (c.1 + c.2);
+                if !f.is_finite() || (f < 0.0) == (c.3 < 0.0) {
+                    if f.is_finite() {
+                        c.1 = t;
+                        c.3 = f;
+                    } else {
+                        c.2 = t; // 定義されない所は、終点の側に寄せる（その区間は零点にならない）
+                    }
+                } else {
+                    c.2 = t;
+                    c.4 = f;
+                }
+            }
+        }
+        // 辺ごとに零点を数える
+        let mut zeros: Vec<Vec<(f64, bool)>> = vec![Vec::new(); sample.len()];
+        for &(e, ta, tb, fa, fb, first) in &iv {
+            if fa.is_finite() && fb.is_finite() && (fa < 0.0) != (fb < 0.0) && fa.abs() + fb.abs() < 0.5 * first {
+                zeros[e].push((0.5 * (ta + tb), fa < 0.0));
+            }
+        }
+        for (e, z) in zeros.iter().enumerate() {
+            let (p, ax) = sample[e];
+            if z.len() != 1 {
+                continue;
+            }
+            cross.insert(3 * idx(p) + ax, Some(z[0]));
+            // 隠れた交点の辺を囲むセルも調べる
+            for c in around(p, ax) {
+                add(c, &mut region, &mut frontier);
+            }
+        }
+    }
+    // 3. 頂点: 調べたセルと、それと辺を共有するセル
+    let mut ring: Vec<usize> = Vec::new();
+    for &c in &region {
+        let q = [c % n, (c / n) % n, c / (n * n)];
+        for dz in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if [dx, dy, dz].iter().filter(|&&d| d != 0).count() > 2 {
+                        continue;
+                    }
+                    let d = [q[0] as i64 + dx, q[1] as i64 + dy, q[2] as i64 + dz];
+                    if d.iter().any(|&v| v < 0 || v >= n as i64) {
+                        continue;
+                    }
+                    let id = cell_id(d.map(|v| v as usize));
+                    if !region.contains(&id) {
+                        ring.push(id);
+                    }
+                }
+            }
+        }
+    }
+    ring.sort_unstable();
+    ring.dedup();
+    // 交点の位置（調べた辺はその結果、ほかは直線の補間）
+    let crossing = |p: [usize; 3], ax: usize| -> Option<(f64, bool)> {
+        let id = 3 * idx(p) + ax;
+        if let Some(c) = cross.get(&id) {
+            return *c;
+        }
+        let mut q = p;
+        q[ax] += 1;
+        let (f0, f1) = (field.f(p), field.f(q));
+        if f0.is_finite() && f1.is_finite() && (f0 < 0.0) != (f1 < 0.0) && !not_zero.contains(&id) {
+            Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
+        } else {
+            None
+        }
+    };
+    let mut cells: Vec<usize> = region.iter().copied().chain(ring.iter().copied()).collect();
+    cells.sort_unstable();
+    let mut vert: crate::adaptive::HashMap<usize, u32> = Default::default();
+    for &c in &cells {
+        let q = [c % n, (c / n) % n, c / (n * n)];
+        if !occupied(q) {
+            continue;
+        }
+        let (mut sum, mut cnt) = ([0.0f64; 3], 0.0f64);
+        for [ca, cb] in EDGES {
+            let (a, b) = (CORNERS[ca], CORNERS[cb]);
+            let ax = (0..3).find(|&x| a[x] != b[x]).unwrap_or(0);
+            if let Some((t, _)) = crossing([q[0] + a[0], q[1] + a[1], q[2] + a[2]], ax) {
+                let mut r = [a[0] as f64, a[1] as f64, a[2] as f64];
+                r[ax] += t;
+                for x in 0..3 {
+                    sum[x] += r[x];
+                }
+                cnt += 1.0;
+            }
+        }
+        if cnt > 0.0 {
+            let p = [q[0] as f64 + sum[0] / cnt, q[1] as f64 + sum[1] / cnt, q[2] as f64 + sum[2] / cnt];
+            vert.insert(c, out.mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]));
+            out.vertex_cell.push(c as u32);
+        }
+    }
+    // 面: 調べたセルの辺のうち、交点のあるもの
+    let mut seen: crate::adaptive::HashSet<usize> = Default::default();
+    let mut sorted: Vec<usize> = region.iter().copied().collect();
+    sorted.sort_unstable();
+    for &c in &sorted {
+        let q = [c % n, (c / n) % n, c / (n * n)];
+        for [ca, cb] in EDGES {
+            let (a, b) = (CORNERS[ca], CORNERS[cb]);
+            let ax = (0..3).find(|&x| a[x] != b[x]).unwrap_or(0);
+            let p = [q[0] + a[0], q[1] + a[1], q[2] + a[2]];
+            if !seen.insert(3 * idx(p) + ax) {
+                continue;
+            }
+            let Some((_, neg)) = crossing(p, ax) else { continue };
+            let cs = around(p, ax);
+            if cs.len() != 4 || cs.iter().any(|&s| s.iter().any(|&v| v >= n)) {
+                continue;
+            }
+            let ids: Vec<u32> = cs.iter().filter_map(|&s| vert.get(&cell_id(s)).copied()).collect();
+            if ids.len() != 4 {
+                continue;
+            }
+            let [q0, q1, q2, q3] = [ids[0], ids[1], ids[2], ids[3]];
+            if neg {
+                out.mesh.indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]);
+            } else {
+                out.mesh.indices.extend_from_slice(&[q0, q2, q1, q0, q3, q2]);
+            }
+        }
+    }
+    out.mixed = region;
+    out
+}
+
+/// `extra` の面を `mesh` に足す。`mesh` の頂点とビットまで同じ位置の頂点は、その頂点を使う（継ぎ目で頂点を共有する）
+fn weld_append(mesh: &mut Mesh, vertex_cell: &mut Vec<u32>, extra: &BranchMeshes) {
+    if extra.mesh.indices.is_empty() {
+        return;
+    }
+    let key = |p: &[f32]| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+    let mut at: crate::adaptive::HashMap<[u32; 3], u32> = Default::default();
+    for (v, p) in mesh.positions.chunks_exact(3).enumerate() {
+        at.entry(key(p)).or_insert(v as u32);
+    }
+    let mut map: Vec<u32> = Vec::with_capacity(extra.mesh.positions.len() / 3);
+    for (v, p) in extra.mesh.positions.chunks_exact(3).enumerate() {
+        map.push(match at.get(&key(p)) {
+            Some(&id) => id,
+            None => {
+                let id = (mesh.positions.len() / 3) as u32;
+                mesh.positions.extend_from_slice(p);
+                vertex_cell.push(extra.vertex_cell[v]);
+                at.insert(key(p), id);
+                id
+            }
+        });
+    }
+    mesh.indices.extend(extra.mesh.indices.iter().map(|&v| map[v as usize]));
 }
 
 /// 段差の元がこれより多い式は、枝ごとに作る道を使わない
