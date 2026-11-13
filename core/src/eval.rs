@@ -16,8 +16,8 @@
 //!   途中で実数に収まらない所（`sqrt` の中が負など）や、有限でない値が出た CHUNK だけ、複素数で計算し直す。
 //!   だから結果は複素数で計算したときと（丸め誤差を除いて）同じになる。
 
-use crate::functions::Func;
 use crate::interval::{Interval, Range};
+use crate::functions::Func;
 use crate::parser::{BinOp, Constant, Expr};
 use num_complex::Complex64 as C;
 use std::f64::consts::{E, PI};
@@ -139,33 +139,8 @@ fn real_fn1(f: Func) -> bool {
     use Func::*;
     matches!(
         f,
-        Sin | Cos
-            | Tan
-            | Sec
-            | Csc
-            | Cot
-            | Asin
-            | Acos
-            | Atan
-            | Sinh
-            | Cosh
-            | Tanh
-            | Asinh
-            | Acosh
-            | Atanh
-            | Exp
-            | Ln
-            | Log10
-            | Sqrt
-            | Abs
-            | Sinc
-            | Floor
-            | Ceil
-            | Round
-            | Sign
-            | Re
-            | Im
-            | Conj
+        Sin | Cos | Tan | Sec | Csc | Cot | Asin | Acos | Atan | Sinh | Cosh | Tanh | Asinh | Acosh | Atanh | Exp
+            | Ln | Log10 | Sqrt | Abs | Sinc | Floor | Ceil | Round | Sign | Re | Im | Conj
     )
 }
 
@@ -236,11 +211,7 @@ impl Code {
             Op::Call2(f, _, _) => real_fn2(*f),
             Op::CallN(..) => false,
         });
-        Code {
-            ops: kept,
-            outs: outs.into_iter().map(|o| at[o]).collect(),
-            real,
-        }
+        Code { ops: kept, outs: outs.into_iter().map(|o| at[o]).collect(), real }
     }
 
     /// `n` 個の点でまとめて計算して、結果を `sink` に渡す。`inputs[k]` は k 番目の変数の値の列
@@ -493,11 +464,7 @@ impl Code {
                     Func::Log10 => map1_if!(*a, |x: f64| x >= 0.0, f64::log10),
                     Func::Sqrt => map1_if!(*a, |x: f64| x >= 0.0, f64::sqrt),
                     Func::Abs => map1!(*a, f64::abs),
-                    Func::Sinc => map1!(*a, |x: f64| if x.abs() < 1e-8 {
-                        1.0 - x * x / 6.0
-                    } else {
-                        x.sin() / x
-                    }),
+                    Func::Sinc => map1!(*a, |x: f64| if x.abs() < 1e-8 { 1.0 - x * x / 6.0 } else { x.sin() / x }),
                     Func::Floor => map1!(*a, f64::floor),
                     Func::Ceil => map1!(*a, f64::ceil),
                     Func::Round => map1!(*a, f64::round),
@@ -554,12 +521,7 @@ impl Program {
 
     /// パラメータ付きでコンパイルする。`params` にある文字は、その値の定数として扱う。
     pub fn compile_with(expr: &Expr, vars: &[&str], params: &Params) -> Result<Program, String> {
-        let mut c = Compiler {
-            b: Builder::default(),
-            vars,
-            params,
-            used_params: Vec::new(),
-        };
+        let mut c = Compiler { b: Builder::default(), vars, params, used_params: Vec::new() };
         let root = c.emit(expr)?;
         Ok(Program {
             code: Code::new(c.b, vec![root]),
@@ -574,10 +536,7 @@ impl Program {
 
     /// k 番目の変数を使っているか（定数に畳み込まれて消えた変数は使っていない）
     pub fn uses_var_index(&self, k: usize) -> bool {
-        self.code
-            .ops
-            .iter()
-            .any(|op| matches!(op, Op::Var(j) if *j == k))
+        self.code.ops.iter().any(|op| matches!(op, Op::Var(j) if *j == k))
     }
 
     /// この式で使われたパラメータの名前
@@ -619,11 +578,7 @@ impl Program {
             .iter()
             .enumerate()
             .filter(|(_, op)| {
-                matches!(
-                    op,
-                    Op::Call1(Func::Floor | Func::Ceil | Func::Round | Func::Sign, _)
-                        | Op::Call2(Func::Mod, _, _)
-                )
+                matches!(op, Op::Call1(Func::Floor | Func::Ceil | Func::Round | Func::Sign, _) | Op::Call2(Func::Mod, _, _))
             })
             .map(|(i, _)| i)
             .collect()
@@ -673,10 +628,7 @@ impl Program {
                 _ => at[i],
             })
             .collect();
-        Branches {
-            code: Some(Code::new(b, outs)),
-            k,
-        }
+        Branches { code: Some(Code::new(b, outs)), k }
     }
 }
 
@@ -689,9 +641,7 @@ pub struct Branches {
 impl Branches {
     /// 点ごとの枝の番号（点の順に、段差の元の数ずつ）
     pub fn eval(&self, inputs: &[&[f64]], n: usize) -> Vec<f64> {
-        let Some(code) = &self.code else {
-            return Vec::new();
-        };
+        let Some(code) = &self.code else { return Vec::new() };
         let k = self.k;
         struct Out<'a> {
             k: usize,
@@ -705,8 +655,7 @@ impl Branches {
             }
             fn complex(&mut self, out: usize, start: usize, vals: &[C]) {
                 for (j, v) in vals.iter().enumerate() {
-                    self.vals[(start + j) * self.k + out] =
-                        if v.im == 0.0 { v.re } else { f64::NAN };
+                    self.vals[(start + j) * self.k + out] = if v.im == 0.0 { v.re } else { f64::NAN };
                 }
             }
         }
@@ -717,6 +666,7 @@ impl Branches {
 }
 
 impl Program {
+
     /// 段差の元を、渡した枝の番号 `k`（[`Program::eval_branches`] と同じ順）で置き換えた式（枝の中での、なめらかな続き）。
     /// `floor(a)`・`ceil(a)`・`round(a)`・`sign(a)` → k、`mod(a, b)` → a − b k
     pub fn frozen(&self, k: &[f64]) -> Program {
@@ -749,11 +699,7 @@ impl Program {
             at.push(b.push(new));
         }
         let outs = self.code.outs.iter().map(|&o| at[o]).collect();
-        Program {
-            code: Code::new(b, outs),
-            vars: self.vars.clone(),
-            used_params: self.used_params.clone(),
-        }
+        Program { code: Code::new(b, outs), vars: self.vars.clone(), used_params: self.used_params.clone() }
     }
 
     /// 区間演算が使える式か（定数がすべて実数で、関数が初等関数だけ。特殊関数・虚数の定数を使う式は使えない）
@@ -849,14 +795,8 @@ impl ProgramSet {
     /// `progs`（変数の並びが同じ式）を1つにまとめる
     pub fn new(progs: &[Program]) -> ProgramSet {
         let mut b = Builder::default();
-        let outs = progs
-            .iter()
-            .map(|p| b.append(&p.code.ops, &Op::Var)[p.code.outs[0]])
-            .collect();
-        ProgramSet {
-            code: Code::new(b, outs),
-            nvars: progs.first().map_or(0, |p| p.vars.len()),
-        }
+        let outs = progs.iter().map(|p| b.append(&p.code.ops, &Op::Var)[p.code.outs[0]]).collect();
+        ProgramSet { code: Code::new(b, outs), nvars: progs.first().map_or(0, |p| p.vars.len()) }
     }
 
     /// 式の数（点の次元）
@@ -872,18 +812,12 @@ impl ProgramSet {
     /// 固定した変数だけで決まる部分は、ここで計算して定数にする
     pub fn bind(&self, fixed: &[(usize, f64)]) -> ProgramSet {
         let mut b = Builder::default();
-        let at = b.append(
-            &self.code.ops,
-            &|k| match fixed.iter().find(|(v, _)| *v == k) {
-                Some(&(_, x)) => Op::Const(C::new(x, 0.0)),
-                None => Op::Var(k),
-            },
-        );
+        let at = b.append(&self.code.ops, &|k| match fixed.iter().find(|(v, _)| *v == k) {
+            Some(&(_, x)) => Op::Const(C::new(x, 0.0)),
+            None => Op::Var(k),
+        });
         let outs = self.code.outs.iter().map(|&o| at[o]).collect();
-        ProgramSet {
-            code: Code::new(b, outs),
-            nvars: self.nvars,
-        }
+        ProgramSet { code: Code::new(b, outs), nvars: self.nvars }
     }
 
     /// `n` 個の点で計算して、点ごとに成分を並べたもの（点ごとに `len()` 個）を `out` の後ろに足す。
@@ -909,14 +843,7 @@ impl ProgramSet {
                 }
             }
         }
-        self.code.run(
-            inputs,
-            n,
-            &mut Points {
-                pts: &mut out[base..],
-                d,
-            },
-        );
+        self.code.run(inputs, n, &mut Points { pts: &mut out[base..], d });
     }
 }
 
@@ -941,11 +868,7 @@ fn pow(a: C, b: C) -> C {
         }
     }
     if a == C::new(0.0, 0.0) {
-        return if b.re > 0.0 {
-            a
-        } else {
-            C::new(f64::NAN, f64::NAN)
-        };
+        return if b.re > 0.0 { a } else { C::new(f64::NAN, f64::NAN) };
     }
     a.powc(b)
 }
@@ -984,21 +907,18 @@ mod tests {
         // 決まった乱数（線形合同法）
         let mut seed: u64 = 12345;
         let mut rnd = || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((seed >> 11) as f64 / (1u64 << 53) as f64) * 20.0 - 10.0
         };
-        let (xs, ys, zs): (Vec<f64>, Vec<f64>, Vec<f64>) =
-            (0..1000).map(|_| (rnd(), rnd(), rnd())).fold(
-                (Vec::new(), Vec::new(), Vec::new()),
-                |(mut a, mut b, mut c), (x, y, z)| {
-                    a.push(x);
-                    b.push(y);
-                    c.push(z);
-                    (a, b, c)
-                },
-            );
+        let (xs, ys, zs): (Vec<f64>, Vec<f64>, Vec<f64>) = (0..1000).map(|_| (rnd(), rnd(), rnd())).fold(
+            (Vec::new(), Vec::new(), Vec::new()),
+            |(mut a, mut b, mut c), (x, y, z)| {
+                a.push(x);
+                b.push(y);
+                c.push(z);
+                (a, b, c)
+            },
+        );
         for src in srcs {
             let p = Program::compile(&parse(src).unwrap(), &["x", "y", "z"]).unwrap();
             let k = p.branch_sites();
@@ -1011,25 +931,12 @@ mod tests {
                 let mut out = [C::new(0.0, 0.0)];
                 f.eval_batch(&[&xs[i..i + 1], &ys[i..i + 1], &zs[i..i + 1]], &mut out);
                 let (a, b) = (plain[i].re, out[0].re);
-                assert!(
-                    (a - b).abs() <= 1e-9 * (1.0 + a.abs()),
-                    "{src} の点 {i}: {a} と {b}"
-                );
+                assert!((a - b).abs() <= 1e-9 * (1.0 + a.abs()), "{src} の点 {i}: {a} と {b}");
             }
         }
         // 段差の元が無い式・複素数の式は 0
-        assert_eq!(
-            Program::compile(&parse("x^2 + y^2 - z").unwrap(), &["x", "y", "z"])
-                .unwrap()
-                .branch_sites(),
-            0
-        );
-        assert_eq!(
-            Program::compile(&parse("floor(x) + i").unwrap(), &["x", "y", "z"])
-                .unwrap()
-                .branch_sites(),
-            0
-        );
+        assert_eq!(Program::compile(&parse("x^2 + y^2 - z").unwrap(), &["x", "y", "z"]).unwrap().branch_sites(), 0);
+        assert_eq!(Program::compile(&parse("floor(x) + i").unwrap(), &["x", "y", "z"]).unwrap().branch_sites(), 0);
     }
 
     #[test]
@@ -1149,24 +1056,12 @@ mod tests {
             p.complex_only().eval_batch(&[&xs, &ys], &mut slow);
             for k in 0..xs.len() {
                 let (a, b) = (fast[k], slow[k]);
-                let same = |u: f64, v: f64| {
-                    (u.is_nan() && v.is_nan()) || u == v || (u - v).abs() <= 1e-9 * v.abs().max(1.0)
-                };
-                assert!(
-                    same(a.re, b.re) && same(a.im, b.im),
-                    "{src} at ({}, {}): {a} vs {b}",
-                    xs[k],
-                    ys[k]
-                );
+                let same = |u: f64, v: f64| (u.is_nan() && v.is_nan()) || u == v || (u - v).abs() <= 1e-9 * v.abs().max(1.0);
+                assert!(same(a.re, b.re) && same(a.im, b.im), "{src} at ({}, {}): {a} vs {b}", xs[k], ys[k]);
             }
         }
         // 初等関数だけの式は実数で、特殊関数・虚数単位を含む式は複素数で計算する
-        let real = |src: &str| {
-            Program::compile(&parse(src).unwrap(), &["x", "y"])
-                .unwrap()
-                .code
-                .real
-        };
+        let real = |src: &str| Program::compile(&parse(src).unwrap(), &["x", "y"]).unwrap().code.real;
         assert!(real("sin(x) sqrt(y) + 2^x"));
         assert!(!real("gamma(x)") && !real("x + i y") && !real("arg(x)"));
     }
@@ -1186,9 +1081,7 @@ mod tests {
         let mut pts = Vec::new();
         set.eval_points(&[&[0.0, 1.0], &[0.5, 2.0]], 2, &mut pts);
         assert_eq!(pts.len(), 6);
-        assert!(
-            (pts[3] - 1f64.cos() * 2f64.cos()).abs() < 1e-15 && (pts[5] - 2f64.sin()).abs() < 1e-15
-        );
+        assert!((pts[3] - 1f64.cos() * 2f64.cos()).abs() < 1e-15 && (pts[5] - 2f64.sin()).abs() < 1e-15);
 
         // y を固定すると、y だけで決まる部分が定数になる。固定した変数の列は空でよい
         let bound = set.bind(&[(1, 2.0)]);

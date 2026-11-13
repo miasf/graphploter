@@ -23,8 +23,7 @@ pub struct Cond {
 impl Cond {
     /// 値 s が範囲に入るか
     pub fn holds(&self, s: f64) -> bool {
-        (s > self.lo || (self.lo_closed && s == self.lo))
-            && (s < self.hi || (self.hi_closed && s == self.hi))
+        (s > self.lo || (self.lo_closed && s == self.lo)) && (s < self.hi || (self.hi_closed && s == self.hi))
     }
 }
 
@@ -45,10 +44,7 @@ impl Relaxed {
         use crate::interval::{Interval, Range};
         let nv = boxes.len();
         let mut all: Vec<Interval> = boxes.to_vec();
-        all.resize(
-            nv + self.divisors.len(),
-            Interval::new(f64::NEG_INFINITY, f64::INFINITY),
-        );
+        all.resize(nv + self.divisors.len(), Interval::new(f64::NEG_INFINITY, f64::INFINITY));
         for (j, d) in self.divisors.iter().enumerate() {
             match d.eval_interval(&all) {
                 Range::Known(i) => all[nv + j] = Interval::new(i.lo.min(0.0), i.hi.max(0.0)),
@@ -96,27 +92,16 @@ impl Program {
         let make = |root: usize| {
             let mut nb = Builder::default();
             let at = nb.append(&ops, &Op::Var);
-            Program {
-                code: Code::new(nb, vec![at[root]]),
-                vars: vars.clone(),
-                used_params: self.used_params.clone(),
-            }
+            Program { code: Code::new(nb, vec![at[root]]), vars: vars.clone(), used_params: self.used_params.clone() }
         };
-        Relaxed {
-            prog: make(at[self.code.outs[0]]),
-            divisors: div_roots.iter().map(|&r| make(r)).collect(),
-        }
+        Relaxed { prog: make(at[self.code.outs[0]]), divisors: div_roots.iter().map(|&r| make(r)).collect() }
     }
 
     /// 同じ変数で、命令 `root` を結果にした式
     fn sub_program(&self, root: usize) -> Program {
         let mut b = Builder::default();
         let at = b.append(&self.code.ops, &Op::Var);
-        Program {
-            code: Code::new(b, vec![at[root]]),
-            vars: self.vars.clone(),
-            used_params: self.used_params.clone(),
-        }
+        Program { code: Code::new(b, vec![at[root]]), vars: self.vars.clone(), used_params: self.used_params.clone() }
     }
 
     /// 定数 0 と分かる命令か（0 との積も 0 とみなす。枝を固定した式の `b × 0` を消すため）
@@ -143,12 +128,8 @@ impl Program {
             Op::Bin(BinOp::Pow, a, e) if matches!(self.code.ops[*e], Op::Const(c) if c.im == 0.0 && c.re > 0.0) => {
                 self.collect_factors(*a, out)
             }
-            Op::Bin(BinOp::Sub | BinOp::Add, a, b) if self.is_zero_op(*b) => {
-                self.collect_factors(*a, out)
-            }
-            Op::Bin(BinOp::Sub | BinOp::Add, a, b) if self.is_zero_op(*a) => {
-                self.collect_factors(*b, out)
-            }
+            Op::Bin(BinOp::Sub | BinOp::Add, a, b) if self.is_zero_op(*b) => self.collect_factors(*a, out),
+            Op::Bin(BinOp::Sub | BinOp::Add, a, b) if self.is_zero_op(*a) => self.collect_factors(*b, out),
             _ => {
                 if !out.contains(&i) {
                     out.push(i);
@@ -246,9 +227,7 @@ impl Program {
                                 (one, Some(b.push(Op::Bin(BinOp::Pow, at[*a], p))))
                             }
                         }
-                        Some(c)
-                            if c.im == 0.0 && c.re > 0.0 && c.re.fract() == 0.0 && da.is_some() =>
-                        {
+                        Some(c) if c.im == 0.0 && c.re > 0.0 && c.re.fract() == 0.0 && da.is_some() => {
                             let d = da.map(|d| b.push(Op::Bin(BinOp::Pow, d, at[*e])));
                             (b.push(Op::Bin(BinOp::Pow, na, at[*e])), d)
                         }
@@ -256,10 +235,7 @@ impl Program {
                     }
                 }
                 Op::Call1(f @ (Func::Tan | Func::Cot | Func::Sec | Func::Csc), a) => {
-                    let (sin, cos) = (
-                        b.push(Op::Call1(Func::Sin, at[*a])),
-                        b.push(Op::Call1(Func::Cos, at[*a])),
-                    );
+                    let (sin, cos) = (b.push(Op::Call1(Func::Sin, at[*a])), b.push(Op::Call1(Func::Cos, at[*a])));
                     let one = b.push(Op::Const(C::new(1.0, 0.0)));
                     match f {
                         Func::Tan => (sin, Some(cos)),
@@ -278,11 +254,7 @@ impl Program {
         let make = |root: usize| {
             let mut nb = Builder::default();
             let at = nb.append(&ops, &Op::Var);
-            Program {
-                code: Code::new(nb, vec![at[root]]),
-                vars: self.vars.clone(),
-                used_params: self.used_params.clone(),
-            }
+            Program { code: Code::new(nb, vec![at[root]]), vars: self.vars.clone(), used_params: self.used_params.clone() }
         };
         Some((make(n), make(d)))
     }
@@ -330,17 +302,11 @@ impl Program {
                         }
                         (BinOp::Mul, Some(i), None) | (BinOp::Mul, None, Some(i)) => {
                             let (a, c) = if ind(rx).is_some() { aff(ry) } else { aff(rx) };
-                            R::Aff(
-                                b.push(Op::Bin(BinOp::Mul, i, a)),
-                                b.push(Op::Bin(BinOp::Mul, i, c)),
-                            )
+                            R::Aff(b.push(Op::Bin(BinOp::Mul, i, a)), b.push(Op::Bin(BinOp::Mul, i, c)))
                         }
                         (BinOp::Div, None, Some(j)) => {
                             let (a, c) = aff(rx);
-                            R::Aff(
-                                b.push(Op::Bin(BinOp::Div, a, j)),
-                                b.push(Op::Bin(BinOp::Div, c, j)),
-                            )
+                            R::Aff(b.push(Op::Bin(BinOp::Div, a, j)), b.push(Op::Bin(BinOp::Div, c, j)))
                         }
                         _ => return None,
                     }
@@ -354,9 +320,7 @@ impl Program {
             };
             rep.push(r);
         }
-        let R::Aff(a, c) = rep[self.code.outs[0]] else {
-            return None;
-        };
+        let R::Aff(a, c) = rep[self.code.outs[0]] else { return None };
         if b.const_of(a).is_some_and(|k| k == C::new(0.0, 0.0)) {
             return None;
         }
@@ -368,11 +332,7 @@ impl Program {
         let make = |root: usize| {
             let mut nb = Builder::default();
             let at = nb.append(&ops, &Op::Var);
-            Program {
-                code: Code::new(nb, vec![at[root]]),
-                vars: vars.clone(),
-                used_params: self.used_params.clone(),
-            }
+            Program { code: Code::new(nb, vec![at[root]]), vars: vars.clone(), used_params: self.used_params.clone() }
         };
         Some((make(g), make(a)))
     }
@@ -394,10 +354,7 @@ impl Program {
         let mut bounds = Vec::with_capacity(sites.len());
         for (&i, &t) in sites.iter().zip(k) {
             let (root, bound) = match &self.code.ops[i] {
-                Op::Call2(Func::Mod, a, d) => (
-                    b.push(Op::Bin(BinOp::Div, at[*a], at[*d])),
-                    (t, t + 1.0, true, false),
-                ),
+                Op::Call2(Func::Mod, a, d) => (b.push(Op::Bin(BinOp::Div, at[*a], at[*d])), (t, t + 1.0, true, false)),
                 Op::Call1(Func::Floor, a) => (at[*a], (t, t + 1.0, true, false)),
                 Op::Call1(Func::Ceil, a) => (at[*a], (t - 1.0, t, false, true)),
                 Op::Call1(Func::Round, a) => (at[*a], (t - 0.5, t + 0.5, t > 0.0, t < 0.0)),
@@ -423,18 +380,9 @@ impl Program {
             .map(|(root, (lo, hi, lo_closed, hi_closed))| {
                 let mut nb = Builder::default();
                 let at = nb.append(&ops, &Op::Var);
-                let prog = Program {
-                    code: Code::new(nb, vec![at[root]]),
-                    vars: self.vars.clone(),
-                    used_params: self.used_params.clone(),
-                };
-                Cond {
-                    prog,
-                    lo,
-                    hi,
-                    lo_closed,
-                    hi_closed,
-                }
+                let prog =
+                    Program { code: Code::new(nb, vec![at[root]]), vars: self.vars.clone(), used_params: self.used_params.clone() };
+                Cond { prog, lo, hi, lo_closed, hi_closed }
             })
             .collect()
     }
@@ -461,7 +409,7 @@ mod tests {
         assert_eq!(f.len(), 2);
         assert_eq!(at(&f[0], [1.0, 2.0, 9.0]), 1.0); // x² + y² − 4
         assert_eq!(at(&f[1], [1.0, 2.0, 9.0]), 8.0); // z − 1
-                                                     // 和・差は分けない
+        // 和・差は分けない
         let (f, changed) = prog("x y z - 1").zero_factors();
         assert!(!changed);
         assert_eq!(f.len(), 1);
@@ -476,21 +424,12 @@ mod tests {
     #[test]
     fn rationalized_removes_poles() {
         // 値は元の式と同じ（N/D）で、分子には極が無い
-        for src in [
-            "tan(x) - z y",
-            "1/(x y) - z",
-            "x/(y - 1) + 2/(z + 3) - cot(x)",
-            "(x/y)^2 - sec(z) + y^(-2)",
-            "-(1/x) / (y/z) + x^(-0.5)",
-        ] {
+        for src in ["tan(x) - z y", "1/(x y) - z", "x/(y - 1) + 2/(z + 3) - cot(x)", "(x/y)^2 - sec(z) + y^(-2)", "-(1/x) / (y/z) + x^(-0.5)"] {
             let p = prog(src);
             let (n, d) = p.rationalized().unwrap_or_else(|| panic!("{src}"));
             for q in [[0.7, 1.9, -2.3], [2.1, -0.4, 1.1], [1.3, 3.3, 0.6]] {
                 let (f, r) = (at(&p, q), at(&n, q) / at(&d, q));
-                assert!(
-                    (f - r).abs() <= 1e-9 * (1.0 + f.abs()),
-                    "{src} {q:?}: {f} {r}"
-                );
+                assert!((f - r).abs() <= 1e-9 * (1.0 + f.abs()), "{src} {q:?}: {f} {r}");
             }
         }
         let (n, d) = prog("tan(x) - z y").rationalized().unwrap();

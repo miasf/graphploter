@@ -3,8 +3,8 @@
 //! ほかの特殊関数（直交多項式、エアリー関数、不完全ベータ関数など）もこれを使って計算する。
 
 use super::{gamma, rgamma};
-use num_complex::Complex64 as C;
 use std::f64::consts::PI;
+use num_complex::Complex64 as C;
 
 const NAN: C = C::new(f64::NAN, f64::NAN);
 
@@ -82,11 +82,7 @@ pub fn hyp2f1(a: C, b: C, c: C, z: C) -> C {
         return gamma(c) * gamma(c - a - b) * rgamma(c - a) * rgamma(c - b);
     }
     // 実軸上の分岐切断 (1, ∞) では、Wolfram と同じく下側からの値にそろえる
-    let z = if z.im == 0.0 && z.re > 1.0 {
-        C::new(z.re, -0.0)
-    } else {
-        z
-    };
+    let z = if z.im == 0.0 && z.re > 1.0 { C::new(z.re, -0.0) } else { z };
     let one = C::new(1.0, 0.0);
     if z.norm() < 0.8 {
         return pfq(&[a, b], &[c], z, 5000);
@@ -100,48 +96,26 @@ pub fn hyp2f1(a: C, b: C, c: C, z: C) -> C {
     if (one - z).norm() < 0.8 {
         let f = |c: C| {
             let s = c - a - b;
-            gamma(c)
-                * gamma(s)
-                * rgamma(c - a)
-                * rgamma(c - b)
-                * pfq(&[a, b], &[one - s], one - z, 5000)
-                + (one - z).powc(s)
-                    * gamma(c)
-                    * gamma(-s)
-                    * rgamma(a)
-                    * rgamma(b)
+            gamma(c) * gamma(s) * rgamma(c - a) * rgamma(c - b) * pfq(&[a, b], &[one - s], one - z, 5000)
+                + (one - z).powc(s) * gamma(c) * gamma(-s) * rgamma(a) * rgamma(b)
                     * pfq(&[c - a, c - b], &[s + 1.0], one - z, 5000)
         };
         let s = c - a - b;
-        return if s.im == 0.0 && s.re == s.re.round() {
-            nudge(f, c)
-        } else {
-            f(c)
-        };
+        return if s.im == 0.0 && s.re == s.re.round() { nudge(f, c) } else { f(c) };
     }
     // 1 / z の変換（a − b が整数のときは少しずらした値の平均）
     if z.norm() > 1.25 {
         let f = |a: C| {
             let zi = one / z;
-            gamma(c)
-                * gamma(b - a)
-                * rgamma(b)
-                * rgamma(c - a)
+            gamma(c) * gamma(b - a) * rgamma(b) * rgamma(c - a)
                 * (-z).powc(-a)
                 * pfq(&[a, a - c + 1.0], &[a - b + 1.0], zi, 5000)
-                + gamma(c)
-                    * gamma(a - b)
-                    * rgamma(a)
-                    * rgamma(c - b)
+                + gamma(c) * gamma(a - b) * rgamma(a) * rgamma(c - b)
                     * (-z).powc(-b)
                     * pfq(&[b, b - c + 1.0], &[b - a + 1.0], zi, 5000)
         };
         let d = a - b;
-        return if d.im == 0.0 && d.re == d.re.round() {
-            nudge(f, a)
-        } else {
-            f(a)
-        };
+        return if d.im == 0.0 && d.re == d.re.round() { nudge(f, a) } else { f(a) };
     }
     // |z| ≈ 1 の残りの所は、ゆっくり収束する級数で
     pfq(&[a, b], &[c], z, 200_000)

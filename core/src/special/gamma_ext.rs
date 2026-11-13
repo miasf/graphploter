@@ -27,8 +27,7 @@ pub fn log_gamma(z: C) -> C {
     }
     let z2 = 1.0 / (z * z);
     let series = (1.0 / z)
-        * (1.0 / 12.0
-            - z2 * (1.0 / 360.0 - z2 * (1.0 / 1260.0 - z2 * (1.0 / 1680.0 - z2 * (1.0 / 1188.0)))));
+        * (1.0 / 12.0 - z2 * (1.0 / 360.0 - z2 * (1.0 / 1260.0 - z2 * (1.0 / 1680.0 - z2 * (1.0 / 1188.0)))));
     acc + (z - 0.5) * z.ln() - z + 0.5 * (2.0 * PI).ln() + series
 }
 
@@ -253,11 +252,7 @@ pub fn polylog(s: C, z: C) -> C {
         return z;
     }
     // 実軸上の分岐切断 (1, ∞) では下側からの値にそろえる
-    let z = if z.im == 0.0 && z.re > 1.0 {
-        C::new(z.re, -0.0)
-    } else {
-        z
-    };
+    let z = if z.im == 0.0 && z.re > 1.0 { C::new(z.re, -0.0) } else { z };
     if z.norm() <= 0.5 {
         let mut sum = C::new(0.0, 0.0);
         let mut zk = z;
@@ -280,8 +275,7 @@ pub fn polylog(s: C, z: C) -> C {
             let sign = if n % 2 == 0 { -1.0 } else { 1.0 };
             let nf: f64 = (1..=n).map(|k| k as f64).product();
             return sign * polylog(s, 1.0 / z)
-                - two_pi_i.powi(n as i32) / nf
-                    * bernoulli_poly(n as usize, 0.5 + (-z).ln() / two_pi_i);
+                - two_pi_i.powi(n as i32) / nf * bernoulli_poly(n as usize, 0.5 + (-z).ln() / two_pi_i);
         }
     }
     // μ = ln z の級数（|μ| < 2π）

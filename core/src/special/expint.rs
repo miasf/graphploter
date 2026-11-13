@@ -65,11 +65,7 @@ pub fn e1(z: C) -> C {
 /// 一般化指数積分 Eₙ(z) = ∫₁^∞ e^(−zt) / tⁿ dt = z^(n−1) Γ(1 − n, z)
 pub fn expint_e(n: C, z: C) -> C {
     if z == C::new(0.0, 0.0) {
-        return if n.re > 1.0 {
-            1.0 / (n - 1.0)
-        } else {
-            C::new(f64::INFINITY, 0.0)
-        };
+        return if n.re > 1.0 { 1.0 / (n - 1.0) } else { C::new(f64::INFINITY, 0.0) };
     }
     if nonnegative_int(n) == Some(1) {
         return e1(z);

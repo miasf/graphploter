@@ -10,9 +10,7 @@ use std::f64::consts::PI;
 const MAX_DEGREE: u64 = 5000;
 
 fn degree(n: C) -> Option<usize> {
-    nonnegative_int(n)
-        .filter(|&k| k <= MAX_DEGREE)
-        .map(|k| k as usize)
+    nonnegative_int(n).filter(|&k| k <= MAX_DEGREE).map(|k| k as usize)
 }
 
 /// 3 項漸化式 p_{k+1} = step(k, p_k, p_{k−1}) を n まで回す
@@ -32,9 +30,7 @@ fn recur(n: usize, p0: C, p1: C, step: impl Fn(f64, C, C) -> C) -> C {
 /// ルジャンドル多項式（関数）Pₙ(x)
 pub fn legendre_p(n: C, x: C) -> C {
     if let Some(n) = degree(n) {
-        return recur(n, C::new(1.0, 0.0), x, |k, p, q| {
-            ((2.0 * k + 1.0) * x * p - k * q) / (k + 1.0)
-        });
+        return recur(n, C::new(1.0, 0.0), x, |k, p, q| ((2.0 * k + 1.0) * x * p - k * q) / (k + 1.0));
     }
     hyp2f1(-n, n + 1.0, C::new(1.0, 0.0), (1.0 - x) / 2.0)
 }
@@ -42,16 +38,14 @@ pub fn legendre_p(n: C, x: C) -> C {
 /// ルジャンドル陪関数 Pₙᵐ(x)（Wolfram の LegendreP[n, m, x]、コンドン・ショートレーの位相つき）
 pub fn legendre_p_assoc(n: C, m: C, x: C) -> C {
     let general = |m: C| {
-        ((1.0 + x) / (1.0 - x)).powc(m / 2.0)
-            * rgamma(1.0 - m)
+        ((1.0 + x) / (1.0 - x)).powc(m / 2.0) * rgamma(1.0 - m)
             * hyp2f1(-n, n + 1.0, 1.0 - m, (1.0 - x) / 2.0)
     };
     match nonnegative_int(m) {
         Some(0) => legendre_p(n, x),
         Some(mi) => {
             // n が整数なら P_{−n−1} = Pₙ で 0 以上にそろえ、m 階微分 = (2m − 1)!! C^{(m+1/2)}_{n−m}
-            let n_int =
-                nonnegative_int(n).or_else(|| nonpositive_int(n + 1.0).map(|k| (-k) as u64));
+            let n_int = nonnegative_int(n).or_else(|| nonpositive_int(n + 1.0).map(|k| (-k) as u64));
             match n_int {
                 Some(ni) if ni <= MAX_DEGREE => {
                     if mi > ni {
@@ -59,11 +53,7 @@ pub fn legendre_p_assoc(n: C, m: C, x: C) -> C {
                     }
                     let dfact: f64 = (1..=mi).map(|k| (2 * k - 1) as f64).product();
                     let deriv = dfact
-                        * gegenbauer_c(
-                            C::new((ni - mi) as f64, 0.0),
-                            C::new(mi as f64 + 0.5, 0.0),
-                            x,
-                        );
+                        * gegenbauer_c(C::new((ni - mi) as f64, 0.0), C::new(mi as f64 + 0.5, 0.0), x);
                     let mf = mi as f64;
                     let sign = if mi % 2 == 1 { -1.0 } else { 1.0 };
                     sign * ((1.0 + x) / (1.0 - x)).powf(mf / 2.0) * (1.0 - x).powf(mf) * deriv
@@ -78,9 +68,7 @@ pub fn legendre_p_assoc(n: C, m: C, x: C) -> C {
 /// エルミート多項式（関数）Hₙ(x)
 pub fn hermite_h(n: C, x: C) -> C {
     if let Some(n) = degree(n) {
-        return recur(n, C::new(1.0, 0.0), 2.0 * x, |k, p, q| {
-            2.0 * x * p - 2.0 * k * q
-        });
+        return recur(n, C::new(1.0, 0.0), 2.0 * x, |k, p, q| 2.0 * x * p - 2.0 * k * q);
     }
     let x2 = x * x;
     let two_n = C::new(2.0, 0.0).powc(n);
@@ -128,9 +116,7 @@ pub fn gegenbauer_c(n: C, a: C, x: C) -> C {
             (2.0 * x * (k + a) * p - (k + 2.0 * a - 1.0) * q) / (k + 1.0)
         });
     }
-    gamma(n + 2.0 * a)
-        * rgamma(n + 1.0)
-        * rgamma(2.0 * a)
+    gamma(n + 2.0 * a) * rgamma(n + 1.0) * rgamma(2.0 * a)
         * hyp2f1(-n, n + 2.0 * a, a + 0.5, (1.0 - x) / 2.0)
 }
 
