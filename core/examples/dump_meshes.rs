@@ -9,7 +9,8 @@
 //! （xy・xz・yz は回転角（度）、flags は plot の flags（1: 再生・ドラッグ中の軽い計算）、ires・res は細かさ）。
 //! `local=1` を付けると、回す前の形だけを作る依頼（flags のビット 3）として計算し、回す前の形（陰関数）ができたら、
 //! それをその回転で射影したメッシュを書き出す（再生・ドラッグ中に描画側で回して描くものと同じ）。説明の頭に「[回す前]」を付ける。
-//! 時間は回す前の形を作る時間だけ（表示する面は別の呼び出しで作る）
+//! 時間は回す前の形を作る時間だけ（表示する面は別の呼び出しで作る）。
+//! `lod=1` を付けると、視点を動かしている間に描く粗い版（別に作った粗いメッシュか、頂点を共有する粗い三角形の番号）を書き出す
 //! 出力は 名前.bin（頂点の数 u32・番号の数 u32・頂点座標 f32 × 3・三角形の頂点番号 u32、すべてリトルエンディアン）と、
 //! 全部の式の結果をまとめた meta.tsv（名前・三角形の数・時間 ms・説明 or エラー・破片の数・裏返りの割合 %）。
 //! 破片は、頂点（同じ位置はまとめる）でつながった成分のうち三角形が 12 個以下のもの。裏返りは、同じ向きで 2 つ以上の
@@ -48,7 +49,7 @@ fn main() {
         }
         let mut opts = walls.split(',');
         let walls = opts.next().unwrap_or("0");
-        let (mut rot, mut flags, mut res, mut ires, mut local) = ([0.0f64; 10], 0u32, RES, IRES, false);
+        let (mut rot, mut flags, mut res, mut ires, mut local, mut lod) = ([0.0f64; 10], 0u32, RES, IRES, false, false);
         for o in opts {
             let (k, v) = o.split_once('=').unwrap_or_else(|| panic!("設定の形が違う: {o}"));
             let num: f64 = v.parse().unwrap_or_else(|_| panic!("設定の値が違う: {o}"));
@@ -61,6 +62,7 @@ fn main() {
                 "res" => res = num as u32,
                 "ires" => ires = num as u32,
                 "local" => local = num != 0.0,
+                "lod" => lod = num != 0.0,
                 _ => panic!("知らない設定: {o}"),
             }
         }
@@ -105,8 +107,14 @@ fn main() {
         };
         let ms = t.elapsed().as_secs_f64() * 1e3;
         match r {
-            Ok(r) => {
-                let (p, ix) = (r.positions(), r.indices());
+            Ok(mut r) => {
+                let (p, ix) = if !lod {
+                    (r.positions(), r.indices())
+                } else if r.has_lod_mesh() {
+                    (r.take_lod_positions(), r.take_lod_mesh_indices())
+                } else {
+                    (r.positions(), r.lod_indices())
+                };
                 // 表示範囲の外の三角形（回した陰関数は、表示範囲より広く作って描画側で切り落とす）は数えない。
                 // 3 つの頂点がどれも、同じ面の外側にある三角形を捨てる
                 let out_side = |k: u32, a: usize, hi: bool| {
