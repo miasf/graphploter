@@ -18,7 +18,7 @@ import init, {
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_NO_REFINE } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -59,7 +59,7 @@ function range(
  * 式・範囲・パラメータなど「点の計算に関わる入力」が同じなら、回転・表示する軸が変わっても
  * 式を計算し直さず、射影し直すだけで済む（回転のスライダーが軽く動く）。
  */
-const shapes = new Map<number, { key: string; shape: Shape; refined: boolean }>()
+const shapes = new Map<number, { key: string; shape: Shape; refined: boolean; ires: number; thorough: boolean }>()
 
 /**
  * 点の計算に関わる入力（回転は含めない）。
@@ -168,6 +168,17 @@ function capTransfer(cap: CapData | null): ArrayBuffer[] {
   return cap ? [cap.positions.buffer, cap.normals.buffer, cap.indices.buffer] as ArrayBuffer[] : []
 }
 
+/**
+ * 覚えている形を、この依頼に使えるか。回す前の形で作った陰関数（implicit）は、陰関数の細かさ・念入りに探すかでも形が変わる。
+ * ただし再生・ドラッグ中（細かくしない依頼）なら、細かさが違っても使う（回転のたびに F を計算し直さない。止まったら細かく作り直す）
+ */
+function reusable(cached: NonNullable<ReturnType<typeof shapes.get>>, key: string, req: PlotRequest): boolean {
+  const refine = (req.flags & PLOT_NO_REFINE) === 0
+  if (cached.key !== key || !(cached.refined || !refine)) return false
+  if (!cached.shape.implicit || !refine) return true
+  return cached.ires === req.implicitResolution && cached.thorough === ((req.flags & PLOT_THOROUGH) !== 0)
+}
+
 self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
   if ('type' in ev.data) {
     const { requestId, itemId, cut, resolution } = ev.data
@@ -232,6 +243,14 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.flatSlice,
         req.flags,
       )
+    const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
+    const cached = shapes.get(itemId)
+    // 覚えている形を回すだけで描けるなら、F の計算を分けない（計画の段階で「分けられない」と返す）
+    if (req.field?.mode === 'plan' && cached && reusable(cached, key(cached.shape.view_dependent), req)) {
+      const stage: FieldStageResponse = { requestId, ok: true, chunks: 0, values: null, ms: 0 }
+      self.postMessage(stage)
+      return
+    }
     // 重い陰関数の F の計算を分ける途中の段階（計画・一部の計算）: メッシュは作らず、結果だけ返す
     if (req.field && req.field.mode !== 'given') {
       const w0 = performance.now()
@@ -251,17 +270,13 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       self.postMessage(stage, { transfer: stage.ok && stage.values ? [stage.values.buffer as ArrayBuffer] : [] })
       return
     }
-    // ほかの Worker が計算した F の値を使ってメッシュを作る
-    if (req.field?.mode === 'given') field_mode_given(req.field.values)
-    const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
-    const cached = shapes.get(itemId)
     let r: MeshResult | null = null
     let wall = 0 // 計算エンジンを呼んだ時間
     let reprojected = false // n 次元の点を使い回して、射影だけし直したか
     // 細かくしない依頼（再生・ドラッグ中）なら、細かくした点もそのまま使う（回転の再生で計算し直さない）。
     // 細かくする依頼なら、細かくしないで計算した点は使わない（止まったときに細かく計算し直す）
     const refine = (req.flags & PLOT_NO_REFINE) === 0
-    if (cached && cached.key === key(cached.shape.view_dependent) && (cached.refined || !refine)) {
+    if (cached && reusable(cached, key(cached.shape.view_dependent), req)) {
       // 点は計算済み: 回転・射影だけし直す
       const w0 = performance.now()
       try {
@@ -279,10 +294,18 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       if (r) {
         wall = performance.now() - w0
         reprojected = true
+        // 回した陰関数は、切り口のふたの元もその回転のものに替える
+        const capSource = r.take_field()
+        if (capSource) {
+          fields.get(itemId)?.source.free()
+          fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
+        }
       }
     }
     if (!r) {
       const w0 = performance.now()
+      // ほかの Worker が計算した F の値を使ってメッシュを作る（計算し直すときだけ。使い回すときに入れると、次の計算に残る）
+      if (req.field?.mode === 'given') field_mode_given(req.field.values)
       r = callPlot()
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
@@ -291,7 +314,10 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       }
       forget(itemId)
       const shape = r.take_shape()
-      if (shape) shapes.set(itemId, { key: key(shape.view_dependent), shape, refined: refine })
+      if (shape) {
+        const thorough = (req.flags & PLOT_THOROUGH) !== 0
+        shapes.set(itemId, { key: key(shape.view_dependent), shape, refined: refine, ires: implicitResolution, thorough })
+      }
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
     }

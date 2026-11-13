@@ -6349,6 +6349,9 @@ pub struct Field {
     pub combos: Vec<Vec<f64>>,
     /// F < 0 の側が中身なら true（F > 0 の側なら false）
     pub negative: bool,
+    /// 表示中の座標 q を、F の変数 p に移す 1 次式 p = A q + b（陰関数を回す前の形で持つとき。[`LocalMesh`]）。
+    /// None なら p = q
+    pub map: Option<([[f64; 3]; 3], [f64; 3])>,
 }
 
 impl Field {
@@ -6375,7 +6378,42 @@ impl Field {
             let pos = v.iter().filter(|&&f| f > 0.0).count();
             negative = neg <= pos;
         }
-        Field { prog: prog.clone(), combos, negative }
+        Field { prog: prog.clone(), combos, negative, map: None }
+    }
+
+    /// 回す前の形の F（変数は回す前の表示中の座標）と、表示中の座標から F の変数への 1 次式 p = A q + b。
+    /// どちらの側が中身かは、表示範囲 `dom`（表示中の座標）で決める
+    pub fn mapped(prog: &Program, a: [[f64; 3]; 3], b: [f64; 3], dom: Domain) -> Field {
+        let mut f = Field { prog: prog.clone(), combos: vec![Vec::new()], negative: true, map: Some((a, b)) };
+        let n = 16;
+        let mut cols: [Vec<f64>; 3] = Default::default();
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    cols[0].push(dom.at(0, i as f64 + 0.5, n));
+                    cols[1].push(dom.at(1, j as f64 + 0.5, n));
+                    cols[2].push(dom.at(2, k as f64 + 0.5, n));
+                }
+            }
+        }
+        let v = f.values(cols);
+        let neg = v.iter().filter(|&&x| x < 0.0).count();
+        let pos = v.iter().filter(|&&x| x > 0.0).count();
+        f.negative = neg <= pos;
+        f
+    }
+
+    /// 表示中の座標の点（列ごと）での F の値
+    fn values(&self, cols: [Vec<f64>; 3]) -> Vec<f64> {
+        let Some((a, b)) = &self.map else {
+            return field_values(&self.prog, &self.combos, [&cols[0], &cols[1], &cols[2]]);
+        };
+        let p: [Vec<f64>; 3] = [0, 1, 2].map(|r| {
+            (0..cols[0].len())
+                .map(|k| b[r] + a[r][0] * cols[0][k] + a[r][1] * cols[1][k] + a[r][2] * cols[2][k])
+                .collect()
+        });
+        field_values(&self.prog, &self.combos, [&p[0], &p[1], &p[2]])
     }
 
     /// 範囲で重ねた立体か（ふつうの陰関数は、どちらの側が中身か決まっていない）
@@ -6424,10 +6462,10 @@ impl Field {
                 cols[axis][j * m + i] = pos;
             }
         }
-        let f = field_values(&self.prog, &self.combos, [&cols[0], &cols[1], &cols[2]]);
+        let point = |k: usize| [cols[0][k], cols[1][k], cols[2][k]];
+        let f = self.values(cols.clone());
         // 中身なら負になる値
         let g: Vec<f64> = if self.negative { f } else { f.iter().map(|v| -v).collect() };
-        let point = |k: usize| [cols[0][k], cols[1][k], cols[2][k]];
 
         let mut mesh = Mesh::default();
         // 各マスを2つの三角形に分け、三角形ごとに中身の部分（g < 0）を切り出す（値は辺の上で直線で補間）
@@ -8065,6 +8103,76 @@ impl View {
             s *= self.dist / depth;
         }
         [0, 1, 2].map(|a| self.center[a] + (q[a] - self.center[a]) * s)
+    }
+}
+
+/// 回す前の形で作った陰関数のメッシュ（変数は表示中の 3 つの座標）。回転が「表示中の座標どうし」だけなら、
+/// 回転は形を変えずに動かすだけなので、角度が変わっても F を計算し直さず [`LocalMesh::project`] で描き直せる。
+/// 回転の中心から表示範囲の角までの距離 ρ の立方体で作っておくので、どの角度に回しても表示範囲が欠けない
+/// （はみ出た部分は描画側で切り落とす）
+#[derive(Debug)]
+pub struct LocalMesh {
+    pub mesh: Mesh,
+    /// 回す前の F（切り口のふた用）
+    pub prog: Program,
+    /// 次元・表示中の座標の番号・断面の値（表示していない座標は、この値のまま回る）
+    pub dims: usize,
+    pub axes: [usize; 3],
+    pub slice: Vec<f64>,
+}
+
+impl LocalMesh {
+    /// `view` の回転で、回す前の座標 p から表示中の座標 q への 1 次式 q = M p + t。
+    /// 遠近法は使わない（陰関数は今までも遠近法なしで描いていた）
+    pub fn affine(&self, view: &View) -> ([[f64; 3]; 3], [f64; 3]) {
+        let mut m = [[0.0; 3]; 3];
+        let mut t = [0.0; 3];
+        for (a, (c0, cs)) in view.rows.iter().enumerate() {
+            t[a] = *c0;
+            for (k, &c) in cs.iter().enumerate().take(self.dims) {
+                match self.axes.iter().position(|&x| x == k) {
+                    Some(b) => m[a][b] = c,
+                    None => t[a] += c * self.slice.get(k).copied().unwrap_or(0.0),
+                }
+            }
+        }
+        (m, t)
+    }
+
+    /// 回して表示中の座標のメッシュにする
+    pub fn project(&self, view: &View) -> Mesh {
+        let (m, t) = self.affine(view);
+        let mv = |p: &[f32], shift: bool| -> [f32; 3] {
+            [0, 1, 2].map(|a| {
+                let v = (0..3).map(|b| m[a][b] * p[b] as f64).sum::<f64>() + if shift { t[a] } else { 0.0 };
+                v as f32
+            })
+        };
+        let move_mesh = |src: &Mesh| -> Mesh {
+            Mesh {
+                positions: src.positions.chunks_exact(3).flat_map(|p| mv(p, true)).collect(),
+                normals: src.normals.chunks_exact(3).flat_map(|n| mv(n, false)).collect(),
+                indices: src.indices.clone(),
+                grid_coords: src.grid_coords.clone(),
+                complex: src.complex.clone(),
+                lod: src.lod.clone(),
+                keep_full: src.keep_full,
+                lod_mesh: None,
+                note: src.note.clone(),
+                stats: src.stats,
+            }
+        };
+        let mut out = move_mesh(&self.mesh);
+        out.lod_mesh = self.mesh.lod_mesh.as_deref().map(|l| Box::new(move_mesh(l)));
+        out
+    }
+
+    /// 回したときの切り口のふたの元（表示中の座標 q から回す前の座標 p = Mᵀ (q − t)）
+    pub fn field(&self, view: &View, dom: Domain) -> Field {
+        let (m, t) = self.affine(view);
+        let a = [0, 1, 2].map(|r| [0, 1, 2].map(|c| m[c][r]));
+        let b = [0, 1, 2].map(|r| -(0..3).map(|c| m[c][r] * t[c]).sum::<f64>());
+        Field::mapped(&self.prog, a, b, dom)
     }
 }
 

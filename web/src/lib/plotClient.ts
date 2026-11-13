@@ -14,6 +14,7 @@ import type {
   Space,
 } from './types'
 import PlotWorker from './plot.worker.ts?worker'
+import { PLOT_LOCAL, PLOT_NO_REFINE } from './types'
 
 /**
  * 計算担当の Worker を CPU のコア数に合わせて最大4つ用意し、式ごとに担当を決めて並列に計算する。
@@ -114,7 +115,26 @@ function send<T>(worker: number, req: PlotRequest): Promise<T> {
   })
 }
 
+/** 式ごとの、前の依頼の「回転と切り口以外」の入力（回転だけが変わったかを見る） */
+const lastInputs = new Map<number, string>()
+
+/**
+ * 回転だけが変わった依頼（前の依頼と、回転・切り口以外が同じ）なら、陰関数を回す前の形で作る印（PLOT_LOCAL）を付ける。
+ * 回し始めの 1 回は今までの道で描き、2 回目に回す前の形を作って、その後は回すだけで描く。
+ * スライダー・式が変わったときは今までの道（回す前の形は表示範囲より広いので、作るのが数倍遅い）。
+ * F の計算を分けるときは、全部の Worker が同じ印で計算する必要があるので、ここで決める
+ */
+function markRotationOnly(req: PlotRequest) {
+  const { requestId: _r, cut: _c, field: _f, space, ...rest } = req
+  const { rotation: _rot, ...spaceRest } = space
+  // 細かさ・細かくしない印は、使い回す側（Worker）が見るので比べない（再生中に細かさが変わっても、回す前の形を作り直さない）
+  const inputs = JSON.stringify({ ...rest, implicitResolution: 0, flags: rest.flags & ~PLOT_NO_REFINE, space: spaceRest })
+  if (lastInputs.get(req.itemId) === inputs && space.rotation.some((a) => a !== 0)) req.flags |= PLOT_LOCAL
+  lastInputs.set(req.itemId, inputs)
+}
+
 async function planned(req: PlotRequest): Promise<PlotResponse> {
+  markRotationOnly(req)
   const { itemId } = req
   const owner = itemId % WORKERS
   latestOf.set(itemId, req.requestId)

@@ -39,6 +39,8 @@ pub struct MeshResult {
     shape: Option<mesh::NdShape>,
     /// 回転した陽関数なら、式が使っている名前（回転が条件を満たすか確かめるため）
     explicit_used: Option<Vec<String>>,
+    /// 回す前の形で作った陰関数（回転だけ変わったときに使い回す）と、式が使っている名前
+    local: Option<(mesh::LocalMesh, Vec<String>)>,
     /// 陰関数・範囲で重ねた立体なら、その中身（切り口のふたを作るため。リストなら複数）
     field: Option<(Vec<mesh::Field>, mesh::Domain)>,
     /// 媒介変数表示の立体（閉じた面）なら true。切り口のふたは描画側で作る
@@ -99,12 +101,21 @@ impl MeshResult {
     /// 媒介変数表示なら、回転・射影する前の形を取り出す（取り出せるのは1回だけ）。
     /// 回転・表示する軸・表示範囲だけが変わったときは、これの `project` で描き直せる
     pub fn take_shape(&mut self) -> Option<Shape> {
-        let inner = self.shape.take()?;
+        let (inner, local) = match (self.shape.take(), self.local.take()) {
+            (Some(sh), _) => (Some(sh), None),
+            (None, Some(l)) => (None, Some(l)),
+            (None, None) => return None,
+        };
+        let explicit_used = match &local {
+            Some((_, used)) => Some(used.clone()),
+            None => self.explicit_used.clone(),
+        };
         Some(Shape {
             inner,
+            local: local.map(|l| l.0),
             flat: self.flat,
             flat_slice: self.flat_slice,
-            explicit_used: self.explicit_used.clone(),
+            explicit_used,
             kind: self.kind.clone(),
             params: self.params.clone(),
             curve: self.shape_curve,
@@ -242,6 +253,7 @@ pub fn last_used_params() -> String {
 
 /// [`plot`] の `flags` のビット 0: 形が急に変わる所を細かくしない
 const FLAG_NO_REFINE: u32 = 1;
+const FLAG_LOCAL: u32 = 8;
 /// [`plot`] の `flags` のビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる）
 const FLAG_THOROUGH: u32 = 2;
 /// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
@@ -273,7 +285,9 @@ const FLAG_EDGES: u32 = 4;
 /// - `flags`: そのほかの設定（ビットごと）。ビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。速さを優先する。
 ///   陰関数の、格子より小さい図形を細かく作り直すこともしない）。
 ///   ビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる）。
-///   ビット 2: 媒介変数が 3 つ以上の図形を、面ではなく辺だけで描く
+///   ビット 2: 媒介変数が 3 つ以上の図形を、面ではなく辺だけで描く。
+///   ビット 3: 回転が表示中の座標どうしだけの陰関数を、回す前の形で（表示範囲より広く）作り、回して描く。
+///   結果の `take_shape` を `Shape::project` すれば、回転が変わっても F を計算し直さない（回転だけが変わったときに使う）
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -394,11 +408,13 @@ pub fn plot(
             mesh::Refine::Normal
         },
         edges: flags & FLAG_EDGES != 0,
+        local: flags & FLAG_LOCAL != 0,
         range: &range,
         view: space.view(perspective),
     };
     let built = build(&plot, &ctx).map_err(|e| JsError::new(&e))?;
     let mut inner = match &built.shape {
+        None if built.local.is_some() => built.local.as_ref().map(|l| l.0.project(&ctx.view)).unwrap_or_default(),
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
             if flat {
@@ -423,6 +439,7 @@ pub fn plot(
         flat_slice: ctx.flat_slice,
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
         shape: built.shape,
+        local: built.local,
         field: (!built.fields.is_empty()).then_some((built.fields, dom)),
         explicit_used,
         kind: built.kind,
@@ -513,6 +530,8 @@ struct Ctx<'a> {
     implicit_refine: mesh::Refine,
     /// 媒介変数が 3 つ以上の図形を、辺だけで描くか（[`plot`] の `flags` を参照）
     edges: bool,
+    /// 回転が表示中の座標どうしだけの陰関数を、回す前の形で作るか（[`plot`] の `flags` を参照）
+    local: bool,
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
     view: mesh::View,
@@ -529,6 +548,18 @@ struct Built {
     kind: String,
     /// 回転した陽関数を点で計算したもの（表示する軸などが変わると使い回せない）
     rotated_explicit: bool,
+    /// 回す前の形で作った陰関数と、式が使っている名前（[`mesh::LocalMesh`]）
+    local: Option<(mesh::LocalMesh, Vec<String>)>,
+}
+
+impl Built {
+    /// 回す前の形で作った陰関数を、今の回転で回したメッシュにする（使い回さない道で使う）
+    fn settle(mut self, view: &mesh::View) -> Built {
+        if let Some((l, _)) = self.local.take() {
+            self.inner = l.project(view);
+        }
+        self
+    }
 }
 
 /// 式の種類ごとに図形を作る。リストで複数の図形になったもの（[`equation::Plot::Multi`]）は、まとめて1つにする
@@ -541,7 +572,8 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         return Ok(b);
     }
     if let P::Multi(ps) = plot {
-        let parts = ps.iter().map(|p| build(p, ctx)).collect::<Result<Vec<_>, _>>()?;
+        // 回す前の形で作った陰関数は、リストでは使い回さない（今の回転で回したメッシュにする）
+        let parts = ps.iter().map(|p| build(p, ctx).map(|b| b.settle(&ctx.view))).collect::<Result<Vec<_>, _>>()?;
         // 2D の切り口では、媒介変数表示の曲面も（射影した後で）線になる
         let line = |b: &Built| b.curve || (ctx.flat_slice && b.shape.is_some());
         let curve = parts.first().is_some_and(line);
@@ -638,6 +670,25 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 ctx.refine,
             );
         }
+        // 回転が表示中の座標どうしだけの陰関数: 回す前の F で、回転の中心から表示範囲の角までの距離 ρ の立方体に
+        // メッシュを作っておき、回して描く（回した陽関数と同じ）。角度が変わっても F を計算し直さない。
+        // 格子の間隔は、表示範囲の一番狭い座標と同じにする（重くなりすぎないよう、細かさは 2 倍まで。
+        // 広いほうの座標に合わせると、x^2 y^2 + y^2 z^2 + z^2 x^2 = 1 の細い腕が 1 割以上欠ける）。
+        // 回転だけが変わった依頼（FLAG_LOCAL）でだけ使う（式・スライダーが変わるたびにこの広さで作ると、今までより何倍も遅い）。
+        // 段差のある式（floor・mod など）は使わない: 格子より薄い枝を描かない判定が範囲全体で決まるので、
+        // 広い範囲で作ると、表示範囲の中の枝まで消えることがある（mod(x y z, 4) = 2 で 6 割欠けた）
+        P::Implicit { prog, local: Some(lp), .. } if ctx.local && lp.branch_sites() == 0 => {
+            let ext = rotated_domain(space, dom);
+            let width = (0..3).map(|a| dom.hi[a] - dom.lo[a]).fold(f64::INFINITY, f64::min);
+            let k = ((ext.hi[0] - ext.lo[0]) / width).clamp(1.0, 2.0);
+            let n = ((ctx.implicit_resolution as f64 * k).round() as usize).min(300);
+            let mut m = mesh::implicit_solid_opt(lp, ext, n, &[], 0, ctx.implicit_refine);
+            mesh::add_cluster_lod(&mut m);
+            b.kind.push_str(&m.note);
+            b.fields.push(mesh::Field::new(prog, &[], 0, dom));
+            let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
+            b.local = Some((local, lp.used_params().to_vec()));
+        }
         P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
             b.kind.push_str(&b.inner.note);
@@ -726,7 +777,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     // 投影: 3次元の図形を作ってから、縦の座標を 0 にする（z = f(x, y) は値で塗り分ける）
     if !ctx.flat_slice && uses_vertical && !matches!(plot, P::Explicit { axis: 2, .. }) {
         let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
-        let mut b = build(plot, &ctx3)?;
+        let mut b = build(plot, &ctx3)?.settle(&ctx.view);
         b.kind = format!("{}の投影", b.kind);
         b.fields.clear();
         if b.shape.is_none() {
@@ -754,7 +805,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind = format!("{} = f({})", names[*axis], other);
             b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
         }
-        P::Implicit { prog, from } => {
+        P::Implicit { prog, from, .. } => {
             b.curve = true;
             b.kind = match from {
                 // 回した陽関数（2D の切り口）: 縦の座標 = 0 の曲線
@@ -808,7 +859,9 @@ fn rotated_domain(space: &equation::Space, dom: mesh::Domain) -> mesh::Domain {
 /// 媒介変数表示の、回転・射影する前の形（n 次元の点）。Worker が式ごとに持っておく
 #[wasm_bindgen]
 pub struct Shape {
-    inner: mesh::NdShape,
+    /// n 次元の点（媒介変数表示・回した陽関数）。回す前の形で作った陰関数なら None で、`local` を使う
+    inner: Option<mesh::NdShape>,
+    local: Option<mesh::LocalMesh>,
     /// 2D 表示（射影した後で縦の座標を 0 にする）
     flat: bool,
     /// 2D 表示の切り口（射影した後で、平面との交わりの線にする）
@@ -828,6 +881,12 @@ impl Shape {
         self.explicit_used.is_some()
     }
 
+    /// 回す前の形で作った陰関数か。そうなら、陰関数の細かさ・念入りに探すかでも形が変わる
+    #[wasm_bindgen(getter)]
+    pub fn implicit(&self) -> bool {
+        self.local.is_some()
+    }
+
     /// 回転・表示する軸・表示範囲を変えて、もう一度3次元に射影する（式は計算し直さない）。
     /// 引数の意味は [`plot`] と同じ。
     /// 回転した陽関数で、新しい回転が「表示中の座標どうし」でなくなったときは
@@ -845,19 +904,30 @@ impl Shape {
         timing::reset();
         let n = dims as usize;
         let rn = equation::rot_dims(n);
-        if domain.len() != 6 || axes.len() != 3 || rotation.len() != rn * (rn - 1) / 2 || n != self.inner.dims {
+        let dims_of = self.inner.as_ref().map_or_else(|| self.local.as_ref().map_or(0, |l| l.dims), |s| s.dims);
+        if domain.len() != 6 || axes.len() != 3 || rotation.len() != rn * (rn - 1) / 2 || n != dims_of {
             return Err(JsError::new("内部エラー: 射影の指定が合っていません"));
         }
         let mut space = equation::Space::basic(n, [axes[0] as usize, axes[1] as usize, axes[2] as usize], vec![0.0; n]);
         space.rotation = rotation.to_vec();
         space.center = center.to_vec();
         if let Some(used) = &self.explicit_used {
-            if space.rotation.iter().all(|&a| a == 0.0) || !space.rotation_keeps_shown(used) {
+            // 回した陽関数は、回転が無くなったら回さない陽関数として作り直す（陰関数は、回転が 0 でも回す前の形のまま描ける）
+            let zero = self.inner.is_some() && space.rotation.iter().all(|&a| a == 0.0);
+            if zero || !space.rotation_keeps_shown(used) {
                 return Err(JsError::new("RECOMPUTE"));
             }
         }
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
-        let mut inner = mesh::project(&self.inner, &space.view(perspective), dom);
+        let view = space.view(perspective);
+        let (mut inner, field, solid) = match (&self.inner, &self.local) {
+            (Some(sh), _) => (mesh::project(sh, &view, dom), None, sh.solid),
+            (None, Some(l)) => {
+                let field = (!self.flat).then(|| (vec![l.field(&view, dom)], dom));
+                (l.project(&view), field, false)
+            }
+            (None, None) => return Err(JsError::new("RECOMPUTE")),
+        };
         if self.flat {
             inner = flat_finish(inner, self.curve, self.flat_slice);
         }
@@ -867,9 +937,10 @@ impl Shape {
             inner,
             flat: self.flat,
             flat_slice: self.flat_slice,
-            solid: self.inner.solid && !self.flat,
-            field: None,
+            solid: solid && !self.flat,
+            field,
             shape: None,
+            local: None,
             explicit_used: None,
             kind: self.kind.clone(),
             params: self.params.clone(),
@@ -927,6 +998,7 @@ impl CapSource {
             param: None,
             shape: None,
             explicit_used: None,
+            local: None,
             field: None,
             solid: false,
             flat: false,

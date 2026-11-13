@@ -1,2 +1,5 @@
 # Rust のビルド結果
 /core/target
+
+# Python のキャッシュ
+__pycache__/

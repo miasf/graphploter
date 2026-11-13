@@ -92,6 +92,19 @@ fn main() {
         match r {
             Ok(r) => {
                 let (p, ix) = (r.positions(), r.indices());
+                // 表示範囲の外の三角形（回した陰関数は、表示範囲より広く作って描画側で切り落とす）は数えない。
+                // 3 つの頂点がどれも、同じ面の外側にある三角形を捨てる
+                let out_side = |k: u32, a: usize, hi: bool| {
+                    let v = p[k as usize * 3 + a] as f64;
+                    let m = (DOMAIN[2 * a + 1] - DOMAIN[2 * a]) * 1e-3;
+                    if hi { v > DOMAIN[2 * a + 1] + m } else { v < DOMAIN[2 * a] - m }
+                };
+                let ix: Vec<u32> = ix
+                    .chunks_exact(3)
+                    .filter(|t| !(0..3).any(|a| [false, true].iter().any(|&h| t.iter().all(|&k| out_side(k, a, h)))))
+                    .flatten()
+                    .copied()
+                    .collect();
                 let file = std::fs::File::create(out.join(format!("{name}.bin"))).unwrap();
                 let mut f = std::io::BufWriter::new(file);
                 f.write_all(&(p.len() as u32 / 3).to_le_bytes()).unwrap();
