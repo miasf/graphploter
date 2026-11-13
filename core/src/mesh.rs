@@ -89,7 +89,9 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// 空間を小さな立方体に区切り、同じ立方体に入る頂点を1つの頂点（最初に見つかったもの）で代表させる
 /// （頂点クラスタリング）。3つの頂点が別々の立方体に入る三角形だけが残る。
 /// 向きが大きく違う面（法線の一番大きい成分の軸と符号が違う面）は、同じ立方体の中でも別々に扱うので、
-/// 薄い板の表と裏がくっつくことは少ない
+/// 薄い板の表と裏がくっつくことは少ない。
+/// 頂点でつながっていない別々の面（段差の枝ごとの部品など）の頂点も、同じ立方体の中でまとめない
+/// （まとめると、立方体より細かい間隔で重なる面どうしが引き伸ばされた三角形でつながり、トゲの塊になる。`mod(x y, z) = 0`）
 pub fn add_cluster_lod(mesh: &mut Mesh) {
     let tris = mesh.indices.len() / 3;
     if !mesh.lod.is_empty() || mesh.keep_full || mesh.lod_mesh.is_some() || tris <= LOD_MIN_TRIANGLES {
@@ -106,9 +108,10 @@ pub fn add_cluster_lod(mesh: &mut Mesh) {
     if size <= 0.0 || size.is_nan() {
         return;
     }
+    let comp = vertex_components(mesh);
     let build = |cells: f32| -> Vec<u32> {
         let scale = cells / size;
-        let mut first: crate::adaptive::HashMap<u64, u32> = crate::adaptive::HashMap::default();
+        let mut first: crate::adaptive::HashMap<(u64, u32), u32> = crate::adaptive::HashMap::default();
         let rep: Vec<u32> = (0..mesh.positions.len() / 3)
             .map(|k| {
                 let p = &mesh.positions[3 * k..3 * k + 3];
@@ -121,7 +124,7 @@ pub fn add_cluster_lod(mesh: &mut Mesh) {
                 let ax = (0..3).max_by(|&a, &b| nr[a].abs().total_cmp(&nr[b].abs())).unwrap_or(2);
                 let side = (ax * 2 + (nr[ax] < 0.0) as usize) as u64;
                 let key = cell(0) | cell(1) << 16 | cell(2) << 32 | side << 48;
-                *first.entry(key).or_insert(k as u32)
+                *first.entry((key, comp[k])).or_insert(k as u32)
             })
             .collect();
         let mut out = Vec::new();
@@ -151,6 +154,30 @@ pub fn add_cluster_lod(mesh: &mut Mesh) {
     if lod.len() < mesh.indices.len() / 2 && !lod.is_empty() {
         mesh.lod = lod;
     }
+}
+
+/// 頂点ごとの、頂点（番号）でつながった成分の番号
+fn vertex_components(mesh: &Mesh) -> Vec<u32> {
+    let nv = mesh.positions.len() / 3;
+    let mut parent: Vec<u32> = (0..nv as u32).collect();
+    fn root(parent: &mut [u32], mut k: u32) -> u32 {
+        while parent[k as usize] != k {
+            let p = parent[parent[k as usize] as usize];
+            parent[k as usize] = p;
+            k = p;
+        }
+        k
+    }
+    for t in mesh.indices.chunks_exact(3) {
+        let a = root(&mut parent, t[0]);
+        for &v in &t[1..] {
+            let b = root(&mut parent, v);
+            if a != b {
+                parent[b as usize] = a;
+            }
+        }
+    }
+    (0..nv as u32).map(|k| root(&mut parent, k)).collect()
 }
 
 /// 複素数の値をとる陽関数の表し方。色は偏角 arg f で付け、高さは次のどれか
@@ -10027,6 +10054,34 @@ mod tests {
         let full = side(&sphere.indices[..3]);
         let flipped = sphere.lod.chunks_exact(3).filter(|t| side(t) != full).count();
         assert!(flipped * 200 < lod, "{flipped} / {lod}");
+        // 頂点でつながっていない別々の面は、立方体より近くてもまとめない（まとめると、重なった面どうしをつなぐトゲになる。
+        // mod(x y, z) = 0 の粗い版で、3 つ以上の三角形が集まる辺が 8 割だった）。間隔 0.01 で重ねた 2 枚の平らな格子
+        let sheets = {
+            let k = 200;
+            let mut m = Mesh::default();
+            for h in 0..2 {
+                let base = (m.positions.len() / 3) as u32;
+                for j in 0..=k {
+                    for i in 0..=k {
+                        m.positions.extend_from_slice(&[i as f32 / k as f32, j as f32 / k as f32, 0.01 * h as f32]);
+                        m.normals.extend_from_slice(&[0.0, 0.0, 1.0]);
+                    }
+                }
+                let at = |i: u32, j: u32| base + i + (k as u32 + 1) * j;
+                for j in 0..k as u32 {
+                    for i in 0..k as u32 {
+                        m.indices.extend_from_slice(&[at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j), at(i + 1, j + 1), at(i, j + 1)]);
+                    }
+                }
+            }
+            add_cluster_lod(&mut m);
+            m
+        };
+        let per = (sheets.positions.len() / 6) as u32;
+        assert!(!sheets.lod.is_empty());
+        assert!(sheets.lod.chunks_exact(3).all(|t| t.iter().all(|&k| k < per) || t.iter().all(|&k| k >= per)), "2 枚の面をつなぐ三角形がある");
+        // 2 枚目も、1 枚目の頂点に吸い込まれずに残る
+        assert!(sheets.lod.chunks_exact(3).any(|t| t.iter().all(|&k| k >= per)), "2 枚目の面が粗い版から消えた");
         // まとめても、粗い版の番号はずれない
         let n0 = sphere.positions.len() as u32 / 3;
         let merged = merge(vec![small, sphere], false);
