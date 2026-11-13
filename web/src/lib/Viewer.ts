@@ -7,7 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
-import { MotionQuality } from './motionQuality'
+import { MotionQuality, pickLod } from './motionQuality'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -671,23 +671,31 @@ export class Viewer {
     })
   }
 
-  /** 場面の三角形の合計と、粗い版があるかを quality に伝える */
+  /** 場面の三角形の合計と、粗い版があるかを quality に伝え、粗い版の段階で粗くする面を決める（重い面から順に） */
   private updateQualityScene() {
     let triangles = 0
     let hasLod = false
+    const shown: Extract<PlotObject, { kind: 'surface' }>[] = []
     for (const p of this.plots.values()) {
       if (p.kind !== 'surface' || !p.group.visible) continue
+      shown.push(p)
       triangles += (p.geo.index?.count ?? p.geo.getAttribute('position')?.count ?? 0) / 3
       if (p.geo.userData.lod) hasLod = true
     }
+    const size = (p: (typeof shown)[number]) => (p.geo.index?.count ?? p.geo.getAttribute('position')?.count ?? 0) / 3
+    const pick = pickLod(shown.map(size), shown.map((p) => !!p.geo.userData.lod))
+    this.lodPlots = new Set(shown.filter((_, k) => pick[k]))
     this.quality.setScene(this.basePixelRatio, triangles, hasLod)
   }
 
-  /** 曲面の形を、動かしている間は（段階が粗い版なら）粗い版、それ以外はそのままの版にする */
+  /** 粗い版の段階で粗い版にする面（重い面だけ。ほかの面は動かしている間もそのままの版） */
+  private lodPlots = new Set<PlotObject>()
+
+  /** 曲面の形を、動かしている間は（段階が粗い版で、重い面なら）粗い版、それ以外はそのままの版にする */
   private applyLod(p: PlotObject) {
     if (p.kind !== 'surface') return
     const lod = p.geo.userData.lod as THREE.BufferGeometry | undefined
-    const geo = this.camMoving && this.quality.stage.lod && lod ? lod : p.geo
+    const geo = this.camMoving && this.quality.stage.lod && lod && this.lodPlots.has(p) ? lod : p.geo
     const main = p.group.children[0] as THREE.Mesh
     if (main.geometry !== geo) main.geometry = geo
   }
