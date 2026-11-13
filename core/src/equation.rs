@@ -255,7 +255,9 @@ pub enum Plot {
     Explicit { axis: usize, names: [String; 3], prog: Program, rotated: bool },
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
     /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
-    Implicit { prog: Program, from: Option<String> },
+    /// `local` は、回転が表示中の座標どうしだけのときの、回す前の F（変数は表示中の 3 つの座標）。
+    /// これでメッシュを作って回せば、角度が変わっても計算し直さずに済む（lib.rs の build）
+    Implicit { prog: Program, from: Option<String>, local: Option<Program> },
     /// 表示していない座標が絡む回転をした陽関数を、傾いた直交座標系 (u, v, t) の陽関数 t = g(u, v) として描くもの（[`tilted`]）。
     /// 表示中の点は q = u e₁ + v e₂ + t e₃（`frame` = [e₁, e₂, e₃]。正規直交・右手系）。
     /// `prog` の変数は (u, v)（利用者が打てない名前 [`TILT_U`]・[`TILT_V`]）。
@@ -502,6 +504,23 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         }
     }
 
+    // 陰関数で、回転が表示中の座標どうしだけなら、回す前の F も作っておく（形を回すだけで描ける）。
+    // 陽関数は上の道で描く。2D の切り口・範囲で重ねる名前を使う式は、今までどおり回した F だけ
+    let local = if rot.is_some() && !space.flat_slice && find_explicit(&l, &r, &shown, &consts)?.is_none() {
+        let mut used = Vec::new();
+        l.collect_vars(&mut used);
+        r.collect_vars(&mut used);
+        let ranged = space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n));
+        if !ranged && space.rotation_keeps_shown(&used) && shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
+            let f = Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()));
+            Some(Program::compile_with(&f, &shown_refs, &consts)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // 陽関数（z = f(x, y) など）を回して陰関数として計算し直すときは、その形を覚えておく。
     // 複素数の色分けをしているなら、f の代わりに高さ（|f|・Re f・Im f）を使う（f のままだと実数にならない）
     let mut from = None;
@@ -549,7 +568,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         return Err(format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")));
     }
     let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
-    Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)?, from })
+    Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)?, from, local })
 }
 
 /// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）
@@ -1323,7 +1342,7 @@ mod tests {
         let mut sp = Space::standard();
         sp.rotation[0] = 0.4; // xy
         sp.flat_slice = true;
-        let Plot::Implicit { prog, from: Some(_) } = compile_with("z = x^2 + y^2", &ps, &sp).unwrap() else {
+        let Plot::Implicit { prog, from: Some(_), .. } = compile_with("z = x^2 + y^2", &ps, &sp).unwrap() else {
             panic!("陰関数として計算し直す")
         };
         let d = crate::mesh::Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };

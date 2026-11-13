@@ -31,7 +31,7 @@ import sys
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DUMP = os.path.join(ROOT, "core/target/release/examples/dump_meshes")
+DUMP = os.environ.get("AUDIT_DUMP") or os.path.join(ROOT, "core/target/release/examples/dump_meshes")
 LO = np.array([-10.0, -10.0, -6.0])
 HI = np.array([10.0, 10.0, 6.0])
 ROT = "xy=14,xz=10"

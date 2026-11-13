@@ -276,7 +276,8 @@ export interface PlotRequest {
   layers: number
   /**
    * そのほかの設定（ビットごと）。ビット 0（PLOT_NO_REFINE）: 形が急に変わる所を細かくしない（再生・ドラッグ中）。
-   * ビット 1（PLOT_THOROUGH）: 陰関数の小さい図形を念入りに探す。ビット 2（PLOT_EDGES）: 辺だけで描く
+   * ビット 1（PLOT_THOROUGH）: 陰関数の小さい図形を念入りに探す。ビット 2（PLOT_EDGES）: 辺だけで描く。
+   * ビット 3（PLOT_LOCAL）: 陰関数を回す前の形で作り、回して描く（回転だけが変わった依頼。plotClient が付ける）
    */
   flags: number
   /**
@@ -293,6 +294,11 @@ export type FieldStageResponse =
 
 /** PlotRequest.flags のビット 0: 形が急に変わる所を細かくしない（再生・ドラッグ中。止まったら細かく計算し直す） */
 export const PLOT_NO_REFINE = 1
+/**
+ * PlotRequest.flags のビット 3: 回転が表示中の座標どうしだけの陰関数を、回す前の形で（表示範囲より広く）作り、回して描く。
+ * 1 回目は今までより数倍遅いが、その後は回転が変わっても F を計算し直さず、回すだけで描ける（段差のある式は使わない）
+ */
+export const PLOT_LOCAL = 8
 /** PlotRequest.flags のビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる。⚙ の設定） */
 export const PLOT_THOROUGH = 2
 /** PlotRequest.flags のビット 2: 媒介変数が3つ以上の図形を、辺だけで描く */
