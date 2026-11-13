@@ -21,6 +21,18 @@ const MAX_BRANCH_POINTS: usize = 40_000_000;
 thread_local! {
     /// 次の [`implicit_solid_with`] で、面を作るブロックを絞る（1 回だけ使う）
     pub(super) static BLOCK_MASK: std::cell::RefCell<Option<Vec<bool>>> = const { std::cell::RefCell::new(None) };
+    /// 立てている間、枝を調べる範囲を、範囲（立方体）に内接する球の中だけにする（[`in_inscribed_ball`]）
+    static BALL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 回す前の形（[`LocalMesh`]）を作るとき: `f` の中で作る陰関数の段差の枝を、範囲（回転の中心を中心とする立方体）に内接する球の
+/// 中だけで調べる。どの向きに回しても、表示範囲はこの球の中に入る（立方体の角は画面に出ない）。
+/// 角まで調べると、枝の数（`mod(x, 2) + mod(y, 2) + mod(z, 2) = 2` で約 4,000）が部品の数の上限を超え、表示範囲の中の枝まで描かなくなる
+pub fn in_inscribed_ball<T>(f: impl FnOnce() -> T) -> T {
+    BALL_ONLY.with(|b| b.set(true));
+    let out = f();
+    BALL_ONLY.with(|b| b.set(false));
+    out
 }
 
 /// 描く部品の数の上限（多い順に描く）
@@ -896,6 +908,13 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
     // 格子点ごとの F の値（符号だけを使う）
     let mut fvals: Vec<f32> = vec![f32::NAN; m * m * m];
     let mut fout = vec![C::new(0.0, 0.0); m * m];
+    // 内接する球の外の点（1 マスの余裕を残す）は、どの枝にも入れない（[`in_inscribed_ball`]）
+    let ball = BALL_ONLY.with(|b| b.get()).then(|| {
+        let c = [0, 1, 2].map(|a| (dom.lo[a] + dom.hi[a]) / 2.0);
+        let r = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / 2.0).fold(f64::INFINITY, f64::min);
+        let step = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n as f64).fold(0.0, f64::max);
+        (c, r + step)
+    });
     for kz in 0..m {
         let zs = vec![dom.at(2, kz as f64, n); m * m];
         let br = branch.eval(&[&xs, &ys, &zs], m * m);
@@ -907,6 +926,12 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
             let b = &br[l * k..(l + 1) * k];
             if b.iter().any(|v| !v.is_finite()) {
                 continue;
+            }
+            if let Some((c, r)) = ball {
+                let d2 = (xs[l] - c[0]).powi(2) + (ys[l] - c[1]).powi(2) + (zs[l] - c[2]).powi(2);
+                if d2 > r * r {
+                    continue;
+                }
             }
             // 隣の点と同じ組のことが多いので、直前と同じなら表を引かない
             let id = if last != NONE && taus[last as usize] == b {

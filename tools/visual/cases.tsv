@@ -114,6 +114,21 @@ j09	0	min(x y, z) = mod(x, 2)
 j10	0	floor(x) + floor(y) + z = mod(x y, 3)
 j11	0	mod(z, x y) = 1
 j12	0	floor(x y) = z floor(z)
+# 描きにくい陰関数の一覧（ユーザーの「プロット殺し」の表の S-01〜S-15。[-2, 2] 用の式は、表示範囲に合わせて 4 倍ほどに広げた。
+# 円錐 S-04 と立方体 S-11 は i04・i02 と同じなので入れない）
+k01	0	(x^2+y^2+z^2-16)^2=0
+k02	0	1/(x^2+y^2+z^2-16)=0
+k03	0	(x^2+y^2+z^2-16)^3=0
+k05	0	x^2-y^2 z=0
+k06	0	x^2 y^2+y^2 z^2+z^2 x^2-5 x y z=0
+k07	0	sin(5x) cos(5y)+sin(5y) cos(5z)+sin(5z) cos(5x)=0
+k08	0	sin(x^2+y^2+z^2)=0
+k09	0	(z-sin(x)) (z-sin(x)-0.001)=0
+k10	0	(x^2+y^2+z^2-9) ((x-6)^2+y^2+z^2-9)=0
+k12	0	x^2+y^2=0
+k13	0	floor(x)+floor(y)+floor(z)=0
+k14	0	x^2+y^2+z^2=1e-12
+k15	0	tan(x y z/27)=1
 # 回した陰関数と、回転の再生中（flags=1: 軽い計算。細かさも下がる）
 r_gy_full	0,xy=-4.4	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0
 r_gy_play80	0,xy=-4.4,flags=1	sin(x) cos(y)+sin(y) cos(z)+sin(z) cos(x)=0

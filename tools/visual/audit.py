@@ -11,6 +11,9 @@ tools/visual/cases.tsv の陰関数（設定の付いていない行）ごとに
 - 基準: 細かさ 160・ふつうの計算
 - 80: 細かさ 80（アプリの既定）、p40・p24: 回転の再生中と同じ軽い計算（flags=1）で細かさ 40・24
 - それぞれ、回さないものと、回したもの（xy 14°・xz 10°。基準も同じだけ回した式）
+- L: 回したものだけ。回転だけが変わった依頼（local=1）で作った、回す前の形（細かさ 80）をその回転で射影したもの
+  （再生・ドラッグ中に描画側で回して描くもの。回す前の形を作らない式は、ふつうの細かさ 80 と同じ）。
+  回す前の形の格子は表示範囲より 1.5〜2.5 倍粗いので、近さの物差しは p40 と同じにする（比べる相手も p40）
 
 物差し（式ごとの正解は使わない）:
 
@@ -36,7 +39,10 @@ LO = np.array([-10.0, -10.0, -6.0])
 HI = np.array([10.0, 10.0, 6.0])
 ROT = "xy=14,xz=10"
 # (名前, 設定, 細かさ)
-VARIANTS = [("ref", "ires=160", 160), ("80", "ires=80", 80), ("p40", "flags=1,ires=40", 40), ("p24", "flags=1,ires=24", 24)]
+VARIANTS = [("ref", "ires=160", 160), ("80", "ires=80", 80), ("p40", "flags=1,ires=40", 40), ("p24", "flags=1,ires=24", 24),
+            ("L", "local=1,ires=80", 40)]
+# 回したものだけで作る版
+ROTATED_ONLY = ("L",)
 
 
 def cases():
@@ -48,7 +54,7 @@ def cases():
             continue
         name, opts, src = line.split("\t")
         # 陰関数（= のある式か、変数 z を含む式）で、設定の付いていないもの
-        if opts != "0" or name[0] not in "suij" or name in ("s_stairs", "s_saddle", "s_gauss", "s_absgamma", "s_abszeta", "s_bessel"):
+        if opts != "0" or name[0] not in "suijk" or name in ("s_stairs", "s_saddle", "s_gauss", "s_absgamma", "s_abszeta", "s_bessel"):
             continue
         if only and only not in name and only not in src:
             continue
@@ -110,6 +116,8 @@ def main():
     for name, src in cs:
         for rot in ("", ROT):
             for v, opts, _ in VARIANTS:
+                if not rot and v in ROTATED_ONLY:
+                    continue
                 tag = f"{name}{'_r' if rot else ''}_{v}"
                 lines.append(f"{tag}\t0,{opts}{',' + rot if rot else ''}\t{src}")
     tsv = os.path.join(out, "audit_cases.tsv")
@@ -125,6 +133,8 @@ def main():
         for rot in ("", "_r"):
             ref = samples(*load(os.path.join(out, "mesh", f"{name}{rot}_ref.bin")))
             for v, _, n in VARIANTS[1:]:
+                if not rot and v in ROTATED_ONLY:
+                    continue
                 tag = f"{name}{rot}_{v}"
                 p, i = load(os.path.join(out, "mesh", tag + ".bin"))
                 tol = 0.75 * 20.0 / n  # 隣の箱まで見るので、0.75〜1.5 マス以内

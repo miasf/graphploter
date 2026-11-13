@@ -5,6 +5,7 @@ use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
 mod pieces;
+pub use pieces::in_inscribed_ball;
 
 /// 表示範囲（直方体）。添字 0, 1, 2 が x, y, z。
 #[derive(Debug, Clone, Copy)]

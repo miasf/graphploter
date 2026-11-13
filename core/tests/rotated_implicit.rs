@@ -92,10 +92,19 @@ fn reprojected_surface_matches_the_rotation() {
 }
 
 #[test]
-fn steps_and_plain_requests_keep_the_old_path() {
-    // 段差のある式と、印（flags のビット 3）の無い依頼は、回す前の形を作らない（今までどおり、回した式で作る）
-    assert!(mesh("mod(x, 2) + mod(y, 2) + mod(z, 2) = 2", &angles(0.4, 0.2), 30, true).take_shape().is_none());
-    assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.4, 0.2), 30, false).take_shape().is_none());
+fn plain_requests_keep_the_old_path() {
+    // 印（flags のビット 3）の無い依頼は、回す前の形を作らない（今までどおり、回した式で作る）
+    let mut plain = mesh("x^2 + y^2 + z^2 = 25", &angles(0.4, 0.2), 30, false);
+    assert!(plain.take_shape().is_none());
+    // 表示する面だけを作り、回す前の形を作れることを知らせる（Worker は面を先に返してから、印を付けてもう一度呼ぶ）
+    assert!(plain.local_available());
+    assert!(!plain.indices().is_empty());
+    // 印の付いた依頼は、回す前の形だけを作る（表示する面は作らない）
+    let mut only = mesh("x^2 + y^2 + z^2 = 25", &angles(0.4, 0.2), 30, true);
+    assert!(only.indices().is_empty());
+    assert!(only.take_shape().is_some_and(|s| s.rigid()));
+    // 陽関数（回すと形の点を使い回す、別の道）は、回す前の陰関数の形を作らない
+    assert!(!mesh("z = x y / 10", &angles(0.4, 0.2), 30, false).local_available());
     // 回転が無ければ、印があっても今までどおり
     assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.0, 0.0), 30, true).take_shape().is_none());
 }
@@ -265,4 +274,25 @@ fn transform_matches_projection() {
             }
         }
     }
+}
+
+#[test]
+fn stepped_surfaces_keep_their_branches_when_rotated() {
+    // 段差のある式も回す前の形で作る。枝は、回す範囲（立方体）の角まで調べると部品の数の上限を超えて、表示範囲の中の枝まで
+    // 落ちていた（この式で 2 割）。内接する球の中だけで調べるので、表示範囲の中は全部描く
+    let src = "mod(x, 2) + mod(y, 2) + mod(z, 2) = 2";
+    let rot = angles(0.25, 0.17);
+    let mut r = mesh(src, &rot, 80, true);
+    let shape = r.take_shape().expect("回す前の形を持っていない");
+    let m = shape.project(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5], 0.0).unwrap_or_else(|_| panic!("射影できない"));
+    // 表示範囲を覆っている: 回した式から表示範囲に作った面の頂点の近く（0.6 以内の箱とその隣）に、回す前の形の頂点がある
+    let key = |p: &[f32]| [0, 1, 2].map(|a| (p[a] as f64 / 0.6).floor() as i64);
+    let ours: std::collections::HashSet<[i64; 3]> = m.positions().chunks_exact(3).map(key).collect();
+    let d = mesh(src, &rot, 80, false);
+    let dp = d.positions();
+    let pts: Vec<&[f32]> = dp.chunks_exact(3).filter(|p| inside(p)).collect();
+    let near = |k: [i64; 3]| (0..27).any(|d| ours.contains(&[k[0] + d % 3 - 1, k[1] + d / 3 % 3 - 1, k[2] + d / 9 - 1]));
+    let missing = pts.iter().filter(|p| !near(key(p))).count();
+    assert!(pts.len() > 1000, "式から作った面が小さい（{}）", pts.len());
+    assert!((missing as f64) < 0.01 * pts.len() as f64, "回す前の形で欠けている頂点が {missing} / {}", pts.len());
 }
