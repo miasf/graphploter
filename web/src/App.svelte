@@ -31,6 +31,7 @@
   } from './lib/types'
   import { GLOBAL_GROUP, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
   import { Viewer } from './lib/Viewer'
+  import type { MotionMode } from './lib/motionQuality'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
 
@@ -95,8 +96,36 @@
   let viewerEl: HTMLElement
   let viewer = $state.raw<Viewer | null>(null)
 
+  // 視点を動かしている間の画質。端末（GPU）ごとに向きが違うので、共有リンクには入れず、このブラウザにだけ覚える
+  const MOTION_KEY = 'graphploter.motionMode'
+  const MOTION_MODES: { mode: MotionMode; label: string; note: string }[] = [
+    { mode: 'auto', label: '自動', note: '遅いときだけ、重い図形を粗くし、それでも遅ければ画面の解像度を下げる（下げても速くならなければ戻す）' },
+    { mode: 'sharp', label: 'くっきり', note: '画面の解像度は下げない。重い図形だけ粗くする' },
+    { mode: 'full', label: '常にそのまま', note: '何も下げない（重い式では動きがカクつく）' },
+  ]
+  function loadMotionMode(): MotionMode {
+    try {
+      const v = localStorage.getItem(MOTION_KEY)
+      if (v === 'auto' || v === 'sharp' || v === 'full') return v
+    } catch {
+      // 保存できない環境（プライベートモードなど）では自動
+    }
+    return 'auto'
+  }
+  let motionMode = $state<MotionMode>(loadMotionMode())
+  function setMotionMode(mode: MotionMode) {
+    motionMode = mode
+    viewer?.setMotionMode(mode)
+    try {
+      localStorage.setItem(MOTION_KEY, mode)
+    } catch {
+      // 覚えられなくても、この画面の間は効く
+    }
+  }
+
   onMount(() => {
     viewer = new Viewer(viewerEl)
+    viewer.setMotionMode(motionMode)
     ;(async () => {
       // 共有リンクで開いた、またはブラウザに保存してあるなら、その状態に戻す
       const saved = await loadInitial()
@@ -328,7 +357,7 @@
     { id: 'dims', icon: '⧉', label: '次元', desc: '4次元以上、表示する座標と断面' },
     { id: 'range', icon: '⬚', label: '表示範囲', desc: 'x, y, z の最小値・最大値' },
     { id: 'detail', icon: '▦', label: '細かさ', desc: '曲面・陰関数の細かさ、重ねる枚数' },
-    { id: 'look', icon: '◎', label: '見え方', desc: '遠近感、視点のリセット、背景' },
+    { id: 'look', icon: '◎', label: '見え方', desc: '動かしている間の画質、遠近感、視点のリセット、背景' },
     { id: 'control', icon: '✥', label: 'マウス操作', desc: '操作モード A / B の切り替え' },
     { id: 'cut', icon: '✂', label: '切り口', desc: '立体を平面で切る' },
     { id: 'save', icon: '⇪', label: '保存・共有', desc: '共有リンク、最初の状態に戻す' },
@@ -1718,6 +1747,16 @@
 
 
           {:else if settingsCat === 'look'}
+            <div class="slider">
+              <span>視点を動かしている間の画質:</span>
+              {#each MOTION_MODES as m (m.mode)}
+                <label class="check-row">
+                  <input type="radio" name="motion-mode" checked={motionMode === m.mode} onchange={() => setMotionMode(m.mode)} />
+                  {m.label}
+                </label>
+              {/each}
+              <span class="note">{MOTION_MODES.find((m) => m.mode === motionMode)?.note}</span>
+            </div>
             <div class="slider">
               <span>
                 4次元の遠近感:

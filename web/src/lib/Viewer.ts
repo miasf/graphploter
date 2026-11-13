@@ -7,7 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
-import { MotionQuality, pickLod } from './motionQuality'
+import { MotionQuality, pickLod, type MotionMode } from './motionQuality'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -685,7 +685,13 @@ export class Viewer {
     const size = (p: (typeof shown)[number]) => (p.geo.index?.count ?? p.geo.getAttribute('position')?.count ?? 0) / 3
     const pick = pickLod(shown.map(size), shown.map((p) => !!p.geo.userData.lod))
     this.lodPlots = new Set(shown.filter((_, k) => pick[k]))
-    this.quality.setScene(this.basePixelRatio, triangles, hasLod)
+    this.quality.setScene(this.basePixelRatio, triangles, hasLod && this.lodPlots.size > 0)
+  }
+
+  /** 動かしている間の画質の設定（auto・sharp・full。motionQuality.ts の MotionMode） */
+  setMotionMode(mode: MotionMode) {
+    this.quality.setMode(mode)
+    this.sceneChanged = true
   }
 
   /** 粗い版の段階で粗い版にする面（重い面だけ。ほかの面は動かしている間もそのままの版） */
