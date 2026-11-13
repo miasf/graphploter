@@ -415,6 +415,12 @@
   const reusable = new Set<number>()
   /** reusable のために、操作中でも細かく計算し直した式（その返事は使い回しではないが、次からは使い回せる） */
   const upgrading = new Set<number>()
+  /**
+   * 操作中に細かいまま頼んだのに、使い回しでなく作り直しになった式（1 回目）。2 回続いたら reusable から外す。
+   * 3 次元の回転を回すだけで描いている途中に 4 次元の回転（表示していない座標が絡む回転）を始めると、
+   * 毎コマ作り直しになるのに、細かさを下げずに頼み続けて激重になっていた
+   */
+  const upgradeMissed = new Set<number>()
   const isCoarse = () => pointerOnControl || anyRotPlaying() || playingParams.length > 0 || playingSlices.length > 0
 
   function refine() {
@@ -656,8 +662,13 @@
     item.error = undefined
     item.usedParams = res.usedParams
     budget.record(item.id, res.ms, used, res.cost, res.reprojected)
-    if (res.reprojected) reusable.add(item.id)
-    else if (!upgrading.has(item.id)) reusable.delete(item.id)
+    if (res.reprojected) {
+      reusable.add(item.id)
+      upgradeMissed.delete(item.id)
+    } else if (!upgrading.has(item.id) || upgradeMissed.has(item.id)) {
+      reusable.delete(item.id)
+      upgradeMissed.delete(item.id)
+    } else upgradeMissed.add(item.id)
     upgrading.delete(item.id)
 
     if (res.param) {
@@ -899,6 +910,7 @@
     budget.forget(item.id)
     reusable.delete(item.id)
     upgrading.delete(item.id)
+    upgradeMissed.delete(item.id)
     lastScale.delete(item.id)
     fineNext.delete(item.id)
     delete playing[-item.id]
