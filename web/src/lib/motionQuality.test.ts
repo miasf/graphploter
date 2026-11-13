@@ -1,5 +1,5 @@
 // motionQuality.ts のテスト。実行: npm test
-import { MANY_TRIANGLES, MotionQuality, stageList } from './motionQuality.ts'
+import { KEEP_FULL_TRIANGLES, MANY_TRIANGLES, MotionQuality, pickLod, stageList } from './motionQuality.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -92,6 +92,12 @@ function lowered(): MotionQuality {
   q.begin()
   check('(e) 図形が変わったら1つ上げる', q.level, low - 1)
 }
+
+// 粗い版にする面: 重い面だけ（細かいままの合計が KEEP_FULL_TRIANGLES 以下になるまで、多い順に）
+check('(f) 1 つだけ重い式', pickLod([1_500_000, 13_000, 40_000], [true, true, false]), [true, false, false])
+check('(f) 重い式が 2 つ', pickLod([400_000, 13_000, 300_000], [true, true, true]), [true, false, true])
+check('(f) 軽い場面は粗くしない', pickLod([KEEP_FULL_TRIANGLES - 1, 0], [true, true]), [false, false])
+check('(f) 粗い版の無い面は飛ばす', pickLod([900_000, 200_000], [false, true]), [false, true])
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('motionQuality.ts: すべて成功')

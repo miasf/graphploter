@@ -14,6 +14,11 @@ export type Stage = {
 
 /** 場面の三角形の合計がこれ以上なら、「粗い版にする」を段階 1 に繰り上げる（画素より三角形が効くとみなす） */
 export const MANY_TRIANGLES = 300_000
+/**
+ * 粗い版にする段階でも、細かいままの三角形の合計がこれ以下になるまでしか粗くしない（重い面から順に粗くする）。
+ * 1 つだけ重い式（mod(x y, z) = 0 の 150 万個など）があるとき、ほかの軽い式まで粗くしない
+ */
+export const KEEP_FULL_TRIANGLES = 150_000
 /** 粗い版にした後、画素密度をさらに何倍にするか（段階 4〜7） */
 const LOW_SCALES = [0.75, 0.55, 0.4, 0.3]
 /** 1コマの時間の目安の上限（60 コマ/秒） */
@@ -47,6 +52,22 @@ export function stageList(base: number, triangles: number, hasLod: boolean): Sta
     if (!prev || prev.lod !== s.lod || prev.ratio !== s.ratio) list.push(s)
   })
   return list
+}
+
+/**
+ * 粗い版の段階で、どの面を粗い版にするか。sizes は面ごとの三角形の数、hasLod は粗い版があるか。
+ * 粗い版のある面を三角形の多い順に粗くし、細かいままの三角形の合計が KEEP_FULL_TRIANGLES 以下になったら止める
+ */
+export function pickLod(sizes: number[], hasLod: boolean[]): boolean[] {
+  const pick = sizes.map(() => false)
+  let full = sizes.reduce((a, b) => a + b, 0)
+  const order = sizes.map((_, k) => k).filter((k) => hasLod[k]).sort((a, b) => sizes[b] - sizes[a])
+  for (const k of order) {
+    if (full <= KEEP_FULL_TRIANGLES) break
+    pick[k] = true
+    full -= sizes[k]
+  }
+  return pick
 }
 
 export class MotionQuality {
