@@ -259,6 +259,84 @@ impl Program {
         Some((make(n), make(d)))
     }
 
+    /// 式 F が変数 `v` について 1 次（F = a v + b。a・b は `v` を含まない）なら、F = 0 を解いた v = −b/a と a。
+    /// どちらも変数は `v` 以外の変数（元の並び）。a が定数 0 の式（`v` を含まない式）は None。
+    /// 1 次かどうかは式の形で決める（`v` を含む関数の引数・`v` どうしの積・`v` での割り算・べきがあれば 1 次でない）
+    pub fn solved_for(&self, v: usize) -> Option<(Program, Program)> {
+        #[derive(Clone, Copy)]
+        enum R {
+            /// v を含まない（新しい命令の番号）
+            Ind(usize),
+            /// a v + b（a・b の新しい命令の番号）
+            Aff(usize, usize),
+        }
+        let remap = |k: usize| if k < v { k } else { k - 1 };
+        let mut b = Builder::default();
+        let zero = b.push(Op::Const(C::new(0.0, 0.0)));
+        let one = b.push(Op::Const(C::new(1.0, 0.0)));
+        let mut rep: Vec<R> = Vec::with_capacity(self.code.ops.len());
+        for op in &self.code.ops {
+            let ind = |r: R| match r {
+                R::Ind(i) => Some(i),
+                R::Aff(..) => None,
+            };
+            let aff = |r: R| match r {
+                R::Ind(i) => (zero, i),
+                R::Aff(a, c) => (a, c),
+            };
+            let r = match op {
+                Op::Const(c) => R::Ind(b.push(Op::Const(*c))),
+                Op::Var(k) if *k == v => R::Aff(one, zero),
+                Op::Var(k) => R::Ind(b.push(Op::Var(remap(*k)))),
+                Op::Neg(x) => match rep[*x] {
+                    R::Ind(i) => R::Ind(b.push(Op::Neg(i))),
+                    R::Aff(a, c) => R::Aff(b.push(Op::Neg(a)), b.push(Op::Neg(c))),
+                },
+                Op::Bin(o, x, y) => {
+                    let (rx, ry) = (rep[*x], rep[*y]);
+                    match (o, ind(rx), ind(ry)) {
+                        (_, Some(i), Some(j)) => R::Ind(b.push(Op::Bin(*o, i, j))),
+                        (BinOp::Add | BinOp::Sub, _, _) => {
+                            let ((a1, c1), (a2, c2)) = (aff(rx), aff(ry));
+                            R::Aff(b.push(Op::Bin(*o, a1, a2)), b.push(Op::Bin(*o, c1, c2)))
+                        }
+                        (BinOp::Mul, Some(i), None) | (BinOp::Mul, None, Some(i)) => {
+                            let (a, c) = if ind(rx).is_some() { aff(ry) } else { aff(rx) };
+                            R::Aff(b.push(Op::Bin(BinOp::Mul, i, a)), b.push(Op::Bin(BinOp::Mul, i, c)))
+                        }
+                        (BinOp::Div, None, Some(j)) => {
+                            let (a, c) = aff(rx);
+                            R::Aff(b.push(Op::Bin(BinOp::Div, a, j)), b.push(Op::Bin(BinOp::Div, c, j)))
+                        }
+                        _ => return None,
+                    }
+                }
+                Op::Call1(f, x) => R::Ind(b.push(Op::Call1(*f, ind(rep[*x])?))),
+                Op::Call2(f, x, y) => R::Ind(b.push(Op::Call2(*f, ind(rep[*x])?, ind(rep[*y])?))),
+                Op::CallN(f, args) => {
+                    let a: Option<Vec<usize>> = args.iter().map(|&x| ind(rep[x])).collect();
+                    R::Ind(b.push(Op::CallN(*f, a?)))
+                }
+            };
+            rep.push(r);
+        }
+        let R::Aff(a, c) = rep[self.code.outs[0]] else { return None };
+        if b.const_of(a).is_some_and(|k| k == C::new(0.0, 0.0)) {
+            return None;
+        }
+        let nc = b.push(Op::Neg(c));
+        let g = b.push(Op::Bin(BinOp::Div, nc, a));
+        let ops = b.ops;
+        let mut vars = self.vars.clone();
+        vars.remove(v);
+        let make = |root: usize| {
+            let mut nb = Builder::default();
+            let at = nb.append(&ops, &Op::Var);
+            Program { code: Code::new(nb, vec![at[root]]), vars: vars.clone(), used_params: self.used_params.clone() }
+        };
+        Some((make(g), make(a)))
+    }
+
     /// 変数を使わない式（定数）か
     pub fn is_constant(&self) -> bool {
         !self.code.ops.iter().any(|op| matches!(op, Op::Var(_)))
