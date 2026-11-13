@@ -80,7 +80,7 @@
     return cut.enabled && !flat ? { axis: cut.axis, pos: cut.pos, keepBelow: !cut.flip } : null
   }
   /** マウスの操作モード（A: 標準 / B: Google Earth に近い操作） */
-  let controlMode = $state<'A' | 'B'>('B')
+  let controlMode = $state<'A' | 'B'>('A')
   $effect(() => {
     viewer?.setControlMode(controlMode)
   })
@@ -990,6 +990,8 @@
 
   // ---- 次元（4次元以上）----
 
+  /** 4次元の遠近感の標準（%） */
+  const PERSPECTIVE_4D = 40
   let space = $state<Space>({
     dims: 3,
     axes: [0, 1, 2],
@@ -1000,7 +1002,7 @@
     samples: 24,
     rotation: Array(10).fill(0), // 5次元の回転（5C2 = 10 通り）
     center: Array(5).fill(0),
-    perspective: 0,
+    perspective: PERSPECTIVE_4D,
   })
   /** 画面の横・奥・縦の軸に表示している座標の名前 */
   const axisNames = $derived(space.axes.map(coordName))
@@ -1343,7 +1345,7 @@
       ranges: Array(dims).fill(null),
       rotation,
       center: Array(rotDims(dims)).fill(0),
-      perspective: view.perspective ?? 0,
+      perspective: view.perspective ?? PERSPECTIVE_4D,
     }
     // 図形が大きく見えるよう、表示範囲を合わせて視点もリセットする
     const h = view.half
