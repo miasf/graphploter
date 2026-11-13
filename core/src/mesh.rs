@@ -6229,7 +6229,107 @@ fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) ->
             touch.insert(id, t as f32);
         }
     }
+    keep_surface_touches(&mut touch, n);
     touch
+}
+
+/// 接するだけの所のうち、面として広がっていない成分（線・点だけの解）を捨てる。
+///
+/// 線・点だけの解（ローマ曲面 x²y² + y²z² + z²x² = 5xyz の座標軸のひげ、x² + y² = 0 の z 軸）は、格子の線に重なるとき
+/// （回さないとき）だけ見つかり、回すと見つからない。潰れた管として、格子の向きしだいで出たり消えたりするので、一貫して描かない
+/// （正しく描くには、曲線・点として描く別の道が要る）。接するだけの面（(x² + y² − 4)² = 0 など）は、今までどおり描く。
+///
+/// 接する辺の載っているセルが 26 方向につながる成分ごとに、面として広がっているかを決める: 同じ向き a の接する辺が、
+/// a に垂直な 2 つの向きに 2 × 2 に並ぶ所（a の向きには 1 マスずれてもよい）が 1 つでもあれば面。線は、垂直な面に映すと
+/// 階段状の線になり、2 × 2 には並ばない
+fn keep_surface_touches(touch: &mut crate::adaptive::HashMap<usize, f32>, n: usize) {
+    if touch.is_empty() {
+        return;
+    }
+    let m = n + 1;
+    let point = |id: usize| {
+        let (a, mut q) = (id % 3, id / 3);
+        let mut p = [0i64; 3];
+        for x in p.iter_mut() {
+            *x = (q % m) as i64;
+            q /= m;
+        }
+        (a, p)
+    };
+    let id_of = |a: usize, p: [i64; 3]| -> Option<usize> {
+        p.iter().all(|&x| x >= 0 && x < m as i64).then(|| 3 * (p[0] as usize + m * (p[1] as usize + m * p[2] as usize)) + a)
+    };
+    // 辺 a, p が、面として広がった所にあるか
+    let spread = |a: usize, p: [i64; 3]| {
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        let has = |db: i64, dc: i64| {
+            (-1..=1).any(|da| {
+                let mut q = p;
+                q[a] += da;
+                q[b] += db;
+                q[c] += dc;
+                id_of(a, q).is_some_and(|id| touch.contains_key(&id))
+            })
+        };
+        [(-1, -1), (-1, 1), (1, -1), (1, 1)].iter().any(|&(sb, sc)| has(sb, 0) && has(0, sc) && has(sb, sc))
+    };
+    // 接する辺を囲むセル（辺 a, p は、p から a に垂直な向きに −1 〜 0 ずらした 4 つのセルに接する）
+    let cells_of = |a: usize, p: [i64; 3]| {
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        let mut out = Vec::with_capacity(4);
+        for db in 0..2 {
+            for dc in 0..2 {
+                let mut s = p;
+                s[b] -= db;
+                s[c] -= dc;
+                if s.iter().all(|&x| x >= 0 && x < n as i64) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    };
+    let mut comp: crate::adaptive::HashMap<[i64; 3], usize> = Default::default();
+    let ids: Vec<usize> = touch.keys().copied().collect();
+    for &id in &ids {
+        let (a, p) = point(id);
+        for s in cells_of(a, p) {
+            comp.insert(s, usize::MAX);
+        }
+    }
+    // セルの成分に番号を付ける（26 方向）
+    let mut count = 0;
+    let cells: Vec<[i64; 3]> = comp.keys().copied().collect();
+    for start in cells {
+        if comp[&start] != usize::MAX {
+            continue;
+        }
+        comp.insert(start, count);
+        let mut stack = vec![start];
+        while let Some(c) = stack.pop() {
+            for d in 0..27 {
+                let q = [c[0] + d % 3 - 1, c[1] + d / 3 % 3 - 1, c[2] + d / 9 - 1];
+                if comp.get(&q) == Some(&usize::MAX) {
+                    comp.insert(q, count);
+                    stack.push(q);
+                }
+            }
+        }
+        count += 1;
+    }
+    let mut surface = vec![false; count];
+    for &id in &ids {
+        let (a, p) = point(id);
+        if spread(a, p) {
+            for s in cells_of(a, p) {
+                surface[comp[&s]] = true;
+            }
+        }
+    }
+    touch.retain(|&id, _| {
+        let (a, p) = point(id);
+        cells_of(a, p).iter().any(|s| surface[comp[s]])
+    });
 }
 
 /// 辺 p → p + e_a を囲む4つのセルの角（合わせて 18 個の格子点）の符号が、すべて同じか。
@@ -9743,6 +9843,24 @@ mod tests {
         let m = implicit_surface(&p, dom(), 21);
         let on_y0 = m.positions.chunks_exact(3).filter(|q| q[1].abs() < 0.02 && q[0].abs() > 0.2).count();
         assert!(on_y0 > 50, "y = 0 の面の頂点 {on_y0}");
+    }
+
+    #[test]
+    fn line_and_point_touches_are_not_drawn() {
+        // 線・点だけの解は、格子の線に重なるとき（回さないとき）だけ「接する所」として見つかり、潰れた管になっていた。
+        // 格子の向きしだいで出たり消えたりするので、一貫して描かない（接するだけの面は描く。上の touching_surface）
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        // x² + y² = 0 は z 軸だけ、x² + y² + z² = 0 は原点だけ
+        for src in ["x^2 + y^2", "x^2 + y^2 + z^2"] {
+            let m = implicit_surface(&prog(src, &AXES), d, 80);
+            assert!(m.indices.is_empty(), "{src}: 三角形 {}", m.indices.len() / 3);
+        }
+        // ローマ曲面: 曲面（原点から 2.6 以内）は描き、座標軸に沿って外に伸びる線だけの解（|t| > 2.5）は描かない
+        let p = prog("x^2 y^2 + y^2 z^2 + z^2 x^2 - 5 x y z", &AXES);
+        let m = implicit_surface(&p, d, 80);
+        assert!(m.indices.len() > 1000, "三角形 {}", m.indices.len() / 3);
+        let far = m.positions.chunks_exact(3).filter(|q| (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt() > 3.0).count();
+        assert_eq!(far, 0, "座標軸のひげの頂点");
     }
 
     #[test]
