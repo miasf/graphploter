@@ -76,7 +76,7 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
     let mut parts: Vec<Mesh> = Vec::new();
     let mut budget = MAX_PIECES;
-    let mut thin_jobs: Vec<(&Program, Vec<BranchGroup>, Vec<Option<(Domain, Vec<Solved>)>>)> = Vec::new();
+    let mut thin_jobs: Vec<(&Program, Vec<BranchGroup>, Vec<Option<LinearBranch>>)> = Vec::new();
     for (f, group) in factors.iter().zip(groups) {
         if f.is_constant() {
             continue;
@@ -108,7 +108,7 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
         // ついて 1 次で、枝の範囲で v の係数が 0 にならない（陰関数定理の条件 ∂F/∂v ≠ 0 が範囲全体で成り立つ）枝は、
         // 面が v = g の 1 枚の陽関数なので、格子によらず描ける（thin_graph）。下の 2 回では描かず、厚い枝を描いた後に描く
         let (edom, _) = solid_grid(dom, en);
-        let linear: Vec<Option<(Domain, Vec<Solved>)>> = group
+        let linear: Vec<Option<LinearBranch>> = group
             .iter()
             .map(|g| {
                 // 今まで描いていなかった枝（どのブロックも薄くて外した枝）だけ。格子で描ける所のある枝は今までどおり
@@ -248,6 +248,9 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
     out.note = if truncated { "（細かすぎて描けない部分あり）".into() } else { note };
     Some(out)
 }
+
+/// 陽関数として描く薄い枝の、範囲と部品ごとの解いた式
+type LinearBranch = (Domain, Vec<Solved>);
 
 /// 部品 `sub` = 0 を座標 `axis` について解いた陽関数 v = g（[`solve_linear`]）
 struct Solved {
