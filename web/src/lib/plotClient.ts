@@ -119,9 +119,9 @@ function send<T>(worker: number, req: PlotRequest): Promise<T> {
 const lastInputs = new Map<number, string>()
 
 /**
- * 回転だけが変わった、細かく作る依頼（前の依頼と、回転・切り口以外が同じ）なら、陰関数を回す前の形で作る印（PLOT_LOCAL）を付ける。
- * 回して止めたときに回す前の形を作り、次に回すときは回すだけで描く。
- * スライダー・式が変わったときは今までの道（回す前の形は表示範囲より広いので、作るのが数倍遅い）。
+ * 回転だけが変わった、細かく作る依頼（前の依頼と、回転・切り口以外が同じ）なら、印（PLOT_LOCAL）を付ける。
+ * 計算担当は、覚えている回す前の形（陰関数）があれば作り直さず、無ければ面を返した後すぐに作る。
+ * 印の無い細かく作る依頼（式・スライダーが変わった）でも、計算担当は少し待ってから回す前の形を作る（初めて回すときから、回すだけで描く）。
  * F の計算を分けるときは、全部の Worker が同じ印で計算する必要があるので、ここで決める
  */
 function markRotationOnly(req: PlotRequest) {
@@ -134,7 +134,8 @@ function markRotationOnly(req: PlotRequest) {
   // 回し始めの 1 コマがカクッと止まる。回し始めは今までどおり軽く作り直し、止まったとき（細かく作る依頼）に作っておけば、
   // 次に回すときは Worker が覚えた形を回すだけで描ける（細かさが違っても、再生中なら使い回す）
   const moving = (req.flags & PLOT_NO_REFINE) !== 0
-  if (lastInputs.get(req.itemId) === inputs && space.rotation.some((a) => a !== 0) && !moving) req.flags |= PLOT_LOCAL
+  // 回転が 0 に戻ったときも同じ（回す前の形は回転によらないので、覚えている形を使い続ける）
+  if (lastInputs.get(req.itemId) === inputs && !moving) req.flags |= PLOT_LOCAL
   lastInputs.set(req.itemId, inputs)
 }
 

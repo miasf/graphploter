@@ -73,12 +73,17 @@ const shapes = new Map<
 >()
 
 /**
- * 表示する面を返した後に作る、回す前の形（陰関数）の予約。式ごとに、作る関数。
- * 止まったとき（回転だけが変わった、細かく作る依頼）は、表示する面を先に返して、回す前の形はその後で作る
+ * 表示する面を返した後に作る、回す前の形（陰関数）の予約。式ごとに、覚える形の鍵と、作る関数。
+ * 止まったとき（細かく作る依頼）は、表示する面を先に返して、回す前の形はその後で作る
  * （回す前の形は表示範囲より広く作るので、表示する面の 0.5〜2 倍かかる。止まってから面が出るまでを今までどおりにする）。
- * 作る前に同じ式の新しい依頼が来たら、作らない（その依頼が今の形を決める）
+ * 回転だけが変わった依頼ならすぐに、式・スライダーが変わった依頼なら少し待ってから作る（打っている途中・動かしている途中に作らない）。
+ * 作る前に同じ式の新しい依頼が来たら、作らない（その依頼が今の形を決める）。ただし、その依頼が同じ形を回し始める依頼（再生・ドラッグ中）なら、
+ * 先に作る（回し始めから、回す前の形を回すだけで描く。粗く作り直すと細い所が欠ける）
  */
-const localJobs = new Map<number, () => void>()
+const localJobs = new Map<number, { key: string; run: () => void }>()
+
+/** 回転以外が変わった依頼のあと、回す前の形を作り始めるまでの待ち（ms）。この間に次の依頼が来たら作らない */
+const LOCAL_IDLE_MS = 400
 
 /**
  * 点の計算に関わる入力（回転は含めない）。
@@ -213,6 +218,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     return
   }
   const req = ev.data
+  const pendingLocal = localJobs.get(req.itemId)
   localJobs.delete(req.itemId)
   const { requestId, itemId, source, domain: d, resolution, implicitResolution, ranges, params, space, stacks } = req
   await ready
@@ -220,6 +226,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
   let res: PlotResponse
   const t0 = performance.now()
   const tally: Tally = { eval: 0, mesh: 0, lod: 0, copy: 0 }
+  let localDelay = 0 // 回す前の形を作り始めるまでの待ち（ms）
   const domainArr = new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax])
   try {
     const rangeNames = Object.keys(ranges)
@@ -269,6 +276,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         flags,
       )
     const key = (view: boolean, rigid = false) => shapeKey(req, view, coord.slice, coord.ranges, rigid)
+    // 回し始め（再生・ドラッグ中の依頼）で、同じ形の回す前の形を作る予約があれば、先に作る（この 1 コマは待つが、粗く作り直さない）
+    if (pendingLocal && (req.flags & PLOT_NO_REFINE) !== 0 && pendingLocal.key === key(true, true)) pendingLocal.run()
     const cached = shapes.get(itemId)
     // 覚えている形を回すだけで描けるなら、F の計算を分けない（計画の段階で「分けられない」と返す）
     if (req.field?.mode === 'plan' && cached && reusable(cached, key(cached.shape.view_dependent, cached.shape.rigid), req)) {
@@ -374,24 +383,28 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       if (shape && !keepLocal) {
         shapes.set(itemId, { key: key(shape.view_dependent, shape.rigid), shape, refined: refine, ires: implicitResolution, thorough, localShown: false })
       }
-      // 回転だけが変わった、細かく作る依頼: 面を返した後で、回す前の形を作っておく（次に回すときは、回すだけで描く）
-      if (!keepLocal && refine && (req.flags & PLOT_LOCAL) !== 0 && r.local_available) {
-        localJobs.set(itemId, () => {
-          let lr: MeshResult | null = null
-          try {
-            field_mode_reset()
-            lr = callPlot(req.flags | PLOT_LOCAL)
-            const local = lr.take_shape()
-            if (local?.rigid) {
-              shapes.get(itemId)?.shape.free()
-              shapes.set(itemId, { key: key(true, true), shape: local, refined: true, ires: implicitResolution, thorough, localShown: false })
-            } else local?.free()
-          } catch {
-            // 作れなくても、次に回すときに今までどおり作り直すだけ
-          } finally {
-            lr?.free()
-          }
+      // 細かく作る依頼: 面を返した後で、回す前の形を作っておく（次に回すときは、回すだけで描く。回転が 0 のときも作る）
+      if (!keepLocal && refine && r.local_available) {
+        localJobs.set(itemId, {
+          key: key(true, true),
+          run: () => {
+            let lr: MeshResult | null = null
+            try {
+              field_mode_reset()
+              lr = callPlot(req.flags | PLOT_LOCAL)
+              const local = lr.take_shape()
+              if (local?.rigid) {
+                shapes.get(itemId)?.shape.free()
+                shapes.set(itemId, { key: key(true, true), shape: local, refined: true, ires: implicitResolution, thorough, localShown: false })
+              } else local?.free()
+            } catch {
+              // 作れなくても、次に回すときに今までどおり作り直すだけ
+            } finally {
+              lr?.free()
+            }
+          },
         })
+        localDelay = (req.flags & PLOT_LOCAL) !== 0 ? 0 : LOCAL_IDLE_MS
       }
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
@@ -466,11 +479,13 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     : []
   self.postMessage(res, { transfer })
   // 返した後で、回す前の形を作る（届いている次の依頼を先に処理する。その依頼が同じ式なら、予約は消える）
-  if (localJobs.has(req.itemId)) {
+  const job = localJobs.get(req.itemId)
+  if (job) {
     setTimeout(() => {
-      const job = localJobs.get(req.itemId)
+      // 待っている間に次の依頼が来ていれば、予約は消えているか、別の予約に替わっている
+      if (localJobs.get(req.itemId) !== job) return
       localJobs.delete(req.itemId)
-      job?.()
-    }, 0)
+      job.run()
+    }, localDelay)
   }
 }

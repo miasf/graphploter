@@ -105,8 +105,9 @@ fn plain_requests_keep_the_old_path() {
     assert!(only.take_shape().is_some_and(|s| s.rigid()));
     // 陽関数（回すと形の点を使い回す、別の道）は、回す前の陰関数の形を作らない
     assert!(!mesh("z = x y / 10", &angles(0.4, 0.2), 30, false).local_available());
-    // 回転が無ければ、印があっても今までどおり
-    assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.0, 0.0), 30, true).take_shape().is_none());
+    // 回転が無くても、回す前の形を作れる（式を入れて初めて回すときから、回すだけで描く）
+    assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.0, 0.0), 30, false).local_available());
+    assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.0, 0.0), 30, true).take_shape().is_some_and(|s| s.rigid()));
 }
 
 #[test]
@@ -295,4 +296,47 @@ fn stepped_surfaces_keep_their_branches_when_rotated() {
     let missing = pts.iter().filter(|p| !near(key(p))).count();
     assert!(pts.len() > 1000, "式から作った面が小さい（{}）", pts.len());
     assert!((missing as f64) < 0.01 * pts.len() as f64, "回す前の形で欠けている頂点が {missing} / {}", pts.len());
+}
+
+#[test]
+fn rotation_of_two_hidden_coords_recomputes() {
+    // 5 次元で、式が使う表示していない座標どうし（w と w2）の回転は、断面の値が回って形が変わるので、回す前の形を回しても描けない
+    let src = "x^2 + y^2 + z^2 + w^2 + w2^2 = 9";
+    let mut rot = vec![0.0; 10];
+    rot[0] = 0.5;
+    let mut r = plot(
+        src, &DOMAIN, 150, 40, "", &[], "", &[], "", 5, &[0, 1, 2], &[0.0, 0.0, 0.0, 2.0, 0.0], &[f64::NAN; 10], "", &[], 16, &rot,
+        &[0.0; 5], 0.0, 0, false, false, 1, false, 8,
+    )
+    .unwrap_or_else(|_| panic!("計算できない"));
+    let shape = r.take_shape().expect("回す前の形を持っていない");
+    rot[0] = 1.2; // 表示中の座標どうし（xy）だけなら回せる
+    assert!(shape.transform(&DOMAIN, 5, &[0, 1, 2], &rot, &[0.0; 5]).is_ok());
+    rot[9] = 0.7; // w と w2
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        shape.transform(&DOMAIN, 5, &[0, 1, 2], &rot, &[0.0; 5]).is_ok()
+    }));
+    assert!(!matches!(res, Ok(true)), "式が使う w・w2 の回転なのに、回す前の形を回して描いた");
+}
+
+#[test]
+fn shape_made_without_rotation_can_be_rotated() {
+    // 回転が 0 のときに作った回す前の形を、後から回しても、その回転で作った形と同じ（1 次式を掛けたものと射影し直したもの）
+    let src = "(x - 6)^2 + y^2 + (z - 2)^2 = 25";
+    let mut r = mesh(src, &angles(0.0, 0.0), 40, true);
+    let shape = r.take_shape().expect("回す前の形を持っていない");
+    let local = shape.local_mesh().unwrap().positions();
+    let mut turned = mesh(src, &angles(0.7, -0.3), 40, true);
+    let other = turned.take_shape().unwrap().local_mesh().unwrap().positions();
+    // 回す前の形は回転によらない
+    assert_eq!(local.len(), other.len());
+    let rot = angles(0.7, -0.3);
+    let t = shape.transform(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5]).unwrap().transform();
+    let p = rotated_prog(src, &rot);
+    let moved: Vec<f32> = local
+        .chunks_exact(3)
+        .flat_map(|q| (0..3).map(|a| (t[4 * a] * q[0] as f64 + t[4 * a + 1] * q[1] as f64 + t[4 * a + 2] * q[2] as f64 + t[4 * a + 3]) as f32))
+        .collect();
+    let v = values(&p, &moved);
+    assert!(v.iter().all(|x| x.abs() < 0.5), "回した後の頂点が、回した式の面の上にない");
 }

@@ -505,13 +505,15 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     }
 
     // 陰関数で、回転が表示中の座標どうしだけなら、回す前の F も作っておく（形を回すだけで描ける）。
+    // 回転が無いときも作る（式を入れて初めて回すときから、回す前の形を回すだけで描けるように。Worker が面を返した後に作る）。
     // 陽関数は上の道で描く。2D の切り口・範囲で重ねる名前を使う式は、今までどおり回した F だけ
-    let local = if rot.is_some() && !space.flat_slice && find_explicit(&l, &r, &shown, &consts)?.is_none() {
+    // 範囲で重ねる名前は、陽関数かどうかを調べる前に除く（重ねるパラメータは、陽関数の判定では使えない変数としてエラーになる）
+    let ranged = space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n));
+    let local = if !space.flat_slice && !ranged && find_explicit(&l, &r, &shown, &consts)?.is_none() {
         let mut used = Vec::new();
         l.collect_vars(&mut used);
         r.collect_vars(&mut used);
-        let ranged = space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n));
-        if !ranged && space.rotation_keeps_shown(&used) && shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
+        if space.rotation_keeps_shown(&used) && shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
             let f = Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()));
             Some(Program::compile_with(&f, &shown_refs, &consts)?)
         } else {
