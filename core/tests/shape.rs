@@ -1190,3 +1190,106 @@ fn pole_hugging_surfaces_are_drawn() {
         assert!(x <= 1.0, "{src} の余計（3 箱）が {x:.2}%");
     }
 }
+
+/// 幅広い陰関数の一覧（`wide_report`）。直してきた式に偏らないよう、単純な式・有名な曲面・適当に打ったような式を混ぜる。
+/// 有名な曲面は、表示範囲（x, y ∈ [−10, 10]、z ∈ [−6.4, 6.4]）に収まるよう、座標を割って縮尺を合わせる
+const WIDE: [(&str, &str); 48] = [
+    // 単純な式
+    ("球", "x^2 + y^2 + z^2 = 25"),
+    ("楕円体", "x^2/64 + y^2/16 + z^2/9 = 1"),
+    ("平面", "x + 2 y - 3 z = 1"),
+    ("円柱", "x^2 + y^2 = 16"),
+    ("円錐", "x^2 + y^2 = z^2"),
+    ("一葉双曲面", "x^2 + y^2 - z^2 = 4"),
+    ("二葉双曲面", "x^2 + y^2 - z^2 = -4"),
+    ("放物面", "x^2 + y^2 = 4 z"),
+    ("鞍", "x^2 - y^2 = 4 z"),
+    ("トーラス", "(sqrt(x^2 + y^2) - 6)^2 + z^2 = 4"),
+    ("細い管", "x^2 + y^2 = 0.04"),
+    ("薄い殻", "(x^2 + y^2 + z^2 - 25)^2 = 0.5"),
+    // 有名な曲面
+    ("ハート", "((x/4)^2 + 9/4 (y/4)^2 + (z/4)^2 - 1)^3 - (x/4)^2 (z/4)^3 - 9/80 (y/4)^2 (z/4)^3 = 0"),
+    ("Cayley の 3 次曲面", "4 ((x/4)^2 + (y/4)^2 + (z/4)^2) + 16 (x/4) (y/4) (z/4) = 1"),
+    ("Clebsch の 3 次曲面", "81 ((x/5)^3 + (y/5)^3 + (z/5)^3) - 189 ((x/5)^2 (y/5 + z/5) + (y/5)^2 (x/5 + z/5) + (z/5)^2 (x/5 + y/5)) + 54 (x/5) (y/5) (z/5) + 126 ((x/5) (y/5) + (x/5) (z/5) + (y/5) (z/5)) - 9 ((x/5)^2 + (y/5)^2 + (z/5)^2) - 9 (x/5 + y/5 + z/5) + 1 = 0"),
+    ("Steiner のローマ曲面", "(x/4)^2 (y/4)^2 + (y/4)^2 (z/4)^2 + (z/4)^2 (x/4)^2 - (x/4) (y/4) (z/4) = 0"),
+    ("Whitney の傘", "(x/3)^2 = (y/3)^2 (z/3)"),
+    ("Ding-dong", "(x/3)^2 + (y/3)^2 = (1 - z/3) (z/3)^2"),
+    ("Goursat のタングルキューブ", "(x/2)^4 - 5 (x/2)^2 + (y/2)^4 - 5 (y/2)^2 + (z/2)^4 - 5 (z/2)^2 + 11.8 = 0"),
+    ("Barth の 6 次曲面", "4 (2.618 (x/4)^2 - (y/4)^2) (2.618 (y/4)^2 - (z/4)^2) (2.618 (z/4)^2 - (x/4)^2) - 4.236 ((x/4)^2 + (y/4)^2 + (z/4)^2 - 1)^2 = 0"),
+    ("Kummer の曲面", "((x/3)^2 + (y/3)^2 + (z/3)^2 - 1.69)^2 - 3.24 ((1 - z/3)^2 - 2 (x/3)^2) ((1 + z/3)^2 - 2 (y/3)^2) = 0"),
+    ("2 穴トーラス", "(((x/4)^2 + (y/4)^2)^2 - (x/4)^2 + (y/4)^2)^2 + (z/4)^2 = 0.01"),
+    ("Chmutov 風", "(x/5)^4 + (y/5)^4 + (z/5)^4 - (x/5)^2 - (y/5)^2 - (z/5)^2 + 0.2 = 0"),
+    ("Dupin のサイクライド", "((x/3)^2 + (y/3)^2 + (z/3)^2 - 0.25 + 4)^2 - 4 (2 (x/3) - 1)^2 - 16 (y/3)^2 = 0"),
+    ("Schwarz P", "cos(x) + cos(y) + cos(z) = 0"),
+    ("Schwarz D", "sin(x) sin(y) sin(z) + sin(x) cos(y) cos(z) + cos(x) sin(y) cos(z) + cos(x) cos(y) sin(z) = 0"),
+    ("Neovius", "3 (cos(x) + cos(y) + cos(z)) + 4 cos(x) cos(y) cos(z) = 0"),
+    ("ジャイロイド", "sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x) = 0"),
+    ("メタボール", "exp(-((x-2)^2 + y^2 + z^2)/4) + exp(-((x+3)^2 + (y-1)^2 + z^2)/4) + exp(-(x^2 + (y+3)^2 + (z-1)^2)/4) = 0.5"),
+    ("らせん面", "y cos(z) = x sin(z)"),
+    ("角ばった立方体", "x^8 + y^8 + z^8 = 5^8"),
+    ("八面体", "abs(x) + abs(y) + abs(z) = 6"),
+    // 適当に打ったような式
+    ("sin(xyz)", "sin(x y z) = 0.5"),
+    ("x^2 + sin(y) z", "x^2 + sin(y) z = 1"),
+    ("exp の和", "exp(x/3) + exp(y/3) = z^2"),
+    ("x^3 + y^3 + z^3 = 3xyz + 1", "x^3 + y^3 + z^3 = 3 x y z + 1"),
+    ("ln", "ln(x^2 + y^2) = z^2 - 2"),
+    ("atan", "atan(y/x) = z/2"),
+    ("sin + cos", "sin(x) + cos(y) = z/3"),
+    ("xy + yz + zx", "x y + y z + z x = 1"),
+    ("|x| と sqrt", "abs(x) + sqrt(abs(y)) + z = 1"),
+    ("max", "max(x, y) = z^2"),
+    ("cos(x y)", "cos(x y) = z/4"),
+    ("x^y", "x^y = z^2"),
+    ("z^5 の 5 次", "z^5 - z = x y"),
+    ("sin(r)/r", "sin(sqrt(x^2 + y^2 + z^2)) / sqrt(x^2 + y^2 + z^2) = 0.1"),
+    ("tanh", "tanh(x) + tanh(y) + tanh(z) = 0.5"),
+    ("x sin(1/y)", "z^3 = x sin(3/y)"),
+];
+
+/// 画面と同じ入口でメッシュを作る（`flags` を指定する。1: 再生・ドラッグ中の軽い計算、8: 回す前の形を作って回す）
+fn mesh_flags(src: &str, rotation: &[f64], ires: u32, flags: u32) -> Option<(MeshResult, f64)> {
+    let t = Instant::now();
+    let r = plot(
+        src, &DOMAIN, RES, ires, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, rotation, &[0.0; 5],
+        0.0, 0, false, false, 1, false, flags,
+    )
+    .ok()?;
+    Some((r, t.elapsed().as_secs_f64() * 1e3))
+}
+
+/// 幅広い陰関数の一覧で、止まっているとき（細かさ 80）・回したとき・回転の再生中（細かさ 24。今までの道と、回す前の形を回す道）を測る。
+/// `cargo test --release --test shape wide_report -- --ignored --nocapture`（SHAPE_ONLY で名前か式を絞る）
+#[test]
+#[ignore]
+fn wide_report() {
+    let variants: [(&str, Rot, u32, u32); 4] =
+        [("80", Rot::None, IRES, 0), ("80 回", Rot::Mixed, IRES, 0), ("24 回 再生", Rot::Mixed, 24, 1), ("24 回 使い回し", Rot::Mixed, 24, 9)];
+    println!("| 名前 | 版 | 欠け1 | 欠け3 | 余計1 | 余計3 | 破片 | 三角形 | ms | 説明 |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    for (name, src) in WIDE.iter().filter(|(n, s)| selected(n) || selected(s)) {
+        let mut refs: Vec<(Rot, Voxels)> = Vec::new();
+        for &(label, rot, ires, flags) in &variants {
+            let reference = match refs.iter().find(|(r, _)| *r == rot) {
+                Some((_, v)) => v.clone(),
+                None => {
+                    let Ok(v) = std::panic::catch_unwind(|| reference_implicit(src, rot)) else {
+                        println!("| {name} | {label} | 正解を作れない | | | | | | | `{src}` |");
+                        continue;
+                    };
+                    refs.push((rot, v.clone()));
+                    v
+                }
+            };
+            let Some((r, ms)) = mesh_flags(src, &rot.angles(), ires, flags) else {
+                println!("| {name} | {label} | エラー | | | | | | | `{src}` |");
+                continue;
+            };
+            let row = measure(&reference, &r, ms);
+            println!(
+                "| {name} | {label} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {:.0} | {} |",
+                row.miss1, row.miss3, row.extra1, row.extra3, row.frags, row.tris, row.ms, r.kind()
+            );
+        }
+    }
+}
