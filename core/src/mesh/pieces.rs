@@ -30,6 +30,12 @@ const MAX_PIECES: usize = 3000;
 const ENUM_N: usize = 80;
 /// 枝の部品の三角形の数の目安。超えそうなら、枝の部品を作る格子を粗くする（面の数は減らさない）
 const TARGET_PIECE_TRIANGLES: f64 = 600_000.0;
+/// 薄いが面が通るので描くブロック（[`BranchGroup::extra`]）の部品の、三角形の数の目安。超えそうなら、その部品の格子を粗くする。
+/// 面が格子とほぼ同じ間隔で重なる密な層（mod(x y z, 4) = 2 など）では、こうしたブロックが何千もあり、元の部品と同じ細かさで
+/// 描くと三角形が 2〜4 倍になる
+const TARGET_EXTRA_TRIANGLES: f64 = 200_000.0;
+/// [`BranchGroup::extra`] の部品の三角形の数の上限（見積もりが外れても、これを超えたら残りは描かない。格子点の多い枝から描く）
+const MAX_EXTRA_TRIANGLES: usize = 300_000;
 /// 枝の部品を作る格子の細かさの下限
 const MIN_PIECE_N: usize = 24;
 
@@ -81,57 +87,77 @@ pub(super) fn implicit_by_pieces(prog: &Program, dom: Domain, n: usize, refine: 
             parts.push(m);
             continue;
         };
-        // 面の数が多い式は、三角形が増えすぎないよう、枝の部品を作る格子を粗くする（1 ブロックあたり約 80 個）
-        let blocks: usize = group.iter().map(|g| g.blocks.len()).sum();
+        // 面の数が多い式は、三角形が増えすぎないよう、枝の部品を作る格子を粗くする（1 ブロックあたり約 80 個）。
+        // 描くのは 2 回に分ける。1 回目は、厚みのある所のブロックがある枝（今までどおりの細かさと順番。薄いが面が通るので描く
+        // ブロックも同じ部品に入れる。部品の格子の線は全体の格子と同じなので、今まで描いていた所の面は変わらない）。
+        // 2 回目は、薄いが面が通るブロックしか無い枝（floor(x y) = z floor(z) の細い帯など）で、別の見積もりで細かさを決め、
+        // 三角形の数にも上限を設ける（1 回目の格子や順番を変えないので、今まで描いていた面は、三角形の上限で落ちることもない）。
+        // 同じ枝を 2 つの部品に分けないのは、部品どうしがブロックの境目のあたりで重なり、同じ面を 2 回描いてしまうから
         let en = n.max(ENUM_N);
-        let est = 80.0 * blocks as f64 * (n as f64 / en as f64).powi(2);
-        let pn = if est > TARGET_PIECE_TRIANGLES {
-            ((n as f64 * (TARGET_PIECE_TRIANGLES / est).sqrt()) as usize).max(MIN_PIECE_N).min(n)
-        } else {
-            n
-        };
-        for g in group {
-            // 三角形が多すぎる（画面が固まる）ときも、残りの部品は描かない
-            if budget == 0 || parts.iter().map(|m| m.indices.len() / 3).sum::<usize>() > MAX_IMPLICIT_TRIANGLES {
-                truncated = true;
-                break;
+        let piece_n = |blocks: usize, target: f64| {
+            let est = 80.0 * blocks as f64 * (n as f64 / en as f64).powi(2);
+            if est > target {
+                ((n as f64 * (target / est).sqrt()) as usize).max(MIN_PIECE_N).min(n)
+            } else {
+                n
             }
-            budget -= 1;
-            let fz = f.frozen(&g.tau);
-            let conds = f.branch_conds(&g.tau);
-            let (subs, sub_changed) = fz.zero_factors();
-            let relaxed = f.frozen_relaxed(&g.tau);
-            let may_zero = |lo: [f64; 3], hi: [f64; 3]| {
-                relaxed.may_contain_zero(&[0, 1, 2].map(|a| crate::interval::Interval::new(lo[a], hi[a])))
-            };
-            let Some((sub_dom, sub_n, mask, tight)) = piece_grid(&g.blocks, (g.lo, g.hi), dom, en, pn, &may_zero) else {
-                continue;
-            };
-            for sub in &subs {
-                if sub.is_constant() {
+        };
+        let pns = [
+            piece_n(group.iter().map(|g| g.blocks.len()).sum(), TARGET_PIECE_TRIANGLES),
+            piece_n(group.iter().filter(|g| g.blocks.is_empty()).map(|g| g.extra.len()).sum(), TARGET_EXTRA_TRIANGLES),
+        ];
+        'pass: for (pass, &pn) in pns.iter().enumerate() {
+            let first = parts.iter().map(|m| m.indices.len() / 3).sum::<usize>();
+            for g in &group {
+                if (pass == 0) == g.blocks.is_empty() {
                     continue;
                 }
-                // 枝の部品は、作り直し（小さい図形・細い部分を探して細かくする処理）をしない。
-                // ブロックを絞ったせいで小さく見えるだけで、小さい図形ではない（1 つ 30 ms ほどかかる）
-                // 区間演算で面が無いと分かるブロックを外す（枝の範囲を面が通らない部品は、ここで終わる）
-                let mut mask = mask.clone();
-                if !prune_mask(sub, sub_dom, sub_n, tight, &mut mask) {
+                let mut blocks = g.blocks.clone();
+                blocks.extend_from_slice(&g.extra);
+                blocks.sort_unstable();
+                // 三角形が多すぎる（画面が固まる）ときも、残りの部品は描かない
+                let total = parts.iter().map(|m| m.indices.len() / 3).sum::<usize>();
+                if budget == 0 || total > MAX_IMPLICIT_TRIANGLES || (pass == 1 && total - first > MAX_EXTRA_TRIANGLES) {
+                    truncated = true;
+                    break 'pass;
+                }
+                budget -= 1;
+                let fz = f.frozen(&g.tau);
+                let conds = f.branch_conds(&g.tau);
+                let (subs, sub_changed) = fz.zero_factors();
+                let relaxed = f.frozen_relaxed(&g.tau);
+                let may_zero = |lo: [f64; 3], hi: [f64; 3]| {
+                    relaxed.may_contain_zero(&[0, 1, 2].map(|a| crate::interval::Interval::new(lo[a], hi[a])))
+                };
+                let Some((sub_dom, sub_n, mask, tight)) = piece_grid(&blocks, (g.lo, g.hi), dom, en, pn, &may_zero) else {
                     continue;
-                }
-                let mut m = mesh_masked(sub, sub_dom, sub_n, Refine::Off, Some(mask));
-                if m.indices.is_empty() {
-                    continue;
-                }
-                let mut defined: Vec<&Program> = Vec::new();
-                if sub_changed {
-                    defined.push(&fz);
-                }
-                if changed {
-                    defined.push(prog);
-                }
-                clip_piece(&mut m, sub, &conds, &defined, &nonzero, size);
-                if !m.indices.is_empty() {
-                    parts.push(m);
+                };
+                for sub in &subs {
+                    if sub.is_constant() {
+                        continue;
+                    }
+                    // 枝の部品は、作り直し（小さい図形・細い部分を探して細かくする処理）をしない。
+                    // ブロックを絞ったせいで小さく見えるだけで、小さい図形ではない（1 つ 30 ms ほどかかる）
+                    // 区間演算で面が無いと分かるブロックを外す（枝の範囲を面が通らない部品は、ここで終わる）
+                    let mut mask = mask.clone();
+                    if !prune_mask(sub, sub_dom, sub_n, tight, &mut mask) {
+                        continue;
+                    }
+                    let mut m = mesh_masked(sub, sub_dom, sub_n, Refine::Off, Some(mask));
+                    if m.indices.is_empty() {
+                        continue;
+                    }
+                    let mut defined: Vec<&Program> = Vec::new();
+                    if sub_changed {
+                        defined.push(&fz);
+                    }
+                    if changed {
+                        defined.push(prog);
+                    }
+                    clip_piece(&mut m, sub, &conds, &defined, &nonzero, size);
+                    if !m.indices.is_empty() {
+                        parts.push(m);
+                    }
                 }
             }
         }
@@ -374,8 +400,10 @@ fn prune_mask(prog: &Program, dom: Domain, n: usize, tight: Domain, mask: &mut [
 struct BranchGroup {
     /// 段差の元ごとの枝の番号
     tau: Vec<f64>,
-    /// この枝の格子点があるブロック（とその隣の 1 セル分）
+    /// この枝の格子点があり、厚みのある所のブロック（とその隣の 1 セル分）
     blocks: Vec<u32>,
+    /// 薄いが、枝の中を面が通るので描くブロック（`blocks` とは別の部品として、後から描く）
+    extra: Vec<u32>,
     /// この枝の格子点の数（多い順に描く）
     count: usize,
     /// この枝の格子点のある範囲（格子点の番号。両端を含む）
@@ -406,9 +434,16 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
     let xs: Vec<f64> = (0..m * m).map(|l| dom.at(0, (l % m) as f64, n)).collect();
     let ys: Vec<f64> = (0..m * m).map(|l| dom.at(1, (l / m) as f64, n)).collect();
     let mut last = NONE;
+    // 格子点ごとの F の値（符号だけを使う）
+    let mut fvals: Vec<f32> = vec![f32::NAN; m * m * m];
+    let mut fout = vec![C::new(0.0, 0.0); m * m];
     for kz in 0..m {
         let zs = vec![dom.at(2, kz as f64, n); m * m];
         let br = branch.eval(&[&xs, &ys, &zs], m * m);
+        f.eval_batch(&[&xs, &ys, &zs], &mut fout);
+        for (o, v) in fvals[m * m * kz..m * m * (kz + 1)].iter_mut().zip(&fout) {
+            *o = as_real(*v) as f32;
+        }
         for l in 0..m * m {
             let b = &br[l * k..(l + 1) * k];
             if b.iter().any(|v| !v.is_finite()) {
@@ -436,9 +471,11 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
             return None;
         }
     }
-    // 格子点ごとの「厚みのある所か」: 3 つの軸のどれでも、隣（前か後ろ）が同じ枝の点
+    // 格子点ごとの「厚みのある所か」: 3 つの軸のどれでも、隣（前か後ろ）が同じ枝の点。
+    // 「面が通る所か」: どれかの軸の隣が同じ枝の点で、F の符号がそこで変わる（枝の中で面が格子の辺を横切る）
     let strides = [1, m, m * m];
     let mut paired: Vec<bool> = vec![false; m * m * m];
+    let mut crossed: Vec<bool> = vec![false; m * m * m];
     let mut boxes: Vec<([u32; 3], [u32; 3])> = vec![([u32::MAX; 3], [0; 3]); taus.len()];
     for kz in 0..m {
         for jy in 0..m {
@@ -455,6 +492,14 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
                     bx.1[a] = bx.1[a].max(q[a] as u32);
                 }
                 paired[l] = (0..3).all(|a| (q[a] > 0 && ids[l - strides[a]] == id) || (q[a] + 1 < m && ids[l + strides[a]] == id));
+                let fl = fvals[l];
+                // 表示範囲の中の点だけ（格子は表示範囲の外側に 1 マス広げてある。外の切れ端のために枝を描かない）
+                crossed[l] = fl.is_finite()
+                    && q.iter().all(|&c| (1..m - 1).contains(&c))
+                    && (0..3).any(|a| {
+                        let other = |o: usize| ids[o] == id && fvals[o].is_finite() && (fvals[o] < 0.0) != (fl < 0.0);
+                        (q[a] > 0 && other(l - strides[a])) || (q[a] + 1 < m && other(l + strides[a]))
+                    });
             }
         }
     }
@@ -462,7 +507,9 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
     // そのうち厚みのある所の点が 3 割以上のブロック。薄い所（面が格子より細かく重なる所）は、ブロックごとに外す
     let mut blocks: Vec<Vec<u32>> = vec![Vec::new(); taus.len()];
     let mut seen_in: Vec<u32> = vec![0; taus.len()];
-    let mut cnt: Vec<(u32, u32)> = vec![(0, 0); taus.len()];
+    let mut cnt: Vec<(u32, u32, u32)> = vec![(0, 0, 0); taus.len()];
+    // 薄いが面が通るので描くかもしれないブロック（下で、同じ枝の隣のブロックを見て決める）
+    let mut rescued: Vec<Vec<u32>> = vec![Vec::new(); taus.len()];
     let mut here: Vec<u32> = Vec::new();
     let mut thin = false;
     for bk in 0..nb {
@@ -481,20 +528,26 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
                             }
                             if seen_in[id as usize] != bid + 1 {
                                 seen_in[id as usize] = bid + 1;
-                                cnt[id as usize] = (0, 0);
+                                cnt[id as usize] = (0, 0, 0);
                                 here.push(id);
                             }
                             cnt[id as usize].0 += 1;
                             cnt[id as usize].1 += paired[ix + row] as u32;
+                            cnt[id as usize].2 += crossed[ix + row] as u32;
                         }
                     }
                 }
                 // 格子の端のブロック（表示範囲の端で切れて薄くなっただけの所）は、「描けない部分」に数えない
                 let edge = [bi, bj, bk].iter().any(|&b| b == 0 || b + 1 == nb);
                 for &id in &here {
-                    let (all, solid) = cnt[id as usize];
+                    let (all, solid, cross) = cnt[id as usize];
+                    // 薄くても、枝の中で面が格子の辺を横切る所があれば描く（面に沿った向きにだけ薄い枝。
+                    // floor(x y) = z floor(z) の水平な細い帯など。面に垂直な向きに薄い枝（面が格子より細かく重なる所）では、
+                    // 同じ枝の隣の点がそもそも無いので、ここを通らない）
                     if 10 * solid >= 3 * all {
                         blocks[id as usize].push(bid);
+                    } else if cross > 0 {
+                        rescued[id as usize].push(bid);
                     } else {
                         thin |= !edge;
                     }
@@ -502,10 +555,37 @@ fn branch_groups(f: &Program, dom: Domain, n: usize) -> Option<(Vec<BranchGroup>
             }
         }
     }
+    // 薄いが面が通るブロックは、同じ枝の描くブロック（どちらの種類でも）が隣（26 方向）にあるときだけ描く。
+    // 細い帯は長く続くので隣が見つかる。面が格子とほぼ同じ間隔で重なる密な層では、面が通るブロックが
+    // ぽつんと 1 つだけになることがあり、それを描くと、層の一部だけが浮いた切れ端になる（mod(x y, z) = 0 の x y = −23 z など）
+    let mut extra: Vec<Vec<u32>> = vec![Vec::new(); taus.len()];
+    for (id, res) in rescued.iter().enumerate() {
+        if res.is_empty() {
+            continue;
+        }
+        let have: crate::adaptive::HashSet<u32> = blocks[id].iter().chain(res).copied().collect();
+        let near = |b: u32, have: &crate::adaptive::HashSet<u32>| {
+            let b = b as usize;
+            let k = [b % nb, (b / nb) % nb, b / (nb * nb)];
+            (0..27).any(|d| {
+                let o = [d % 3, d / 3 % 3, d / 9];
+                if o == [1, 1, 1] {
+                    return false;
+                }
+                let q = [0, 1, 2].map(|a| (k[a] + o[a]).wrapping_sub(1));
+                q.iter().all(|&c| c < nb) && have.contains(&((q[0] + nb * (q[1] + nb * q[2])) as u32))
+            })
+        };
+        let keep: Vec<u32> = res.iter().copied().filter(|&b| near(b, &have)).collect();
+        if keep.len() < res.len() {
+            thin = true;
+        }
+        extra[id] = keep;
+    }
     let mut out: Vec<BranchGroup> = Vec::new();
-    for (id, (tau, blocks)) in taus.into_iter().zip(blocks).enumerate() {
-        if !blocks.is_empty() {
-            out.push(BranchGroup { tau, blocks, count: counts[id], lo: boxes[id].0, hi: boxes[id].1 });
+    for (id, ((tau, blocks), extra)) in taus.into_iter().zip(blocks).zip(extra).enumerate() {
+        if !blocks.is_empty() || !extra.is_empty() {
+            out.push(BranchGroup { tau, blocks, extra, count: counts[id], lo: boxes[id].0, hi: boxes[id].1 });
         }
     }
     // 格子点の多い順（同じ数なら見つけた順。毎回同じ並びにする）
@@ -571,6 +651,97 @@ fn project_to_surface(surf: &Program, pts: &[[f64; 3]], normals: Option<&[f32]>,
     cur
 }
 
+/// 細かく分ける回数の上限（1 回で辺の長さが半分）
+const SPLIT_ROUNDS: usize = 3;
+
+/// 条件の範囲をまたぐ三角形（ある頂点では下の端より下、別の頂点では上の端より上）を、辺の中点で分ける（[`SPLIT_ROUNDS`] 回まで）。
+///
+/// 切り取りは頂点ごとに条件を調べるので、条件の範囲が三角形より細い所（`floor(x y) = z floor(z)` の帯 i ≤ x y < i + 1 は、
+/// x = 10 で幅 0.1。細かさ 80 のマスは 0.25）は、範囲の中に頂点が 1 つも無いと、三角形ごと捨てられていた。
+/// 分けるのは辺ごとに決め、その辺を持つ三角形は全部同じ中点で分ける（隣の三角形と頂点を共有して、継ぎ目に隙間を作らない）。
+/// 中点は辺の上（面の上に寄せない）。法線は両端の間を取る
+fn split_straddling(mesh: &mut Mesh, conds: &[Cond]) {
+    if conds.is_empty() {
+        return;
+    }
+    let pos = |m: &Mesh, v: usize| [0, 1, 2].map(|a| m.positions[3 * v + a] as f64);
+    let has_normals = mesh.normals.len() == mesh.positions.len();
+    // 頂点ごとの条件の値（条件ごと）
+    let mut vals: Vec<Vec<f64>> = vec![Vec::new(); conds.len()];
+    for _ in 0..SPLIT_ROUNDS {
+        let count = mesh.positions.len() / 3;
+        let done = vals[0].len();
+        if done < count {
+            let new: Vec<[f64; 3]> = (done..count).map(|v| pos(mesh, v)).collect();
+            for (c, v) in conds.iter().zip(vals.iter_mut()) {
+                v.extend(eval_at(&c.prog, &new));
+            }
+        }
+        // 分ける辺: 範囲をまたぐ三角形の 3 本の辺
+        let straddles = |t: &[u32]| {
+            conds.iter().zip(&vals).any(|(c, v)| {
+                let s = t.iter().map(|&k| v[k as usize]);
+                let (lo, hi) = s.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| (a.min(x), b.max(x)));
+                lo.is_finite() && hi.is_finite() && lo < c.lo && hi > c.hi
+            })
+        };
+        let mut mid: crate::adaptive::HashMap<(u32, u32), u32> = Default::default();
+        for t in mesh.indices.chunks_exact(3) {
+            if straddles(t) {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    mid.insert((a.min(b), a.max(b)), NONE);
+                }
+            }
+        }
+        if mid.is_empty() {
+            return;
+        }
+        // 中点を足す（毎回同じ番号になるよう、辺の番号順に）
+        let mut keys: Vec<(u32, u32)> = mid.keys().copied().collect();
+        keys.sort_unstable();
+        for (a, b) in keys {
+            let (p, q) = (pos(mesh, a as usize), pos(mesh, b as usize));
+            let id = mesh.push_vertex([0, 1, 2].map(|k| 0.5 * (p[k] + q[k])));
+            if has_normals {
+                let n: [f32; 3] = [0, 1, 2].map(|k| mesh.normals[3 * a as usize + k] + mesh.normals[3 * b as usize + k]);
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-30);
+                mesh.normals.extend(n.map(|c| c / len));
+            }
+            mid.insert((a, b), id);
+        }
+        let m = |a: u32, b: u32| mid.get(&(a.min(b), a.max(b))).copied();
+        let mut out: Vec<u32> = Vec::with_capacity(mesh.indices.len() * 2);
+        for t in mesh.indices.chunks_exact(3) {
+            // 分ける辺の並びが決まった形になるよう回す（向きは保つ）
+            let rot = |r: usize| [t[r % 3], t[(r + 1) % 3], t[(r + 2) % 3]];
+            let split = |v: [u32; 3]| [m(v[0], v[1]), m(v[1], v[2]), m(v[2], v[0])];
+            match split(rot(0)).iter().filter(|x| x.is_some()).count() {
+                0 => out.extend_from_slice(t),
+                3 => {
+                    let [a, b, c] = rot(0);
+                    let [ab, bc, ca] = split(rot(0)).map(|x| x.unwrap_or(NONE));
+                    out.extend_from_slice(&[a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca]);
+                }
+                1 => {
+                    // 分ける辺を a-b にする
+                    let r = (0..3).find(|&r| split(rot(r))[0].is_some()).unwrap_or(0);
+                    let [a, b, c] = rot(r);
+                    let ab = split(rot(r))[0].unwrap_or(NONE);
+                    out.extend_from_slice(&[a, ab, c, ab, b, c]);
+                }
+                _ => {
+                    // 分けない辺を c-a にする
+                    let r = (0..3).find(|&r| split(rot(r))[2].is_none()).unwrap_or(0);
+                    let [a, b, c] = rot(r);
+                    let [ab, bc, _] = split(rot(r)).map(|x| x.unwrap_or(NONE));
+                    out.extend_from_slice(&[ab, b, bc, a, ab, bc, a, bc, c]);
+                }
+            }
+        }
+        mesh.indices = out;
+    }
+}
+
 /// 面 `surf` = 0 のメッシュから、条件に合う部分だけを残す。
 /// - `conds`: 全部が成り立つ所だけ残す（その枝にいる所）
 /// - `defined`: 全部の式の値が有限な所だけ残す（元の式が定義される所）
@@ -581,10 +752,11 @@ fn project_to_surface(surf: &Program, pts: &[[f64; 3]], normals: Option<&[f32]>,
 /// そこで頂点を面の上に寄せてから調べ、境目からのずれが丸め誤差ほどなら、境目の上にあるとみなす
 /// （境目を含む条件なら成り立ち、含まない条件なら成り立たない）
 fn clip_piece(mesh: &mut Mesh, surf: &Program, conds: &[Cond], defined: &[&Program], nonzero: &[&Program], size: f64) {
-    let count = mesh.positions.len() / 3;
-    if count == 0 || (conds.is_empty() && defined.is_empty() && nonzero.is_empty()) {
+    if mesh.positions.is_empty() || (conds.is_empty() && defined.is_empty() && nonzero.is_empty()) {
         return;
     }
+    split_straddling(mesh, conds);
+    let count = mesh.positions.len() / 3;
     let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
     let mut inside = vec![true; count];
     // 境目が面に重なっていない条件（辺の上で境目を探すときに調べる）
@@ -1032,6 +1204,39 @@ mod tests {
                 }
             }
             assert!(all > 300 && missing * 50 <= all, "細かさ {n}: {all} 点のうち {missing} 点が欠けている");
+        }
+    }
+
+    #[test]
+    fn thin_bands_are_drawn() {
+        // floor(x y) = z floor(z) の面は、z ∈ [k, k + 1) で高さ z = i/k（k² ≤ i < k² + k）の水平な帯 i ≤ x y < i + 1。
+        // 帯は x = 10 で幅 0.1 と、格子（細かさ 80 で 0.25）より細い。枝は横に薄いが、面に垂直な向き（z）には厚いので描ける。
+        // 前は「薄い枝」として描かず、描いても帯の中に頂点の無い三角形を捨てていたので、本当の面の 8 割が欠けていた
+        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let p = prog("floor(x y) - z floor(z)");
+        for (n, need) in [(80usize, 0.75), (24, 0.75)] {
+            let m = implicit_solid_opt(&p, d, n, &[], 0, Refine::Light);
+            let near = near_fn(&m, 0.1);
+            let (mut all, mut hit) = (0, 0);
+            for k in 1..=5i64 {
+                for i in k * k..k * k + k {
+                    let z = i as f64 / k as f64;
+                    for s in 0..40 {
+                        // 帯の真ん中の線 x y = i + 0.5 の上の点
+                        let x = 1.0 + 8.5 * s as f64 / 40.0;
+                        let y = (i as f64 + 0.5) / x;
+                        if y.abs() > 9.5 || z > 5.5 {
+                            continue;
+                        }
+                        for (px, py) in [(x, y), (-x, -y), (y, x)] {
+                            all += 1;
+                            hit += near([px, py, z]) as usize;
+                        }
+                    }
+                }
+            }
+            assert!(all > 1000, "{all}");
+            assert!(hit as f64 >= need * all as f64, "細かさ {n}: {all} 点のうち {hit} 点しか描けていない");
         }
     }
 
