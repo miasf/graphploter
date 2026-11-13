@@ -230,6 +230,13 @@ export interface MeshData {
   params: string[]
   /** 媒介変数の範囲の長さ */
   paramSpan: ParamSpan
+  /**
+   * 頂点に掛ける 1 次式 q = M p + t（[M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂] の 12 個）。回す前の形で作った陰関数だけ。
+   * 描画側は 3D オブジェクトにこれを掛ける（回転だけが変わったときは、メッシュを作り直さず、これだけが届く）。無ければ null
+   */
+  transform: Float64Array | null
+  /** true なら形は前と同じで、transform だけが新しい（メッシュの配列は空） */
+  transformOnly: boolean
 }
 
 // ---- Web Worker とのやりとり ----

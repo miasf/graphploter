@@ -1066,6 +1066,29 @@ export class Viewer {
     this.setStyle(id, style)
   }
 
+  /**
+   * 曲面の 3D オブジェクトに 1 次式 q = M p + t を掛ける（[M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂] の 12 個。null なら掛けない）。
+   * 回す前の形で作った陰関数は、回転だけが変わったら、形を作り直さずにこれだけを変えて描く（GPU で回す）。
+   * 格子線は表示中の座標で引く（uGridWorld）。表示範囲・切り口で切り落とす平面は、もともと表示中の座標
+   */
+  setPlotTransform(id: number, t: ArrayLike<number> | null) {
+    const p = this.plots.get(id)
+    if (!p || p.kind !== 'surface') return
+    const main = p.group.children[0] as THREE.Mesh
+    if (t && t.length === 12) {
+      main.matrixAutoUpdate = false
+      main.matrix.set(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1)
+      main.matrixWorldNeedsUpdate = true
+      p.grid.uGridWorld.value = 1
+    } else if (!main.matrixAutoUpdate) {
+      main.matrix.identity()
+      main.matrixAutoUpdate = true
+      main.matrixWorldNeedsUpdate = true
+      p.grid.uGridWorld.value = 0
+    }
+    this.dirty = true
+  }
+
   // ---- 切り口 ----
 
   /** 曲面・曲線・ふたの材質に、切り落とす平面を設定し直す */

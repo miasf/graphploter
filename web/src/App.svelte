@@ -678,7 +678,9 @@
     item.paramSpan = res.mesh.paramSpan
     item.kind = res.kind
     const s0 = performance.now()
-    viewer.setPlot(item.id, res.mesh, item)
+    // 回す前の形で作った陰関数で、回転だけが変わった: 形はそのままで、3D オブジェクトの向きだけを変える
+    if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
+    viewer.setPlotTransform(item.id, res.mesh.transform)
     viewer.setCap(item.id, res.cap, item)
     lastBreakdown.set(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
@@ -690,7 +692,10 @@
       : res.mesh.curve
       ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
-    item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
+    // 回転だけを変えた（形はそのまま）なら、三角形の数は前の表示のまま
+    if (res.mesh.transformOnly) {
+      if (item.info) item.info = item.info.replace(/ · [\d.]+ ms/, ` · ${res.ms.toFixed(0)} ms`)
+    } else item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
     if (preview !== null) {
       // 2段階の表示: 粗い版を出したので、続けて細かく計算する（終わったら1回だけ差し替える）
       item.info += ' · 計算中'

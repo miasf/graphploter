@@ -41,6 +41,9 @@ pub struct MeshResult {
     explicit_used: Option<Vec<String>>,
     /// 回す前の形で作った陰関数（回転だけ変わったときに使い回す）と、式が使っている名前
     local: Option<(mesh::LocalMesh, Vec<String>)>,
+    /// 頂点に掛ける 1 次式 q = M p + t（[M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂] の 12 個）。
+    /// 回す前の形のメッシュを返したときだけ（[`Shape::local_mesh`]・[`Shape::transform`]）。描画側で 3D オブジェクトに掛ける
+    transform: Option<[f64; 12]>,
     /// 陰関数・範囲で重ねた立体なら、その中身（切り口のふたを作るため。リストなら複数）
     field: Option<(Vec<mesh::Field>, mesh::Domain)>,
     /// 媒介変数表示の立体（閉じた面）なら true。切り口のふたは描画側で作る
@@ -67,6 +70,11 @@ impl MeshResult {
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind.clone()
+    }
+    /// 頂点に掛ける 1 次式（12 個。[`MeshResult`] の transform を参照）。無ければ空
+    #[wasm_bindgen(getter)]
+    pub fn transform(&self) -> Vec<f64> {
+        self.transform.map_or_else(Vec::new, |t| t.to_vec())
     }
     /// 媒介変数の名前（カンマ区切り）。例: "t"（曲線）, "u,v"（曲面）, ""（媒介変数表示でない）
     #[wasm_bindgen(getter)]
@@ -414,7 +422,6 @@ pub fn plot(
     };
     let built = build(&plot, &ctx).map_err(|e| JsError::new(&e))?;
     let mut inner = match &built.shape {
-        None if built.local.is_some() => built.local.as_ref().map(|l| l.0.project(&ctx.view)).unwrap_or_default(),
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
             if flat {
@@ -440,6 +447,7 @@ pub fn plot(
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
         shape: built.shape,
         local: built.local,
+        transform: None,
         field: (!built.fields.is_empty()).then_some((built.fields, dom)),
         explicit_used,
         kind: built.kind,
@@ -553,11 +561,9 @@ struct Built {
 }
 
 impl Built {
-    /// 回す前の形で作った陰関数を、今の回転で回したメッシュにする（使い回さない道で使う）
-    fn settle(mut self, view: &mesh::View) -> Built {
-        if let Some((l, _)) = self.local.take() {
-            self.inner = l.project(view);
-        }
+    /// 回す前の形を捨てる（リスト・2D 表示では使い回さない。表示するメッシュは別に作ってある）
+    fn settle(mut self) -> Built {
+        self.local = None;
         self
     }
 }
@@ -573,7 +579,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     }
     if let P::Multi(ps) = plot {
         // 回す前の形で作った陰関数は、リストでは使い回さない（今の回転で回したメッシュにする）
-        let parts = ps.iter().map(|p| build(p, ctx).map(|b| b.settle(&ctx.view))).collect::<Result<Vec<_>, _>>()?;
+        let parts = ps.iter().map(|p| build(p, ctx).map(Built::settle)).collect::<Result<Vec<_>, _>>()?;
         // 2D の切り口では、媒介変数表示の曲面も（射影した後で）線になる
         let line = |b: &Built| b.curve || (ctx.flat_slice && b.shape.is_some());
         let curve = parts.first().is_some_and(line);
@@ -670,22 +676,21 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 ctx.refine,
             );
         }
-        // 回転が表示中の座標どうしだけの陰関数: 回す前の F で、回転の中心から表示範囲の角までの距離 ρ の立方体に
-        // メッシュを作っておき、回して描く（回した陽関数と同じ）。角度が変わっても F を計算し直さない。
-        // 格子の間隔は、表示範囲の一番狭い座標と同じにする（重くなりすぎないよう、細かさは 2 倍まで。
-        // 広いほうの座標に合わせると、x^2 y^2 + y^2 z^2 + z^2 x^2 = 1 の細い腕が 1 割以上欠ける）。
-        // 回転だけが変わった依頼（FLAG_LOCAL）でだけ使う（式・スライダーが変わるたびにこの広さで作ると、今までより何倍も遅い）。
+        // 回転が表示中の座標どうしだけの陰関数で、回転だけが変わった依頼（FLAG_LOCAL）: 表示するのは今までどおり、回した F で表示範囲に
+        // 作ったメッシュ。それとは別に、回す前の F で、回転の中心から表示範囲の角までの距離 ρ の立方体にメッシュを作っておく
+        // （[`mesh::LocalMesh`]）。次に回転を再生・ドラッグするときは、これを描画側で 3D オブジェクトとして回すだけで描ける。
+        // 動いている間だけ使うので、格子のマスの数は表示範囲と同じにする（マスは表示範囲より 1.5〜2.5 倍大きい。法線は式の勾配から
+        // 求めるので、光の当たり方は止まったときとそろう）。細かくすると、止まったときの計算と三角形の数が何倍にもなる
+        // （ジャイロイドで 0.1 → 1 秒、17 万 → 125 万個）。
         // 段差のある式（floor・mod など）は使わない: 格子より薄い枝を描かない判定が範囲全体で決まるので、
         // 広い範囲で作ると、表示範囲の中の枝まで消えることがある（mod(x y z, 4) = 2 で 6 割欠けた）
         P::Implicit { prog, local: Some(lp), .. } if ctx.local && lp.branch_sites() == 0 => {
-            let ext = rotated_domain(space, dom);
-            let width = (0..3).map(|a| dom.hi[a] - dom.lo[a]).fold(f64::INFINITY, f64::min);
-            let k = ((ext.hi[0] - ext.lo[0]) / width).clamp(1.0, 2.0);
-            let n = ((ctx.implicit_resolution as f64 * k).round() as usize).min(300);
-            let mut m = mesh::implicit_solid_opt(lp, ext, n, &[], 0, ctx.implicit_refine);
-            mesh::add_cluster_lod(&mut m);
-            b.kind.push_str(&m.note);
+            b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
+            b.kind.push_str(&b.inner.note);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
+            let ext = rotated_domain(space, dom);
+            let mut m = mesh::implicit_solid_opt(lp, ext, ctx.implicit_resolution, &[], 0, mesh::Refine::Light);
+            mesh::add_cluster_lod(&mut m);
             let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
             b.local = Some((local, lp.used_params().to_vec()));
         }
@@ -777,7 +782,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     // 投影: 3次元の図形を作ってから、縦の座標を 0 にする（z = f(x, y) は値で塗り分ける）
     if !ctx.flat_slice && uses_vertical && !matches!(plot, P::Explicit { axis: 2, .. }) {
         let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
-        let mut b = build(plot, &ctx3)?.settle(&ctx.view);
+        let mut b = build(plot, &ctx3)?.settle();
         b.kind = format!("{}の投影", b.kind);
         b.fields.clear();
         if b.shape.is_none() {
@@ -902,6 +907,93 @@ impl Shape {
     ) -> Result<MeshResult, JsError> {
         let start = timing::now_ms();
         timing::reset();
+        let (view, dom) = self.view_for(domain, dims, axes, rotation, center, perspective)?;
+        let (mut inner, field, solid) = match (&self.inner, &self.local) {
+            (Some(sh), _) => (mesh::project(sh, &view, dom), None, sh.solid),
+            (None, Some(l)) => {
+                let field = (!self.flat).then(|| (vec![l.field(&view, dom)], dom));
+                (l.project(&view), field, false)
+            }
+            (None, None) => return Err(JsError::new("RECOMPUTE")),
+        };
+        if self.flat {
+            inner = flat_finish(inner, self.curve, self.flat_slice);
+        }
+        let end = timing::now_ms();
+        record_stats(&mut inner, start, end, end);
+        Ok(self.result(inner, field, solid && !self.flat, None))
+    }
+
+    /// 回す前の形で作った陰関数で、2D 表示でないなら true。メッシュを作り直さず、描画側で
+    /// [`Shape::local_mesh`] のメッシュに [`Shape::transform`] の 1 次式を掛けて描ける
+    #[wasm_bindgen(getter)]
+    pub fn rigid(&self) -> bool {
+        self.local.is_some() && !self.flat
+    }
+
+    /// 回す前の形のメッシュ（[`Shape::rigid`] のときだけ）
+    pub fn local_mesh(&self) -> Option<MeshResult> {
+        let l = self.local.as_ref().filter(|_| !self.flat)?;
+        let space = equation::Space::basic(l.dims, l.axes, vec![0.0; l.dims]);
+        Some(self.result(l.project(&space.view(0.0)), None, false, None))
+    }
+
+    /// 回転だけを変えたときの、頂点に掛ける 1 次式（結果の `transform`）と切り口のふたの元（`take_field`）。メッシュは空。
+    /// 引数の意味は [`Shape::project`] と同じ（遠近法は使わない）。回せないときは "RECOMPUTE" のエラー
+    pub fn transform(&self, domain: &[f64], dims: u32, axes: &[u32], rotation: &[f64], center: &[f64]) -> Result<MeshResult, JsError> {
+        let start = timing::now_ms();
+        timing::reset();
+        let Some(l) = self.local.as_ref().filter(|_| !self.flat) else {
+            return Err(JsError::new("RECOMPUTE"));
+        };
+        let (view, dom) = self.view_for(domain, dims, axes, rotation, center, 0.0)?;
+        let (m, t) = l.affine(&view);
+        let tr = [m[0][0], m[0][1], m[0][2], t[0], m[1][0], m[1][1], m[1][2], t[1], m[2][0], m[2][1], m[2][2], t[2]];
+        let mut inner = mesh::Mesh::default();
+        let end = timing::now_ms();
+        record_stats(&mut inner, start, end, end);
+        Ok(self.result(inner, Some((vec![l.field(&view, dom)], dom)), false, Some(tr)))
+    }
+
+    /// 結果の入れ物（式の説明などは、この形のものを使う）
+    fn result(
+        &self,
+        inner: mesh::Mesh,
+        field: Option<(Vec<mesh::Field>, mesh::Domain)>,
+        solid: bool,
+        transform: Option<[f64; 12]>,
+    ) -> MeshResult {
+        MeshResult {
+            inner,
+            flat: self.flat,
+            flat_slice: self.flat_slice,
+            solid,
+            field,
+            shape: None,
+            local: None,
+            transform,
+            explicit_used: None,
+            kind: self.kind.clone(),
+            params: self.params.clone(),
+            curve: self.curve || self.flat_slice,
+            shape_curve: self.curve,
+            used_params: self.used_params.clone(),
+            param: None,
+        }
+    }
+}
+
+impl Shape {
+    /// 回転・射影の設定と表示範囲。回した陽関数・回す前の形で作った陰関数で、回転が条件を外れたら "RECOMPUTE" のエラー
+    fn view_for(
+        &self,
+        domain: &[f64],
+        dims: u32,
+        axes: &[u32],
+        rotation: &[f64],
+        center: &[f64],
+        perspective: f64,
+    ) -> Result<(mesh::View, mesh::Domain), JsError> {
         let n = dims as usize;
         let rn = equation::rot_dims(n);
         let dims_of = self.inner.as_ref().map_or_else(|| self.local.as_ref().map_or(0, |l| l.dims), |s| s.dims);
@@ -919,36 +1011,7 @@ impl Shape {
             }
         }
         let dom = mesh::Domain { lo: [domain[0], domain[2], domain[4]], hi: [domain[1], domain[3], domain[5]] };
-        let view = space.view(perspective);
-        let (mut inner, field, solid) = match (&self.inner, &self.local) {
-            (Some(sh), _) => (mesh::project(sh, &view, dom), None, sh.solid),
-            (None, Some(l)) => {
-                let field = (!self.flat).then(|| (vec![l.field(&view, dom)], dom));
-                (l.project(&view), field, false)
-            }
-            (None, None) => return Err(JsError::new("RECOMPUTE")),
-        };
-        if self.flat {
-            inner = flat_finish(inner, self.curve, self.flat_slice);
-        }
-        let end = timing::now_ms();
-        record_stats(&mut inner, start, end, end);
-        Ok(MeshResult {
-            inner,
-            flat: self.flat,
-            flat_slice: self.flat_slice,
-            solid: solid && !self.flat,
-            field,
-            shape: None,
-            local: None,
-            explicit_used: None,
-            kind: self.kind.clone(),
-            params: self.params.clone(),
-            curve: self.curve || self.flat_slice,
-            shape_curve: self.curve,
-            used_params: self.used_params.clone(),
-            param: None,
-        })
+        Ok((space.view(perspective), dom))
     }
 }
 
@@ -999,6 +1062,7 @@ impl CapSource {
             shape: None,
             explicit_used: None,
             local: None,
+            transform: None,
             field: None,
             solid: false,
             flat: false,

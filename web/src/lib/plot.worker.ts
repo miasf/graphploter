@@ -18,7 +18,7 @@ import init, {
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -59,14 +59,27 @@ function range(
  * 式・範囲・パラメータなど「点の計算に関わる入力」が同じなら、回転・表示する軸が変わっても
  * 式を計算し直さず、射影し直すだけで済む（回転のスライダーが軽く動く）。
  */
-const shapes = new Map<number, { key: string; shape: Shape; refined: boolean; ires: number; thorough: boolean }>()
+const shapes = new Map<
+  number,
+  {
+    key: string
+    shape: Shape
+    refined: boolean
+    ires: number
+    thorough: boolean
+    /** 回す前の形で作った陰関数（rigid）で、そのメッシュを画面側に送ってあるか（送ってあれば、回転が変わっても 1 次式だけ送る） */
+    localShown: boolean
+  }
+>()
 
 /**
  * 点の計算に関わる入力（回転は含めない）。
  * 回転した陽関数から作った点（view が true）は、表示する軸・断面の値・回転の中心にもよる
  */
-function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[]): string {
-  const { source, domain, resolution, ranges, params, stacks, space } = req
+function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges: number[], rigid = false): string {
+  const { source, domain, ranges, params, stacks, space } = req
+  // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
+  const resolution = rigid ? 0 : req.resolution
   const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
@@ -175,6 +188,8 @@ function capTransfer(cap: CapData | null): ArrayBuffer[] {
 function reusable(cached: NonNullable<ReturnType<typeof shapes.get>>, key: string, req: PlotRequest): boolean {
   const refine = (req.flags & PLOT_NO_REFINE) === 0
   if (cached.key !== key || !(cached.refined || !refine)) return false
+  // 回す前の形で作った陰関数は、動いている間だけ使う（止まったときは、表示範囲だけを細かく作った面を表示する）
+  if (cached.shape.rigid) return !refine
   if (!cached.shape.implicit || !refine) return true
   return cached.ires === req.implicitResolution && cached.thorough === ((req.flags & PLOT_THOROUGH) !== 0)
 }
@@ -212,7 +227,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       coordError = e
       coord = { ranges: space.ranges.flatMap(() => [NaN, NaN]), slice: [...space.slice] }
     }
-    const callPlot = () =>
+    const callPlot = (flags = req.flags) =>
       plot(
         source,
         domainArr,
@@ -241,12 +256,12 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.flat,
         req.layers,
         req.flatSlice,
-        req.flags,
+        flags,
       )
-    const key = (view: boolean) => shapeKey(req, view, coord.slice, coord.ranges)
+    const key = (view: boolean, rigid = false) => shapeKey(req, view, coord.slice, coord.ranges, rigid)
     const cached = shapes.get(itemId)
     // 覚えている形を回すだけで描けるなら、F の計算を分けない（計画の段階で「分けられない」と返す）
-    if (req.field?.mode === 'plan' && cached && reusable(cached, key(cached.shape.view_dependent), req)) {
+    if (req.field?.mode === 'plan' && cached && reusable(cached, key(cached.shape.view_dependent, cached.shape.rigid), req)) {
       const stage: FieldStageResponse = { requestId, ok: true, chunks: 0, values: null, ms: 0 }
       self.postMessage(stage)
       return
@@ -271,23 +286,41 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       return
     }
     let r: MeshResult | null = null
+    /** メッシュの配列を取り出す結果（回す前の形のメッシュを返すときは、r とは別） */
+    let geom: MeshResult | null = null
+    let localTransform: Float64Array | null = null
     let wall = 0 // 計算エンジンを呼んだ時間
     let reprojected = false // n 次元の点を使い回して、射影だけし直したか
     // 細かくしない依頼（再生・ドラッグ中）なら、細かくした点もそのまま使う（回転の再生で計算し直さない）。
     // 細かくする依頼なら、細かくしないで計算した点は使わない（止まったときに細かく計算し直す）
     const refine = (req.flags & PLOT_NO_REFINE) === 0
-    if (cached && reusable(cached, key(cached.shape.view_dependent), req)) {
+    // 回す前の形で作った陰関数は、メッシュを射影し直さず、描画側で 3D オブジェクトに掛ける 1 次式だけを返す
+    let transformOnly = false
+    const transformOf = (shape: Shape) =>
+      shape.transform(domainArr, space.dims, new Uint32Array(space.axes), new Float64Array(space.rotation), new Float64Array(space.center))
+    if (cached && reusable(cached, key(cached.shape.view_dependent, cached.shape.rigid), req)) {
       // 点は計算済み: 回転・射影だけし直す
       const w0 = performance.now()
       try {
-        r = cached.shape.project(
-          domainArr,
-          space.dims,
-          new Uint32Array(space.axes),
-          new Float64Array(space.rotation),
-          new Float64Array(space.center),
-          space.perspective,
-        )
+        if (cached.shape.rigid) {
+          r = transformOf(cached.shape)
+          if (cached.localShown) transformOnly = true
+          else {
+            // 画面側には、止まったときの面（表示範囲だけを細かく作ったもの）がある。回す前の形のメッシュを 1 回だけ送る
+            geom = cached.shape.local_mesh() ?? null
+            localTransform = new Float64Array(r.transform)
+            cached.localShown = true
+          }
+        } else {
+          r = cached.shape.project(
+            domainArr,
+            space.dims,
+            new Uint32Array(space.axes),
+            new Float64Array(space.rotation),
+            new Float64Array(space.center),
+            space.perspective,
+          )
+        }
       } catch {
         r = null // 回転した陽関数で、回転が条件を外れた（傾いた座標系の陽関数・陰関数として計算し直す）
       }
@@ -306,17 +339,30 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       const w0 = performance.now()
       // ほかの Worker が計算した F の値を使ってメッシュを作る（計算し直すときだけ。使い回すときに入れると、次の計算に残る）
       if (req.field?.mode === 'given') field_mode_given(req.field.values)
-      r = callPlot()
+      // 止まったとき: 覚えている回す前の形（回転の再生用）がそのまま使えるなら、作り直さない（表示範囲の面だけ作る）
+      const thorough = (req.flags & PLOT_THOROUGH) !== 0
+      const keepLocal =
+        cached !== undefined &&
+        cached.shape.rigid &&
+        (req.flags & PLOT_LOCAL) !== 0 &&
+        cached.key === key(true, true) &&
+        cached.ires === implicitResolution &&
+        cached.thorough === thorough
+      r = callPlot(keepLocal ? req.flags & ~PLOT_LOCAL : req.flags)
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
         throw coordError // パラメータの定義ではなかった
       }
-      forget(itemId)
+      if (keepLocal && cached) {
+        // 画面側は表示範囲の面に戻るので、次に動かすときは回す前の形のメッシュを送り直す
+        cached.localShown = false
+        fields.get(itemId)?.source.free()
+        fields.delete(itemId)
+      } else forget(itemId)
       const shape = r.take_shape()
-      if (shape) {
-        const thorough = (req.flags & PLOT_THOROUGH) !== 0
-        shapes.set(itemId, { key: key(shape.view_dependent), shape, refined: refine, ires: implicitResolution, thorough })
+      if (shape && !keepLocal) {
+        shapes.set(itemId, { key: key(shape.view_dependent, shape.rigid), shape, refined: refine, ires: implicitResolution, thorough, localShown: false })
       }
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
@@ -334,16 +380,20 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     }
     const c0 = performance.now()
     // 配列は取り出して渡す（getter だと Rust 側の clone と JavaScript への写しで2回コピーになる）
+    const g = geom ?? r
+    const transform = transformOnly ? new Float64Array(r.transform) : localTransform
     const mesh = {
-      positions: r.take_positions(),
-      normals: r.take_normals(),
-      indices: r.take_indices(),
-      lodIndices: r.take_lod_indices(),
-      lod: r.has_lod_mesh
-        ? { positions: r.take_lod_positions(), normals: r.take_lod_normals(), indices: r.take_lod_mesh_indices() }
+      positions: g.take_positions(),
+      normals: g.take_normals(),
+      indices: g.take_indices(),
+      lodIndices: g.take_lod_indices(),
+      lod: g.has_lod_mesh
+        ? { positions: g.take_lod_positions(), normals: g.take_lod_normals(), indices: g.take_lod_mesh_indices() }
         : null,
-      gridCoords: r.take_grid_coords(),
-      complexValues: r.take_complex_values(),
+      gridCoords: g.take_grid_coords(),
+      complexValues: g.take_complex_values(),
+      transform,
+      transformOnly,
       curve: r.curve,
       solid: r.solid,
       heat: r.kind.includes('の値で塗り分け'),
@@ -362,6 +412,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const pv = r.param_value
     const param = r.param_name ? { name: r.param_name, re: pv[0], im: pv[1] } : null
     r.free() // Rust 側のメモリを解放
+    geom?.free()
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
     res = { requestId, ok: true, mesh, kind, ms: total, usedParams, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }

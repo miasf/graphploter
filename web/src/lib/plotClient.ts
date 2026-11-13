@@ -127,8 +127,9 @@ const lastInputs = new Map<number, string>()
 function markRotationOnly(req: PlotRequest) {
   const { requestId: _r, cut: _c, field: _f, space, ...rest } = req
   const { rotation: _rot, ...spaceRest } = space
-  // 細かさ・細かくしない印は、使い回す側（Worker）が見るので比べない（再生中に細かさが変わっても、回す前の形を作り直さない）
-  const inputs = JSON.stringify({ ...rest, implicitResolution: 0, flags: rest.flags & ~PLOT_NO_REFINE, space: spaceRest })
+  // 細かさ（陽関数・陰関数とも）・細かくしない印は、使い回す側（Worker）が見るので比べない（再生中・2 段階の表示で細かさが変わっても、
+  // 回転だけが変わったとみなす）
+  const inputs = JSON.stringify({ ...rest, resolution: 0, implicitResolution: 0, flags: rest.flags & ~PLOT_NO_REFINE, space: spaceRest })
   // 再生・ドラッグ中（PLOT_NO_REFINE）は作らない。回す前の形は表示範囲より広く細かく作るので、再生中の軽い計算の 8 倍ほどかかり、
   // 回し始めの 1 コマがカクッと止まる。回し始めは今までどおり軽く作り直し、止まったとき（細かく作る依頼）に作っておけば、
   // 次に回すときは Worker が覚えた形を回すだけで描ける（細かさが違っても、再生中なら使い回す）
