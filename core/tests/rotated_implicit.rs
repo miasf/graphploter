@@ -179,3 +179,67 @@ fn timing_report() {
         }
     }
 }
+
+/// 法線のずれ（`cargo test --release --test rotated_implicit normal_report -- --ignored --nocapture`）:
+/// 頂点の法線と、本当の面の向き（式の勾配を細かい刻みで求めたもの）の角度（度）。止まったとき（80）と再生中（24）
+#[test]
+#[ignore]
+fn normal_report() {
+    let cases = [
+        "x^2 + y^2 + z^2 = 25",
+        "(sqrt(x^2 + y^2) - 6)^2 + z^2 = 4",
+        "sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x) = 0",
+        "cos(x) + cos(y) + cos(z) = 0",
+        "((x/4)^2 + 9/4 (y/4)^2 + (z/4)^2 - 1)^3 - (x/4)^2 (z/4)^3 - 9/80 (y/4)^2 (z/4)^3 = 0",
+        "(x/4)^2 (y/4)^2 + (y/4)^2 (z/4)^2 + (z/4)^2 (x/4)^2 - (x/4) (y/4) (z/4) = 0",
+        "x^2 + y^2 = z^2",
+        "abs(x) + abs(y) + abs(z) = 6",
+        "x^8 + y^8 + z^8 = 5^8",
+    ];
+    println!("| 式 | 細かさ | 平均 ° | 95% ° | 最大 ° |");
+    println!("|---|---|---|---|---|");
+    for src in cases {
+        let prog = rotated_prog_none(src);
+        for (ires, flags) in [(80u32, 0u32), (24, 1)] {
+            let r = plot(
+                src, &DOMAIN, 150, ires, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+                &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, flags,
+            )
+            .unwrap_or_else(|_| panic!("{src}"));
+            let (pos, nrm) = (r.positions(), r.normals());
+            let mut errs: Vec<f64> = Vec::new();
+            let h = 1e-5;
+            for (p, n) in pos.chunks_exact(3).zip(nrm.chunks_exact(3)) {
+                if !inside(p) {
+                    continue;
+                }
+                let at = |d: [f64; 3]| {
+                    let mut o = [C::new(0.0, 0.0)];
+                    prog.eval_batch(&[&[p[0] as f64 + d[0]], &[p[1] as f64 + d[1]], &[p[2] as f64 + d[2]]], &mut o);
+                    o[0].re
+                };
+                let g = [0, 1, 2].map(|a| {
+                    let mut e = [0.0; 3];
+                    e[a] = h;
+                    (at(e) - at(e.map(|v| -v))) / (2.0 * h)
+                });
+                let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+                if !(len.is_finite() && len > 1e-9) {
+                    continue;
+                }
+                let d = ((g[0] * n[0] as f64 + g[1] * n[1] as f64 + g[2] * n[2] as f64) / len).abs().min(1.0);
+                errs.push(d.acos().to_degrees());
+            }
+            errs.sort_by(|a, b| a.total_cmp(b));
+            let mean = errs.iter().sum::<f64>() / errs.len().max(1) as f64;
+            let p95 = errs.get(errs.len() * 95 / 100).copied().unwrap_or(0.0);
+            let max = errs.last().copied().unwrap_or(0.0);
+            println!("| `{src}` | {ires} | {mean:.2} | {p95:.2} | {max:.1} |");
+        }
+    }
+}
+
+/// 回さない、表示中の座標の F
+fn rotated_prog_none(src: &str) -> eval::Program {
+    rotated_prog(src, &[0.0; 10])
+}

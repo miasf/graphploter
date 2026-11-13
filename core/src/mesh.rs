@@ -2027,12 +2027,61 @@ pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64
 /// [`implicit_solid`] で、格子より小さい図形を探して細かく作り直すか（`refine`）を選ぶ版
 pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize, refine: Refine) -> Mesh {
     // 式を変形して部品に分けられるなら、部品ごとに描く（因数・段差の枝。pieces.rs）
+    let mut mesh = None;
     if ranges.is_empty() && refine != Refine::Off {
-        if let Some(mesh) = pieces::implicit_by_pieces(prog, dom, n, refine) {
-            return mesh;
+        mesh = pieces::implicit_by_pieces(prog, dom, n, refine);
+    }
+    let mut mesh = mesh.unwrap_or_else(|| implicit_solid_with(prog, dom, n, ranges, samples, false, refine));
+    if ranges.is_empty() && refine != Refine::Off {
+        let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min) * 1e-3;
+        gradient_normals(&mut mesh, prog, h);
+        if let Some(l) = mesh.lod_mesh.as_deref_mut() {
+            gradient_normals(l, prog, h);
         }
     }
-    implicit_solid_with(prog, dom, n, ranges, samples, false, refine)
+    mesh
+}
+
+/// 頂点の法線を、式 F の勾配 ∇F の向きにする（刻み `h` の前進差分）。
+///
+/// 三角形の向きの平均（[`compute_normals`]）は、格子が粗いと本当の面の向きからずれる。再生・ドラッグ中は格子を粗くするので、
+/// 止まったときの細かい面と光の当たり方が大きく変わって見えた。勾配は格子の細かさによらないので、粗い面でも陰影がそろう。
+/// 勾配が当てにならない頂点（有限でない・ほとんど 0・三角形の向きの平均と 70° 以上違う。特異点・折れ目・極・値が飛ぶ所の近く）は、
+/// 三角形の向きの平均のままにする。向き（表裏）は三角形の向きの平均にそろえる（因数に分けた部品では F の勾配の符号が逆のことがある）
+fn gradient_normals(mesh: &mut Mesh, prog: &Program, h: f64) {
+    let count = mesh.positions.len() / 3;
+    if count == 0 || mesh.normals.len() != mesh.positions.len() || prog.vars().len() != 3 {
+        return;
+    }
+    // 頂点と、3 方向にずらした点（頂点ごとに そのまま, +x, +y, +z の順）。前進差分（中心差分の 6 回より軽い。刻みが小さいので十分）
+    let mut cols: [Vec<f64>; 3] = [Vec::with_capacity(4 * count), Vec::with_capacity(4 * count), Vec::with_capacity(4 * count)];
+    for p in mesh.positions.chunks_exact(3) {
+        for a in [3, 0, 1, 2] {
+            for (b, col) in cols.iter_mut().enumerate() {
+                col.push(p[b] as f64 + if a == b { h } else { 0.0 });
+            }
+        }
+    }
+    let mut out = vec![C::new(0.0, 0.0); 4 * count];
+    prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    let cos_limit = 70f64.to_radians().cos();
+    for k in 0..count {
+        let v = |i: usize| as_real(out[4 * k + i]);
+        let g = [0, 1, 2].map(|a| (v(a + 1) - v(0)) / h);
+        let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+        if !(len.is_finite() && len > 1e-12) {
+            continue;
+        }
+        let n = &mut mesh.normals[3 * k..3 * k + 3];
+        let d = (g[0] * n[0] as f64 + g[1] * n[1] as f64 + g[2] * n[2] as f64) / len;
+        if d.abs() < cos_limit {
+            continue;
+        }
+        let s = d.signum() / len;
+        for a in 0..3 {
+            n[a] = (g[a] * s) as f32;
+        }
+    }
 }
 
 /// 陰関数で、格子より小さい図形（小さい球・細い輪など）を探して、その所だけ細かく作り直すか（[`refine_components`]）
