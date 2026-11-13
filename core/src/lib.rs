@@ -41,6 +41,8 @@ pub struct MeshResult {
     explicit_used: Option<Vec<String>>,
     /// 回す前の形で作った陰関数（回転だけ変わったときに使い回す）と、式が使っている名前
     local: Option<(mesh::LocalMesh, Vec<String>)>,
+    /// 回す前の形を作れる陰関数か（[`plot`] の `flags` のビット 3 で作れる）
+    local_available: bool,
     /// 頂点に掛ける 1 次式 q = M p + t（[M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂] の 12 個）。
     /// 回す前の形のメッシュを返したときだけ（[`Shape::local_mesh`]・[`Shape::transform`]）。描画側で 3D オブジェクトに掛ける
     transform: Option<[f64; 12]>,
@@ -105,6 +107,12 @@ impl MeshResult {
     #[wasm_bindgen(getter)]
     pub fn param_value(&self) -> Vec<f64> {
         self.param.as_ref().map(|p| vec![p.1.re, p.1.im]).unwrap_or_default()
+    }
+    /// 回す前の形を作れる陰関数か（回転が表示中の座標どうしだけで、2D 表示でない）。そうなら、`flags` のビット 3 を付けて
+    /// もう一度 [`plot`] を呼ぶと、回す前の形だけを作る（`take_shape`）
+    #[wasm_bindgen(getter)]
+    pub fn local_available(&self) -> bool {
+        self.local_available
     }
     /// 媒介変数表示なら、回転・射影する前の形を取り出す（取り出せるのは1回だけ）。
     /// 回転・表示する軸・表示範囲だけが変わったときは、これの `project` で描き直せる
@@ -261,6 +269,7 @@ pub fn last_used_params() -> String {
 
 /// [`plot`] の `flags` のビット 0: 形が急に変わる所を細かくしない
 const FLAG_NO_REFINE: u32 = 1;
+/// [`plot`] の `flags` のビット 3: 陰関数の、回す前の形だけを作る
 const FLAG_LOCAL: u32 = 8;
 /// [`plot`] の `flags` のビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる）
 const FLAG_THOROUGH: u32 = 2;
@@ -294,8 +303,9 @@ const FLAG_EDGES: u32 = 4;
 ///   陰関数の、格子より小さい図形を細かく作り直すこともしない）。
 ///   ビット 1: 陰関数で、格子より小さい図形を念入りに探す（遅くなる）。
 ///   ビット 2: 媒介変数が 3 つ以上の図形を、面ではなく辺だけで描く。
-///   ビット 3: 回転が表示中の座標どうしだけの陰関数を、回す前の形で（表示範囲より広く）作り、回して描く。
-///   結果の `take_shape` を `Shape::project` すれば、回転が変わっても F を計算し直さない（回転だけが変わったときに使う）
+///   ビット 3: 回転が表示中の座標どうしだけの陰関数（結果の `local_available`）を、回す前の形で（表示範囲より広く）作る。
+///   表示する面は作らない（結果のメッシュは空）。結果の `take_shape` を回せば、回転が変わっても F を計算し直さない。
+///   表示する面とは別の呼び出しにしてあるのは、止まったときに表示する面を先に返し、回す前の形は後から作るため
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn plot(
@@ -459,6 +469,7 @@ pub fn plot(
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
             _ => None,
         },
+        local_available: !flat && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
     })
 }
 
@@ -538,7 +549,7 @@ struct Ctx<'a> {
     implicit_refine: mesh::Refine,
     /// 媒介変数が 3 つ以上の図形を、辺だけで描くか（[`plot`] の `flags` を参照）
     edges: bool,
-    /// 回転が表示中の座標どうしだけの陰関数を、回す前の形で作るか（[`plot`] の `flags` を参照）
+    /// 回転が表示中の座標どうしだけの陰関数の、回す前の形だけを作るか（[`plot`] の `flags` を参照）
     local: bool,
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
@@ -676,19 +687,17 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 ctx.refine,
             );
         }
-        // 回転が表示中の座標どうしだけの陰関数で、回転だけが変わった依頼（FLAG_LOCAL）: 表示するのは今までどおり、回した F で表示範囲に
-        // 作ったメッシュ。それとは別に、回す前の F で、回転の中心から表示範囲の角までの距離 ρ の立方体にメッシュを作っておく
-        // （[`mesh::LocalMesh`]）。次に回転を再生・ドラッグするときは、これを描画側で 3D オブジェクトとして回すだけで描ける。
+        // 回転が表示中の座標どうしだけの陰関数の、回す前の形だけを作る依頼（FLAG_LOCAL）: 回す前の F で、回転の中心から表示範囲の角までの
+        // 距離 ρ の立方体にメッシュを作る（[`mesh::LocalMesh`]）。表示する面（回した F で表示範囲に作るもの）は作らない（Worker が
+        // 先に別の呼び出しで作って返し、その後でこれを呼ぶ）。次に回転を再生・ドラッグするときは、これを描画側で 3D オブジェクトとして
+        // 回すだけで描ける。
         // 動いている間だけ使うので、格子のマスの数は表示範囲と同じにする（マスは表示範囲より 1.5〜2.5 倍大きい。法線は式の勾配から
         // 求めるので、光の当たり方は止まったときとそろう）。細かくすると、止まったときの計算と三角形の数が何倍にもなる
         // （ジャイロイドで 0.1 → 1 秒、17 万 → 125 万個）。
         // 段差のある式（floor・mod など）の枝は、立方体に内接する球（どの向きに回しても表示範囲が入る所）の中だけで調べる
         // （[`mesh::in_inscribed_ball`]）。角まで調べると、枝の数が部品の数の上限を超えて、表示範囲の中の枝まで描かなくなる
         // （mod(x, 2) + mod(y, 2) + mod(z, 2) = 2 で 2 割欠けた）
-        P::Implicit { prog, local: Some(lp), .. } if ctx.local => {
-            b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
-            b.kind.push_str(&b.inner.note);
-            b.fields.push(mesh::Field::new(prog, &[], 0, dom));
+        P::Implicit { local: Some(lp), .. } if ctx.local => {
             let ext = rotated_domain(space, dom);
             let mut m = mesh::in_inscribed_ball(|| {
                 mesh::implicit_solid_opt(lp, ext, ctx.implicit_resolution, &[], 0, mesh::Refine::Light)
@@ -982,6 +991,7 @@ impl Shape {
             shape_curve: self.curve,
             used_params: self.used_params.clone(),
             param: None,
+            local_available: false,
         }
     }
 }
@@ -1062,6 +1072,7 @@ impl CapSource {
             shape_curve: false,
             used_params: Vec::new(),
             param: None,
+            local_available: false,
             shape: None,
             explicit_used: None,
             local: None,

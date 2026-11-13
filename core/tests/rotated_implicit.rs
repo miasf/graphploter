@@ -94,7 +94,17 @@ fn reprojected_surface_matches_the_rotation() {
 #[test]
 fn plain_requests_keep_the_old_path() {
     // 印（flags のビット 3）の無い依頼は、回す前の形を作らない（今までどおり、回した式で作る）
-    assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.4, 0.2), 30, false).take_shape().is_none());
+    let mut plain = mesh("x^2 + y^2 + z^2 = 25", &angles(0.4, 0.2), 30, false);
+    assert!(plain.take_shape().is_none());
+    // 表示する面だけを作り、回す前の形を作れることを知らせる（Worker は面を先に返してから、印を付けてもう一度呼ぶ）
+    assert!(plain.local_available());
+    assert!(!plain.indices().is_empty());
+    // 印の付いた依頼は、回す前の形だけを作る（表示する面は作らない）
+    let mut only = mesh("x^2 + y^2 + z^2 = 25", &angles(0.4, 0.2), 30, true);
+    assert!(only.indices().is_empty());
+    assert!(only.take_shape().is_some_and(|s| s.rigid()));
+    // 陽関数（回すと形の点を使い回す、別の道）は、回す前の陰関数の形を作らない
+    assert!(!mesh("z = x y / 10", &angles(0.4, 0.2), 30, false).local_available());
     // 回転が無ければ、印があっても今までどおり
     assert!(mesh("x^2 + y^2 + z^2 = 25", &angles(0.0, 0.0), 30, true).take_shape().is_none());
 }

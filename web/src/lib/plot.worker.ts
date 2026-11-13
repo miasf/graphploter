@@ -73,6 +73,14 @@ const shapes = new Map<
 >()
 
 /**
+ * 表示する面を返した後に作る、回す前の形（陰関数）の予約。式ごとに、作る関数。
+ * 止まったとき（回転だけが変わった、細かく作る依頼）は、表示する面を先に返して、回す前の形はその後で作る
+ * （回す前の形は表示範囲より広く作るので、表示する面の 0.5〜2 倍かかる。止まってから面が出るまでを今までどおりにする）。
+ * 作る前に同じ式の新しい依頼が来たら、作らない（その依頼が今の形を決める）
+ */
+const localJobs = new Map<number, () => void>()
+
+/**
  * 点の計算に関わる入力（回転は含めない）。
  * 回転した陽関数から作った点（view が true）は、表示する軸・断面の値・回転の中心にもよる
  */
@@ -205,6 +213,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     return
   }
   const req = ev.data
+  localJobs.delete(req.itemId)
   const { requestId, itemId, source, domain: d, resolution, implicitResolution, ranges, params, space, stacks } = req
   await ready
 
@@ -227,7 +236,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       coordError = e
       coord = { ranges: space.ranges.flatMap(() => [NaN, NaN]), slice: [...space.slice] }
     }
-    const callPlot = (flags = req.flags) =>
+    // 回す前の形だけを作る印（PLOT_LOCAL）は、ふつうの呼び出しでは外す（回す前の形は、面を返した後に別に作る）
+    const callPlot = (flags = req.flags & ~PLOT_LOCAL) =>
       plot(
         source,
         domainArr,
@@ -348,7 +358,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         cached.key === key(true, true) &&
         cached.ires === implicitResolution &&
         cached.thorough === thorough
-      r = callPlot(keepLocal ? req.flags & ~PLOT_LOCAL : req.flags)
+      r = callPlot()
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
@@ -363,6 +373,25 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       const shape = r.take_shape()
       if (shape && !keepLocal) {
         shapes.set(itemId, { key: key(shape.view_dependent, shape.rigid), shape, refined: refine, ires: implicitResolution, thorough, localShown: false })
+      }
+      // 回転だけが変わった、細かく作る依頼: 面を返した後で、回す前の形を作っておく（次に回すときは、回すだけで描く）
+      if (!keepLocal && refine && (req.flags & PLOT_LOCAL) !== 0 && r.local_available) {
+        localJobs.set(itemId, () => {
+          let lr: MeshResult | null = null
+          try {
+            field_mode_reset()
+            lr = callPlot(req.flags | PLOT_LOCAL)
+            const local = lr.take_shape()
+            if (local?.rigid) {
+              shapes.get(itemId)?.shape.free()
+              shapes.set(itemId, { key: key(true, true), shape: local, refined: true, ires: implicitResolution, thorough, localShown: false })
+            } else local?.free()
+          } catch {
+            // 作れなくても、次に回すときに今までどおり作り直すだけ
+          } finally {
+            lr?.free()
+          }
+        })
       }
       const capSource = r.take_field()
       if (capSource) fields.set(itemId, { source: capSource, resolution: implicitResolution * 2 })
@@ -436,4 +465,12 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       ]
     : []
   self.postMessage(res, { transfer })
+  // 返した後で、回す前の形を作る（届いている次の依頼を先に処理する。その依頼が同じ式なら、予約は消える）
+  if (localJobs.has(req.itemId)) {
+    setTimeout(() => {
+      const job = localJobs.get(req.itemId)
+      localJobs.delete(req.itemId)
+      job?.()
+    }, 0)
+  }
 }
