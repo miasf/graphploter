@@ -219,7 +219,10 @@ impl Func {
     }
 
     fn entry(self) -> &'static (Func, &'static [&'static str], &'static [usize]) {
-        TABLE.iter().find(|(f, _, _)| *f == self).expect("TABLE に無い関数")
+        TABLE
+            .iter()
+            .find(|(f, _, _)| *f == self)
+            .expect("TABLE に無い関数")
     }
 
     /// 入力で使える名前（最初のものが代表名）
@@ -425,7 +428,11 @@ mod tests {
                     args[0] = C::new(2.0, 0.0); // 階数は 0 以上の整数だけ
                 }
                 let v = f.call(&args);
-                assert!(!(v.re.is_nan() && v.im.is_nan()), "{:?}（引数 {n} 個）が計算されない", f);
+                assert!(
+                    !(v.re.is_nan() && v.im.is_nan()),
+                    "{:?}（引数 {n} 個）が計算されない",
+                    f
+                );
             }
         }
     }
@@ -552,7 +559,10 @@ mod tests {
             let f = Func::all().find(|f| f.names().contains(&name)).unwrap();
             let got = f.call(&args);
             let err = (got - want).norm() / want.norm().max(1e-300);
-            assert!(err < 1e-8, "{name}{args:?} = {got}（正しくは {want}、相対誤差 {err:.1e}）");
+            assert!(
+                err < 1e-8,
+                "{name}{args:?} = {got}（正しくは {want}、相対誤差 {err:.1e}）"
+            );
         }
     }
 }

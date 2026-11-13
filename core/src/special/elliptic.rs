@@ -49,7 +49,10 @@ pub fn carlson_rd(x: C, y: C, z: C) -> C {
             let (c1, c2, c3, c4) = (3.0 / 14.0, 1.0 / 6.0, 9.0 / 22.0, 3.0 / 26.0);
             let (c5, c6) = (0.25 * c3, 1.5 * c4);
             return 3.0 * sum
-                + fac * (1.0 + ed * (-c1 + c5 * ed - c6 * dz * ee) + dz * (c2 * ee + dz * (-c3 * ec + dz * c4 * ea)))
+                + fac
+                    * (1.0
+                        + ed * (-c1 + c5 * ed - c6 * dz * ee)
+                        + dz * (c2 * ee + dz * (-c3 * ec + dz * c4 * ea)))
                     / (a * a.sqrt());
         }
         let (sx, sy, sz) = (x.sqrt(), y.sqrt(), z.sqrt());
@@ -86,7 +89,9 @@ pub fn carlson_rj(x: C, y: C, z: C, p: C) -> C {
             let (c5, c6, c7, c8) = (0.75 * c3, 1.5 * c4, 0.5 * c2, 2.0 * c3);
             return 3.0 * sum
                 + fac
-                    * (1.0 + ed * (-c1 + c5 * ed - c6 * ee) + eb * (c7 + dp * (-c8 + dp * c4))
+                    * (1.0
+                        + ed * (-c1 + c5 * ed - c6 * ee)
+                        + eb * (c7 + dp * (-c8 + dp * c4))
                         + dp * ea * (c2 - dp * c3)
                         - c2 * dp * ec)
                     / (a * a.sqrt());
@@ -201,7 +206,8 @@ pub fn elliptic_pi_inc(n: C, phi: C, m: C) -> C {
     let (k, phi) = reduce(phi);
     let (s, c) = (phi.sin(), phi.cos());
     let (x, y, one) = (c * c, 1.0 - m * s * s, C::new(1.0, 0.0));
-    let p = s * carlson_rf(x, y, one) + n / 3.0 * s * s * s * carlson_rj(x, y, one, 1.0 - n * s * s);
+    let p =
+        s * carlson_rf(x, y, one) + n / 3.0 * s * s * s * carlson_rj(x, y, one, 1.0 - n * s * s);
     if k == 0.0 {
         p
     } else {
@@ -260,14 +266,22 @@ fn jacobi_landen(u: C, m: C) -> (C, C, C) {
         phi = (phi + (c[j] / a[j] * phi.sin()).asin()) / 2.0;
     }
     let (sn, cn) = (phi.sin(), phi.cos());
-    let dn = if n == 0 { C::new(1.0, 0.0) } else { cn / (prev - phi).cos() };
+    let dn = if n == 0 {
+        C::new(1.0, 0.0)
+    } else {
+        cn / (prev - phi).cos()
+    };
     (sn, cn, dn)
 }
 
 /// ランベルトの W 関数の第 k 枝 W_k(z)（w eʷ = z の解）
 pub fn lambert_w(k: f64, z: C) -> C {
     if z == C::new(0.0, 0.0) {
-        return if k == 0.0 { z } else { C::new(f64::NEG_INFINITY, 0.0) };
+        return if k == 0.0 {
+            z
+        } else {
+            C::new(f64::NEG_INFINITY, 0.0)
+        };
     }
     let e = std::f64::consts::E;
     let near_branch = (z + 1.0 / e).norm() < 0.3;

@@ -5,6 +5,7 @@ use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
 mod pieces;
+pub use pieces::in_inscribed_ball;
 
 /// 表示範囲（直方体）。添字 0, 1, 2 が x, y, z。
 #[derive(Debug, Clone, Copy)]
@@ -75,8 +76,15 @@ fn tri_normal(p: &[f32], t: [u32; 3]) -> [f64; 3] {
         [p[k] as f64, p[k + 1] as f64, p[k + 2] as f64]
     };
     let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
-    let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
-    [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+    let (e1, e2) = (
+        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+    );
+    [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ]
 }
 
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -91,11 +99,19 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// 薄い板の表と裏がくっつくことは少ない
 pub fn add_cluster_lod(mesh: &mut Mesh) {
     let tris = mesh.indices.len() / 3;
-    if !mesh.lod.is_empty() || mesh.keep_full || mesh.lod_mesh.is_some() || tris <= LOD_MIN_TRIANGLES {
+    if !mesh.lod.is_empty()
+        || mesh.keep_full
+        || mesh.lod_mesh.is_some()
+        || tris <= LOD_MIN_TRIANGLES
+    {
         return;
     }
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
-    for p in mesh.positions.chunks_exact(3).filter(|p| p.iter().all(|v| v.is_finite())) {
+    for p in mesh
+        .positions
+        .chunks_exact(3)
+        .filter(|p| p.iter().all(|v| v.is_finite()))
+    {
         for a in 0..3 {
             lo[a] = lo[a].min(p[a]);
             hi[a] = hi[a].max(p[a]);
@@ -116,8 +132,13 @@ pub fn add_cluster_lod(mesh: &mut Mesh) {
                 }
                 let cell = |a: usize| ((p[a] - lo[a]) * scale) as u64;
                 // 法線の一番大きい成分の軸と符号（6通り）
-                let nr = mesh.normals.get(3 * k..3 * k + 3).unwrap_or(&[0.0, 0.0, 1.0]);
-                let ax = (0..3).max_by(|&a, &b| nr[a].abs().total_cmp(&nr[b].abs())).unwrap_or(2);
+                let nr = mesh
+                    .normals
+                    .get(3 * k..3 * k + 3)
+                    .unwrap_or(&[0.0, 0.0, 1.0]);
+                let ax = (0..3)
+                    .max_by(|&a, &b| nr[a].abs().total_cmp(&nr[b].abs()))
+                    .unwrap_or(2);
                 let side = (ax * 2 + (nr[ax] < 0.0) as usize) as u64;
                 let key = cell(0) | cell(1) << 16 | cell(2) << 32 | side << 48;
                 *first.entry(key).or_insert(k as u32)
@@ -129,7 +150,11 @@ pub fn add_cluster_lod(mesh: &mut Mesh) {
             if a != b && b != c && a != c && a != NONE && b != NONE && c != NONE {
                 // 代表の頂点に置き換えると三角形が裏返ることがある。元の三角形と同じ向きにそろえる
                 // （そうしないと、裏面として暗く描かれる点々が出る）
-                if dot3(tri_normal(&mesh.positions, [a, b, c]), tri_normal(&mesh.positions, [t[0], t[1], t[2]])) < 0.0 {
+                if dot3(
+                    tri_normal(&mesh.positions, [a, b, c]),
+                    tri_normal(&mesh.positions, [t[0], t[1], t[2]]),
+                ) < 0.0
+                {
                     out.extend_from_slice(&[a, c, b]);
                 } else {
                     out.extend_from_slice(&[a, b, c]);
@@ -206,14 +231,24 @@ pub fn explicit_surface(prog: &Program, dom: Domain, n: usize, axis: usize) -> M
 }
 
 /// [`explicit_surface`] で、複素数の値を `mode` の高さと偏角の色で表すもの
-pub fn explicit_surface_with(prog: &Program, dom: Domain, n: usize, axis: usize, mode: ComplexMode) -> Mesh {
+pub fn explicit_surface_with(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    axis: usize,
+    mode: ComplexMode,
+) -> Mesh {
     explicit_surface_full(prog, dom, n, axis, mode, false)
 }
 
 /// 複素数の色分けで頂点に持たせる値 (Re z/|z|, Im z/|z|, log₂|z|)（色相は偏角、明るさの縞は |z|）
 fn complex_attr(z: C) -> [f32; 3] {
     let r = z.norm();
-    let (c, s) = if r > 0.0 { (z.re / r, z.im / r) } else { (0.0, 0.0) };
+    let (c, s) = if r > 0.0 {
+        (z.re / r, z.im / r)
+    } else {
+        (0.0, 0.0)
+    };
     [c as f32, s as f32, r.log2().max(-1e6) as f32]
 }
 
@@ -226,7 +261,11 @@ fn height(z: C, mode: ComplexMode) -> f64 {
         ComplexMode::Im => z.im,
         ComplexMode::Arg => z.arg(),
     };
-    if z.re.is_finite() && z.im.is_finite() { w } else { f64::NAN }
+    if z.re.is_finite() && z.im.is_finite() {
+        w
+    } else {
+        f64::NAN
+    }
 }
 
 /// 格子の辺の上で値が飛ぶ所（floor の段差、tan の極など）
@@ -282,7 +321,16 @@ pub fn explicit_surface_opt(
     walls: bool,
     refine: bool,
 ) -> Mesh {
-    explicit_surface_scaled(prog, dom, n, axis, mode, walls, refine, dom.hi[axis] - dom.lo[axis])
+    explicit_surface_scaled(
+        prog,
+        dom,
+        n,
+        axis,
+        mode,
+        walls,
+        refine,
+        dom.hi[axis] - dom.lo[axis],
+    )
 }
 
 /// [`explicit_surface_opt`] で、段差・細かくする量の目安にする高さ `h` を別に指定するもの。
@@ -384,7 +432,18 @@ fn explicit_surface_scaled(
     let mut seeds = if refine {
         let hs: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
         let interval = mode == ComplexMode::Off && prog.supports_interval();
-        hidden_features(prog, dom, (ua, va), n, &hs, h, (dom.lo[axis], dom.hi[axis]), &clamped, interval, base_ms)
+        hidden_features(
+            prog,
+            dom,
+            (ua, va),
+            n,
+            &hs,
+            h,
+            (dom.lo[axis], dom.hi[axis]),
+            &clamped,
+            interval,
+            base_ms,
+        )
     } else {
         SeedMap::default()
     };
@@ -397,8 +456,19 @@ fn explicit_surface_scaled(
             .filter(|(_, j)| (clamped(j.after) - clamped(j.before)).abs() > 0.1 * (whi - wlo))
             .map(|(&(a, b), _)| (a as usize, b as usize))
             .collect();
-        let poles =
-            trace_poles(prog, &us, &vs, &hs, n, &seeds, (dom.lo[axis], dom.hi[axis]), (wlo, whi), &clamped, base_ms, &known);
+        let poles = trace_poles(
+            prog,
+            &us,
+            &vs,
+            &hs,
+            n,
+            &seeds,
+            (dom.lo[axis], dom.hi[axis]),
+            (wlo, whi),
+            &clamped,
+            base_ms,
+            &known,
+        );
         for (e, jp) in poles {
             steps.insert(e);
             base_jumps.insert(e, jp);
@@ -475,7 +545,13 @@ fn explicit_surface_scaled(
         };
         let base_tris = 2 * n * n;
         let limits = crate::adaptive::Limits {
-            passes: if !refine { 0 } else if seeds.is_empty() { NORMAL_PASSES } else { SEED_PASSES },
+            passes: if !refine {
+                0
+            } else if seeds.is_empty() {
+                NORMAL_PASSES
+            } else {
+                SEED_PASSES
+            },
             max_new_triangles: base_tris.max(30_000),
         };
         let (u0, u1) = (dom.lo[ua], dom.hi[ua]);
@@ -487,33 +563,44 @@ fn explicit_surface_scaled(
     // 二分してできた辺は、どれも新しい頂点を端に持つので、番号が `from` 以上の頂点を持つ辺だけを調べればよい
     let mut jumps = base_jumps;
     let ek = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
-    let search_new_edges = |r: &crate::adaptive::Triangulation<C>,
-                            tris: &[[u32; 3]],
-                            from: usize,
-                            jumps: &mut crate::adaptive::HashMap<(u32, u32), Jump>| {
-        let mut new_edges: Vec<(usize, usize)> = Vec::new();
-        let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
-        for t in tris {
-            if t.iter().all(|&k| (k as usize) < from) {
-                continue;
-            }
-            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                let e = ek(a, b);
-                if (e.1 as usize) >= from && seen.insert(e) {
-                    new_edges.push((e.0 as usize, e.1 as usize));
+    let search_new_edges =
+        |r: &crate::adaptive::Triangulation<C>,
+         tris: &[[u32; 3]],
+         from: usize,
+         jumps: &mut crate::adaptive::HashMap<(u32, u32), Jump>| {
+            let mut new_edges: Vec<(usize, usize)> = Vec::new();
+            let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+            for t in tris {
+                if t.iter().all(|&k| (k as usize) < from) {
+                    continue;
+                }
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let e = ek(a, b);
+                    if (e.1 as usize) >= from && seen.insert(e) {
+                        new_edges.push((e.0 as usize, e.1 as usize));
+                    }
                 }
             }
-        }
-        if new_edges.is_empty() {
-            return;
-        }
-        let (us, vs): (Vec<f64>, Vec<f64>) = r.uv().iter().map(|p| (p[0], p[1])).unzip();
-        let vals = r.vals();
-        let hs_clamped: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
-        for (e, jp) in find_jumps(prog, &us, &vs, vals, &hs_clamped, &new_edges, &clamped, threshold, &usable) {
-            jumps.insert((new_edges[e].0 as u32, new_edges[e].1 as u32), jp);
-        }
-    };
+            if new_edges.is_empty() {
+                return;
+            }
+            let (us, vs): (Vec<f64>, Vec<f64>) = r.uv().iter().map(|p| (p[0], p[1])).unzip();
+            let vals = r.vals();
+            let hs_clamped: Vec<f64> = vals.iter().map(|&z| clamped(z)).collect();
+            for (e, jp) in find_jumps(
+                prog,
+                &us,
+                &vs,
+                vals,
+                &hs_clamped,
+                &new_edges,
+                &clamped,
+                threshold,
+                &usable,
+            ) {
+                jumps.insert((new_edges[e].0 as u32, new_edges[e].1 as u32), jp);
+            }
+        };
     let mut tris = r.tris();
     search_new_edges(&r, &tris, m * m, &mut jumps);
 
@@ -661,7 +748,10 @@ fn explicit_surface_scaled(
             let (id, _) = edges[e];
             let jp = jumps[&id];
             let (k0, k1) = (id.0 as usize, id.1 as usize);
-            (us[k0] + (us[k1] - us[k0]) * jp.t, vs[k0] + (vs[k1] - vs[k0]) * jp.t)
+            (
+                us[k0] + (us[k1] - us[k0]) * jp.t,
+                vs[k0] + (vs[k1] - vs[k0]) * jp.t,
+            )
         };
         // 3 辺とも飛ぶとき、頂点 k の段の、辺 k（k の側）・辺 k + 2（k の側）の飛ぶ所での値
         let mut side_vals: [[C; 2]; 3] = [[C::new(0.0, 0.0); 2]; 3];
@@ -728,7 +818,10 @@ fn explicit_surface_scaled(
                     let near_c = (side_vals[k][0] + side_vals[k][1]) * 0.5;
                     let far_c = (side_vals[k1][0] + side_vals[k1][1]) * 0.5;
                     let p = vtx[k];
-                    wall_quads.push(([(at[k].0, at[k].1, near_j, far_j), (cu, cv, near_c, far_c)], (us[p], vs[p])));
+                    wall_quads.push((
+                        [(at[k].0, at[k].1, near_j, far_j), (cu, cv, near_c, far_c)],
+                        (us[p], vs[p]),
+                    ));
                 }
             }
         } else if jumped.len() == 1 && walls {
@@ -737,10 +830,17 @@ fn explicit_surface_scaled(
             let e = jumped[0];
             let (id, forward) = edges[e];
             let jp = jumps[&id];
-            let (start, end) = if forward { (jp.before, jp.after) } else { (jp.after, jp.before) };
+            let (start, end) = if forward {
+                (jp.before, jp.after)
+            } else {
+                (jp.after, jp.before)
+            };
             let (ju, jv_) = jump_at(e);
             let (p, w) = (vtx[e], vtx[(e + 2) % 3]);
-            wall_quads.push(([(ju, jv_, start, end), (us[w], vs[w], vals[w], vals[w])], (us[p], vs[p])));
+            wall_quads.push((
+                [(ju, jv_, start, end), (us[w], vs[w], vals[w], vals[w])],
+                (us[p], vs[p]),
+            ));
         }
         // 段差の壁（段差の線が三角形を横切る所）
         if let (Some(lone), true) = (lone, walls) {
@@ -766,7 +866,20 @@ fn explicit_surface_scaled(
             wall_quads.push(([info(e_out), info(e_in)], (us[p], vs[p])));
         }
     }
-    clip_to_height_range(prog, &mut mesh, &plain, &us, &vs, &vals, &index_of, axis, mode, (dom.lo[axis], dom.hi[axis]), flip, &push);
+    clip_to_height_range(
+        prog,
+        &mut mesh,
+        &plain,
+        &us,
+        &vs,
+        &vals,
+        &index_of,
+        axis,
+        mode,
+        (dom.lo[axis], dom.hi[axis]),
+        flip,
+        &push,
+    );
     compute_normals(&mut mesh);
     // 段差のある曲面は、頂点をまとめた粗い版にすると段差と壁が崩れるので、粗い版を作らない
     mesh.keep_full = !jumps.is_empty();
@@ -786,7 +899,13 @@ fn explicit_surface_scaled(
             q
         };
         let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-        let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
         let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         // 法線: 段差の線に垂直な水平の向きのうち、段の低い側（外から壁が見える側）を向くもの。
         // 段差の線の向きは三角形ごとに入れ替わるので、線の向きだけで決めると、隣の区間と法線が逆になって
@@ -795,19 +914,34 @@ fn explicit_surface_scaled(
         let to_lone = at(lu - 0.5 * (u0 + u1), lv - 0.5 * (v0 + v1), 0.0);
         // どちらの段が低いかは、高さの差が大きいほうの端で決める（段差の線の交わる所では、
         // 交わる点の側の端で、段の組み合わせが変わって差が小さくなったり 0 になったりする）
-        let (near, far) = if (clamped(n0) - clamped(f0)).abs() >= (clamped(n1) - clamped(f1)).abs() {
+        let (near, far) = if (clamped(n0) - clamped(f0)).abs() >= (clamped(n1) - clamped(f1)).abs()
+        {
             (clamped(n0), clamped(f0))
         } else {
             (clamped(n1), clamped(f1))
         };
-        let toward_near = if dot(horizontal, to_lone) >= 0.0 { horizontal } else { horizontal.map(|c| -c) };
-        let nv = if near <= far { toward_near } else { toward_near.map(|c| -c) };
-        // 三角形の向き（表側）も法線にそろえる
-        let (p0, p1, p2) = (at(u0, v0, clamped(n0)), at(u1, v1, clamped(n1)), at(u1, v1, clamped(f1)));
-        if dot(cross(sub(p1, p0), sub(p2, p0)), nv) >= 0.0 {
-            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let toward_near = if dot(horizontal, to_lone) >= 0.0 {
+            horizontal
         } else {
-            mesh.indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            horizontal.map(|c| -c)
+        };
+        let nv = if near <= far {
+            toward_near
+        } else {
+            toward_near.map(|c| -c)
+        };
+        // 三角形の向き（表側）も法線にそろえる
+        let (p0, p1, p2) = (
+            at(u0, v0, clamped(n0)),
+            at(u1, v1, clamped(n1)),
+            at(u1, v1, clamped(f1)),
+        );
+        if dot(cross(sub(p1, p0), sub(p2, p0)), nv) >= 0.0 {
+            mesh.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        } else {
+            mesh.indices
+                .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
         }
         let len = dot(nv, nv).sqrt().max(1e-300);
         for _ in 0..4 {
@@ -822,17 +956,25 @@ fn fermat_point(p: [(f64, f64); 3]) -> (f64, f64) {
     for k in 0..3 {
         let (a, b, c) = (p[k], p[(k + 1) % 3], p[(k + 2) % 3]);
         let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - a.0, c.1 - a.1));
-        let (lu, lv) = ((u.0 * u.0 + u.1 * u.1).sqrt(), (v.0 * v.0 + v.1 * v.1).sqrt());
+        let (lu, lv) = (
+            (u.0 * u.0 + u.1 * u.1).sqrt(),
+            (v.0 * v.0 + v.1 * v.1).sqrt(),
+        );
         // 2 点が重なっている（長さ 0 の辺がある）か、角が 120° 以上
         if lu * lv == 0.0 || (u.0 * v.0 + u.1 * v.1) <= -0.5 * lu * lv {
             return a;
         }
     }
-    let mut x = ((p[0].0 + p[1].0 + p[2].0) / 3.0, (p[0].1 + p[1].1 + p[2].1) / 3.0);
+    let mut x = (
+        (p[0].0 + p[1].0 + p[2].0) / 3.0,
+        (p[0].1 + p[1].1 + p[2].1) / 3.0,
+    );
     for _ in 0..40 {
         let (mut su, mut sv, mut sw) = (0.0, 0.0, 0.0);
         for q in p {
-            let d = ((q.0 - x.0).powi(2) + (q.1 - x.1).powi(2)).sqrt().max(1e-300);
+            let d = ((q.0 - x.0).powi(2) + (q.1 - x.1).powi(2))
+                .sqrt()
+                .max(1e-300);
             su += q.0 / d;
             sv += q.1 / d;
             sw += 1.0 / d;
@@ -869,7 +1011,14 @@ fn cut_by_jumps(t: [u32; 3], jv: [Option<(u32, u32)>; 3]) -> (Vec<[u32; 3]>, Opt
             let (out_lone, out_far) = jv[e_out].unwrap();
             let (in_far, in_lone) = jv[e_in].unwrap();
             let (p, q, r) = (t[lone], t[(lone + 1) % 3], t[(lone + 2) % 3]);
-            (vec![[p, out_lone, in_lone], [out_far, q, r], [out_far, r, in_far]], Some(lone))
+            (
+                vec![
+                    [p, out_lone, in_lone],
+                    [out_far, q, r],
+                    [out_far, r, in_far],
+                ],
+                Some(lone),
+            )
         }
         _ => {
             let mut out = Vec::with_capacity(3);
@@ -924,7 +1073,11 @@ fn trace_poles(
     let tri_edges = |i: usize, j: usize, t: usize| -> [(usize, usize); 3] {
         let a = j * m + i;
         let (b, c, d) = (a + 1, a + m, a + m + 1);
-        if t == 0 { [key(a, b), key(b, d), key(a, d)] } else { [key(a, d), key(d, c), key(a, c)] }
+        if t == 0 {
+            [key(a, b), key(b, d), key(a, d)]
+        } else {
+            [key(a, d), key(d, c), key(a, c)]
+        }
     };
     // 辺を持つ三角形（1 つか 2 つ）
     let edge_tris = |e: (usize, usize)| -> Vec<(usize, usize, usize)> {
@@ -977,7 +1130,11 @@ fn trace_poles(
         for j in 0..m {
             for i in 0..m {
                 let k = j * m + i;
-                for (ok, e) in [(i + 1 < m, (k, k + 1)), (j + 1 < m, (k, k + m)), (i + 1 < m && j + 1 < m, (k, k + m + 1))] {
+                for (ok, e) in [
+                    (i + 1 < m, (k, k + 1)),
+                    (j + 1 < m, (k, k + m)),
+                    (i + 1 < m && j + 1 < m, (k, k + m + 1)),
+                ] {
                     if ok {
                         if c.is_multiple_of(4) && inside(hs[e.0]) && inside(hs[e.1]) {
                             edges.push(e);
@@ -1015,7 +1172,11 @@ fn trace_poles(
     let mut todo = start;
     while !todo.is_empty() && checked.len() < MAX_EDGES {
         let room = MAX_EDGES - checked.len();
-        let batch: Vec<(usize, usize)> = todo.drain(..).filter(|e| checked.insert(*e)).take(room).collect();
+        let batch: Vec<(usize, usize)> = todo
+            .drain(..)
+            .filter(|e| checked.insert(*e))
+            .take(room)
+            .collect();
         if batch.is_empty() {
             break;
         }
@@ -1061,7 +1222,13 @@ fn trace_poles(
             if let Some((s, d0)) = best {
                 first.push(d0);
                 // 区間の両端の値（格子点は高さしか持っていないので、下でまとめて計算し直す）
-                iv.push((b, s as f64 / SAMPLES as f64, (s + 1) as f64 / SAMPLES as f64, C::new(f64::NAN, 0.0), C::new(f64::NAN, 0.0)));
+                iv.push((
+                    b,
+                    s as f64 / SAMPLES as f64,
+                    (s + 1) as f64 / SAMPLES as f64,
+                    C::new(f64::NAN, 0.0),
+                    C::new(f64::NAN, 0.0),
+                ));
             }
         }
         // 区間の両端の値を計算し直してから、二分する
@@ -1130,7 +1297,13 @@ fn trace_poles(
             let (k0, k1) = batch[b];
             found.insert(
                 (k0 as u32, k1 as u32),
-                Jump { t: 0.5 * (ta + tb), before: fa, after: fb, multi: false, rest_at_start: false },
+                Jump {
+                    t: 0.5 * (ta + tb),
+                    before: fa,
+                    after: fb,
+                    multi: false,
+                    rest_at_start: false,
+                },
             );
             // 3. 線をたどる: この辺を持つ三角形の、残りの辺
             for (i, j, t) in edge_tris((k0, k1)) {
@@ -1184,8 +1357,12 @@ impl SeedMap {
 
     fn cell_of(&self, p: [f64; 2]) -> (usize, usize) {
         let n = self.n as f64;
-        let i = ((p[0] - self.u.0) / (self.u.1 - self.u.0) * n).floor().clamp(0.0, n - 1.0) as usize;
-        let j = ((p[1] - self.v.0) / (self.v.1 - self.v.0) * n).floor().clamp(0.0, n - 1.0) as usize;
+        let i = ((p[0] - self.u.0) / (self.u.1 - self.u.0) * n)
+            .floor()
+            .clamp(0.0, n - 1.0) as usize;
+        let j = ((p[1] - self.v.0) / (self.v.1 - self.v.0) * n)
+            .floor()
+            .clamp(0.0, n - 1.0) as usize;
         (i, j)
     }
 
@@ -1214,7 +1391,9 @@ impl SeedMap {
         let (i0, j0) = self.cell_of(lo);
         let (i1, j1) = self.cell_of(hi);
         // 三角形の中か（辺の上も含める）
-        let cross = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        let cross = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+            (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+        };
         let area = cross(pos[0], pos[1], pos[2]);
         let eps = 1e-12 * (hyp * hyp + 1e-300);
         let inside = |p: [f64; 2]| {
@@ -1223,7 +1402,9 @@ impl SeedMap {
         let mut best: Option<f64> = None;
         for j in j0..=j1 {
             for i in i0..=i1 {
-                let Some(list) = self.cells.get(&(j * self.n + i)) else { continue };
+                let Some(list) = self.cells.get(&(j * self.n + i)) else {
+                    continue;
+                };
                 for s in list {
                     if (!must_split || hyp > 2.0 * s.size) && inside([s.u, s.v]) {
                         best = Some(best.map_or(s.excess, |b: f64| b.max(s.excess)));
@@ -1261,12 +1442,18 @@ fn hidden_features(
 ) -> SeedMap {
     use crate::interval::{Interval, Range};
     const UNIT: i64 = 64; // 最初の格子の 1 マス = 64 単位（1/32 マスの箱でも、中点が整数になる）
-    // 深さ（最初の格子の 1 マスの 1/32 まで）
+                          // 深さ（最初の格子の 1 マスの 1/32 まで）
     const MAX_DEPTH: u32 = 8;
     const MAX_INTERVALS: usize = 30_000;
     let m = n + 1;
     let (u0, u1, v0, v1) = (dom.lo[ua], dom.hi[ua], dom.lo[va], dom.hi[va]);
-    let mut out = SeedMap { n, u: (u0, u1), v: (v0, v1), cells: Default::default(), mids: Vec::new() };
+    let mut out = SeedMap {
+        n,
+        u: (u0, u1),
+        v: (v0, v1),
+        cells: Default::default(),
+        mids: Vec::new(),
+    };
     let total = n as i64 * UNIT;
     let pu = |iu: i64| u0 + (u1 - u0) * iu as f64 / total as f64;
     let pv = |iv: i64| v0 + (v1 - v0) * iv as f64 / total as f64;
@@ -1275,8 +1462,14 @@ fn hidden_features(
     let (lo, hi) = visible;
     // 最初の格子の双 1 次補間
     let bilinear = |iu: i64, iv: i64| -> f64 {
-        let (i, j) = ((iu / UNIT).min(n as i64 - 1) as usize, (iv / UNIT).min(n as i64 - 1) as usize);
-        let (fu, fv) = ((iu - i as i64 * UNIT) as f64 / UNIT as f64, (iv - j as i64 * UNIT) as f64 / UNIT as f64);
+        let (i, j) = (
+            (iu / UNIT).min(n as i64 - 1) as usize,
+            (iv / UNIT).min(n as i64 - 1) as usize,
+        );
+        let (fu, fv) = (
+            (iu - i as i64 * UNIT) as f64 / UNIT as f64,
+            (iv - j as i64 * UNIT) as f64 / UNIT as f64,
+        );
         let g = |a: usize, b: usize| hs[b * m + a];
         let (a, b, c, d) = (g(i, j), g(i + 1, j), g(i, j + 1), g(i + 1, j + 1));
         a * (1.0 - fu) * (1.0 - fv) + b * fu * (1.0 - fv) + c * (1.0 - fu) * fv + d * fu * fv
@@ -1293,7 +1486,12 @@ fn hidden_features(
         let dev = (val - base).abs();
         // 見える高さにかかる（補間の値から計算した値までの区間が、見える範囲と重なる）
         if dev > tol && val.max(base) >= lo && val.min(base) <= hi {
-            out.insert(Seed { u: pu(iu), v: pv(iv), size, excess: dev });
+            out.insert(Seed {
+                u: pu(iu),
+                v: pv(iv),
+                size,
+                excess: dev,
+            });
         }
     };
     let eval_points = |pts: &[(i64, i64)]| -> Vec<f64> {
@@ -1345,25 +1543,34 @@ fn hidden_features(
     // 点の値（単位の座標 → 値）。最初は最初の格子の点
     let mut known: crate::adaptive::HashMap<(i64, i64), f64> = Default::default();
     let grid = |iu: i64, iv: i64| -> Option<f64> {
-        (iu % UNIT == 0 && iv % UNIT == 0).then(|| hs[(iv / UNIT) as usize * m + (iu / UNIT) as usize])
+        (iu % UNIT == 0 && iv % UNIT == 0)
+            .then(|| hs[(iv / UNIT) as usize * m + (iu / UNIT) as usize])
     };
-    let value = |known: &crate::adaptive::HashMap<(i64, i64), f64>, p: (i64, i64)| grid(p.0, p.1).or_else(|| known.get(&p).copied());
+    let value = |known: &crate::adaptive::HashMap<(i64, i64), f64>, p: (i64, i64)| {
+        grid(p.0, p.1).or_else(|| known.get(&p).copied())
+    };
     let mut intervals = 0usize;
     // 箱 [x0, x1] × [y0, y1]（単位）のはみ出し（疑わしくなければ None）。`vals` は箱の角と中の点の値
-    let excess = |x0: i64, x1: i64, y0: i64, y1: i64, vals: &[f64], intervals: &mut usize| -> Option<f64> {
-        let fin: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
-        if fin.is_empty() {
-            return None;
-        }
-        let (mn, mx) = fin.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-        *intervals += 1;
-        let r = prog.eval_interval(&[Interval::new(pu(x0), pu(x1)), Interval::new(pv(y0), pv(y1))]);
-        let Range::Known(iv) = r else { return Some(h) };
-        let (a, b) = (iv.lo.clamp(lo, hi), iv.hi.clamp(lo, hi));
-        let tau = 0.02 * h + TAU_SPREAD * (mx - mn);
-        let e = (b - (mx + tau)).max((mn - tau) - a);
-        (e > 0.0).then_some(e)
-    };
+    let excess =
+        |x0: i64, x1: i64, y0: i64, y1: i64, vals: &[f64], intervals: &mut usize| -> Option<f64> {
+            let fin: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+            if fin.is_empty() {
+                return None;
+            }
+            let (mn, mx) = fin
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                    (a.min(v), b.max(v))
+                });
+            *intervals += 1;
+            let r =
+                prog.eval_interval(&[Interval::new(pu(x0), pu(x1)), Interval::new(pv(y0), pv(y1))]);
+            let Range::Known(iv) = r else { return Some(h) };
+            let (a, b) = (iv.lo.clamp(lo, hi), iv.hi.clamp(lo, hi));
+            let tau = 0.02 * h + TAU_SPREAD * (mx - mn);
+            let e = (b - (mx + tau)).max((mn - tau) - a);
+            (e > 0.0).then_some(e)
+        };
     // 最初のブロック
     let mut frontier: Vec<(f64, [i64; 4], u32)> = Vec::new();
     // 最初の箱の 1 辺のマス数（ブロックの数が 8,000 個ほどまでになるように。細かさ 150 なら 2 マス）。
@@ -1382,7 +1589,9 @@ fn hidden_features(
                 }
             }
             // 全部の点が見える範囲の外（同じ側）なら調べない
-            if vals.iter().all(|&v| v.is_finite() && v > hi) || vals.iter().all(|&v| v.is_finite() && v < lo) {
+            if vals.iter().all(|&v| v.is_finite() && v > hi)
+                || vals.iter().all(|&v| v.is_finite() && v < lo)
+            {
                 continue;
             }
             let b = [i0 * UNIT, i1 * UNIT, j0 * UNIT, j1 * UNIT];
@@ -1479,13 +1688,13 @@ fn clip_to_height_range(
     let defined = |val: &C| height(*val, mode).is_finite();
     // 辺 (a, b) の上で、条件 inside が成り立つ側（a の側）と成り立たない側の境目を、二分法でまとめて求めて点を足す
     let bisect = |pairs: &[(usize, usize)],
-                      inside: &dyn Fn(&C) -> bool,
-                      at: &dyn Fn(usize) -> Option<f64>,
-                      pu: &mut Vec<f64>,
-                      pv: &mut Vec<f64>,
-                      pval: &mut Vec<C>,
-                      pid: &mut Vec<u32>,
-                      level: &mut Vec<Option<f64>>|
+                  inside: &dyn Fn(&C) -> bool,
+                  at: &dyn Fn(usize) -> Option<f64>,
+                  pu: &mut Vec<f64>,
+                  pv: &mut Vec<f64>,
+                  pval: &mut Vec<C>,
+                  pid: &mut Vec<u32>,
+                  level: &mut Vec<Option<f64>>|
      -> Vec<usize> {
         let n = pairs.len();
         let (mut ta, mut tb) = (vec![0.0f64; n], vec![1.0f64; n]);
@@ -1536,7 +1745,16 @@ fn clip_to_height_range(
         }
     }
     if !todo.is_empty() {
-        let ids = bisect(&todo, &|v| defined(v), &|_| None, &mut pu, &mut pv, &mut pval, &mut pid, &mut level);
+        let ids = bisect(
+            &todo,
+            &|v| defined(v),
+            &|_| None,
+            &mut pu,
+            &mut pv,
+            &mut pval,
+            &mut pid,
+            &mut level,
+        );
         for (pair, id) in todo.iter().zip(ids) {
             edge_pt.insert(*pair, id);
         }
@@ -1576,7 +1794,13 @@ fn clip_to_height_range(
     // 点の位置: 0 = 範囲の中、1 = 上端より上（定義されない点も）、-1 = 下端より下
     let side = |val: &C| {
         let v = h(val);
-        if !v.is_finite() || v > hi { 1i8 } else if v < lo { -1 } else { 0 }
+        if !v.is_finite() || v > hi {
+            1i8
+        } else if v < lo {
+            -1
+        } else {
+            0
+        }
     };
     let outside_of = |poly: &[usize], pval: &[C]| -> i8 {
         let s: Vec<i8> = poly.iter().map(|&k| side(&pval[k])).collect();
@@ -1607,14 +1831,30 @@ fn clip_to_height_range(
     }
     if !todo.is_empty() {
         // 上端・下端の両方の辺をまとめて二分する（中の側の条件は、辺ごとの高さで決める）
-        let (up, down): (Vec<usize>, Vec<usize>) = (0..todo.len()).partition(|&k| todo_level[k] == hi);
-        for (group, inside) in [(up, &(|v: &C| h(v).is_finite() && h(v) <= hi) as &dyn Fn(&C) -> bool), (down, &|v: &C| h(v).is_finite() && h(v) >= lo)] {
+        let (up, down): (Vec<usize>, Vec<usize>) =
+            (0..todo.len()).partition(|&k| todo_level[k] == hi);
+        for (group, inside) in [
+            (
+                up,
+                &(|v: &C| h(v).is_finite() && h(v) <= hi) as &dyn Fn(&C) -> bool,
+            ),
+            (down, &|v: &C| h(v).is_finite() && h(v) >= lo),
+        ] {
             if group.is_empty() {
                 continue;
             }
             let pairs: Vec<(usize, usize)> = group.iter().map(|&k| todo[k]).collect();
             let lv = todo_level[group[0]];
-            let ids = bisect(&pairs, inside, &|_| Some(lv), &mut pu, &mut pv, &mut pval, &mut pid, &mut level);
+            let ids = bisect(
+                &pairs,
+                inside,
+                &|_| Some(lv),
+                &mut pu,
+                &mut pv,
+                &mut pval,
+                &mut pid,
+                &mut level,
+            );
             for (pair, id) in pairs.iter().zip(ids) {
                 cut_pt.insert(*pair, id);
             }
@@ -1660,7 +1900,8 @@ fn clip_to_height_range(
         let ids: Vec<u32> = kept.iter().map(|&k| vid(k, mesh)).collect();
         for k in 1..ids.len() - 1 {
             let t = [ids[0], ids[k], ids[k + 1]];
-            mesh.indices.extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
+            mesh.indices
+                .extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
         }
     }
 }
@@ -1769,7 +2010,8 @@ fn find_jumps_with(
             // （なめらかな斜面なら、ずっと小さい）。1 回目だけで決めないのは、段差が 2 つ入った辺（段差の線の交わる所を
             // 斜めに通る辺）では、1 回目の中点がちょうど真ん中の段に乗って、平均と同じになることがあるから
             if early_exit && round < 2 {
-                let smooth = hm.is_finite() && (hm - 0.5 * (ha + hb)).abs() < MID_KEEP * (hb - ha).abs();
+                let smooth =
+                    hm.is_finite() && (hm - 0.5 * (ha + hb)).abs() < MID_KEEP * (hb - ha).abs();
                 if round == 0 {
                     c.smooth = smooth;
                 } else if smooth && c.smooth {
@@ -1857,15 +2099,31 @@ fn find_jumps_with(
         if d.is_finite() && d > EARLY_KEEP * c.first {
             let (h0, h1) = (hs[c.k0], hs[c.k1]);
             let (ha, hb) = (height(c.fa), height(c.fb));
-            let side = if (ha - h0).abs() >= (h1 - hb).abs() { (0.0, c.ta, h0, ha) } else { (c.tb, 1.0, hb, h1) };
+            let side = if (ha - h0).abs() >= (h1 - hb).abs() {
+                (0.0, c.ta, h0, ha)
+            } else {
+                (c.tb, 1.0, hb, h1)
+            };
             if (side.3 - side.2).abs() > threshold {
                 rest.push((c.id, side.0, side.1, side.2, side.3));
             }
-            jumps.insert(c.id, Jump { t: 0.5 * (c.ta + c.tb), before: c.fa, after: c.fb, multi: false, rest_at_start: false });
+            jumps.insert(
+                c.id,
+                Jump {
+                    t: 0.5 * (c.ta + c.tb),
+                    before: c.fa,
+                    after: c.fb,
+                    multi: false,
+                    rest_at_start: false,
+                },
+            );
         }
     }
     if !rest.is_empty() {
-        let (mut mu, mut mv) = (Vec::with_capacity(rest.len()), Vec::with_capacity(rest.len()));
+        let (mut mu, mut mv) = (
+            Vec::with_capacity(rest.len()),
+            Vec::with_capacity(rest.len()),
+        );
         for &(id, t0, t1, ..) in &rest {
             let (k0, k1) = edges[id];
             let t = 0.5 * (t0 + t1);
@@ -1945,7 +2203,10 @@ const EDGES: [[usize; 2]; 12] = [
 ///
 /// `far(f, side)` は、軸 f の向きの面（side = 0: 手前、1: 奥）の向こうのセルの、その面と反対側の面の 4 つの角の値
 /// （格子の外なら None。そのときは鞍点の値だけで決める）
-fn corner_groups(v: &[f32; 8], far: &dyn Fn(usize, usize) -> Option<[f32; 4]>) -> ([usize; 8], usize, bool) {
+fn corner_groups(
+    v: &[f32; 8],
+    far: &dyn Fn(usize, usize) -> Option<[f32; 4]>,
+) -> ([usize; 8], usize, bool) {
     let neg: [bool; 8] = v.map(|x| x < 0.0);
     let count = neg.iter().filter(|&&b| b).count();
     let minority = count <= 4;
@@ -1955,7 +2216,9 @@ fn corner_groups(v: &[f32; 8], far: &dyn Fn(usize, usize) -> Option<[f32; 4]>) -
             1 => true,
             2 => {
                 // 面の対角。面の残りの 2 つの角が同じ符号なら（あいまいな面）、鞍点の値で決める
-                let f = (0..3).find(|&a| CORNERS[x][a] == CORNERS[y][a]).unwrap_or(0);
+                let f = (0..3)
+                    .find(|&a| CORNERS[x][a] == CORNERS[y][a])
+                    .unwrap_or(0);
                 let mut w = [0usize; 2];
                 let mut k = 0;
                 for c in 0..8 {
@@ -2020,20 +2283,37 @@ pub fn implicit_surface(prog: &Program, dom: Domain, n: usize) -> Mesh {
 /// F が r について連続なら、点 p が領域に入る ⇔ min_r F(p, r) ≤ 0 ≤ max_r F(p, r)。
 /// そこで G(p) = max(min_r F, −max_r F) を作ると、領域の内側で G ≤ 0 になるので、G = 0 の面を作ればよい。
 /// min, max は、範囲をそれぞれ `samples` 等分した点での値から求める（近似）。
-pub fn implicit_solid(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize) -> Mesh {
+pub fn implicit_solid(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    ranges: &[(f64, f64)],
+    samples: usize,
+) -> Mesh {
     implicit_solid_opt(prog, dom, n, ranges, samples, Refine::Normal)
 }
 
 /// [`implicit_solid`] で、格子より小さい図形を探して細かく作り直すか（`refine`）を選ぶ版
-pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize, refine: Refine) -> Mesh {
+pub fn implicit_solid_opt(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    ranges: &[(f64, f64)],
+    samples: usize,
+    refine: Refine,
+) -> Mesh {
     // 式を変形して部品に分けられるなら、部品ごとに描く（因数・段差の枝。pieces.rs）
     let mut mesh = None;
     if ranges.is_empty() && refine != Refine::Off {
         mesh = pieces::implicit_by_pieces(prog, dom, n, refine);
     }
-    let mut mesh = mesh.unwrap_or_else(|| implicit_solid_with(prog, dom, n, ranges, samples, false, refine));
+    let mut mesh =
+        mesh.unwrap_or_else(|| implicit_solid_with(prog, dom, n, ranges, samples, false, refine));
     if ranges.is_empty() && refine != Refine::Off {
-        let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min) * 1e-3;
+        let h = (0..3)
+            .map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64)
+            .fold(f64::INFINITY, f64::min)
+            * 1e-3;
         gradient_normals(&mut mesh, prog, h);
         if let Some(l) = mesh.lod_mesh.as_deref_mut() {
             gradient_normals(l, prog, h);
@@ -2054,7 +2334,11 @@ fn gradient_normals(mesh: &mut Mesh, prog: &Program, h: f64) {
         return;
     }
     // 頂点と、3 方向にずらした点（頂点ごとに そのまま, +x, +y, +z の順）。前進差分（中心差分の 6 回より軽い。刻みが小さいので十分）
-    let mut cols: [Vec<f64>; 3] = [Vec::with_capacity(4 * count), Vec::with_capacity(4 * count), Vec::with_capacity(4 * count)];
+    let mut cols: [Vec<f64>; 3] = [
+        Vec::with_capacity(4 * count),
+        Vec::with_capacity(4 * count),
+        Vec::with_capacity(4 * count),
+    ];
     for p in mesh.positions.chunks_exact(3) {
         for a in [3, 0, 1, 2] {
             for (b, col) in cols.iter_mut().enumerate() {
@@ -2149,18 +2433,34 @@ fn implicit_solid_with(
                     FieldMode::Given(v) => {
                         let v = std::mem::take(v);
                         *mode = FieldMode::Normal;
-                        Some(if v.len() == plan.len() { v } else { plan.values(prog, &combos, dom, 0..plan.chunks()) })
+                        Some(if v.len() == plan.len() {
+                            v
+                        } else {
+                            plan.values(prog, &combos, dom, 0..plan.chunks())
+                        })
                     }
                 }
             })
         });
-        let Some(vals) = vals else { return Mesh::default() };
+        let Some(vals) = vals else {
+            return Mesh::default();
+        };
         plan.fill(&vals);
         // 値が有限でない（NaN・±∞ の）格子点（格子点の番号）。1'''（定義域の縁）で使う
         let nan_pts: Vec<usize> = if plan.field.dense {
-            plan.field.vals.iter().enumerate().filter(|(_, v)| !v.is_finite()).map(|(l, _)| l).collect()
+            plan.field
+                .vals
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_finite())
+                .map(|(l, _)| l)
+                .collect()
         } else {
-            plan.spots.iter().filter(|&&(at, _)| !plan.field.vals[at as usize].is_finite()).map(|&(_, p)| p as usize).collect()
+            plan.spots
+                .iter()
+                .filter(|&&(at, _)| !plan.field.vals[at as usize].is_finite())
+                .map(|&(_, p)| p as usize)
+                .collect()
         };
         (plan.field, nan_pts)
     };
@@ -2168,18 +2468,27 @@ fn implicit_solid_with(
     let idx = |i: usize, j: usize, k: usize| i + m * (j + m * k);
     // 1'''. 定義されない格子点のうち、軸の向きの隣に定義される点があるものを、縁での値で埋める（[`extend_undefined`]）。
     //       こうすると、定義域の縁をまたぐセルにも頂点が置かれ、面が縁の少し外まで延びる（外にはみ出た所は 4' で切り落とす）
-    let ext = if nan_pts.is_empty() { Extended::default() } else { extend_undefined(prog, &combos, &mut field, dom, n, &nan_pts) };
+    let ext = if nan_pts.is_empty() {
+        Extended::default()
+    } else {
+        extend_undefined(prog, &combos, &mut field, dom, n, &nan_pts)
+    };
     let field = field;
     let filled = |p: usize| !ext.filled.is_empty() && ext.filled.contains(&p);
     let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
     // 1''''. 段差（floor・mod など）をまたぐセルは、枝ごとのなめらかな続きで別に作る（[`branch_meshes`]）。
     //        ふつうの Surface Nets では、そのセルに頂点を置かない
-    let branches = if refine != Refine::Off && ranges.is_empty() && (1..=MAX_BRANCH_SITES).contains(&prog.branch_sites()) {
+    let branches = if refine != Refine::Off
+        && ranges.is_empty()
+        && (1..=MAX_BRANCH_SITES).contains(&prog.branch_sites())
+    {
         branch_meshes(prog, &field, dom, n)
     } else {
         BranchMeshes::default()
     };
-    let in_branch_cell = |i: usize, j: usize, k: usize| !branches.mixed.is_empty() && branches.mixed.contains(&cell(i, j, k));
+    let in_branch_cell = |i: usize, j: usize, k: usize| {
+        !branches.mixed.is_empty() && branches.mixed.contains(&cell(i, j, k))
+    };
 
     let t_field = crate::timing::now_ms();
 
@@ -2216,7 +2525,10 @@ fn implicit_solid_with(
                                 if q[a] >= 1 && q[a] + 2 < m {
                                     let (fl, fr) = (buf[l - st], buf[l + 2 * st]);
                                     let (sl, s, sr) = (f0 - fl, f1 - f0, fr - f1);
-                                    if sl * s > 0.0 && sr * s > 0.0 && s.abs() <= 4.0 * sl.abs().max(sr.abs()) {
+                                    if sl * s > 0.0
+                                        && sr * s > 0.0
+                                        && s.abs() <= 4.0 * sl.abs().max(sr.abs())
+                                    {
                                         continue;
                                     }
                                 }
@@ -2226,7 +2538,12 @@ fn implicit_solid_with(
                                 if filled(idx(i, j, k)) || filled(idx(q1[0], q1[1], q1[2])) {
                                     continue;
                                 }
-                                sign_edges.push(SignEdge { p0: pt(q), p1: pt(q1), f0: f0 as f64, f1: f1 as f64 });
+                                sign_edges.push(SignEdge {
+                                    p0: pt(q),
+                                    p1: pt(q1),
+                                    f0: f0 as f64,
+                                    f1: f1 as f64,
+                                });
                                 sign_ids.push(3 * idx(i, j, k) + a);
                             } else if ranges.is_empty() && q[a] >= 1 && q[a] + 2 <= n {
                                 let v = [buf[l - st], f0, f1, buf[l + 2 * st]];
@@ -2243,10 +2560,22 @@ fn implicit_solid_with(
     }
     let not_zero: crate::adaptive::HashSet<usize> = {
         let mut sc = FieldScratch::default();
-        let flags = false_crossings(&mut |xyz| field_values_with(prog, &combos, xyz, &mut sc).to_vec(), &sign_edges);
-        sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+        let flags = false_crossings(
+            &mut |xyz| field_values_with(prog, &combos, xyz, &mut sc).to_vec(),
+            &sign_edges,
+        );
+        sign_ids
+            .into_iter()
+            .zip(flags)
+            .filter(|&(_, bad)| bad)
+            .map(|(id, _)| id)
+            .collect()
     };
-    let touch = if ranges.is_empty() { touch_search(prog, touch_cands, dom, n) } else { Default::default() };
+    let touch = if ranges.is_empty() {
+        touch_search(prog, touch_cands, dom, n)
+    } else {
+        Default::default()
+    };
     // 接するだけの辺を囲むセルに印を付ける。印の無いセル・辺は、接する所を調べずに済ませる
     // （1つでも接する所があると全部のセルが遅い道を通る、ということにならないように）
     let mut touch_cell = vec![false; if touch.is_empty() { 0 } else { n * n * n }];
@@ -2282,7 +2611,17 @@ fn implicit_solid_with(
         && (!not_zero.is_empty() || !nan_pts.is_empty())
         && not_zero.len() + nan_pts.len() <= MAX_POLE_SEEDS
     {
-        pole_meshes(prog, &combos, &field, dom, n, &not_zero, &nan_pts, &ext.filled, &branches.mixed)
+        pole_meshes(
+            prog,
+            &combos,
+            &field,
+            dom,
+            n,
+            &not_zero,
+            &nan_pts,
+            &ext.filled,
+            &branches.mixed,
+        )
     } else {
         BranchMeshes::default()
     };
@@ -2291,7 +2630,12 @@ fn implicit_solid_with(
     // 格子の辺 p → p + e_a の上で曲面と交わる位置 t（0〜1）と、F の符号（接するだけの所は None）。
     // 接するだけの所は、印のあるセルに接する辺（near_touch）でだけ調べる
     //    両端の値 f0, f1 を渡す版（cross_vals）と、格子から値を読む版（crossing）
-    let cross_vals = |f0: f32, f1: f32, p: [usize; 3], a: usize, near_touch: bool| -> Option<(f64, Option<bool>)> {
+    let cross_vals = |f0: f32,
+                      f1: f32,
+                      p: [usize; 3],
+                      a: usize,
+                      near_touch: bool|
+     -> Option<(f64, Option<bool>)> {
         if !f0.is_finite() || !f1.is_finite() {
             return None;
         }
@@ -2299,7 +2643,10 @@ fn implicit_solid_with(
             if !not_zero.is_empty() && not_zero.contains(&(3 * idx(p[0], p[1], p[2]) + a)) {
                 return None; // F が飛ぶだけで、0 になる点は無い
             }
-            if let Some(&t) = (!ext.edge_t.is_empty()).then(|| ext.edge_t.get(&(3 * idx(p[0], p[1], p[2]) + a))).flatten() {
+            if let Some(&t) = (!ext.edge_t.is_empty())
+                .then(|| ext.edge_t.get(&(3 * idx(p[0], p[1], p[2]) + a)))
+                .flatten()
+            {
                 return Some((t as f64, Some(f0 < 0.0))); // 定義される部分にある本当の零点
             }
             return Some(((f0 / (f0 - f1)) as f64, Some(f0 < 0.0)));
@@ -2307,7 +2654,9 @@ fn implicit_solid_with(
         if !near_touch {
             return None;
         }
-        touch.get(&(3 * idx(p[0], p[1], p[2]) + a)).map(|&t| (t as f64, None))
+        touch
+            .get(&(3 * idx(p[0], p[1], p[2]) + a))
+            .map(|&t| (t as f64, None))
     };
     let crossing = |p: [usize; 3], a: usize, near_touch: bool| {
         let mut q = p;
@@ -2326,7 +2675,11 @@ fn implicit_solid_with(
     //    空のブロックのセルは見ない（区間演算が「曲面は無い」と保証する）。あるブロックごとに、値を小さな配列に
     //    写してから見る（[`SparseField::for_blocks`]）
     // セルの12本の辺の向き（0: x, 1: y, 2: z）
-    let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
+    let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| {
+        (0..3)
+            .find(|&x| CORNERS[ca][x] != CORNERS[cb][x])
+            .unwrap_or(0)
+    });
     let mut vert = vec![NONE; n * n * n];
     let mut cell_slots: Vec<[u32; 12]> = Vec::new();
     // 頂点を置いたセル（cell_slots と同じ順番）
@@ -2338,103 +2691,127 @@ fn implicit_solid_with(
     let mut multi_surface = false;
     let mut cbuf = vec![f32::NAN; BLOCK_BUF * BLOCK_BUF * BLOCK_BUF];
     field.for_blocks(&mut cbuf, |buf, view, _| {
-    // セルの角 c の、data の中での位置のずれ
-    let [sx, sy, sz] = view.strides;
-    let corner_off: [usize; 8] = CORNERS.map(|d| d[0] * sx + d[1] * sy + d[2] * sz);
-    let cells = view.origin.map(|o| o..(o + BLOCK).min(n));
-    for k in cells[2].clone() {
-        for j in cells[1].clone() {
-            for i in cells[0].clone() {
-                let l = view.at([i, j, k]);
-                // セルの辺（角 base から向き a）の交わり。値はブロックの見え方から読む
-                let crossing = |base: [usize; 3], a: usize, near: bool| {
-                    let l0 = l + base[0] * sx + base[1] * sy + base[2] * sz;
-                    cross_vals(buf[l0], buf[l0 + view.strides[a]], [i + base[0], j + base[1], k + base[2]], a, near)
-                };
-                let mut mask = 0u8;
-                for (c, off) in corner_off.iter().enumerate() {
-                    mask |= ((buf[l + off] < 0.0) as u8) << c;
-                }
-                let corner_val = |c: usize| buf[l + corner_off[c]];
-                // 段差をまたぐセルは枝ごとに、極の近くのセルは零点を数え直して、別に作る
-                if in_branch_cell(i, j, k) || (!poles.mixed.is_empty() && poles.mixed.contains(&cell(i, j, k))) {
-                    continue;
-                }
-                // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
-                let near_touch = marked(i, j, k);
-                if !near_touch && (mask == 0 || mask == 0xFF) {
-                    continue;
-                }
-                let corner_neg: [bool; 8] = std::array::from_fn(|c| mask >> c & 1 == 1);
-                // 少ないほうの符号の角を、つながっているものどうしで組に分ける（[`corner_groups`]）
-                let q = [i, j, k];
-                let far = |f: usize, side: usize| -> Option<[f32; 4]> {
-                    // 向こうのセルの反対側の面: 軸 f の座標が q[f] − 1（手前）か q[f] + 2（奥）
-                    if (side == 0 && q[f] == 0) || (side == 1 && q[f] + 2 > n) {
-                        return None;
+        // セルの角 c の、data の中での位置のずれ
+        let [sx, sy, sz] = view.strides;
+        let corner_off: [usize; 8] = CORNERS.map(|d| d[0] * sx + d[1] * sy + d[2] * sz);
+        let cells = view.origin.map(|o| o..(o + BLOCK).min(n));
+        for k in cells[2].clone() {
+            for j in cells[1].clone() {
+                for i in cells[0].clone() {
+                    let l = view.at([i, j, k]);
+                    // セルの辺（角 base から向き a）の交わり。値はブロックの見え方から読む
+                    let crossing = |base: [usize; 3], a: usize, near: bool| {
+                        let l0 = l + base[0] * sx + base[1] * sy + base[2] * sz;
+                        cross_vals(
+                            buf[l0],
+                            buf[l0 + view.strides[a]],
+                            [i + base[0], j + base[1], k + base[2]],
+                            a,
+                            near,
+                        )
+                    };
+                    let mut mask = 0u8;
+                    for (c, off) in corner_off.iter().enumerate() {
+                        mask |= ((buf[l + off] < 0.0) as u8) << c;
                     }
-                    let (g, h) = ((f + 1) % 3, (f + 2) % 3);
-                    let base = if side == 0 { l - view.strides[f] } else { l + 2 * view.strides[f] };
-                    Some([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dg, dh)| buf[base + dg * view.strides[g] + dh * view.strides[h]]))
-                };
-                let (mut group, mut groups, minority) = corner_groups(&std::array::from_fn(corner_val), &far);
-                // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
-                // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
-                let has_touch = near_touch
-                    && EDGES.iter().enumerate().any(|(e, &[ca, _])| {
+                    let corner_val = |c: usize| buf[l + corner_off[c]];
+                    // 段差をまたぐセルは枝ごとに、極の近くのセルは零点を数え直して、別に作る
+                    if in_branch_cell(i, j, k)
+                        || (!poles.mixed.is_empty() && poles.mixed.contains(&cell(i, j, k)))
+                    {
+                        continue;
+                    }
+                    // 角の符号がそろっていて、接するだけの所も無ければ、曲面は通らない（ほとんどのセルはここで終わる）
+                    let near_touch = marked(i, j, k);
+                    if !near_touch && (mask == 0 || mask == 0xFF) {
+                        continue;
+                    }
+                    let corner_neg: [bool; 8] = std::array::from_fn(|c| mask >> c & 1 == 1);
+                    // 少ないほうの符号の角を、つながっているものどうしで組に分ける（[`corner_groups`]）
+                    let q = [i, j, k];
+                    let far = |f: usize, side: usize| -> Option<[f32; 4]> {
+                        // 向こうのセルの反対側の面: 軸 f の座標が q[f] − 1（手前）か q[f] + 2（奥）
+                        if (side == 0 && q[f] == 0) || (side == 1 && q[f] + 2 > n) {
+                            return None;
+                        }
+                        let (g, h) = ((f + 1) % 3, (f + 2) % 3);
+                        let base = if side == 0 {
+                            l - view.strides[f]
+                        } else {
+                            l + 2 * view.strides[f]
+                        };
+                        Some([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dg, dh)| {
+                            buf[base + dg * view.strides[g] + dh * view.strides[h]]
+                        }))
+                    };
+                    let (mut group, mut groups, minority) =
+                        corner_groups(&std::array::from_fn(corner_val), &far);
+                    // 接するだけの辺（符号が変わらない）は、そのセルを通る曲面のどれか1枚の一部。
+                    // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
+                    let has_touch = near_touch
+                        && EDGES.iter().enumerate().any(|(e, &[ca, _])| {
+                            let a = edge_axis[e];
+                            let base = CORNERS[ca];
+                            matches!(crossing(base, a, true), Some((_, None)))
+                        });
+                    if has_touch && groups > 0 {
+                        for g in group.iter_mut().filter(|g| **g != usize::MAX) {
+                            *g = 0;
+                        }
+                        groups = 1;
+                    }
+                    if groups > 1 {
+                        multi_surface = true;
+                    }
+                    let touch_group = if groups > 0 { 0 } else { groups }; // 接するだけの辺の組
+                                                                           // 交わる辺ごとの組と、交わる点（セルの中の位置）。組ごとに足し合わせる
+                                                                           // （組は高々 8 個 + 接するだけの組。セルごとに Vec を作らないよう、固定の大きさにする）
+                    let mut sums = [([0.0f64; 3], 0.0f64); 9];
+                    let mut edge_group = [usize::MAX; 12];
+                    for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
                         let a = edge_axis[e];
                         let base = CORNERS[ca];
-                        matches!(crossing(base, a, true), Some((_, None)))
-                    });
-                if has_touch && groups > 0 {
-                    for g in group.iter_mut().filter(|g| **g != usize::MAX) {
-                        *g = 0;
-                    }
-                    groups = 1;
-                }
-                if groups > 1 {
-                    multi_surface = true;
-                }
-                let touch_group = if groups > 0 { 0 } else { groups }; // 接するだけの辺の組
-                // 交わる辺ごとの組と、交わる点（セルの中の位置）。組ごとに足し合わせる
-                // （組は高々 8 個 + 接するだけの組。セルごとに Vec を作らないよう、固定の大きさにする）
-                let mut sums = [([0.0f64; 3], 0.0f64); 9];
-                let mut edge_group = [usize::MAX; 12];
-                for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
-                    let a = edge_axis[e];
-                    let base = CORNERS[ca];
-                    if let Some((t, sign)) = crossing(base, a, near_touch) {
-                        let g = match sign {
-                            Some(_) => group[if corner_neg[ca] == minority { ca } else { cb }],
-                            None => touch_group,
-                        };
-                        let mut q = [base[0] as f64, base[1] as f64, base[2] as f64];
-                        q[a] += t;
-                        edge_group[e] = g;
-                        let (sum, cnt) = &mut sums[g];
-                        for ax in 0..3 {
-                            sum[ax] += q[ax];
+                        if let Some((t, sign)) = crossing(base, a, near_touch) {
+                            let g = match sign {
+                                Some(_) => group[if corner_neg[ca] == minority { ca } else { cb }],
+                                None => touch_group,
+                            };
+                            let mut q = [base[0] as f64, base[1] as f64, base[2] as f64];
+                            q[a] += t;
+                            edge_group[e] = g;
+                            let (sum, cnt) = &mut sums[g];
+                            for ax in 0..3 {
+                                sum[ax] += q[ax];
+                            }
+                            *cnt += 1.0;
                         }
-                        *cnt += 1.0;
                     }
-                }
-                let mut ids = [NONE; 9];
-                for (g, (sum, cnt)) in sums.iter().enumerate().take(groups + 1) {
-                    if *cnt > 0.0 {
-                        let p = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
-                        ids[g] = mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
-                        vertex_cell.push(cell(i, j, k) as u32);
+                    let mut ids = [NONE; 9];
+                    for (g, (sum, cnt)) in sums.iter().enumerate().take(groups + 1) {
+                        if *cnt > 0.0 {
+                            let p = [
+                                i as f64 + sum[0] / cnt,
+                                j as f64 + sum[1] / cnt,
+                                k as f64 + sum[2] / cnt,
+                            ];
+                            ids[g] = mesh.push_vertex([
+                                dom.at(0, p[0], n),
+                                dom.at(1, p[1], n),
+                                dom.at(2, p[2], n),
+                            ]);
+                            vertex_cell.push(cell(i, j, k) as u32);
+                        }
                     }
+                    if ids[..=groups].iter().all(|&v| v == NONE) {
+                        continue;
+                    }
+                    vert[cell(i, j, k)] = cell_slots.len() as u32;
+                    cell_slots
+                        .push(edge_group.map(|g| if g == usize::MAX { NONE } else { ids[g] }));
+                    vert_cells.push([i, j, k]);
                 }
-                if ids[..=groups].iter().all(|&v| v == NONE) {
-                    continue;
-                }
-                vert[cell(i, j, k)] = cell_slots.len() as u32;
-                cell_slots.push(edge_group.map(|g| if g == usize::MAX { NONE } else { ids[g] }));
-                vert_cells.push([i, j, k]);
             }
         }
-    }
     });
 
     let t_cells = crate::timing::now_ms();
@@ -2442,7 +2819,9 @@ fn implicit_solid_with(
     let local_edge = |a: usize, base: [usize; 3]| -> usize {
         EDGES
             .iter()
-            .position(|&[ca, cb]| CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a)))
+            .position(|&[ca, cb]| {
+                CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a))
+            })
             .unwrap_or(0)
     };
 
@@ -2474,9 +2853,15 @@ fn implicit_solid_with(
                             s[c] -= dc;
                             marked(s[0], s[1], s[2])
                         });
-                    let Some((_, sign)) = crossing(p, a, near_touch) else { continue };
+                    let Some((_, sign)) = crossing(p, a, near_touch) else {
+                        continue;
+                    };
                     let mut around = [NONE; 4];
-                    for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)].iter().zip(locals).enumerate() {
+                    for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)]
+                        .iter()
+                        .zip(locals)
+                        .enumerate()
+                    {
                         let mut s = p;
                         s[b] -= db;
                         s[c] -= dc;
@@ -2542,14 +2927,20 @@ fn implicit_solid_with(
         compute_normals(&mut mesh);
         if mesh.indices.len() / 3 > LOD_MIN_TRIANGLES {
             let mut sc = FieldScratch::default();
-            let mut eval = |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
+            let mut eval =
+                |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
             let lod = coarse_nets(&field, dom, n, 2 * k, &not_zero, &mut eval);
             if !lod.indices.is_empty() {
                 mesh.lod_mesh = Some(Box::new(lod));
             }
         }
         let t_end = crate::timing::now_ms();
-        mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
+        mesh.stats.phases = [
+            t_field - t_start,
+            t_touch - t_field,
+            t_cells - t_touch,
+            t_end - t_cells,
+        ];
         return mesh;
     }
 
@@ -2568,7 +2959,8 @@ fn implicit_solid_with(
         let sel = sharp_blocks(&mesh, &vertex_cell, n, field.nb);
         if !sel.is_empty() && sel.len() <= MAX_STITCH_BLOCKS {
             let mut sc = FieldScratch::default();
-            let mut eval = |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
+            let mut eval =
+                |xyz: [&[f64]; 3]| field_values_with(prog, &combos, xyz, &mut sc).to_vec();
             let (fine, cells) = stitched_nets(&field, dom, n, &sel, &mut eval);
             if fine.indices.len() / 3 <= mesh.indices.len() / 3 + MAX_STITCH_TRIANGLES {
                 mesh.positions = fine.positions;
@@ -2581,7 +2973,16 @@ fn implicit_solid_with(
     // 4. 格子より小さい図形（見落とした・角ばった所）を探して、その所だけ細かく作り直す
     if refine != Refine::Off && ranges.is_empty() {
         let before = (mesh.positions.len(), mesh.indices.len());
-        refine_components(prog, &combos, dom, n, &field, &mut mesh, &vertex_cell, refine);
+        refine_components(
+            prog,
+            &combos,
+            dom,
+            n,
+            &field,
+            &mut mesh,
+            &vertex_cell,
+            refine,
+        );
         // 作り直しが、値の飛ぶ所・極の近くに作った細かい切れ端も消す（作り直しでメッシュが変わったときだけ）
         if (mesh.positions.len(), mesh.indices.len()) != before {
             let more = drop_fragments(&mut mesh, dom, n, &field, &not_zero, &ext.filled, true);
@@ -2600,7 +3001,12 @@ fn implicit_solid_with(
         }
     }
     let t_end = crate::timing::now_ms();
-    mesh.stats.phases = [t_field - t_start, t_touch - t_field, t_cells - t_touch, t_end - t_cells];
+    mesh.stats.phases = [
+        t_field - t_start,
+        t_touch - t_field,
+        t_cells - t_touch,
+        t_end - t_cells,
+    ];
     mesh
 }
 
@@ -2664,7 +3070,11 @@ fn stitched_nets(
                 }
             }
         }
-        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| need.iter().map(|(_, q)| dom.at(a, q[a] as f64 / 2.0, n)).collect());
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
+            need.iter()
+                .map(|(_, q)| dom.at(a, q[a] as f64 / 2.0, n))
+                .collect()
+        });
         let vals = eval([&cols[0], &cols[1], &cols[2]]);
         for ((at, _), v) in need.into_iter().zip(vals) {
             fvals[at] = v as f32;
@@ -2678,7 +3088,11 @@ fn stitched_nets(
         // q を含むブロック（ブロックの境目の点は、どちらのブロックにもある）
         let cand = |v: usize| {
             let b = v / (2 * BLOCK);
-            if v % (2 * BLOCK) == 0 && b > 0 { [b.min(nb - 1), b - 1] } else { [b.min(nb - 1), b.min(nb - 1)] }
+            if v % (2 * BLOCK) == 0 && b > 0 {
+                [b.min(nb - 1), b - 1]
+            } else {
+                [b.min(nb - 1), b.min(nb - 1)]
+            }
         };
         for bz in cand(q[2]) {
             for by in cand(q[1]) {
@@ -2687,7 +3101,11 @@ fn stitched_nets(
                     if k == usize::MAX {
                         continue;
                     }
-                    let l = [q[0] - 2 * BLOCK * bx, q[1] - 2 * BLOCK * by, q[2] - 2 * BLOCK * bz];
+                    let l = [
+                        q[0] - 2 * BLOCK * bx,
+                        q[1] - 2 * BLOCK * by,
+                        q[2] - 2 * BLOCK * bz,
+                    ];
                     if l.iter().all(|&v| v < S) {
                         return fvals[k * S * S * S + l[0] + S * (l[1] + S * l[2])];
                     }
@@ -2706,7 +3124,11 @@ fn stitched_nets(
         if !occupied(c) {
             return None;
         }
-        Some(if selected(c) { Leaf::Fine(fc) } else { Leaf::Coarse(c) })
+        Some(if selected(c) {
+            Leaf::Fine(fc)
+        } else {
+            Leaf::Coarse(c)
+        })
     };
     // 一番細かい辺（細かい格子の座標で、始点 p、向き a、長さ len = 1 か 2）の一覧
     let mut edges: Vec<([usize; 3], usize, usize, f32, f32)> = Vec::new();
@@ -2733,12 +3155,15 @@ fn stitched_nets(
                                 continue;
                             }
                             let (bx, cx) = ((a + 1) % 3, (a + 2) % 3);
-                            let any_fine = [(0i64, 0i64), (1, 0), (0, 1), (1, 1)].iter().any(|&(db, dc)| {
-                                let mut fc = p.map(|v| v as i64);
-                                fc[bx] -= db;
-                                fc[cx] -= dc;
-                                matches!(leaf(fc), Some(Leaf::Fine(_)))
-                            });
+                            let any_fine =
+                                [(0i64, 0i64), (1, 0), (0, 1), (1, 1)]
+                                    .iter()
+                                    .any(|&(db, dc)| {
+                                        let mut fc = p.map(|v| v as i64);
+                                        fc[bx] -= db;
+                                        fc[cx] -= dc;
+                                        matches!(leaf(fc), Some(Leaf::Fine(_)))
+                                    });
                             if any_fine && seen.insert((p, a)) {
                                 edges.push((p, a, 1, f0, f1));
                             }
@@ -2772,12 +3197,14 @@ fn stitched_nets(
                                     continue;
                                 }
                                 let (bx, cx) = ((a + 1) % 3, (a + 2) % 3);
-                                let all_coarse = [(0i64, 0i64), (1, 0), (0, 1), (1, 1)].iter().all(|&(db, dc)| {
-                                    let mut fc = c.map(|v| 2 * v as i64);
-                                    fc[bx] -= 2 * db;
-                                    fc[cx] -= 2 * dc;
-                                    !matches!(leaf(fc), Some(Leaf::Fine(_)))
-                                });
+                                let all_coarse = [(0i64, 0i64), (1, 0), (0, 1), (1, 1)].iter().all(
+                                    |&(db, dc)| {
+                                        let mut fc = c.map(|v| 2 * v as i64);
+                                        fc[bx] -= 2 * db;
+                                        fc[cx] -= 2 * dc;
+                                        !matches!(leaf(fc), Some(Leaf::Fine(_)))
+                                    },
+                                );
                                 if all_coarse && c[a] < n {
                                     edges.push((c.map(|v| 2 * v), a, 2, f0, f1));
                                 }
@@ -2842,7 +3269,10 @@ fn stitched_nets(
     for l in order {
         let (sum, cnt) = sums[&l];
         let p = sum.map(|v| v / cnt / 2.0); // 細かい格子の座標 → 元の格子の座標
-        ids.insert(l, mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]));
+        ids.insert(
+            l,
+            mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]),
+        );
         let c = match l {
             Leaf::Coarse(c) => c,
             Leaf::Fine(f) => f.map(|v| v / 2),
@@ -2869,7 +3299,12 @@ const MAX_STITCH_TRIANGLES: usize = 300_000;
 
 /// 細かくするブロック: 辺でつながる頂点どうしの法線のなす角が 35° を超える所（細い部分・尖った所）を含むブロックと、
 /// その隣（面・辺・角で接するもの）
-fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> crate::adaptive::HashSet<usize> {
+fn sharp_blocks(
+    mesh: &Mesh,
+    vertex_cell: &[u32],
+    n: usize,
+    nb: usize,
+) -> crate::adaptive::HashSet<usize> {
     let cos = 35f32.to_radians().cos();
     let nr = &mesh.normals;
     let block = |v: u32| {
@@ -2879,7 +3314,8 @@ fn sharp_blocks(mesh: &Mesh, vertex_cell: &[u32], n: usize, nb: usize) -> crate:
     let mut hit: crate::adaptive::HashSet<[usize; 3]> = Default::default();
     for t in mesh.indices.chunks_exact(3) {
         let (a, b, c) = (3 * t[0] as usize, 3 * t[1] as usize, 3 * t[2] as usize);
-        let dot = |p: usize, q: usize| nr[p] * nr[q] + nr[p + 1] * nr[q + 1] + nr[p + 2] * nr[q + 2];
+        let dot =
+            |p: usize, q: usize| nr[p] * nr[q] + nr[p + 1] * nr[q + 1] + nr[p + 2] * nr[q + 2];
         // 3 本の辺のどれかで、法線が大きくずれる（ふつうは無いので、まとめて確かめる）
         if dot(a, b) >= cos && dot(b, c) >= cos && dot(c, a) >= cos {
             continue;
@@ -2938,7 +3374,10 @@ fn pole_meshes(
     let cell_id = |c: [usize; 3]| c[0] + n * (c[1] + n * c[2]);
     let pt = |q: [usize; 3]| [0, 1, 2].map(|a| dom.at(a, q[a] as f64, n));
     let nb = field.nb;
-    let occupied = |c: [usize; 3]| field.occupied[(c[0] / BLOCK).min(nb - 1) + nb * ((c[1] / BLOCK).min(nb - 1) + nb * (c[2] / BLOCK).min(nb - 1))];
+    let occupied = |c: [usize; 3]| {
+        field.occupied[(c[0] / BLOCK).min(nb - 1)
+            + nb * ((c[1] / BLOCK).min(nb - 1) + nb * (c[2] / BLOCK).min(nb - 1))]
+    };
     // 使えるセル: 格子の中、値を持っている、段差をまたぐセル・埋めた角のセルでない
     let usable = |c: [usize; 3]| {
         c.iter().all(|&v| v < n)
@@ -2967,7 +3406,9 @@ fn pole_meshes(
     // 1. 調べ始めるセル
     let mut region: crate::adaptive::HashSet<usize> = Default::default();
     let mut frontier: Vec<[usize; 3]> = Vec::new();
-    let add = |c: [usize; 3], region: &mut crate::adaptive::HashSet<usize>, frontier: &mut Vec<[usize; 3]>| {
+    let add = |c: [usize; 3],
+               region: &mut crate::adaptive::HashSet<usize>,
+               frontier: &mut Vec<[usize; 3]>| {
         if usable(c) && region.insert(cell_id(c)) {
             frontier.push(c);
         }
@@ -2990,7 +3431,10 @@ fn pole_meshes(
             if c.iter().any(|&v| v >= n) || !occupied(c) {
                 continue;
             }
-            if CORNERS.iter().any(|o| field.f([c[0] + o[0], c[1] + o[1], c[2] + o[2]]).is_finite()) {
+            if CORNERS
+                .iter()
+                .any(|o| field.f([c[0] + o[0], c[1] + o[1], c[2] + o[2]]).is_finite())
+            {
                 add(c, &mut region, &mut frontier);
             }
         }
@@ -3053,7 +3497,8 @@ fn pole_meshes(
                 }
             }
         }
-        let vals = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc).to_vec();
+        let vals =
+            field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc).to_vec();
         // 符号の変わる小さい区間 (辺, ta, tb, fa, fb, 最初の |fa| + |fb|)
         let mut iv: Vec<(usize, f64, f64, f64, f64, f64)> = Vec::new();
         for (e, _) in sample.iter().enumerate() {
@@ -3061,7 +3506,14 @@ fn pole_meshes(
             for s in 0..SAMPLES {
                 let (a, b) = (v[s], v[s + 1]);
                 if a.is_finite() && b.is_finite() && (a < 0.0) != (b < 0.0) {
-                    iv.push((e, s as f64 / SAMPLES as f64, (s + 1) as f64 / SAMPLES as f64, a, b, a.abs() + b.abs()));
+                    iv.push((
+                        e,
+                        s as f64 / SAMPLES as f64,
+                        (s + 1) as f64 / SAMPLES as f64,
+                        a,
+                        b,
+                        a.abs() + b.abs(),
+                    ));
                 }
             }
         }
@@ -3074,7 +3526,8 @@ fn pole_meshes(
                     cols[k].push(x[k]);
                 }
             }
-            let mid = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc).to_vec();
+            let mid =
+                field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc).to_vec();
             for (c, &f) in iv.iter_mut().zip(&mid) {
                 let t = 0.5 * (c.1 + c.2);
                 if !f.is_finite() || (f < 0.0) == (c.3 < 0.0) {
@@ -3093,7 +3546,11 @@ fn pole_meshes(
         // 辺ごとに零点を数える
         let mut zeros: Vec<Vec<(f64, bool)>> = vec![Vec::new(); sample.len()];
         for &(e, ta, tb, fa, fb, first) in &iv {
-            if fa.is_finite() && fb.is_finite() && (fa < 0.0) != (fb < 0.0) && fa.abs() + fb.abs() < 0.5 * first {
+            if fa.is_finite()
+                && fb.is_finite()
+                && (fa < 0.0) != (fb < 0.0)
+                && fa.abs() + fb.abs() < 0.5 * first
+            {
                 zeros[e].push((0.5 * (ta + tb), fa < 0.0));
             }
         }
@@ -3170,8 +3627,16 @@ fn pole_meshes(
             }
         }
         if cnt > 0.0 {
-            let p = [q[0] as f64 + sum[0] / cnt, q[1] as f64 + sum[1] / cnt, q[2] as f64 + sum[2] / cnt];
-            vert.insert(c, out.mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]));
+            let p = [
+                q[0] as f64 + sum[0] / cnt,
+                q[1] as f64 + sum[1] / cnt,
+                q[2] as f64 + sum[2] / cnt,
+            ];
+            vert.insert(
+                c,
+                out.mesh
+                    .push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]),
+            );
             out.vertex_cell.push(c as u32);
         }
     }
@@ -3188,20 +3653,29 @@ fn pole_meshes(
             if !seen.insert(3 * idx(p) + ax) {
                 continue;
             }
-            let Some((_, neg)) = crossing(p, ax) else { continue };
+            let Some((_, neg)) = crossing(p, ax) else {
+                continue;
+            };
             let cs = around(p, ax);
             if cs.len() != 4 || cs.iter().any(|&s| s.iter().any(|&v| v >= n)) {
                 continue;
             }
-            let ids: Vec<u32> = cs.iter().filter_map(|&s| vert.get(&cell_id(s)).copied()).collect();
+            let ids: Vec<u32> = cs
+                .iter()
+                .filter_map(|&s| vert.get(&cell_id(s)).copied())
+                .collect();
             if ids.len() != 4 {
                 continue;
             }
             let [q0, q1, q2, q3] = [ids[0], ids[1], ids[2], ids[3]];
             if neg {
-                out.mesh.indices.extend_from_slice(&[q0, q1, q2, q0, q2, q3]);
+                out.mesh
+                    .indices
+                    .extend_from_slice(&[q0, q1, q2, q0, q2, q3]);
             } else {
-                out.mesh.indices.extend_from_slice(&[q0, q2, q1, q0, q3, q2]);
+                out.mesh
+                    .indices
+                    .extend_from_slice(&[q0, q2, q1, q0, q3, q2]);
             }
         }
     }
@@ -3232,7 +3706,8 @@ fn weld_append(mesh: &mut Mesh, vertex_cell: &mut Vec<u32>, extra: &BranchMeshes
             }
         });
     }
-    mesh.indices.extend(extra.mesh.indices.iter().map(|&v| map[v as usize]));
+    mesh.indices
+        .extend(extra.mesh.indices.iter().map(|&v| map[v as usize]));
 }
 
 /// 枝ごとに作る（[`branch_meshes`]）セルの数の上限。これより多い式は、ふつうの Surface Nets のまま
@@ -3297,7 +3772,11 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
             }
         }
         let pts: Vec<usize> = (0..m * m * m).filter(|&p| need[p]).collect();
-        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| pts.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
+            pts.iter()
+                .map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a])
+                .collect()
+        });
         let br = branch.eval(&[&cols[0], &cols[1], &cols[2]], pts.len());
         let mut ids: crate::adaptive::HashMap<[i64; MAX_BRANCH_SITES], u32> = Default::default();
         for (q, &p) in pts.iter().enumerate() {
@@ -3352,7 +3831,11 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                         bad = true;
                         break;
                     }
-                    if v < 0.0 { neg = true } else { pos = true }
+                    if v < 0.0 {
+                        neg = true
+                    } else {
+                        pos = true
+                    }
                 }
                 if bad {
                     continue;
@@ -3382,7 +3865,11 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
             for &t in uniq {
                 for (&tc, d) in ts.iter().zip(CORNERS) {
                     if tc != t && owns(t, tc) {
-                        want.entry(t).or_default().push(idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]));
+                        want.entry(t).or_default().push(idx([
+                            c[0] + d[0],
+                            c[1] + d[1],
+                            c[2] + d[2],
+                        ]));
                     }
                 }
             }
@@ -3394,9 +3881,14 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
             let mut ps = std::mem::take(want.get_mut(&t).unwrap());
             ps.sort_unstable();
             ps.dedup();
-            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| ps.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
+                ps.iter()
+                    .map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a])
+                    .collect()
+            });
             let mut v = vec![C::new(0.0, 0.0); ps.len()];
-            prog.frozen(&taus[t as usize]).eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut v);
+            prog.frozen(&taus[t as usize])
+                .eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut v);
             for (&p, z) in ps.iter().zip(v) {
                 cont.insert((p, t), as_real(z) as f32);
             }
@@ -3410,11 +3902,19 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                         continue;
                     }
                     let p = idx([c[0] + d[0], c[1] + d[1], c[2] + d[2]]);
-                    let v = if tc == t { field.f([c[0] + d[0], c[1] + d[1], c[2] + d[2]]) } else { cont[&(p, t)] };
+                    let v = if tc == t {
+                        field.f([c[0] + d[0], c[1] + d[1], c[2] + d[2]])
+                    } else {
+                        cont[&(p, t)]
+                    };
                     if !v.is_finite() {
                         continue;
                     }
-                    if v < 0.0 { neg = true } else { pos = true }
+                    if v < 0.0 {
+                        neg = true
+                    } else {
+                        pos = true
+                    }
                 }
                 neg && pos
             });
@@ -3442,7 +3942,11 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                         }
                         d[a] -= 1;
                     }
-                    if CORNERS.iter().all(|o| field.f([d[0] + o[0], d[1] + o[1], d[2] + o[2]]).is_finite()) && set.insert(cell_id(d)) {
+                    if CORNERS
+                        .iter()
+                        .all(|o| field.f([d[0] + o[0], d[1] + o[1], d[2] + o[2]]).is_finite())
+                        && set.insert(cell_id(d))
+                    {
                         more.push(d);
                     }
                 }
@@ -3504,7 +4008,8 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
         let mixed_cells = &cells_of[&t];
         let fz = prog.frozen(&taus[t as usize]);
         // 頂点を置くセル: 段差をまたぐセルと、それと辺を共有するセル
-        let mut cells: crate::adaptive::HashSet<usize> = mixed_cells.iter().map(|&c| cell_id(c)).collect();
+        let mut cells: crate::adaptive::HashSet<usize> =
+            mixed_cells.iter().map(|&c| cell_id(c)).collect();
         for &c in mixed_cells {
             for dz in -1i64..=1 {
                 for dy in -1i64..=1 {
@@ -3518,7 +4023,10 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                         }
                         let d = nb.map(|v| v as usize);
                         // 角が全部 τ のふつうのセル（継ぎ目）と、ほかの枝のセル（τ の面を段差の向こうまで延ばし、段差の所で切り取る）
-                        if CORNERS.iter().all(|o| field.f([d[0] + o[0], d[1] + o[1], d[2] + o[2]]).is_finite()) {
+                        if CORNERS
+                            .iter()
+                            .all(|o| field.f([d[0] + o[0], d[1] + o[1], d[2] + o[2]]).is_finite())
+                        {
                             cells.insert(cell_id(d));
                         }
                     }
@@ -3544,7 +4052,11 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
             }
         }
         if !need.is_empty() {
-            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| need.iter().map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a]).collect());
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
+                need.iter()
+                    .map(|&p| pt([p % m, (p / m) % m, p / (m * m)])[a])
+                    .collect()
+            });
             let mut v = vec![C::new(0.0, 0.0); need.len()];
             fz.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut v);
             for (&p, z) in need.iter().zip(v) {
@@ -3581,15 +4093,24 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                 cnt += 1.0;
             }
             if cnt > 0.0 {
-                let p = [q[0] as f64 + sum[0] / cnt, q[1] as f64 + sum[1] / cnt, q[2] as f64 + sum[2] / cnt];
-                let id = local.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
+                let p = [
+                    q[0] as f64 + sum[0] / cnt,
+                    q[1] as f64 + sum[1] / cnt,
+                    q[2] as f64 + sum[2] / cnt,
+                ];
+                let id =
+                    local.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
                 vert.insert(c, id);
                 local_cell.push(c as u32);
             }
         }
         // 枝ごとに作るのは、τ の頂点を置いた段差をまたぐセルだけ（どの枝の F_τ にも零点が無いセルの面は、F が飛ぶ所に
         // しか無いので、ふつうの Surface Nets に任せる）
-        let active: Vec<[usize; 3]> = mixed_cells.iter().copied().filter(|&c| vert.contains_key(&cell_id(c))).collect();
+        let active: Vec<[usize; 3]> = mixed_cells
+            .iter()
+            .copied()
+            .filter(|&c| vert.contains_key(&cell_id(c)))
+            .collect();
         for &c in &active {
             out.mixed.insert(cell_id(c));
         }
@@ -3599,7 +4120,11 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
             for [ca, cb] in EDGES {
                 let (a, b) = (CORNERS[ca], CORNERS[cb]);
                 let ax = (0..3).find(|&x| a[x] != b[x]).unwrap_or(0);
-                let p0 = if a[ax] == 0 { [c[0] + a[0], c[1] + a[1], c[2] + a[2]] } else { [c[0] + b[0], c[1] + b[1], c[2] + b[2]] };
+                let p0 = if a[ax] == 0 {
+                    [c[0] + a[0], c[1] + a[1], c[2] + a[2]]
+                } else {
+                    [c[0] + b[0], c[1] + b[1], c[2] + b[2]]
+                };
                 if !seen.insert((idx(p0), ax)) {
                     continue;
                 }
@@ -3612,7 +4137,10 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
                 let (bx, cx) = ((ax + 1) % 3, (ax + 2) % 3);
                 let mut around = [NONE; 4];
                 let mut ok = true;
-                for (r, (db, dc)) in [(1usize, 1usize), (0, 1), (0, 0), (1, 0)].into_iter().enumerate() {
+                for (r, (db, dc)) in [(1usize, 1usize), (0, 1), (0, 0), (1, 0)]
+                    .into_iter()
+                    .enumerate()
+                {
                     let mut s = p0;
                     if s[bx] < db || s[cx] < dc {
                         ok = false;
@@ -3651,12 +4179,16 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
         let inside = |xyz: [&[f64]; 3]| -> Vec<bool> {
             let len = xyz[0].len();
             let b = branch.eval(&xyz, len);
-            (0..len).map(|q| key(&b[q * k..(q + 1) * k]) == want).collect()
+            (0..len)
+                .map(|q| key(&b[q * k..(q + 1) * k]) == want)
+                .collect()
         };
         trim_by(&mut local, &mut local_cell, &inside, 10);
         let base = (out.mesh.positions.len() / 3) as u32;
         out.mesh.positions.extend_from_slice(&local.positions);
-        out.mesh.indices.extend(local.indices.iter().map(|&v| v + base));
+        out.mesh
+            .indices
+            .extend(local.indices.iter().map(|&v| v + base));
         out.vertex_cell.extend_from_slice(&local_cell);
     }
     out
@@ -3665,7 +4197,12 @@ fn branch_meshes(prog: &Program, field: &SparseField, dom: Domain, n: usize) -> 
 /// メッシュのうち、`inside` が真の所だけを残す。3 頂点とも外の三角形は捨て、混ざる三角形は、辺の上で内側の端を
 /// `rounds` 回の二分で探して、そこまでの多角形に切る（辺の上に求めた点は、隣の三角形と共有する）。
 /// 足した頂点の `vertex_cell` は、内側の頂点のセルにする
-fn trim_by(mesh: &mut Mesh, vertex_cell: &mut Vec<u32>, inside: &dyn Fn([&[f64]; 3]) -> Vec<bool>, rounds: usize) {
+fn trim_by(
+    mesh: &mut Mesh,
+    vertex_cell: &mut Vec<u32>,
+    inside: &dyn Fn([&[f64]; 3]) -> Vec<bool>,
+    rounds: usize,
+) {
     let nv = mesh.positions.len() / 3;
     let pos = |mesh: &Mesh, v: usize| [0, 1, 2].map(|a| mesh.positions[3 * v + a] as f64);
     let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| (0..nv).map(|v| pos(mesh, v)[a]).collect());
@@ -3695,12 +4232,20 @@ fn trim_by(mesh: &mut Mesh, vertex_cell: &mut Vec<u32>, inside: &dyn Fn([&[f64];
     for _ in 0..rounds {
         for (a, col) in cols.iter_mut().enumerate() {
             col.clear();
-            col.extend(todo.iter().enumerate().map(|(k, &e)| lerp(mesh, e, 0.5 * (ta[k] + tb[k]), a)));
+            col.extend(
+                todo.iter()
+                    .enumerate()
+                    .map(|(k, &e)| lerp(mesh, e, 0.5 * (ta[k] + tb[k]), a)),
+            );
         }
         let v = inside([&cols[0], &cols[1], &cols[2]]);
         for k in 0..todo.len() {
             let t = 0.5 * (ta[k] + tb[k]);
-            if v[k] { ta[k] = t } else { tb[k] = t }
+            if v[k] {
+                ta[k] = t
+            } else {
+                tb[k] = t
+            }
         }
     }
     for (k, &e) in todo.iter().enumerate() {
@@ -3727,7 +4272,11 @@ fn trim_by(mesh: &mut Mesh, vertex_cell: &mut Vec<u32>, inside: &dyn Fn([&[f64];
                 poly.push(a);
             }
             if ia != ib {
-                poly.push(if ia { edge_pt[&(a, b)] } else { edge_pt[&(b, a)] });
+                poly.push(if ia {
+                    edge_pt[&(a, b)]
+                } else {
+                    edge_pt[&(b, a)]
+                });
             }
         }
         for k in 1..poly.len().saturating_sub(1) {
@@ -3784,13 +4333,21 @@ fn extend_undefined(
                     continue;
                 }
                 let mut r = q;
-                if up { r[a] += 1 } else { r[a] -= 1 }
+                if up {
+                    r[a] += 1
+                } else {
+                    r[a] -= 1
+                }
                 if !field.f(r).is_finite() {
                     continue;
                 }
                 let opposite_bad = if up { q[a] == 0 } else { q[a] + 1 >= m } || {
                     let mut o = q;
-                    if up { o[a] -= 1 } else { o[a] += 1 }
+                    if up {
+                        o[a] -= 1
+                    } else {
+                        o[a] += 1
+                    }
                     bad.contains(&idx(o))
                 };
                 if opposite_bad {
@@ -3812,7 +4369,10 @@ fn extend_undefined(
         a + (b - a) * t
     };
     let (mut ta, mut tb) = (vec![0.0f64; np], vec![1.0f64; np]);
-    let fr: Vec<f64> = pairs.iter().map(|&(_, _, r, _)| field.f(r) as f64).collect();
+    let fr: Vec<f64> = pairs
+        .iter()
+        .map(|&(_, _, r, _)| field.f(r) as f64)
+        .collect();
     let mut fa = fr.clone();
     let mut cols: [Vec<f64>; 3] = Default::default();
     for _ in 0..10 {
@@ -3831,7 +4391,16 @@ fn extend_undefined(
             }
         }
     }
-    let fa: Vec<f64> = fa.iter().map(|&v| if v.is_infinite() { FILL_BIG.copysign(v) } else { v }).collect();
+    let fa: Vec<f64> = fa
+        .iter()
+        .map(|&v| {
+            if v.is_infinite() {
+                FILL_BIG.copysign(v)
+            } else {
+                v
+            }
+        })
+        .collect();
     // 埋める点ごとに平均する
     let mut sum: crate::adaptive::HashMap<usize, (f64, f64)> = Default::default();
     for (k, &(p, ..)) in pairs.iter().enumerate() {
@@ -3862,7 +4431,11 @@ fn extend_undefined(
                     continue;
                 }
                 let mut r = q;
-                if up { r[a] += 1 } else { r[a] -= 1 }
+                if up {
+                    r[a] += 1
+                } else {
+                    r[a] -= 1
+                }
                 if ext.filled.contains(&idx(r)) {
                     s += field.f(r) as f64;
                     c += 1.0;
@@ -3890,11 +4463,16 @@ fn extend_undefined(
     if zero.is_empty() {
         return ext;
     }
-    let (mut lo, mut hi): (Vec<f64>, Vec<f64>) = (vec![0.0; zero.len()], zero.iter().map(|&k| ta[k]).collect());
+    let (mut lo, mut hi): (Vec<f64>, Vec<f64>) =
+        (vec![0.0; zero.len()], zero.iter().map(|&k| ta[k]).collect());
     for _ in 0..12 {
         for (ax, col) in cols.iter_mut().enumerate() {
             col.clear();
-            col.extend(zero.iter().enumerate().map(|(z, &k)| at(k, 0.5 * (lo[z] + hi[z]), ax)));
+            col.extend(
+                zero.iter()
+                    .enumerate()
+                    .map(|(z, &k)| at(k, 0.5 * (lo[z] + hi[z]), ax)),
+            );
         }
         let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
         for (z, &k) in zero.iter().enumerate() {
@@ -3911,7 +4489,8 @@ fn extend_undefined(
         let t = 0.5 * (lo[z] + hi[z]);
         // 辺の始点（座標の小さいほうの端）からの割合にする
         let (start, t) = if r[a] < q[a] { (r, t) } else { (q, 1.0 - t) };
-        ext.edge_t.insert(3 * (start[0] + m * (start[1] + m * start[2])) + a, t as f32);
+        ext.edge_t
+            .insert(3 * (start[0] + m * (start[1] + m * start[2])) + a, t as f32);
     }
     ext
 }
@@ -3934,7 +4513,9 @@ fn trim_undefined(
         .filter(|&v| {
             let c = vertex_cell[v] as usize;
             let q = [c % n, (c / n) % n, c / (n * n)];
-            CORNERS.iter().any(|d| filled.contains(&((q[0] + d[0]) + m * ((q[1] + d[1]) + m * (q[2] + d[2])))))
+            CORNERS.iter().any(|d| {
+                filled.contains(&((q[0] + d[0]) + m * ((q[1] + d[1]) + m * (q[2] + d[2]))))
+            })
         })
         .collect();
     if near.is_empty() {
@@ -3944,7 +4525,8 @@ fn trim_undefined(
     let mut sc = FieldScratch::default();
     let mut undefined = vec![false; nv];
     {
-        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| near.iter().map(|&v| pos(mesh, v)[a]).collect());
+        let cols: [Vec<f64>; 3] =
+            [0, 1, 2].map(|a| near.iter().map(|&v| pos(mesh, v)[a]).collect());
         let vals = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
         for (&v, &f) in near.iter().zip(vals) {
             undefined[v] = f.is_nan();
@@ -3960,7 +4542,8 @@ fn trim_undefined(
         for e in 0..3 {
             let (a, b) = (t[e], t[(e + 1) % 3]);
             for (d, u) in [(a, b), (b, a)] {
-                if !undefined[d as usize] && undefined[u as usize] && !edge_pt.contains_key(&(d, u)) {
+                if !undefined[d as usize] && undefined[u as usize] && !edge_pt.contains_key(&(d, u))
+                {
                     edge_pt.insert((d, u), NONE);
                     todo.push((d, u));
                 }
@@ -3976,12 +4559,20 @@ fn trim_undefined(
     for _ in 0..8 {
         for (a, col) in cols.iter_mut().enumerate() {
             col.clear();
-            col.extend(todo.iter().enumerate().map(|(k, &e)| lerp(mesh, e, 0.5 * (ta[k] + tb[k]), a)));
+            col.extend(
+                todo.iter()
+                    .enumerate()
+                    .map(|(k, &e)| lerp(mesh, e, 0.5 * (ta[k] + tb[k]), a)),
+            );
         }
         let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
         for k in 0..todo.len() {
             let t = 0.5 * (ta[k] + tb[k]);
-            if v[k].is_nan() { tb[k] = t } else { ta[k] = t }
+            if v[k].is_nan() {
+                tb[k] = t
+            } else {
+                ta[k] = t
+            }
         }
     }
     for (k, &e) in todo.iter().enumerate() {
@@ -4008,7 +4599,11 @@ fn trim_undefined(
                 poly.push(a);
             }
             if ua != ub {
-                poly.push(if ua { edge_pt[&(b, a)] } else { edge_pt[&(a, b)] });
+                poly.push(if ua {
+                    edge_pt[&(b, a)]
+                } else {
+                    edge_pt[&(a, b)]
+                });
             }
         }
         for k in 1..poly.len().saturating_sub(1) {
@@ -4077,8 +4672,14 @@ fn drop_fragments(
         corner_bad
             || (!not_zero.is_empty()
                 && EDGES.iter().any(|&[ca, cb]| {
-                    let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
-                    let s =if CORNERS[ca][a] == 0 { CORNERS[ca] } else { CORNERS[cb] };
+                    let a = (0..3)
+                        .find(|&x| CORNERS[ca][x] != CORNERS[cb][x])
+                        .unwrap_or(0);
+                    let s = if CORNERS[ca][a] == 0 {
+                        CORNERS[ca]
+                    } else {
+                        CORNERS[cb]
+                    };
                     not_zero.contains(&(3 * idx([q[0] + s[0], q[1] + s[1], q[2] + s[2]]) + a))
                 }))
     };
@@ -4093,7 +4694,9 @@ fn drop_fragments(
     let mut info: crate::adaptive::HashMap<u32, ([f64; 3], [f64; 3], bool)> = Default::default();
     for v in (0..nv).filter(|&v| small[v]) {
         let r = root(&mut parent, v as u32);
-        let e = info.entry(r).or_insert(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], false));
+        let e = info
+            .entry(r)
+            .or_insert(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], false));
         for a in 0..3 {
             let x = mesh.positions[3 * v + a] as f64;
             e.0[a] = e.0[a].min(x);
@@ -4126,7 +4729,9 @@ fn drop_fragments(
     }
     let drop: crate::adaptive::HashSet<u32> = info
         .iter()
-        .filter(|(_, (lo, hi, sus))| *sus && (0..3).all(|a| hi[a] - lo[a] <= 2.0 * cell_size[a] + 1e-9))
+        .filter(|(_, (lo, hi, sus))| {
+            *sus && (0..3).all(|a| hi[a] - lo[a] <= 2.0 * cell_size[a] + 1e-9)
+        })
         .map(|(&r, _)| r)
         .collect();
     if drop.is_empty() {
@@ -4254,7 +4859,11 @@ fn nets_on_grid(
     pos: &dyn Fn([f64; 3]) -> [f64; 3],
 ) -> Mesh {
     let cell = |c: [usize; 3]| c[0] + dims[0] * (c[1] + dims[1] * c[2]);
-    let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
+    let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| {
+        (0..3)
+            .find(|&x| CORNERS[ca][x] != CORNERS[cb][x])
+            .unwrap_or(0)
+    });
     let mut vert = vec![NONE; dims[0] * dims[1] * dims[2]];
     let mut slots: Vec<[u32; 12]> = Vec::new();
     let mut cells: Vec<[usize; 3]> = Vec::new();
@@ -4306,7 +4915,11 @@ fn nets_on_grid(
                 for g in 0..groups {
                     let (sum, cnt) = sums[g];
                     if cnt > 0.0 {
-                        ids[g] = mesh.push_vertex(pos([x as f64 + sum[0] / cnt, y as f64 + sum[1] / cnt, z as f64 + sum[2] / cnt]));
+                        ids[g] = mesh.push_vertex(pos([
+                            x as f64 + sum[0] / cnt,
+                            y as f64 + sum[1] / cnt,
+                            z as f64 + sum[2] / cnt,
+                        ]));
                     }
                 }
                 if ids.iter().all(|&v| v == NONE) {
@@ -4321,7 +4934,9 @@ fn nets_on_grid(
     let local_edge = |a: usize, base: [usize; 3]| -> usize {
         EDGES
             .iter()
-            .position(|&[ca, cb]| CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a)))
+            .position(|&[ca, cb]| {
+                CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a))
+            })
             .unwrap_or(0)
     };
     for a in 0..3 {
@@ -4337,7 +4952,9 @@ fn nets_on_grid(
             if p[b] == 0 || p[c] == 0 {
                 continue;
             }
-            let Some((_, sign)) = cross(p, a) else { continue };
+            let Some((_, sign)) = cross(p, a) else {
+                continue;
+            };
             let mut q = [NONE; 4];
             for (i, ((db, dc), le)) in around.iter().zip(locals).enumerate() {
                 let mut s = p;
@@ -4352,9 +4969,11 @@ fn nets_on_grid(
                 continue;
             }
             if sign {
-                mesh.indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
+                mesh.indices
+                    .extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
             } else {
-                mesh.indices.extend_from_slice(&[q[0], q[2], q[1], q[0], q[3], q[2]]);
+                mesh.indices
+                    .extend_from_slice(&[q[0], q[2], q[1], q[0], q[3], q[2]]);
             }
         }
     }
@@ -4406,13 +5025,19 @@ fn refine_components(
     let thorough = refine == Refine::Thorough;
     let light = refine == Refine::Light;
     // 元の格子の 1 マスの大きさ（いちばん大きい向き）
-    let cell_size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n as f64).fold(0.0, f64::max);
+    let cell_size = (0..3)
+        .map(|a| (dom.hi[a] - dom.lo[a]) / n as f64)
+        .fold(0.0, f64::max);
     use crate::adaptive::{HashMap, HashSet};
     let nb = field.nb;
     let bid = |b: [usize; 3]| b[0] + nb * (b[1] + nb * b[2]);
     let unbid = |id: usize| [id % nb, (id / nb) % nb, id / (nb * nb)];
-    let block_of_cell = |c: usize| bid([c % n, (c / n) % n, c / (n * n)].map(|x| (x / BLOCK).min(nb - 1)));
-    let vblock: Vec<usize> = vertex_cell.iter().map(|&c| block_of_cell(c as usize)).collect();
+    let block_of_cell =
+        |c: usize| bid([c % n, (c / n) % n, c / (n * n)].map(|x| (x / BLOCK).min(nb - 1)));
+    let vblock: Vec<usize> = vertex_cell
+        .iter()
+        .map(|&c| block_of_cell(c as usize))
+        .collect();
     let mut has_vert = vec![false; nb * nb * nb];
     for &b in &vblock {
         has_vert[b] = true;
@@ -4443,7 +5068,9 @@ fn refine_components(
         }
         let neg = v < 0.0;
         let r = |x: usize| x.saturating_sub(2)..=(x + 2).min(m - 1);
-        r(q[2]).all(|k| r(q[1]).all(|j| r(q[0]).all(|i| f([i, j, k]).is_nan() || (f([i, j, k]) < 0.0) == neg)))
+        r(q[2]).all(|k| {
+            r(q[1]).all(|j| r(q[0]).all(|i| f([i, j, k]).is_nan() || (f([i, j, k]) < 0.0) == neg))
+        })
     };
     // 1 (a), (b)
     if prog.supports_interval() {
@@ -4488,9 +5115,15 @@ fn refine_components(
                 for i in 1..m - 1 {
                     let l = i + sy * j + sz * k;
                     let f = v[l];
-                    let (gx, gy, gz) = (v[l + 1] - v[l - 1], v[l + sy] - v[l - sy], v[l + sz] - v[l - sz]);
+                    let (gx, gy, gz) = (
+                        v[l + 1] - v[l - 1],
+                        v[l + sy] - v[l - sy],
+                        v[l + sz] - v[l - sz],
+                    );
                     // 0.87² / 4 ≈ 0.19（中心差分の 1/2 を含める）
-                    if (f * f).partial_cmp(&(0.19 * (gx * gx + gy * gy + gz * gz))) != Some(std::cmp::Ordering::Less) {
+                    if (f * f).partial_cmp(&(0.19 * (gx * gx + gy * gy + gz * gz)))
+                        != Some(std::cmp::Ordering::Less)
+                    {
                         continue;
                     }
                     if near_zero([i, j, k]) {
@@ -4518,7 +5151,13 @@ fn refine_components(
         }
     }
     // 1 (d) 小さい成分: メッシュの成分を囲む箱が ZOOM_TARGET マスより小さい（頂点はあるが、粗い多面体になっている）
-    let target = ZOOM_TARGET[if light { 0 } else if thorough { 2 } else { 1 }];
+    let target = ZOOM_TARGET[if light {
+        0
+    } else if thorough {
+        2
+    } else {
+        1
+    }];
     for comp in mesh_components(mesh) {
         let (lo, hi) = vertex_box(mesh, comp.iter().copied());
         if (0..3).all(|a| hi[a] - lo[a] < target as f64 * cell_size) {
@@ -4576,7 +5215,11 @@ fn refine_components(
             g.1 |= suspect[id];
         }
     }
-    let mut groups: Vec<Vec<usize>> = groups.into_values().filter(|(_, s)| *s).map(|(b, _)| b).collect();
+    let mut groups: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|(_, s)| *s)
+        .map(|(b, _)| b)
+        .collect();
     // 大きい成分は、図形の大きさに合わせて作り直すときだけ使う（[`refine_blocks`] は 64 ブロックを超えると諦める）
     groups.retain(|g| g.len() <= REFINE_MAX_BLOCKS);
     if groups.is_empty() {
@@ -4590,7 +5233,13 @@ fn refine_components(
         points: REFINE_POINT_BUDGET[thorough as usize],
     };
     let max_r = if thorough { 8 } else { 4 };
-    let mut zoom_budget = ZOOM_POINT_BUDGET[if light { 0 } else if thorough { 2 } else { 1 }];
+    let mut zoom_budget = ZOOM_POINT_BUDGET[if light {
+        0
+    } else if thorough {
+        2
+    } else {
+        1
+    }];
     // ブロックごとの、頂点を持つ三角形（差し替えるときに、内と外にまたがらないかを見る）
     let mut block_tris: HashMap<usize, Vec<u32>> = HashMap::default();
     for (ti, t) in mesh.indices.chunks_exact(3).enumerate() {
@@ -4610,14 +5259,33 @@ fn refine_components(
         // 小さい成分は、図形を囲む箱に合わせた細かい格子で作り直す（図形の大きさによらず同じ細かさになる）
         let mut best: Option<(Mesh, HashSet<usize>)> = None;
         if let Some((fine, more)) = zoom_component(
-            prog, combos, dom, n, nb, &blocks, &has_vert, mesh, &vblock, cell_size, target, &mut zoom_budget,
+            prog,
+            combos,
+            dom,
+            n,
+            nb,
+            &blocks,
+            &has_vert,
+            mesh,
+            &vblock,
+            cell_size,
+            target,
+            &mut zoom_budget,
         ) {
             blocks.extend(more);
             best = Some((fine, blocks.clone()));
         }
-        let mut r = if best.is_some() || light { max_r + 1 } else { 2 };
+        let mut r = if best.is_some() || light {
+            max_r + 1
+        } else {
+            2
+        };
         while r <= max_r {
-            let Some(fine) = refine_blocks(prog, combos, dom, n, field, &mut blocks, r, &mut budget) else { break };
+            let Some(fine) =
+                refine_blocks(prog, combos, dom, n, field, &mut blocks, r, &mut budget)
+            else {
+                break;
+            };
             let done = !fine.indices.is_empty() && !is_angular(&fine);
             if !fine.indices.is_empty() {
                 best = Some((fine, blocks.clone()));
@@ -4628,7 +5296,9 @@ fn refine_components(
             r *= 2;
         }
         let Some((fine, blocks)) = best else { continue };
-        if blocks.iter().any(|b| replaced.contains(b)) || added + fine.indices.len() / 3 > REFINE_MAX_TRIANGLES {
+        if blocks.iter().any(|b| replaced.contains(b))
+            || added + fine.indices.len() / 3 > REFINE_MAX_TRIANGLES
+        {
             continue;
         }
         // 元の三角形のうち、成分の中のもの。内と外にまたがるものがあれば差し替えない
@@ -4661,7 +5331,10 @@ fn refine_components(
     // 4. 差し替える（使われなくなった頂点は除く）
     let old = std::mem::take(mesh);
     let mut remap = vec![NONE; old.positions.len() / 3];
-    let mut out = Mesh { stats: old.stats, ..Mesh::default() };
+    let mut out = Mesh {
+        stats: old.stats,
+        ..Mesh::default()
+    };
     for (ti, t) in old.indices.chunks_exact(3).enumerate() {
         if drop_tri[ti] {
             continue;
@@ -4670,7 +5343,8 @@ fn refine_components(
             let v = v as usize;
             if remap[v] == NONE {
                 remap[v] = (out.positions.len() / 3) as u32;
-                out.positions.extend_from_slice(&old.positions[3 * v..3 * v + 3]);
+                out.positions
+                    .extend_from_slice(&old.positions[3 * v..3 * v + 3]);
             }
             out.indices.push(remap[v]);
         }
@@ -4686,13 +5360,21 @@ fn refine_components(
 
 /// 箱 [lo, hi] の上で F = 0 になるかもしれないか（区間演算）。`depth` 段まで 8 等分して確かめ、どこかの小箱が
 /// 0 を含むかもしれなければ true。区間演算の回数が `budget` を使い切ったら false（疑わしいままにしない）
-fn zero_in_box(prog: &Program, lo: [f64; 3], hi: [f64; 3], depth: usize, budget: &mut usize) -> bool {
+fn zero_in_box(
+    prog: &Program,
+    lo: [f64; 3],
+    hi: [f64; 3],
+    depth: usize,
+    budget: &mut usize,
+) -> bool {
     use crate::interval::Interval;
     if *budget == 0 {
         return false;
     }
     *budget -= 1;
-    let boxes: Vec<Interval> = (0..3).map(|a| Interval::new(lo[a].min(hi[a]), lo[a].max(hi[a]))).collect();
+    let boxes: Vec<Interval> = (0..3)
+        .map(|a| Interval::new(lo[a].min(hi[a]), lo[a].max(hi[a])))
+        .collect();
     if !prog.eval_interval(&boxes).may_contain_zero() {
         return false;
     }
@@ -5134,7 +5816,11 @@ fn is_angular(mesh: &Mesh) -> bool {
         let (a, b) = (a as usize * 3, b as usize * 3);
         nrm[a] * nrm[b] + nrm[a + 1] * nrm[b + 1] + nrm[a + 2] * nrm[b + 2]
     };
-    mesh.indices.chunks_exact(3).any(|t| dotn(t[0], t[1]) < REFINE_COS || dotn(t[1], t[2]) < REFINE_COS || dotn(t[2], t[0]) < REFINE_COS)
+    mesh.indices.chunks_exact(3).any(|t| {
+        dotn(t[0], t[1]) < REFINE_COS
+            || dotn(t[1], t[2]) < REFINE_COS
+            || dotn(t[2], t[0]) < REFINE_COS
+    })
 }
 
 /// 細かく作り直す手間の残り（[`refine_components`]）
@@ -5165,7 +5851,10 @@ fn refine_blocks(
     // 成分の外側の面（ブロック b の向き a・側 side の面。向こうのブロックが成分の外）の上の格子の辺で、
     // `changes(点, 向き)` が真のものがあれば、向こうのブロックを返す。`scale` は格子の細かさ（元の格子なら 1）、
     // `origin` は格子の原点（元の格子のセル）
-    let outward = |blocks: &crate::adaptive::HashSet<usize>, scale: usize, origin: [usize; 3], changes: &dyn Fn([usize; 3], usize) -> bool| {
+    let outward = |blocks: &crate::adaptive::HashSet<usize>,
+                   scale: usize,
+                   origin: [usize; 3],
+                   changes: &dyn Fn([usize; 3], usize) -> bool| {
         let mut grow: Vec<usize> = Vec::new();
         for &id in blocks.iter() {
             let b = unbid(id);
@@ -5175,7 +5864,11 @@ fn refine_blocks(
             };
             for a in 0..3 {
                 for side in 0..2 {
-                    let Some(nbr) = (if side == 0 { b[a].checked_sub(1) } else { Some(b[a] + 1).filter(|&x| x < nb) }) else {
+                    let Some(nbr) = (if side == 0 {
+                        b[a].checked_sub(1)
+                    } else {
+                        Some(b[a] + 1).filter(|&x| x < nb)
+                    }) else {
                         continue;
                     };
                     let mut q = b;
@@ -5279,7 +5972,8 @@ fn refine_blocks(
         let mut vals = vec![f32::NAN; need.len()];
         let mut sc = FieldScratch::default();
         for part in list.chunks(FIELD_CHUNK) {
-            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| part.iter().map(|&l| coord(l, a)).collect());
+            let cols: [Vec<f64>; 3] =
+                [0, 1, 2].map(|a| part.iter().map(|&l| coord(l, a)).collect());
             let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
             for (&l, &x) in part.iter().zip(v) {
                 vals[l] = x as f32;
@@ -5321,13 +6015,26 @@ fn refine_blocks(
                         continue;
                     }
                 }
-                sign_edges.push(SignEdge { p0: point(l), p1: point(l + st), f0: f0 as f64, f1: f1 as f64 });
+                sign_edges.push(SignEdge {
+                    p0: point(l),
+                    p1: point(l + st),
+                    f0: f0 as f64,
+                    f1: f1 as f64,
+                });
                 sign_ids.push(3 * l + a);
             }
         }
         let not_zero: crate::adaptive::HashSet<usize> = {
-            let flags = false_crossings(&mut |xyz| field_values_with(prog, combos, xyz, &mut sc).to_vec(), &sign_edges);
-            sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+            let flags = false_crossings(
+                &mut |xyz| field_values_with(prog, combos, xyz, &mut sc).to_vec(),
+                &sign_edges,
+            );
+            sign_ids
+                .into_iter()
+                .zip(flags)
+                .filter(|&(_, bad)| bad)
+                .map(|(id, _)| id)
+                .collect()
         };
         let cell_ok = |c: [usize; 3]| {
             let b = [0, 1, 2].map(|a| ((c0[a] + c[a] / r) / BLOCK).min(nb - 1) - b0[a]);
@@ -5337,7 +6044,11 @@ fn refine_blocks(
             let mut q = p;
             q[a] += 1;
             let (f0, f1) = (vals[at(p)], vals[at(q)]);
-            if !f0.is_finite() || !f1.is_finite() || (f0 < 0.0) == (f1 < 0.0) || not_zero.contains(&(3 * at(p) + a)) {
+            if !f0.is_finite()
+                || !f1.is_finite()
+                || (f0 < 0.0) == (f1 < 0.0)
+                || not_zero.contains(&(3 * at(p) + a))
+            {
                 return None;
             }
             Some(((f0 / (f0 - f1)) as f64, f0 < 0.0))
@@ -5349,7 +6060,13 @@ fn refine_blocks(
 
 /// 速くする前の [`implicit_solid`]（テストで、出力が完全に同じことを確かめる）
 #[cfg(test)]
-fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f64, f64)], samples: usize) -> Mesh {
+fn implicit_solid_reference(
+    prog: &Program,
+    dom: Domain,
+    n: usize,
+    ranges: &[(f64, f64)],
+    samples: usize,
+) -> Mesh {
     // 表示範囲の外側に1マスずつ広げて計算する。Surface Nets 法は範囲の端で曲面が
     // ギザギザに途切れるので、少しはみ出して作っておき、端は描画側で真っ直ぐ切り落とす。
     let n = n.max(2);
@@ -5379,14 +6096,21 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
         for k in 0..m {
             zs.fill(dom.at(2, k as f64, n));
             let layer = &mut f[k * m * m..(k + 1) * m * m];
-            for (dst, v) in layer.iter_mut().zip(field_values(prog, &combos, [&xs, &ys, &zs])) {
+            for (dst, v) in layer
+                .iter_mut()
+                .zip(field_values(prog, &combos, [&xs, &ys, &zs]))
+            {
                 *dst = v as f32;
             }
         }
     }
 
     // 1'. 符号は変わらないが F = 0 に接している所（例: (x² + y² + z² − 1)² = 0）を探す
-    let touch = if ranges.is_empty() { find_touches(prog, &f, dom, n) } else { Default::default() };
+    let touch = if ranges.is_empty() {
+        find_touches(prog, &f, dom, n)
+    } else {
+        Default::default()
+    };
     let cell = |i: usize, j: usize, k: usize| i + n * (j + n * k);
     // 接するだけの辺を囲むセルに印を付ける。印の無いセル・辺は、接する所を調べずに済ませる
     // （1つでも接する所があると全部のセルが遅い道を通る、ということにならないように）
@@ -5430,7 +6154,9 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
         if !near_touch {
             return None;
         }
-        touch.get(&(3 * idx(p[0], p[1], p[2]) + a)).map(|&t| (t as f64, None))
+        touch
+            .get(&(3 * idx(p[0], p[1], p[2]) + a))
+            .map(|&t| (t as f64, None))
     };
 
     // 2. 曲面が通るセルに頂点を置く。位置は「辺の上で曲面と交わる点」の平均。
@@ -5473,9 +6199,14 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
                 // 符号の変わる辺もあるセルでは組に分けず、1つの頂点にまとめる（前と同じ）
                 let has_touch = near_touch
                     && EDGES.iter().any(|&[ca, cb]| {
-                        let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
+                        let a = (0..3)
+                            .find(|&x| CORNERS[ca][x] != CORNERS[cb][x])
+                            .unwrap_or(0);
                         let base = CORNERS[ca];
-                        matches!(crossing([i + base[0], j + base[1], k + base[2]], a, true), Some((_, None)))
+                        matches!(
+                            crossing([i + base[0], j + base[1], k + base[2]], a, true),
+                            Some((_, None))
+                        )
                     });
                 if has_touch && groups > 0 {
                     for g in group.iter_mut().filter(|g| **g != usize::MAX) {
@@ -5484,12 +6215,16 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
                     groups = 1;
                 }
                 let touch_group = if groups > 0 { 0 } else { groups }; // 接するだけの辺の組
-                // 交わる辺ごとの組と、交わる点（セルの中の位置）
+                                                                       // 交わる辺ごとの組と、交わる点（セルの中の位置）
                 let mut hits: Vec<(usize, usize, [f64; 3])> = Vec::with_capacity(12);
                 for (e, [ca, cb]) in EDGES.iter().copied().enumerate() {
-                    let a = (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0);
+                    let a = (0..3)
+                        .find(|&x| CORNERS[ca][x] != CORNERS[cb][x])
+                        .unwrap_or(0);
                     let base = CORNERS[ca];
-                    if let Some((t, sign)) = crossing([i + base[0], j + base[1], k + base[2]], a, near_touch) {
+                    if let Some((t, sign)) =
+                        crossing([i + base[0], j + base[1], k + base[2]], a, near_touch)
+                    {
                         let g = match sign {
                             Some(_) => group[if corner_neg[ca] == minority { ca } else { cb }],
                             None => touch_group,
@@ -5512,8 +6247,16 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
                 let mut ids = vec![NONE; groups + 1];
                 for (g, (sum, cnt)) in sums.iter().enumerate() {
                     if *cnt > 0.0 {
-                        let p = [i as f64 + sum[0] / cnt, j as f64 + sum[1] / cnt, k as f64 + sum[2] / cnt];
-                        ids[g] = mesh.push_vertex([dom.at(0, p[0], n), dom.at(1, p[1], n), dom.at(2, p[2], n)]);
+                        let p = [
+                            i as f64 + sum[0] / cnt,
+                            j as f64 + sum[1] / cnt,
+                            k as f64 + sum[2] / cnt,
+                        ];
+                        ids[g] = mesh.push_vertex([
+                            dom.at(0, p[0], n),
+                            dom.at(1, p[1], n),
+                            dom.at(2, p[2], n),
+                        ]);
                     }
                 }
                 if ids.iter().all(|&v| v == NONE) {
@@ -5529,7 +6272,9 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
     let local_edge = |a: usize, base: [usize; 3]| -> usize {
         EDGES
             .iter()
-            .position(|&[ca, cb]| CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a)))
+            .position(|&[ca, cb]| {
+                CORNERS[ca] == base && (0..3).all(|x| (CORNERS[cb][x] != base[x]) == (x == a))
+            })
             .unwrap_or(0)
     };
 
@@ -5560,9 +6305,15 @@ fn implicit_solid_reference(prog: &Program, dom: Domain, n: usize, ranges: &[(f6
                             s[c] -= dc;
                             marked(s[0], s[1], s[2])
                         });
-                    let Some((_, sign)) = crossing(p, a, near_touch) else { continue };
+                    let Some((_, sign)) = crossing(p, a, near_touch) else {
+                        continue;
+                    };
                     let mut around = [NONE; 4];
-                    for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)].iter().zip(locals).enumerate() {
+                    for (q, ((db, dc), le)) in [(1, 1), (0, 1), (0, 0), (1, 0)]
+                        .iter()
+                        .zip(locals)
+                        .enumerate()
+                    {
                         let mut s = p;
                         s[b] -= db;
                         s[c] -= dc;
@@ -5706,11 +6457,21 @@ const FIELD_CHUNK: usize = 1 << 15;
 impl FieldPlan {
     /// かたまりの数
     fn chunks(&self) -> usize {
-        if self.field.dense { self.field.m } else { self.spots.len().div_ceil(FIELD_CHUNK) }
+        if self.field.dense {
+            self.field.m
+        } else {
+            self.spots.len().div_ceil(FIELD_CHUNK)
+        }
     }
 
     /// かたまり `range` の点で F を計算して、点の順に並べたもの
-    fn values(&self, prog: &Program, combos: &[Vec<f64>], dom: Domain, range: std::ops::Range<usize>) -> Vec<f32> {
+    fn values(
+        &self,
+        prog: &Program,
+        combos: &[Vec<f64>],
+        dom: Domain,
+        range: std::ops::Range<usize>,
+    ) -> Vec<f32> {
         let (m, n) = (self.field.m, self.n);
         let mut scratch = FieldScratch::default();
         let mut out = Vec::new();
@@ -5726,11 +6487,16 @@ impl FieldPlan {
             let mut zs = vec![0.0; m * m];
             for k in range {
                 zs.fill(dom.at(2, k as f64, n));
-                out.extend(field_values_with(prog, combos, [&xs, &ys, &zs], &mut scratch).iter().map(|&v| v as f32));
+                out.extend(
+                    field_values_with(prog, combos, [&xs, &ys, &zs], &mut scratch)
+                        .iter()
+                        .map(|&v| v as f32),
+                );
             }
             return out;
         }
-        let coord: [Vec<f64>; 3] = [0, 1, 2].map(|ax| (0..m).map(|q| dom.at(ax, q as f64, n)).collect());
+        let coord: [Vec<f64>; 3] =
+            [0, 1, 2].map(|ax| (0..m).map(|q| dom.at(ax, q as f64, n)).collect());
         let mut cols: [Vec<f64>; 3] = Default::default();
         for c in range {
             let part = &self.spots[c * FIELD_CHUNK..((c + 1) * FIELD_CHUNK).min(self.spots.len())];
@@ -5744,7 +6510,11 @@ impl FieldPlan {
                     cols[ax].push(coord[ax][q[ax]]);
                 }
             }
-            out.extend(field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut scratch).iter().map(|&v| v as f32));
+            out.extend(
+                field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut scratch)
+                    .iter()
+                    .map(|&v| v as f32),
+            );
         }
         out
     }
@@ -5762,13 +6532,24 @@ impl FieldPlan {
 
     /// 全部の点の数
     fn len(&self) -> usize {
-        if self.field.dense { self.field.m.pow(3) } else { self.spots.len() }
+        if self.field.dense {
+            self.field.m.pow(3)
+        } else {
+            self.spots.len()
+        }
     }
 }
 
 impl SparseField {
     #[cfg(test)]
-    fn build(prog: &Program, combos: &[Vec<f64>], ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool) -> SparseField {
+    fn build(
+        prog: &Program,
+        combos: &[Vec<f64>],
+        ranges: &[(f64, f64)],
+        dom: Domain,
+        n: usize,
+        all_blocks: bool,
+    ) -> SparseField {
         let mut plan = SparseField::plan(prog, ranges, dom, n, all_blocks, None);
         let vals = plan.values(prog, combos, dom, 0..plan.chunks());
         plan.fill(&vals);
@@ -5776,7 +6557,14 @@ impl SparseField {
     }
 
     /// F の値を入れる前の形（あるブロック・値の置き場所）と、F を計算する点の一覧（[`FieldPlan`]）
-    fn plan(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, all_blocks: bool, mask: Option<&[bool]>) -> FieldPlan {
+    fn plan(
+        prog: &Program,
+        ranges: &[(f64, f64)],
+        dom: Domain,
+        n: usize,
+        all_blocks: bool,
+        mask: Option<&[bool]>,
+    ) -> FieldPlan {
         let m = n + 1;
         let nb = n.div_ceil(BLOCK);
         // 面を作るブロックを絞る（部品に分けて描くとき。pieces.rs）。絞ったブロックでは、区間演算で空かどうかを調べない
@@ -5795,13 +6583,24 @@ impl SparseField {
             None => block_occupancy(prog, ranges, dom, n, nb),
         };
         let np = m.div_ceil(8);
-        let mut field =
-            SparseField { m, nb, occupied, np, pages: Vec::new(), vals: Vec::new(), dense: false };
+        let mut field = SparseField {
+            m,
+            nb,
+            occupied,
+            np,
+            pages: Vec::new(),
+            vals: Vec::new(),
+            dense: false,
+        };
         // 全部のブロックがあるなら、密な格子にする（層ごとにまとめて計算する。速くする前と同じ）
         if field.occupied.iter().all(|&o| o) {
             field.dense = true;
             field.vals = vec![0.0; m * m * m];
-            return FieldPlan { field, n, spots: Vec::new() };
+            return FieldPlan {
+                field,
+                n,
+                spots: Vec::new(),
+            };
         }
         field.pages = vec![NONE; np * np * np];
         // 要る格子点: あるブロックのセルの角と、その周りの1点
@@ -5813,7 +6612,10 @@ impl SparseField {
                     if !field.occupied[bi + nb * (bj + nb * bk)] {
                         continue;
                     }
-                    let span = |b: usize| (BLOCK * b).saturating_sub(1)..=(BLOCK * (b + 1)).min(n).saturating_add(1).min(m - 1);
+                    let span = |b: usize| {
+                        (BLOCK * b).saturating_sub(1)
+                            ..=(BLOCK * (b + 1)).min(n).saturating_add(1).min(m - 1)
+                    };
                     let (si, sj, sk) = (span(bi), span(bj), span(bk));
                     // ページを用意する
                     for pk in (*sk.start() / 8)..=(*sk.end() / 8) {
@@ -5896,7 +6698,11 @@ impl SparseField {
     /// 密な格子なら全体の配列をそのまま渡し、ページに分けて持っているなら `buf`（BLOCK_BUF³ 個）に写して渡す。
     /// 受け持つ格子点は、ブロックの最小の角の側の点（最後のブロックは格子の端まで）。格子の辺 p → p + e は、
     /// 始点 p を受け持つブロックが調べる
-    fn for_blocks(&self, buf: &mut [f32], mut visit: impl FnMut(&[f32], BlockView, [std::ops::Range<usize>; 3])) {
+    fn for_blocks(
+        &self,
+        buf: &mut [f32],
+        mut visit: impl FnMut(&[f32], BlockView, [std::ops::Range<usize>; 3]),
+    ) {
         let nb = self.nb;
         let m = self.m;
         for bk in 0..nb {
@@ -5911,15 +6717,27 @@ impl SparseField {
                     if self.dense {
                         // 全体の配列で、origin − (1, 1, 1) の位置（負になることがあるので、桁あふれを許して計算する）
                         let strides = [1, m, m * m];
-                        let base = (origin[0] + m * (origin[1] + m * origin[2])).wrapping_sub(1 + m + m * m);
-                        visit(&self.vals, BlockView { origin, base, strides }, owned);
+                        let base = (origin[0] + m * (origin[1] + m * origin[2]))
+                            .wrapping_sub(1 + m + m * m);
+                        visit(
+                            &self.vals,
+                            BlockView {
+                                origin,
+                                base,
+                                strides,
+                            },
+                            owned,
+                        );
                         continue;
                     }
                     // 値を写す（x の向きに続く所はまとめて写す）
                     for lk in 0..BLOCK_BUF {
                         for lj in 0..BLOCK_BUF {
                             let row = &mut buf[BLOCK_BUF * (lj + BLOCK_BUF * lk)..][..BLOCK_BUF];
-                            let (j, k) = ((origin[1] + lj).wrapping_sub(1), (origin[2] + lk).wrapping_sub(1));
+                            let (j, k) = (
+                                (origin[1] + lj).wrapping_sub(1),
+                                (origin[2] + lk).wrapping_sub(1),
+                            );
                             if j >= m || k >= m {
                                 row.fill(f32::NAN);
                                 continue;
@@ -5936,13 +6754,23 @@ impl SparseField {
                                 let run = (8 - (i & 7)).min(m - i).min(BLOCK_BUF - li);
                                 match self.at([i, j, k]) {
                                     usize::MAX => row[li..li + run].fill(f32::NAN),
-                                    at => row[li..li + run].copy_from_slice(&self.vals[at..at + run]),
+                                    at => {
+                                        row[li..li + run].copy_from_slice(&self.vals[at..at + run])
+                                    }
                                 }
                                 li += run;
                             }
                         }
                     }
-                    visit(buf, BlockView { origin, base: 0, strides: [1, BLOCK_BUF, BLOCK_BUF * BLOCK_BUF] }, owned);
+                    visit(
+                        buf,
+                        BlockView {
+                            origin,
+                            base: 0,
+                            strides: [1, BLOCK_BUF, BLOCK_BUF * BLOCK_BUF],
+                        },
+                        owned,
+                    );
                 }
             }
         }
@@ -5958,17 +6786,29 @@ impl SparseField {
 /// ブロックごとに、F = 0 の曲面があるかもしれないか（区間演算で 0 を含むか。分からなければ「ある」）。
 /// 範囲で重ねた立体は、箱 × 重ねる変数の範囲で調べる（0 ∉ F(B × R) なら G = max(min F, −max F) > 0 で境界は無い）。
 /// まず 2 ブロックおき（各軸で1つおき）のブロックで割合を見積もり、DENSE_FRACTION を超えたら全部を「ある」にする
-fn block_occupancy(prog: &Program, ranges: &[(f64, f64)], dom: Domain, n: usize, nb: usize) -> Vec<bool> {
+fn block_occupancy(
+    prog: &Program,
+    ranges: &[(f64, f64)],
+    dom: Domain,
+    n: usize,
+    nb: usize,
+) -> Vec<bool> {
     use crate::interval::Interval;
     if !prog.supports_interval() {
         return vec![true; nb * nb * nb];
     }
-    let extra: Vec<Interval> = ranges.iter().map(|&(a, b)| Interval::new(a.min(b), a.max(b))).collect();
+    let extra: Vec<Interval> = ranges
+        .iter()
+        .map(|&(a, b)| Interval::new(a.min(b), a.max(b)))
+        .collect();
     // セル [c0, c1) の箱で 0 を含むかもしれないか
     let may_cross = |c0: [usize; 3], c1: [usize; 3]| {
         let mut boxes: Vec<Interval> = (0..3)
             .map(|ax| {
-                let (a, b) = (dom.at(ax, c0[ax] as f64, n), dom.at(ax, c1[ax].min(n) as f64, n));
+                let (a, b) = (
+                    dom.at(ax, c0[ax] as f64, n),
+                    dom.at(ax, c1[ax].min(n) as f64, n),
+                );
                 Interval::new(a.min(b), a.max(b))
             })
             .collect();
@@ -6057,7 +6897,10 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
         }
     };
     // 1. 直線で補間した交点
-    fill(&mut cols, &mut edges.iter().map(|e| at(e, e.f0 / (e.f0 - e.f1))));
+    fill(
+        &mut cols,
+        &mut edges.iter().map(|e| at(e, e.f0 / (e.f0 - e.f1))),
+    );
     let v = eval([&cols[0], &cols[1], &cols[2]]);
     // 残った辺: (辺の番号, ta, tb, fa, fb)
     let mut rest: Vec<(usize, f64, f64, f64, f64)> = edges
@@ -6067,7 +6910,9 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
         .map(|(k, e)| (k, 0.0, 1.0, e.f0, e.f1))
         .collect();
     // 2. 二分
-    let shrunk = |k: usize, fa: f64, fb: f64| fa.abs() + fb.abs() < 0.5 * (edges[k].f0.abs() + edges[k].f1.abs());
+    let shrunk = |k: usize, fa: f64, fb: f64| {
+        fa.abs() + fb.abs() < 0.5 * (edges[k].f0.abs() + edges[k].f1.abs())
+    };
     for round in 0..ROUNDS + EXTRA_ROUNDS {
         if round == ROUNDS {
             // 3. 縮んだ辺は本当の零点。縮まなかった辺だけ、二分を続ける
@@ -6076,7 +6921,12 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
         if rest.is_empty() {
             break;
         }
-        fill(&mut cols, &mut rest.iter().map(|&(k, ta, tb, _, _)| at(&edges[k], 0.5 * (ta + tb))));
+        fill(
+            &mut cols,
+            &mut rest
+                .iter()
+                .map(|&(k, ta, tb, _, _)| at(&edges[k], 0.5 * (ta + tb))),
+        );
         let v = eval([&cols[0], &cols[1], &cols[2]]);
         rest = rest
             .into_iter()
@@ -6087,7 +6937,11 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
                     return None;
                 }
                 let t = 0.5 * (ta + tb);
-                Some(if (fm < 0.0) != (fa < 0.0) { (k, ta, t, fa, fm) } else { (k, t, tb, fm, fb) })
+                Some(if (fm < 0.0) != (fa < 0.0) {
+                    (k, ta, t, fa, fm)
+                } else {
+                    (k, t, tb, fm, fb)
+                })
             })
             .collect();
     }
@@ -6108,7 +6962,12 @@ fn false_crossings(eval: &mut dyn FnMut([&[f64]; 3]) -> Vec<f64>, edges: &[SignE
 /// ただし、辺を囲む4つのセルの角に符号の変わる所があれば、符号の変わる曲面が通っているので候補にしない
 /// （`same_sign_around`。三分探索の前に外しても、結果は最後に外すのと同じ）。
 #[cfg(test)]
-fn find_touches(prog: &Program, f: &[f32], dom: Domain, n: usize) -> crate::adaptive::HashMap<usize, f32> {
+fn find_touches(
+    prog: &Program,
+    f: &[f32],
+    dom: Domain,
+    n: usize,
+) -> crate::adaptive::HashMap<usize, f32> {
     touch_search(prog, touch_candidates_dense(f, n), dom, n)
 }
 
@@ -6154,11 +7013,20 @@ fn touch_candidates_dense(f: &[f32], n: usize) -> Vec<TouchCand> {
                 let row = m * (j + m * k);
                 // 4 点 p − e, p, p + e, p + 2e の値の列（連続した場所を順に読む）
                 // （lo を先に足す: row + d·stride だけだと、row = 0, d = −1 で途中が負になる）
-                let cols = [-1isize, 0, 1, 2].map(|d| &f[((row + lo) as isize + d * stride as isize) as usize..][..hi - lo]);
-                for (off, (((&w0, &w1), &w2), &w3)) in cols[0].iter().zip(cols[1]).zip(cols[2]).zip(cols[3]).enumerate() {
+                let cols = [-1isize, 0, 1, 2]
+                    .map(|d| &f[((row + lo) as isize + d * stride as isize) as usize..][..hi - lo]);
+                for (off, (((&w0, &w1), &w2), &w3)) in cols[0]
+                    .iter()
+                    .zip(cols[1])
+                    .zip(cols[2])
+                    .zip(cols[3])
+                    .enumerate()
+                {
                     let p = [lo + off, j, k];
                     let get = |q: [usize; 3]| f[idx(q)];
-                    if let Some((s, outer)) = touch_candidate([w0, w1, w2, w3], || same_sign_around(get, m, p, a)) {
+                    if let Some((s, outer)) =
+                        touch_candidate([w0, w1, w2, w3], || same_sign_around(get, m, p, a))
+                    {
                         cands.push((3 * idx(p) + a, p, a, s, outer));
                     }
                 }
@@ -6169,7 +7037,12 @@ fn touch_candidates_dense(f: &[f32], n: usize) -> Vec<TouchCand> {
 }
 
 /// 接する所の候補を三分探索で確かめる（[`find_touches`] を参照）
-fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) -> crate::adaptive::HashMap<usize, f32> {
+fn touch_search(
+    prog: &Program,
+    cands: Vec<TouchCand>,
+    dom: Domain,
+    n: usize,
+) -> crate::adaptive::HashMap<usize, f32> {
     const ROUNDS: usize = 16;
     if cands.is_empty() {
         return Default::default();
@@ -6185,7 +7058,11 @@ fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) ->
             let t2 = ts(c);
             for (h, t) in t2.iter().enumerate() {
                 for ax in 0..3 {
-                    let g = if ax == a { p[ax] as f64 + t } else { p[ax] as f64 };
+                    let g = if ax == a {
+                        p[ax] as f64 + t
+                    } else {
+                        p[ax] as f64
+                    };
                     cols[ax][2 * c + h] = dom.at(ax, g, n);
                 }
             }
@@ -6202,7 +7079,11 @@ fn touch_search(prog: &Program, cands: Vec<TouchCand>, dom: Domain, n: usize) ->
             let s = cands[c].3;
             let val = |z: C| {
                 let v = s * as_real(z);
-                if v.is_nan() { f64::INFINITY } else { v }
+                if v.is_nan() {
+                    f64::INFINITY
+                } else {
+                    v
+                }
             };
             let (g1, g2) = (val(out[2 * c]), val(out[2 * c + 1]));
             let d = (hi[c] - lo[c]) / 3.0;
@@ -6276,7 +7157,9 @@ fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
         }
     }
     // 三角形 t が辺 u → v をこの向きにたどるか
-    let has = |tris: &[u32], t: usize, u: u32, v: u32| (0..3).any(|e| tris[3 * t + e] == u && tris[3 * t + (e + 1) % 3] == v);
+    let has = |tris: &[u32], t: usize, u: u32, v: u32| {
+        (0..3).any(|e| tris[3 * t + e] == u && tris[3 * t + (e + 1) % 3] == v)
+    };
     let mut done = vec![false; count];
     for start in 0..count {
         if done[start] {
@@ -6288,7 +7171,9 @@ fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
         while let Some(t) = stack.pop() {
             for e in 0..3 {
                 let (u, v) = (tris[3 * t + e], tris[3 * t + (e + 1) % 3]);
-                let Some(list) = edges.get(&(u.min(v), u.max(v))) else { continue };
+                let Some(list) = edges.get(&(u.min(v), u.max(v))) else {
+                    continue;
+                };
                 if list.len() != 2 {
                     continue; // 3つ以上の三角形が集まる辺では、向きを決められない
                 }
@@ -6309,7 +7194,11 @@ fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
         // 囲む体積（向き付き）が負なら裏返す
         let p = |k: u32| {
             let k = k as usize * 3;
-            [positions[k] as f64, positions[k + 1] as f64, positions[k + 2] as f64]
+            [
+                positions[k] as f64,
+                positions[k + 1] as f64,
+                positions[k + 2] as f64,
+            ]
         };
         // 基準点は部分の頂点の重心（開いた曲面でも、筒なら外向きになるように）
         let mut o = [0.0; 3];
@@ -6323,8 +7212,11 @@ fn orient_consistently(positions: &[f32], tris: &mut [u32]) {
         }
         let mut vol = 0.0;
         for &t in &comp {
-            let [a, b, c] = [p(tris[3 * t]), p(tris[3 * t + 1]), p(tris[3 * t + 2])].map(|q| [q[0] - o[0], q[1] - o[1], q[2] - o[2]]);
-            vol += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+            let [a, b, c] = [p(tris[3 * t]), p(tris[3 * t + 1]), p(tris[3 * t + 2])]
+                .map(|q| [q[0] - o[0], q[1] - o[1], q[2] - o[2]]);
+            vol += a[0] * (b[1] * c[2] - b[2] * c[1])
+                + a[1] * (b[2] * c[0] - b[0] * c[2])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]);
         }
         if vol < 0.0 {
             for &t in &comp {
@@ -6351,7 +7243,12 @@ struct FieldScratch {
 }
 
 /// [`field_values`] と同じ値を、作業用の配列 `sc` を使い回して計算する（結果は `sc` の中）
-fn field_values_with<'a>(prog: &Program, combos: &[Vec<f64>], [xs, ys, zs]: [&[f64]; 3], sc: &'a mut FieldScratch) -> &'a [f64] {
+fn field_values_with<'a>(
+    prog: &Program,
+    combos: &[Vec<f64>],
+    [xs, ys, zs]: [&[f64]; 3],
+    sc: &'a mut FieldScratch,
+) -> &'a [f64] {
     let len = xs.len();
     sc.out.resize(len, C::new(0.0, 0.0));
     sc.result.clear();
@@ -6365,7 +7262,8 @@ fn field_values_with<'a>(prog: &Program, combos: &[Vec<f64>], [xs, ys, zs]: [&[f
     sc.lo.resize(len, f64::INFINITY);
     sc.hi.clear();
     sc.hi.resize(len, f64::NEG_INFINITY);
-    sc.extra.resize(combos.first().map_or(0, |c| c.len()), Vec::new());
+    sc.extra
+        .resize(combos.first().map_or(0, |c| c.len()), Vec::new());
     for arr in sc.extra.iter_mut() {
         arr.resize(len, 0.0);
     }
@@ -6385,7 +7283,13 @@ fn field_values_with<'a>(prog: &Program, combos: &[Vec<f64>], [xs, ys, zs]: [&[f
         }
     }
     let (lo, hi) = (&sc.lo, &sc.hi);
-    sc.result.extend((0..len).map(|p| if lo[p].is_finite() { lo[p].max(-hi[p]) } else { f64::NAN }));
+    sc.result.extend((0..len).map(|p| {
+        if lo[p].is_finite() {
+            lo[p].max(-hi[p])
+        } else {
+            f64::NAN
+        }
+    }));
     &sc.result
 }
 
@@ -6427,13 +7331,23 @@ impl Field {
             let pos = v.iter().filter(|&&f| f > 0.0).count();
             negative = neg <= pos;
         }
-        Field { prog: prog.clone(), combos, negative, map: None }
+        Field {
+            prog: prog.clone(),
+            combos,
+            negative,
+            map: None,
+        }
     }
 
     /// 回す前の形の F（変数は回す前の表示中の座標）と、表示中の座標から F の変数への 1 次式 p = A q + b。
     /// どちらの側が中身かは、表示範囲 `dom`（表示中の座標）で決める
     pub fn mapped(prog: &Program, a: [[f64; 3]; 3], b: [f64; 3], dom: Domain) -> Field {
-        let mut f = Field { prog: prog.clone(), combos: vec![Vec::new()], negative: true, map: Some((a, b)) };
+        let mut f = Field {
+            prog: prog.clone(),
+            combos: vec![Vec::new()],
+            negative: true,
+            map: Some((a, b)),
+        };
         let n = 16;
         let mut cols: [Vec<f64>; 3] = Default::default();
         for k in 0..n {
@@ -6474,7 +7388,10 @@ impl Field {
     /// （面のちょうど上だと、描画側の切り落としの誤差で点々に欠けるため）。
     /// `clip` = (軸, 位置, 位置以下を残すか) があれば、その切り口で切り落とされる側は描かない
     pub fn box_caps(&self, dom: Domain, n: usize, clip: Option<(usize, f64, bool)>) -> Mesh {
-        let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
+        let size = (0..3)
+            .map(|a| (dom.hi[a] - dom.lo[a]).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let eps = size * 1e-4;
         let mut parts = Vec::new();
         for a in 0..3 {
@@ -6514,13 +7431,22 @@ impl Field {
         let point = |k: usize| [cols[0][k], cols[1][k], cols[2][k]];
         let f = self.values(cols.clone());
         // 中身なら負になる値
-        let g: Vec<f64> = if self.negative { f } else { f.iter().map(|v| -v).collect() };
+        let g: Vec<f64> = if self.negative {
+            f
+        } else {
+            f.iter().map(|v| -v).collect()
+        };
 
         let mut mesh = Mesh::default();
         // 各マスを2つの三角形に分け、三角形ごとに中身の部分（g < 0）を切り出す（値は辺の上で直線で補間）
         for j in 0..n {
             for i in 0..n {
-                let (a, b, c, d) = (j * m + i, j * m + i + 1, (j + 1) * m + i, (j + 1) * m + i + 1);
+                let (a, b, c, d) = (
+                    j * m + i,
+                    j * m + i + 1,
+                    (j + 1) * m + i,
+                    (j + 1) * m + i + 1,
+                );
                 for tri in [[a, b, d], [a, d, c]] {
                     if tri.iter().any(|&k| !g[k].is_finite()) || tri.iter().all(|&k| g[k] >= 0.0) {
                         continue;
@@ -6548,7 +7474,8 @@ impl Field {
                         mesh.push_vertex(*p);
                     }
                     for k in 1..poly.len() as u32 - 1 {
-                        mesh.indices.extend_from_slice(&[base, base + k, base + k + 1]);
+                        mesh.indices
+                            .extend_from_slice(&[base, base + k, base + k + 1]);
                     }
                 }
             }
@@ -6591,10 +7518,14 @@ fn sample_combos(ranges: &[(f64, f64)], samples: usize) -> Vec<Vec<f64>> {
         return vec![vec![]];
     }
     let k = ranges.len() as f64;
-    let per = ((samples.max(2) as f64).min(4096f64.powf(1.0 / k))).floor().max(2.0) as usize;
+    let per = ((samples.max(2) as f64).min(4096f64.powf(1.0 / k)))
+        .floor()
+        .max(2.0) as usize;
     let mut combos: Vec<Vec<f64>> = vec![vec![]];
     for &(a, b) in ranges {
-        let vals: Vec<f64> = (0..per).map(|s| a + (b - a) * s as f64 / (per - 1) as f64).collect();
+        let vals: Vec<f64> = (0..per)
+            .map(|s| a + (b - a) * s as f64 / (per - 1) as f64)
+            .collect();
         combos = combos
             .into_iter()
             .flat_map(|c| {
@@ -6655,11 +7586,20 @@ fn finite(p: &[f64]) -> bool {
 }
 
 fn dist(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>().sqrt()
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f64>()
+        .sqrt()
 }
 
 /// 媒介変数表示の曲面を、`n × n` マスの格子で計算する。`sets` の1つ1つが1枚の曲面（n 次元の成分の式）
-pub fn parametric_surface_nd(sets: &[Vec<Program>], u: (f64, f64), v: (f64, f64), n: usize) -> NdShape {
+pub fn parametric_surface_nd(
+    sets: &[Vec<Program>],
+    u: (f64, f64),
+    v: (f64, f64),
+    n: usize,
+) -> NdShape {
     parametric_surface_nd_opt(sets, u, v, n, None)
 }
 
@@ -6695,101 +7635,130 @@ fn param_jumps(
 ) -> ParamCut {
     const ROUNDS: usize = 12;
     let threshold = 0.02 * diag;
-    let dist = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt();
+    let dist = |a: &[f64], b: &[f64]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
     let ek = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
     let mut far = false;
     // 辺の一覧（`from` 以上の番号の頂点を持つ辺だけ）で段差を探す
-    let mut search = |r: &crate::adaptive::Triangulation<Vec<f64>>,
-                      tris: &[[u32; 3]],
-                      from: usize,
-                      eval: &mut crate::adaptive::Eval<'_, Vec<f64>>,
-                      out: &mut crate::adaptive::HashMap<(u32, u32), ParamJump>| {
-        let (uv, vals) = (r.uv(), r.vals());
-        let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
-        struct Cand {
-            e: (u32, u32),
-            ta: f64,
-            tb: f64,
-            pa: Vec<f64>,
-            pb: Vec<f64>,
-            first: f64,
-            smooth: bool,
-        }
-        let mut cands: Vec<Cand> = Vec::new();
-        for t in tris {
-            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                let e = ek(a, b);
-                if (e.1 as usize) < from || !seen.insert(e) {
-                    continue;
-                }
-                let (pa, pb) = (&vals[e.0 as usize], &vals[e.1 as usize]);
-                if !finite(pa) || !finite(pb) {
-                    continue;
-                }
-                let d = dist(pa, pb);
-                if d > threshold {
-                    cands.push(Cand { e, ta: 0.0, tb: 1.0, pa: pa.clone(), pb: pb.clone(), first: d, smooth: false });
-                }
+    let mut search =
+        |r: &crate::adaptive::Triangulation<Vec<f64>>,
+         tris: &[[u32; 3]],
+         from: usize,
+         eval: &mut crate::adaptive::Eval<'_, Vec<f64>>,
+         out: &mut crate::adaptive::HashMap<(u32, u32), ParamJump>| {
+            let (uv, vals) = (r.uv(), r.vals());
+            let mut seen: crate::adaptive::HashSet<(u32, u32)> = Default::default();
+            struct Cand {
+                e: (u32, u32),
+                ta: f64,
+                tb: f64,
+                pa: Vec<f64>,
+                pb: Vec<f64>,
+                first: f64,
+                smooth: bool,
             }
-        }
-        for round in 0..ROUNDS {
-            if round == 3 {
-                cands.retain(|c| dist(&c.pa, &c.pb) >= 0.3 * c.first);
-            }
-            if cands.is_empty() {
-                break;
-            }
-            let (mut us, mut vs) = (Vec::with_capacity(cands.len()), Vec::with_capacity(cands.len()));
-            for c in &cands {
-                let (a, b) = (uv[c.e.0 as usize], uv[c.e.1 as usize]);
-                let t = 0.5 * (c.ta + c.tb);
-                us.push(a[0] + (b[0] - a[0]) * t);
-                vs.push(a[1] + (b[1] - a[1]) * t);
-            }
-            let mids = eval(&us, &vs);
-            let mut keep = vec![true; cands.len()];
-            for ((c, pm), keep) in cands.iter_mut().zip(mids).zip(keep.iter_mut()) {
-                let t = 0.5 * (c.ta + c.tb);
-                let ok = finite(&pm);
-                if round < 2 {
-                    let avg: Vec<f64> = c.pa.iter().zip(&c.pb).map(|(x, y)| 0.5 * (x + y)).collect();
-                    let smooth = ok && dist(&pm, &avg) < 0.2 * dist(&c.pa, &c.pb);
-                    if round == 0 {
-                        c.smooth = smooth;
-                    } else if smooth && c.smooth {
-                        *keep = false;
+            let mut cands: Vec<Cand> = Vec::new();
+            for t in tris {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let e = ek(a, b);
+                    if (e.1 as usize) < from || !seen.insert(e) {
                         continue;
                     }
-                }
-                if !ok || dist(&pm, &c.pa) >= dist(&c.pb, &pm) {
-                    c.tb = t;
-                    c.pb = pm;
-                } else {
-                    c.ta = t;
-                    c.pa = pm;
-                }
-            }
-            let mut it = keep.iter();
-            cands.retain(|_| *it.next().unwrap());
-        }
-        for mut c in cands {
-            let d = dist(&c.pa, &c.pb);
-            if !(d.is_finite() && d >= 0.5 * c.first && finite(&c.pa) && finite(&c.pb)) {
-                continue;
-            }
-            // 極の先の点を、その側の頂点から対角線の 2 倍の所にそろえる
-            for (p, base) in [(&mut c.pa, &vals[c.e.0 as usize]), (&mut c.pb, &vals[c.e.1 as usize])] {
-                let l = dist(p, base);
-                if l > 100.0 * diag {
-                    for (x, b) in p.iter_mut().zip(base) {
-                        *x = b + (*x - b) / l * 2.0 * diag;
+                    let (pa, pb) = (&vals[e.0 as usize], &vals[e.1 as usize]);
+                    if !finite(pa) || !finite(pb) {
+                        continue;
                     }
-                    far = true;
+                    let d = dist(pa, pb);
+                    if d > threshold {
+                        cands.push(Cand {
+                            e,
+                            ta: 0.0,
+                            tb: 1.0,
+                            pa: pa.clone(),
+                            pb: pb.clone(),
+                            first: d,
+                            smooth: false,
+                        });
+                    }
                 }
             }
-            out.insert(c.e, ParamJump { t: 0.5 * (c.ta + c.tb), before: c.pa, after: c.pb });
-        }
-    };
+            for round in 0..ROUNDS {
+                if round == 3 {
+                    cands.retain(|c| dist(&c.pa, &c.pb) >= 0.3 * c.first);
+                }
+                if cands.is_empty() {
+                    break;
+                }
+                let (mut us, mut vs) = (
+                    Vec::with_capacity(cands.len()),
+                    Vec::with_capacity(cands.len()),
+                );
+                for c in &cands {
+                    let (a, b) = (uv[c.e.0 as usize], uv[c.e.1 as usize]);
+                    let t = 0.5 * (c.ta + c.tb);
+                    us.push(a[0] + (b[0] - a[0]) * t);
+                    vs.push(a[1] + (b[1] - a[1]) * t);
+                }
+                let mids = eval(&us, &vs);
+                let mut keep = vec![true; cands.len()];
+                for ((c, pm), keep) in cands.iter_mut().zip(mids).zip(keep.iter_mut()) {
+                    let t = 0.5 * (c.ta + c.tb);
+                    let ok = finite(&pm);
+                    if round < 2 {
+                        let avg: Vec<f64> =
+                            c.pa.iter().zip(&c.pb).map(|(x, y)| 0.5 * (x + y)).collect();
+                        let smooth = ok && dist(&pm, &avg) < 0.2 * dist(&c.pa, &c.pb);
+                        if round == 0 {
+                            c.smooth = smooth;
+                        } else if smooth && c.smooth {
+                            *keep = false;
+                            continue;
+                        }
+                    }
+                    if !ok || dist(&pm, &c.pa) >= dist(&c.pb, &pm) {
+                        c.tb = t;
+                        c.pb = pm;
+                    } else {
+                        c.ta = t;
+                        c.pa = pm;
+                    }
+                }
+                let mut it = keep.iter();
+                cands.retain(|_| *it.next().unwrap());
+            }
+            for mut c in cands {
+                let d = dist(&c.pa, &c.pb);
+                if !(d.is_finite() && d >= 0.5 * c.first && finite(&c.pa) && finite(&c.pb)) {
+                    continue;
+                }
+                // 極の先の点を、その側の頂点から対角線の 2 倍の所にそろえる
+                for (p, base) in [
+                    (&mut c.pa, &vals[c.e.0 as usize]),
+                    (&mut c.pb, &vals[c.e.1 as usize]),
+                ] {
+                    let l = dist(p, base);
+                    if l > 100.0 * diag {
+                        for (x, b) in p.iter_mut().zip(base) {
+                            *x = b + (*x - b) / l * 2.0 * diag;
+                        }
+                        far = true;
+                    }
+                }
+                out.insert(
+                    c.e,
+                    ParamJump {
+                        t: 0.5 * (c.ta + c.tb),
+                        before: c.pa,
+                        after: c.pb,
+                    },
+                );
+            }
+        };
     let mut jumps: crate::adaptive::HashMap<(u32, u32), ParamJump> = Default::default();
     let mut tris = r.tris();
     search(r, &tris, 0, eval, &mut jumps);
@@ -6803,7 +7772,10 @@ fn param_jumps(
                 .iter()
                 .filter(|t| {
                     t.iter().all(|&k| finite(&vals[k as usize])) && {
-                        let c = [ek(t[0], t[1]), ek(t[1], t[2]), ek(t[2], t[0])].iter().filter(|e| jumps.contains_key(e)).count();
+                        let c = [ek(t[0], t[1]), ek(t[1], t[2]), ek(t[2], t[0])]
+                            .iter()
+                            .filter(|e| jumps.contains_key(e))
+                            .count();
                         c == 1 || c == 3
                     }
                 })
@@ -6853,7 +7825,10 @@ pub fn parametric_surface_nd_opt(
     let mut grid1 = Vec::with_capacity(m * m * 2);
     for j in 0..m {
         for i in 0..m {
-            let (a, b) = (u.0 + (u.1 - u.0) * i as f64 / n as f64, v.0 + (v.1 - v.0) * j as f64 / n as f64);
+            let (a, b) = (
+                u.0 + (u.1 - u.0) * i as f64 / n as f64,
+                v.0 + (v.1 - v.0) * j as f64 / n as f64,
+            );
             us.push(a);
             vs.push(b);
             grid1.extend_from_slice(&[(a - u.0) as f32, (b - v.0) as f32]);
@@ -6867,7 +7842,16 @@ pub fn parametric_surface_nd_opt(
         grid.extend_from_slice(&grid1);
     }
     let Some(tol) = tol.filter(|t| *t > 0.0 && dims > 0) else {
-        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false };
+        return NdShape {
+            dims,
+            points,
+            grid: Some((m, grid)),
+            solid: false,
+            complex: Vec::new(),
+            tris: None,
+            keep_full: false,
+            keep_far: false,
+        };
     };
     // 曲面ごとに細かくする。足した点は、全部の曲面の一様な格子の点の後ろに並べる
     let base = sets.len() * m * m;
@@ -6878,11 +7862,16 @@ pub fn parametric_surface_nd_opt(
     let diag = tol * 1e3;
     for (s, progs) in sets.iter().enumerate() {
         let set = ProgramSet::new(progs);
-        let first: Vec<Vec<f64>> = points[s * m * m * dims..(s + 1) * m * m * dims].chunks_exact(dims).map(|p| p.to_vec()).collect();
+        let first: Vec<Vec<f64>> = points[s * m * m * dims..(s + 1) * m * m * dims]
+            .chunks_exact(dims)
+            .map(|p| p.to_vec())
+            .collect();
         let mut eval = |a: &[f64], b: &[f64]| {
             let mut out = Vec::with_capacity(a.len() * dims);
             set.eval_points(&[a, b], a.len(), &mut out);
-            out.chunks_exact(dims).map(|p| p.to_vec()).collect::<Vec<_>>()
+            out.chunks_exact(dims)
+                .map(|p| p.to_vec())
+                .collect::<Vec<_>>()
         };
         let mut decide = |c: &crate::adaptive::Candidate<Vec<f64>>| -> Option<f64> {
             let pts = [c.vals[0], c.vals[1], c.vals[2], c.mid];
@@ -6893,7 +7882,13 @@ pub fn parametric_surface_nd_opt(
             if defined < 4 {
                 return Some(f64::INFINITY); // 定義域の縁
             }
-            let e = c.mid.iter().zip(c.vals[0].iter().zip(c.vals[1])).map(|(&q, (&a, &b))| (q - 0.5 * (a + b)).powi(2)).sum::<f64>().sqrt();
+            let e = c
+                .mid
+                .iter()
+                .zip(c.vals[0].iter().zip(c.vals[1]))
+                .map(|(&q, (&a, &b))| (q - 0.5 * (a + b)).powi(2))
+                .sum::<f64>()
+                .sqrt();
             if e <= tol {
                 return None;
             }
@@ -6903,7 +7898,10 @@ pub fn parametric_surface_nd_opt(
             }
             Some(e)
         };
-        let limits = crate::adaptive::Limits { passes: 6, max_new_triangles: (2 * n * n).max(30_000) };
+        let limits = crate::adaptive::Limits {
+            passes: 6,
+            max_new_triangles: (2 * n * n).max(30_000),
+        };
         let mut r = crate::adaptive::refine_keep(n, u, v, first, &mut eval, &mut decide, limits);
         // 値が飛ぶ所（floor の段差、tan の極）を探して、三角形を切り分ける（S20 と同じく、段差の線が終わる・交わる所だけ細かくする）
         let mut cut = param_jumps(&mut r, &mut eval, diag);
@@ -6918,7 +7916,13 @@ pub fn parametric_surface_nd_opt(
             extra_points.extend_from_slice(w);
             extra_grid.extend_from_slice(&[(p[0] - u.0) as f32, (p[1] - v.0) as f32]);
         }
-        let map = |k: u32| if (k as usize) < m * m { (s * m * m) as u32 + k } else { (offset + k as usize - m * m) as u32 };
+        let map = |k: u32| {
+            if (k as usize) < m * m {
+                (s * m * m) as u32 + k
+            } else {
+                (offset + k as usize - m * m) as u32
+            }
+        };
         // 飛ぶ所の 2 つの点（直前・直後）を、点の列の後ろに足す
         let mut jump_vertex: crate::adaptive::HashMap<(u32, u32), (u32, u32)> = Default::default();
         let mut keys: Vec<(u32, u32)> = cut.jumps.keys().copied().collect();
@@ -6950,11 +7954,29 @@ pub fn parametric_surface_nd_opt(
         }
     }
     if !refined_any {
-        return NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false };
+        return NdShape {
+            dims,
+            points,
+            grid: Some((m, grid)),
+            solid: false,
+            complex: Vec::new(),
+            tris: None,
+            keep_full: false,
+            keep_far: false,
+        };
     }
     points.extend_from_slice(&extra_points);
     grid.extend_from_slice(&extra_grid);
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: Some((base, tris)), keep_full, keep_far }
+    NdShape {
+        dims,
+        points,
+        grid: Some((m, grid)),
+        solid: false,
+        complex: Vec::new(),
+        tris: Some((base, tris)),
+        keep_full,
+        keep_far,
+    }
 }
 
 /// 媒介変数表示の立体（媒介変数 3 つ）。媒介変数の範囲の直方体の6つの面を、それぞれ `n × n` マスの曲面として計算する。
@@ -6976,7 +7998,11 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
     let mut faces = Vec::with_capacity(6);
     for k in 0..3 {
         for side in [0, 1] {
-            let (a, b) = if side == 1 { ((k + 1) % 3, (k + 2) % 3) } else { ((k + 2) % 3, (k + 1) % 3) };
+            let (a, b) = if side == 1 {
+                ((k + 1) % 3, (k + 2) % 3)
+            } else {
+                ((k + 2) % 3, (k + 1) % 3)
+            };
             let fixed = if side == 1 { r[k].1 } else { r[k].0 };
             let mut cols: [Vec<f64>; 3] = Default::default();
             for j in 0..m {
@@ -6988,7 +8014,11 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
                     cols[a].push(p[a]);
                     cols[b].push(p[b]);
                     for c in 0..3 {
-                        grid1.push(if c == k { NO_GRID } else { (p[c] - r[c].0) as f32 });
+                        grid1.push(if c == k {
+                            NO_GRID
+                        } else {
+                            (p[c] - r[c].0) as f32
+                        });
                     }
                 }
             }
@@ -6999,11 +8029,24 @@ pub fn parametric_solid_nd(sets: &[Vec<Program>], r: [(f64, f64); 3], n: usize) 
     for set in &merged {
         for (k, fixed, cols) in &faces {
             // その面で固定した媒介変数は定数にする（それだけで決まる部分は1回だけ計算すればよい）
-            set.bind(&[(*k, *fixed)]).eval_points(&[&cols[0], &cols[1], &cols[2]], m * m, &mut points);
+            set.bind(&[(*k, *fixed)]).eval_points(
+                &[&cols[0], &cols[1], &cols[2]],
+                m * m,
+                &mut points,
+            );
         }
         grid.extend_from_slice(&grid1);
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: true, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
+    NdShape {
+        dims,
+        points,
+        grid: Some((m, grid)),
+        solid: true,
+        complex: Vec::new(),
+        tris: None,
+        keep_full: false,
+        keep_far: false,
+    }
 }
 
 /// 媒介変数が4つ以上の図形の、面の枚数と、1枚の格子のマス数。
@@ -7019,7 +8062,8 @@ pub fn sheet_layout(k: usize, div: usize, resolution: usize) -> (usize, usize, u
         div -= 1;
     }
     let sheets = count(div);
-    let n = ((6.0 * (resolution * resolution) as f64 / sheets as f64).sqrt() as usize).clamp(3, resolution.max(3));
+    let n = ((6.0 * (resolution * resolution) as f64 / sheets as f64).sqrt() as usize)
+        .clamp(3, resolution.max(3));
     (div, sheets, n)
 }
 
@@ -7032,7 +8076,12 @@ pub fn sheet_layout(k: usize, div: usize, resolution: usize) -> (usize, usize, u
 ///
 /// 面ごとに、固定した媒介変数を定数にした式を作って計算する（[`ProgramSet::bind`]）。
 /// 格子線用の値は、面ごとに (a, b) を 0〜1 にそろえたもの
-pub fn parametric_sheets_nd(sets: &[Vec<Program>], r: &[(f64, f64)], div: usize, resolution: usize) -> NdShape {
+pub fn parametric_sheets_nd(
+    sets: &[Vec<Program>],
+    r: &[(f64, f64)],
+    div: usize,
+    resolution: usize,
+) -> NdShape {
     let k = r.len();
     assert!(k >= 3);
     let (div, sheets, n) = sheet_layout(k, div, resolution);
@@ -7084,7 +8133,16 @@ pub fn parametric_sheets_nd(sets: &[Vec<Program>], r: &[(f64, f64)], div: usize,
             }
         }
     }
-    NdShape { dims, points, grid: Some((m, grid)), solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
+    NdShape {
+        dims,
+        points,
+        grid: Some((m, grid)),
+        solid: false,
+        complex: Vec::new(),
+        tris: None,
+        keep_full: false,
+        keep_far: false,
+    }
 }
 
 /// 陽関数の曲面（表示中の `axis` 番目の座標 = f(残り2つ)）を、n 次元の点として計算する。
@@ -7139,7 +8197,13 @@ pub fn explicit_tilted(
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for corner in 0..8 {
-        let q = [0, 1, 2].map(|a| if (corner >> a) & 1 == 0 { dom.lo[a] } else { dom.hi[a] });
+        let q = [0, 1, 2].map(|a| {
+            if (corner >> a) & 1 == 0 {
+                dom.lo[a]
+            } else {
+                dom.hi[a]
+            }
+        });
         for k in 0..3 {
             let x = dot(q, frame[k]);
             lo[k] = lo[k].min(x);
@@ -7161,10 +8225,18 @@ pub fn explicit_tilted(
         refine,
         shortest,
     );
-    let uvt: Vec<[f64; 3]> =
-        mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
-    let to_q = |p: [f64; 3]| [0, 1, 2].map(|a| p[0] * frame[0][a] + p[1] * frame[1][a] + p[2] * frame[2][a]);
-    mesh.positions = uvt.iter().flat_map(|&p| to_q(p).map(|v| v as f32)).collect();
+    let uvt: Vec<[f64; 3]> = mesh
+        .positions
+        .chunks_exact(3)
+        .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+        .collect();
+    let to_q = |p: [f64; 3]| {
+        [0, 1, 2].map(|a| p[0] * frame[0][a] + p[1] * frame[1][a] + p[2] * frame[2][a])
+    };
+    mesh.positions = uvt
+        .iter()
+        .flat_map(|&p| to_q(p).map(|v| v as f32))
+        .collect();
     let normals: Vec<f32> = mesh
         .normals
         .chunks_exact(3)
@@ -7209,10 +8281,20 @@ fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize
         }
     }
     let Some(axis) = surface else {
-        return NdShape { dims: d, points, keep_full: mesh.keep_full, keep_far: true, ..Default::default() };
+        return NdShape {
+            dims: d,
+            points,
+            keep_full: mesh.keep_full,
+            keep_far: true,
+            ..Default::default()
+        };
     };
     let (ua, va) = others(axis);
-    let grid: Vec<f32> = mesh.positions.chunks_exact(3).flat_map(|q| [q[ua], q[va]]).collect();
+    let grid: Vec<f32> = mesh
+        .positions
+        .chunks_exact(3)
+        .flat_map(|q| [q[ua], q[va]])
+        .collect();
     NdShape {
         dims: d,
         points,
@@ -7229,7 +8311,14 @@ fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize
 
 /// 2D 表示の、回した `y = f(x)`（`x = f(y)`）の曲線を n 次元の点として計算する（`dom` は計算する範囲）。
 /// 回さないときと同じ [`explicit_curve_2d`] で作るので、値が飛ぶ所では線を切る
-pub fn explicit_curve_nd(prog: &Program, axis: usize, axes: [usize; 3], base: &[f64], dom: Domain, tol: f64) -> NdShape {
+pub fn explicit_curve_nd(
+    prog: &Program,
+    axis: usize,
+    axes: [usize; 3],
+    base: &[f64],
+    dom: Domain,
+    tol: f64,
+) -> NdShape {
     let mut mesh = explicit_curve_2d(prog, axis, dom, tol);
     // 極の近くのとても大きな値は、回すと横にも大きくはみ出す。計算する範囲の外は形が見えないので、
     // 範囲の何倍かの所にそろえる（f32 にしたとき無限大にならないように）
@@ -7281,7 +8370,16 @@ pub fn parametric_edges_nd(sets: &[Vec<Program>], r: &[(f64, f64)], n: usize, to
             }
         }
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
+    NdShape {
+        dims,
+        points,
+        grid: None,
+        solid: false,
+        complex: Vec::new(),
+        tris: None,
+        keep_full: false,
+        keep_far: false,
+    }
 }
 
 pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: f64) -> NdShape {
@@ -7292,27 +8390,52 @@ pub fn parametric_curve_nd(sets: &[Vec<Program>], t: (f64, f64), n: usize, tol: 
             points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
         }
         let set = ProgramSet::new(progs);
-        points.extend(curve_nd(&|ts: &[f64]| eval_nd(&set, &[ts], ts.len()), progs.len(), t, n, tol));
+        points.extend(curve_nd(
+            &|ts: &[f64]| eval_nd(&set, &[ts], ts.len()),
+            progs.len(),
+            t,
+            n,
+            tol,
+        ));
     }
-    NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: false }
+    NdShape {
+        dims,
+        points,
+        grid: None,
+        solid: false,
+        complex: Vec::new(),
+        tris: None,
+        keep_full: false,
+        keep_far: false,
+    }
 }
 
 /// 1本の曲線の点（適応サンプリング）。`eval` は媒介変数の値の列から、d 次元の点を並べたものを計算する
-fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize, tol: f64) -> Vec<f64> {
+fn curve_nd(
+    eval: &dyn Fn(&[f64]) -> Vec<f64>,
+    d: usize,
+    t: (f64, f64),
+    n: usize,
+    tol: f64,
+) -> Vec<f64> {
     const MAX_POINTS: usize = 200_000;
     const PASSES: usize = 14;
-    let split = |flat: Vec<f64>| -> Vec<Vec<f64>> { flat.chunks_exact(d).map(|c| c.to_vec()).collect() };
+    let split =
+        |flat: Vec<f64>| -> Vec<Vec<f64>> { flat.chunks_exact(d).map(|c| c.to_vec()).collect() };
 
     let n = n.max(2);
-    let mut ts: Vec<f64> = (0..=n).map(|k| t.0 + (t.1 - t.0) * k as f64 / n as f64).collect();
+    let mut ts: Vec<f64> = (0..=n)
+        .map(|k| t.0 + (t.1 - t.0) * k as f64 / n as f64)
+        .collect();
     let mut ps = split(eval(&ts));
     // 区間 [ts[k], ts[k+1]] をまだ分け直す必要があるか
     let mut todo = vec![true; ts.len() - 1];
 
     for _ in 0..PASSES {
         // 分け直す候補の区間の中点をまとめて計算する
-        let cand: Vec<usize> =
-            (0..todo.len()).filter(|&k| todo[k] && (finite(&ps[k]) || finite(&ps[k + 1]))).collect();
+        let cand: Vec<usize> = (0..todo.len())
+            .filter(|&k| todo[k] && (finite(&ps[k]) || finite(&ps[k + 1])))
+            .collect();
         if cand.is_empty() || ts.len() + cand.len() > MAX_POINTS {
             break;
         }
@@ -7360,7 +8483,12 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
     let jump = tol * 200.0;
     let mut points = Vec::with_capacity(ps.len() * d);
     for k in 0..ps.len() {
-        if k > 0 && todo[k - 1] && finite(&ps[k - 1]) && finite(&ps[k]) && dist(&ps[k - 1], &ps[k]) > jump {
+        if k > 0
+            && todo[k - 1]
+            && finite(&ps[k - 1])
+            && finite(&ps[k])
+            && dist(&ps[k - 1], &ps[k]) > jump
+        {
             points.extend(std::iter::repeat_n(f64::NAN, d));
         }
         points.extend_from_slice(&ps[k]);
@@ -7380,7 +8508,11 @@ pub fn merge(mut meshes: Vec<Mesh>, curve: bool) -> Mesh {
                 None => Mesh {
                     positions: m.positions.clone(),
                     normals: m.normals.clone(),
-                    indices: if m.lod.is_empty() { m.indices.clone() } else { m.lod.clone() },
+                    indices: if m.lod.is_empty() {
+                        m.indices.clone()
+                    } else {
+                        m.lod.clone()
+                    },
                     ..Default::default()
                 },
             })
@@ -7440,7 +8572,10 @@ fn merge_inner(meshes: Vec<Mesh>, curve: bool) -> Mesh {
 pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
     let first = shapes.first()?;
     let (dims, solid, m) = (first.dims, first.solid, first.grid.as_ref().map(|g| g.0));
-    if shapes.iter().any(|s| s.dims != dims || s.solid != solid || s.grid.as_ref().map(|g| g.0) != m) {
+    if shapes
+        .iter()
+        .any(|s| s.dims != dims || s.solid != solid || s.grid.as_ref().map(|g| g.0) != m)
+    {
         return None;
     }
     let complex = shapes.iter().any(|s| !s.complex.is_empty());
@@ -7466,9 +8601,17 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
             let (c, b) = (count(s), base_of(s));
             let grid = &s.grid.as_ref().map_or(&[][..], |g| &g.1[..]);
             let cx = |k: usize| -> [f32; 3] {
-                if s.complex.is_empty() { [0.0; 3] } else { [s.complex[3 * k], s.complex[3 * k + 1], s.complex[3 * k + 2]] }
+                if s.complex.is_empty() {
+                    [0.0; 3]
+                } else {
+                    [s.complex[3 * k], s.complex[3 * k + 1], s.complex[3 * k + 2]]
+                }
             };
-            let (o, g) = out.grid.as_mut().map(|g| (&mut out.points, &mut g.1)).unwrap();
+            let (o, g) = out
+                .grid
+                .as_mut()
+                .map(|g| (&mut out.points, &mut g.1))
+                .unwrap();
             o.extend_from_slice(&s.points[..b * dims]);
             g.extend_from_slice(&grid[..b * gd]);
             extra.0.extend_from_slice(&s.points[b * dims..]);
@@ -7481,7 +8624,13 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
                     extra.2.extend_from_slice(&cx(k));
                 }
             }
-            let map = |k: u32| if (k as usize) < b { (base_at + k as usize) as u32 } else { (extra_at + k as usize - b) as u32 };
+            let map = |k: u32| {
+                if (k as usize) < b {
+                    (base_at + k as usize) as u32
+                } else {
+                    (extra_at + k as usize - b) as u32
+                }
+            };
             let tris = &mut out.tris.as_mut().unwrap().1;
             match &s.tris {
                 Some((_, t)) => tris.extend(t.iter().map(|&k| map(k))),
@@ -7495,17 +8644,16 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
         out.complex.extend_from_slice(&extra.2);
         return Some(out);
     }
-    let mut out =
-        NdShape {
-            dims,
-            points: Vec::new(),
-            grid: m.map(|m| (m, Vec::new())),
-            solid,
-            complex: Vec::new(),
-            tris: None,
-            keep_full: shapes.iter().any(|s| s.keep_full),
-            keep_far: shapes.iter().any(|s| s.keep_far),
-        };
+    let mut out = NdShape {
+        dims,
+        points: Vec::new(),
+        grid: m.map(|m| (m, Vec::new())),
+        solid,
+        complex: Vec::new(),
+        tris: None,
+        keep_full: shapes.iter().any(|s| s.keep_full),
+        keep_far: shapes.iter().any(|s| s.keep_far),
+    };
     for s in shapes {
         if m.is_none() && !out.points.is_empty() {
             out.points.extend(std::iter::repeat_n(f64::NAN, dims)); // 曲線どうしの間で線を切る
@@ -7513,7 +8661,8 @@ pub fn merge_shapes(shapes: Vec<NdShape>) -> Option<NdShape> {
         out.points.extend_from_slice(&s.points);
         if complex {
             if s.complex.is_empty() {
-                out.complex.extend(std::iter::repeat_n(0.0, s.points.len() / dims.max(1) * 3));
+                out.complex
+                    .extend(std::iter::repeat_n(0.0, s.points.len() / dims.max(1) * 3));
             } else {
                 out.complex.extend_from_slice(&s.complex);
             }
@@ -7554,7 +8703,9 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
         }
     }
     if !curve {
-        mesh.normals = (0..mesh.positions.len() / 3).flat_map(|_| [0.0f32, 0.0, 1.0]).collect();
+        mesh.normals = (0..mesh.positions.len() / 3)
+            .flat_map(|_| [0.0f32, 0.0, 1.0])
+            .collect();
     }
 }
 
@@ -7572,7 +8723,10 @@ pub fn slice_mesh(mesh: &Mesh, level: f32) -> Mesh {
     let p = &mesh.positions;
     // メッシュの大きさ（とても短い線を捨てる目安）
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for q in p.chunks_exact(3).filter(|q| q.iter().all(|v| v.is_finite())) {
+    for q in p
+        .chunks_exact(3)
+        .filter(|q| q.iter().all(|v| v.is_finite()))
+    {
         for c in 0..3 {
             lo[c] = lo[c].min(q[c]);
             hi[c] = hi[c].max(q[c]);
@@ -7587,12 +8741,24 @@ pub fn slice_mesh(mesh: &Mesh, level: f32) -> Mesh {
     for t in mesh.indices.chunks_exact(3) {
         let v = [at(t[0]), at(t[1]), at(t[2])];
         // 平面の上にちょうど乗った頂点は、わずかに上にあるとみなす（同じ線を2回引かないように）
-        let d = v.map(|q| if q[2] == level { f32::MIN_POSITIVE } else { q[2] - level });
+        let d = v.map(|q| {
+            if q[2] == level {
+                f32::MIN_POSITIVE
+            } else {
+                q[2] - level
+            }
+        });
         let mut pts: Vec<[f32; 3]> = Vec::with_capacity(2);
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
             if (d[a] > 0.0) != (d[b] > 0.0) {
                 let s = d[a] / (d[a] - d[b]);
-                pts.push([0, 1, 2].map(|c| if c == 2 { level } else { v[a][c] + (v[b][c] - v[a][c]) * s }));
+                pts.push([0, 1, 2].map(|c| {
+                    if c == 2 {
+                        level
+                    } else {
+                        v[a][c] + (v[b][c] - v[a][c]) * s
+                    }
+                }));
             }
         }
         // 長さの無い線・とても短い線は描かない（描画側が点とみなして丸を付ける）
@@ -7602,7 +8768,10 @@ pub fn slice_mesh(mesh: &Mesh, level: f32) -> Mesh {
             out.extend_from_slice(&[f32::NAN; 3]);
         }
     }
-    Mesh { positions: out, ..Default::default() }
+    Mesh {
+        positions: out,
+        ..Default::default()
+    }
 }
 
 /// 2D 表示の `z = f(x, y)`（縦の座標が横・奥の座標の関数）: 平面を f の値で塗る（色の濃さと等高線）。
@@ -7636,11 +8805,17 @@ pub fn flat_map(prog: &Program, dom: Domain, n: usize, mode: ComplexMode) -> Mes
             continue;
         }
         index_of[k] = mesh.push_vertex([xs[k], ys[k], 0.0]);
-        mesh.grid_coords.extend_from_slice(&[xs[k] as f32, ys[k] as f32, w as f32]);
+        mesh.grid_coords
+            .extend_from_slice(&[xs[k] as f32, ys[k] as f32, w as f32]);
         if mode != ComplexMode::Off {
             let r = z.norm();
-            let (c, s) = if r > 0.0 { (z.re / r, z.im / r) } else { (0.0, 0.0) };
-            mesh.complex.extend_from_slice(&[c as f32, s as f32, r.log2().max(-1e6) as f32]);
+            let (c, s) = if r > 0.0 {
+                (z.re / r, z.im / r)
+            } else {
+                (0.0, 0.0)
+            };
+            mesh.complex
+                .extend_from_slice(&[c as f32, s as f32, r.log2().max(-1e6) as f32]);
         }
     }
     for j in 0..n {
@@ -7681,7 +8856,10 @@ pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> 
         pts
     };
     let points = curve_nd(&eval, 3, (dom.lo[free], dom.hi[free]), 400, tol);
-    Mesh { positions: points.iter().map(|&v| v as f32).collect(), ..Default::default() }
+    Mesh {
+        positions: points.iter().map(|&v| v as f32).collect(),
+        ..Default::default()
+    }
 }
 
 /// 2D 表示の陰関数の曲線 F(x, y, 0) = 0。`prog` の変数は表示中の3つの座標（縦の座標は 0）。
@@ -7716,11 +8894,19 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
         let mut edges = Vec::new();
         for k in 0..m * m {
             let (i, j) = (k % m, k / m);
-            for (dir, k1) in [(0, (i + 1 < m).then_some(k + 1)), (1, (j + 1 < m).then_some(k + m))] {
+            for (dir, k1) in [
+                (0, (i + 1 < m).then_some(k + 1)),
+                (1, (j + 1 < m).then_some(k + m)),
+            ] {
                 let Some(k1) = k1 else { continue };
                 let (f0, f1) = (f[k], f[k1]);
                 if (f0 < 0.0) != (f1 < 0.0) && f0.is_finite() && f1.is_finite() {
-                    edges.push(SignEdge { p0: [xs[k], ys[k], 0.0], p1: [xs[k1], ys[k1], 0.0], f0, f1 });
+                    edges.push(SignEdge {
+                        p0: [xs[k], ys[k], 0.0],
+                        p1: [xs[k1], ys[k1], 0.0],
+                        f0,
+                        f1,
+                    });
                     ids.push(2 * k + dir);
                 }
             }
@@ -7737,7 +8923,11 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
             buf.iter().map(|v| as_real(*v)).collect()
         };
         let flags = false_crossings(&mut eval, &edges);
-        ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
+        ids.into_iter()
+            .zip(flags)
+            .filter(|&(_, bad)| bad)
+            .map(|(id, _)| id)
+            .collect()
     };
     let edge_id = |ka: usize, kb: usize| 2 * ka.min(kb) + (ka.abs_diff(kb) == m) as usize;
     let exact = exact_crossings_2d(prog, &f, &xs, &ys, m, &not_zero);
@@ -7756,7 +8946,12 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     for j in 0..n {
         for i in 0..n {
             // マスの4つの角（反時計回り）
-            let ks = [j * m + i, j * m + i + 1, (j + 1) * m + i + 1, (j + 1) * m + i];
+            let ks = [
+                j * m + i,
+                j * m + i + 1,
+                (j + 1) * m + i + 1,
+                (j + 1) * m + i,
+            ];
             let v = ks.map(|k| f[k]);
             if v.iter().any(|x| !x.is_finite()) {
                 continue;
@@ -7772,14 +8967,19 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
                     if !has_touch[id] {
                         continue;
                     }
-                    let Some(&(p, t)) = touch.get(&id) else { continue };
+                    let Some(&(p, t)) = touch.get(&id) else {
+                        continue;
+                    };
                     let corner_only = !ids.contains(&id);
                     if corner_only && t != 0.0 {
                         continue;
                     }
                     // 同じ所を、縦と横の線（や、隣の辺の端）で2回見つけることがある。マスの 1/10 より近い点はまとめる
                     let (cw, ch) = (xs[ks[1]] - xs[ks[0]], ys[ks[3]] - ys[ks[0]]);
-                    if !found.iter().any(|q| (q[0] - p[0]).abs() < 0.1 * cw && (q[1] - p[1]).abs() < 0.1 * ch) {
+                    if !found
+                        .iter()
+                        .any(|q| (q[0] - p[0]).abs() < 0.1 * cw && (q[1] - p[1]).abs() < 0.1 * ch)
+                    {
                         found.push(p);
                     }
                 }
@@ -7814,7 +9014,10 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
                         continue;
                     }
                     let t = v[a] / (v[a] - v[b]);
-                    cross.push([xs[ka] + (xs[kb] - xs[ka]) * t, ys[ka] + (ys[kb] - ys[ka]) * t]);
+                    cross.push([
+                        xs[ka] + (xs[kb] - xs[ka]) * t,
+                        ys[ka] + (ys[kb] - ys[ka]) * t,
+                    ]);
                 }
             }
             let pairs: Vec<(usize, usize)> = match cross.len() {
@@ -7823,7 +9026,11 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
                     // 鞍点: マスの中心の値で、どちらの組み合わせで結ぶか決める
                     let center = v.iter().sum::<f64>() / 4.0;
                     // 中心が角 0 と同じ側なら、角 0 と 2 がつながっていて、角 1 と 3 が切り離される
-                    if (center < 0.0) == (v[0] < 0.0) { vec![(0, 1), (2, 3)] } else { vec![(0, 3), (1, 2)] }
+                    if (center < 0.0) == (v[0] < 0.0) {
+                        vec![(0, 1), (2, 3)]
+                    } else {
+                        vec![(0, 3), (1, 2)]
+                    }
                 }
                 _ => vec![],
             };
@@ -7845,9 +9052,12 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     // 格子の線の上で見つかったのに線分の端にならなかった点と、格子点の周りで |F| が一番小さい所を探して見つけた点
     // 接するだけの線分の近く（周りのマス）の点は、その線の一部なので点にしない
     let near_segment = |p: [f64; 2]| {
-        let cell = |a: usize| (((p[a] - dom.lo[a]) / (dom.hi[a] - dom.lo[a]) * n as f64).max(0.0) as usize).min(n - 1);
+        let cell = |a: usize| {
+            (((p[a] - dom.lo[a]) / (dom.hi[a] - dom.lo[a]) * n as f64).max(0.0) as usize).min(n - 1)
+        };
         let (i, j) = (cell(0), cell(1));
-        (i.saturating_sub(1)..(i + 2).min(n)).any(|a| (j.saturating_sub(1)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
+        (i.saturating_sub(1)..(i + 2).min(n))
+            .any(|a| (j.saturating_sub(1)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
     };
     let dots: Vec<[f64; 2]> = touch
         .values()
@@ -7855,7 +9065,8 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
         .filter(|&p| !used.contains(&key(p)))
         .chain(touch_points_2d(prog, &f, &xs, &ys, m, |i, j| {
             // 格子点 (i, j) の周りのマス（2 マス先まで）に、接するだけの線分があれば調べない
-            (i.saturating_sub(2)..(i + 2).min(n)).any(|a| (j.saturating_sub(2)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
+            (i.saturating_sub(2)..(i + 2).min(n))
+                .any(|a| (j.saturating_sub(2)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
         }))
         .filter(|&p| !near_segment(p))
         .collect();
@@ -7863,7 +9074,10 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
     let h = 0.5 * ((dom.hi[0] - dom.lo[0]) / n as f64).min((dom.hi[1] - dom.lo[1]) / n as f64);
     let mut kept: Vec<[f64; 2]> = Vec::new();
     for p in dots {
-        if kept.iter().all(|q| (p[0] - q[0]).abs() > h || (p[1] - q[1]).abs() > h) {
+        if kept
+            .iter()
+            .all(|q| (p[0] - q[0]).abs() > h || (p[1] - q[1]).abs() > h)
+        {
             kept.push(p);
         }
     }
@@ -7873,7 +9087,10 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
         pts.extend_from_slice(&q);
         pts.extend_from_slice(&[f32::NAN; 3]);
     }
-    Mesh { positions: pts, ..Default::default() }
+    Mesh {
+        positions: pts,
+        ..Default::default()
+    }
 }
 
 /// 符号が変わる辺のうち、両端の値から直線で求めた交わる点が、実際の F = 0 の点からずれているもの
@@ -7892,17 +9109,32 @@ fn exact_crossings_2d(
     let mut edges: Vec<(usize, usize, usize)> = Vec::new();
     for k in 0..m * m {
         let (i, j) = (k % m, k / m);
-        for (dir, k1) in [(0, (i + 1 < m).then_some(k + 1)), (1, (j + 1 < m).then_some(k + m))] {
+        for (dir, k1) in [
+            (0, (i + 1 < m).then_some(k + 1)),
+            (1, (j + 1 < m).then_some(k + m)),
+        ] {
             let Some(k1) = k1 else { continue };
             let (f0, f1) = (f[k], f[k1]);
-            if (f0 < 0.0) != (f1 < 0.0) && f0.is_finite() && f1.is_finite() && !not_zero.contains(&(2 * k + dir)) {
+            if (f0 < 0.0) != (f1 < 0.0)
+                && f0.is_finite()
+                && f1.is_finite()
+                && !not_zero.contains(&(2 * k + dir))
+            {
                 edges.push((2 * k + dir, k, k1));
             }
         }
     }
-    let at = |k: usize, k1: usize, t: f64| [xs[k] + (xs[k1] - xs[k]) * t, ys[k] + (ys[k1] - ys[k]) * t];
-    let lin: Vec<[f64; 2]> = edges.iter().map(|&(_, k, k1)| at(k, k1, f[k] / (f[k] - f[k1]))).collect();
-    let v = eval_2d(prog, &lin.iter().map(|p| p[0]).collect::<Vec<_>>(), &lin.iter().map(|p| p[1]).collect::<Vec<_>>());
+    let at =
+        |k: usize, k1: usize, t: f64| [xs[k] + (xs[k1] - xs[k]) * t, ys[k] + (ys[k1] - ys[k]) * t];
+    let lin: Vec<[f64; 2]> = edges
+        .iter()
+        .map(|&(_, k, k1)| at(k, k1, f[k] / (f[k] - f[k1])))
+        .collect();
+    let v = eval_2d(
+        prog,
+        &lin.iter().map(|p| p[0]).collect::<Vec<_>>(),
+        &lin.iter().map(|p| p[1]).collect::<Vec<_>>(),
+    );
     let bad: Vec<usize> = (0..edges.len())
         .filter(|&c| {
             let (_, k, k1) = edges[c];
@@ -7918,7 +9150,11 @@ fn exact_crossings_2d(
             .enumerate()
             .map(|(b, &c)| at(edges[c].1, edges[c].2, 0.5 * (lo[b] + hi[b])))
             .collect();
-        let w = eval_2d(prog, &ps.iter().map(|p| p[0]).collect::<Vec<_>>(), &ps.iter().map(|p| p[1]).collect::<Vec<_>>());
+        let w = eval_2d(
+            prog,
+            &ps.iter().map(|p| p[0]).collect::<Vec<_>>(),
+            &ps.iter().map(|p| p[1]).collect::<Vec<_>>(),
+        );
         for (b, &c) in bad.iter().enumerate() {
             let mid = 0.5 * (lo[b] + hi[b]);
             if !w[b].is_nan() && (w[b] < 0.0) == (f[edges[c].1] < 0.0) {
@@ -7930,7 +9166,12 @@ fn exact_crossings_2d(
     }
     bad.iter()
         .enumerate()
-        .map(|(b, &c)| (edges[c].0, at(edges[c].1, edges[c].2, 0.5 * (lo[b] + hi[b]))))
+        .map(|(b, &c)| {
+            (
+                edges[c].0,
+                at(edges[c].1, edges[c].2, 0.5 * (lo[b] + hi[b])),
+            )
+        })
         .collect()
 }
 
@@ -7978,8 +9219,13 @@ fn touches_2d(
             let side = if dir == 0 { j } else { i };
             let around = || {
                 // 辺を挟む2つのマスの角（6 点）の符号がそろっているか
-                let s = if f[k] != 0.0 { f[k].signum() } else { f[k - step].signum() };
-                (side == 0 || same_sign(&[k - across, k + step - across], s)) && (side + 1 >= m || same_sign(&[k + across, k + step + across], s))
+                let s = if f[k] != 0.0 {
+                    f[k].signum()
+                } else {
+                    f[k - step].signum()
+                };
+                (side == 0 || same_sign(&[k - across, k + step - across], s))
+                    && (side + 1 >= m || same_sign(&[k + across, k + step + across], s))
             };
             if let Some((s, outer)) = touch_candidate(v, around) {
                 cands.push((2 * k + dir, k, dir, s, outer));
@@ -8004,7 +9250,10 @@ fn touches_2d(
     let mut lo = vec![-1.0f64; cands.len()];
     let mut hi = vec![2.0f64; cands.len()];
     for _ in 0..24 {
-        let (mut px, mut py) = (Vec::with_capacity(2 * cands.len()), Vec::with_capacity(2 * cands.len()));
+        let (mut px, mut py) = (
+            Vec::with_capacity(2 * cands.len()),
+            Vec::with_capacity(2 * cands.len()),
+        );
         for (c, cand) in cands.iter().enumerate() {
             let d = (hi[c] - lo[c]) / 3.0;
             for t in [lo[c] + d, hi[c] - d] {
@@ -8015,7 +9264,13 @@ fn touches_2d(
         }
         let vals = eval_2d(prog, &px, &py);
         for (c, cand) in cands.iter().enumerate() {
-            let g = |v: f64| if v.is_nan() { f64::INFINITY } else { cand.3 * v };
+            let g = |v: f64| {
+                if v.is_nan() {
+                    f64::INFINITY
+                } else {
+                    cand.3 * v
+                }
+            };
             let d = (hi[c] - lo[c]) / 3.0;
             if g(vals[2 * c]) > g(vals[2 * c + 1]) {
                 lo[c] += d;
@@ -8026,12 +9281,20 @@ fn touches_2d(
     }
     let ts: Vec<f64> = (0..cands.len()).map(|c| 0.5 * (lo[c] + hi[c])).collect();
     let ps: Vec<[f64; 2]> = cands.iter().zip(&ts).map(|(c, &t)| at(c, t)).collect();
-    let vals = eval_2d(prog, &ps.iter().map(|p| p[0]).collect::<Vec<_>>(), &ps.iter().map(|p| p[1]).collect::<Vec<_>>());
+    let vals = eval_2d(
+        prog,
+        &ps.iter().map(|p| p[0]).collect::<Vec<_>>(),
+        &ps.iter().map(|p| p[1]).collect::<Vec<_>>(),
+    );
     for (c, cand) in cands.iter().enumerate() {
         // 格子点にちょうどある極小は、t がほんのわずかずれても同じ辺の始点（t = 0）とみなす
         let t = if ts[c].abs() < 1e-6 { 0.0 } else { ts[c] };
         if (0.0..1.0).contains(&t) && vals[c].abs() <= 1e-3 * cand.4 {
-            let p = if t == 0.0 { [xs[cand.1], ys[cand.1]] } else { ps[c] };
+            let p = if t == 0.0 {
+                [xs[cand.1], ys[cand.1]]
+            } else {
+                ps[c]
+            };
             out.insert(cand.0, (p, t));
         }
     }
@@ -8042,7 +9305,14 @@ fn touches_2d(
 /// 格子点のうち、|F| が周りの 8 点のどれよりも小さく、9 点とも同じ符号のもの（F の極小・極大）の周りで、
 /// x, y の向きに交互に三分探索して |F| の極小を求め、ほぼ 0（周りの平均の 10⁻³ 倍以下）なら点とする。
 /// `skip(i, j)` が true の格子点（接するだけの線の近く）は調べない。候補はまとめて計算する
-fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, skip: impl Fn(usize, usize) -> bool) -> Vec<[f64; 2]> {
+fn touch_points_2d(
+    prog: &Program,
+    f: &[f64],
+    xs: &[f64],
+    ys: &[f64],
+    m: usize,
+    skip: impl Fn(usize, usize) -> bool,
+) -> Vec<[f64; 2]> {
     // 候補: (格子点, 符号, 周りの |F| の平均)
     let mut cands: Vec<(usize, f64, f64)> = Vec::new();
     'outer: for j in 1..m.saturating_sub(1) {
@@ -8052,9 +9322,26 @@ fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, 
             if !c.is_finite() {
                 continue;
             }
-            let around = [k - m - 1, k - m, k - m + 1, k - 1, k + 1, k + m - 1, k + m, k + m + 1];
-            let s = if c != 0.0 { c.signum() } else { f[k + 1].signum() };
-            if !around.iter().all(|&q| f[q].is_finite() && f[q] * s > 0.0 && f[q].abs() > c.abs()) || skip(i, j) {
+            let around = [
+                k - m - 1,
+                k - m,
+                k - m + 1,
+                k - 1,
+                k + 1,
+                k + m - 1,
+                k + m,
+                k + m + 1,
+            ];
+            let s = if c != 0.0 {
+                c.signum()
+            } else {
+                f[k + 1].signum()
+            };
+            if !around
+                .iter()
+                .all(|&q| f[q].is_finite() && f[q] * s > 0.0 && f[q].abs() > c.abs())
+                || skip(i, j)
+            {
                 continue;
             }
             cands.push((k, s, around.iter().map(|&q| f[q].abs()).sum::<f64>() / 8.0));
@@ -8076,7 +9363,10 @@ fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, 
             let mut lo: Vec<f64> = pos.iter().map(|p| p[axis] - w[axis]).collect();
             let mut hi: Vec<f64> = pos.iter().map(|p| p[axis] + w[axis]).collect();
             for _ in 0..12 {
-                let (mut px, mut py) = (Vec::with_capacity(2 * pos.len()), Vec::with_capacity(2 * pos.len()));
+                let (mut px, mut py) = (
+                    Vec::with_capacity(2 * pos.len()),
+                    Vec::with_capacity(2 * pos.len()),
+                );
                 for (c, p) in pos.iter().enumerate() {
                     let d = (hi[c] - lo[c]) / 3.0;
                     for t in [lo[c] + d, hi[c] - d] {
@@ -8103,12 +9393,18 @@ fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, 
         }
         w = [0.5 * w[0], 0.5 * w[1]];
     }
-    let v = eval_2d(prog, &pos.iter().map(|p| p[0]).collect::<Vec<_>>(), &pos.iter().map(|p| p[1]).collect::<Vec<_>>());
+    let v = eval_2d(
+        prog,
+        &pos.iter().map(|p| p[0]).collect::<Vec<_>>(),
+        &pos.iter().map(|p| p[1]).collect::<Vec<_>>(),
+    );
     cands
         .iter()
         .zip(pos)
         .zip(v)
-        .filter(|&((&(k, _, mean), p), g)| (p[0] - xs[k]).abs() <= hx && (p[1] - ys[k]).abs() <= hy && g.abs() <= 1e-3 * mean)
+        .filter(|&((&(k, _, mean), p), g)| {
+            (p[0] - xs[k]).abs() <= hx && (p[1] - ys[k]).abs() <= hy && g.abs() <= 1e-3 * mean
+        })
         .map(|((_, p), _)| p)
         .collect()
 }
@@ -8133,7 +9429,12 @@ impl View {
     /// 回転なし・遠近法なしで、最初の3つの成分をそのまま画面の軸にする
     #[cfg(test)]
     pub fn identity(d: usize) -> View {
-        View { rows: identity_rows(d), center: [0.0; 3], hidden: Vec::new(), dist: 0.0 }
+        View {
+            rows: identity_rows(d),
+            center: [0.0; 3],
+            hidden: Vec::new(),
+            dist: 0.0,
+        }
     }
 
     /// n 次元の点 p を画面の3次元の点にする。視点より後ろ（または近すぎる）点は NaN
@@ -8193,14 +9494,23 @@ impl LocalMesh {
         let (m, t) = self.affine(view);
         let mv = |p: &[f32], shift: bool| -> [f32; 3] {
             [0, 1, 2].map(|a| {
-                let v = (0..3).map(|b| m[a][b] * p[b] as f64).sum::<f64>() + if shift { t[a] } else { 0.0 };
+                let v = (0..3).map(|b| m[a][b] * p[b] as f64).sum::<f64>()
+                    + if shift { t[a] } else { 0.0 };
                 v as f32
             })
         };
         let move_mesh = |src: &Mesh| -> Mesh {
             Mesh {
-                positions: src.positions.chunks_exact(3).flat_map(|p| mv(p, true)).collect(),
-                normals: src.normals.chunks_exact(3).flat_map(|n| mv(n, false)).collect(),
+                positions: src
+                    .positions
+                    .chunks_exact(3)
+                    .flat_map(|p| mv(p, true))
+                    .collect(),
+                normals: src
+                    .normals
+                    .chunks_exact(3)
+                    .flat_map(|n| mv(n, false))
+                    .collect(),
                 indices: src.indices.clone(),
                 grid_coords: src.grid_coords.clone(),
                 complex: src.complex.clone(),
@@ -8212,7 +9522,11 @@ impl LocalMesh {
             }
         };
         let mut out = move_mesh(&self.mesh);
-        out.lod_mesh = self.mesh.lod_mesh.as_deref().map(|l| Box::new(move_mesh(l)));
+        out.lod_mesh = self
+            .mesh
+            .lod_mesh
+            .as_deref()
+            .map(|l| Box::new(move_mesh(l)));
         out
     }
 
@@ -8235,7 +9549,10 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     let Some((m, grid)) = &shape.grid else {
         // 曲線: 点をそのまま並べる（NaN は線の切れ目として残る）
         let positions = (0..count).flat_map(|k| to3(k).map(|v| v as f32)).collect();
-        return Mesh { positions, ..Default::default() };
+        return Mesh {
+            positions,
+            ..Default::default()
+        };
     };
 
     // 表示範囲から大きく外れた点（無限大の近くなど）は省く。はみ出た部分は描画側で切り落とす。
@@ -8260,10 +9577,15 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
         if ok(&p) {
             *slot = mesh.push_vertex(p);
             if !shape.complex.is_empty() {
-                mesh.complex.extend_from_slice(&shape.complex[3 * k..3 * k + 3]);
+                mesh.complex
+                    .extend_from_slice(&shape.complex[3 * k..3 * k + 3]);
             }
             let g = &grid[gd * k..gd * k + gd];
-            mesh.grid_coords.extend_from_slice(&[g[0], g[1], if shape.solid { g[2] } else { p[2] as f32 }]);
+            mesh.grid_coords.extend_from_slice(&[
+                g[0],
+                g[1],
+                if shape.solid { g[2] } else { p[2] as f32 },
+            ]);
         }
     }
     // 曲面ごとに m × m 個の点が並んでいる。立体は6枚ずつ。
@@ -8276,7 +9598,9 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     // 粗い版: 格子の点を stride 個おきに使う（最後の行・列は必ず入れるので、面の端は変わらない）
     let quads = tris.map_or(grid_count / (m * m) * n * n, |t| t.len() / 6);
     let stride = if 2 * quads > LOD_MIN_TRIANGLES {
-        ((2 * quads) as f64 / LOD_TARGET_TRIANGLES as f64).sqrt().ceil() as usize
+        ((2 * quads) as f64 / LOD_TARGET_TRIANGLES as f64)
+            .sqrt()
+            .ceil() as usize
     } else {
         0
     };
@@ -8289,7 +9613,11 @@ pub fn project(shape: &NdShape, view: &View, dom: Domain) -> Mesh {
     };
     if let Some(t) = tris {
         for tri in t.chunks_exact(3) {
-            let v = [index_of[tri[0] as usize], index_of[tri[1] as usize], index_of[tri[2] as usize]];
+            let v = [
+                index_of[tri[0] as usize],
+                index_of[tri[1] as usize],
+                index_of[tri[2] as usize],
+            ];
             if !v.contains(&NONE) {
                 mesh.indices.extend_from_slice(&v);
             }
@@ -8352,12 +9680,17 @@ fn signed_volume(mesh: &Mesh, first: usize) -> f64 {
         [p[k] as f64, p[k + 1] as f64, p[k + 2] as f64]
     };
     // 原点の代わりに最初の頂点を基準にする（桁落ちを防ぐ）
-    let Some(&k0) = mesh.indices.get(first) else { return 0.0 };
+    let Some(&k0) = mesh.indices.get(first) else {
+        return 0.0;
+    };
     let o = v(k0);
     let mut sum = 0.0;
     for t in mesh.indices[first..].chunks_exact(3) {
-        let [a, b, c] = [v(t[0]), v(t[1]), v(t[2])].map(|q| [q[0] - o[0], q[1] - o[1], q[2] - o[2]]);
-        sum += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        let [a, b, c] =
+            [v(t[0]), v(t[1]), v(t[2])].map(|q| [q[0] - o[0], q[1] - o[1], q[2] - o[2]]);
+        sum += a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
     }
     sum / 6.0
 }
@@ -8412,7 +9745,10 @@ mod tests {
     use crate::parser::parse;
 
     fn dom() -> Domain {
-        Domain { lo: [-1.0; 3], hi: [1.0; 3] }
+        Domain {
+            lo: [-1.0; 3],
+            hi: [1.0; 3],
+        }
     }
     fn prog(src: &str, vars: &[&str]) -> Program {
         Program::compile(&parse(src).unwrap(), vars).unwrap()
@@ -8454,7 +9790,10 @@ mod tests {
         assert!(explicit_surface(&p, dom(), 10, 2).indices.is_empty());
         // 高さ = Im f = y
         let m = explicit_surface_with(&p, dom(), 4, 2, ComplexMode::Im);
-        assert!(m.positions.chunks_exact(3).all(|q| (q[2] - q[1]).abs() < 1e-6));
+        assert!(m
+            .positions
+            .chunks_exact(3)
+            .all(|q| (q[2] - q[1]).abs() < 1e-6));
     }
 
     /// `explicit_surface_full` と同じ入力で `find_jumps_with` を呼び、(辺の番号, 位置 t) を番号順に並べたもの
@@ -8462,7 +9801,10 @@ mod tests {
         let p = prog(src, &["x", "y"]);
         // 範囲を少しずらして、極 x = 0 が格子の点にも二分の点にもならないようにする
         // （値が有限でない点を踏むと、その辺は段差とみなされない）
-        let dom = Domain { lo: [-4.93, -4.93, -5.0], hi: [5.07, 5.07, 5.0] };
+        let dom = Domain {
+            lo: [-4.93, -4.93, -5.0],
+            hi: [5.07, 5.07, 5.0],
+        };
         let n = 60;
         let m = n + 1;
         let (mut us, mut vs) = (Vec::new(), Vec::new());
@@ -8483,14 +9825,29 @@ mod tests {
         for j in 0..m {
             for i in 0..m {
                 let k = j * m + i;
-                for (ok, k1) in [(i + 1 < m, k + 1), (j + 1 < m, k + m), (i + 1 < m && j + 1 < m, k + m + 1)] {
+                for (ok, k1) in [
+                    (i + 1 < m, k + 1),
+                    (j + 1 < m, k + m),
+                    (i + 1 < m && j + 1 < m, k + m + 1),
+                ] {
                     if ok {
                         edges.push((k, k1));
                     }
                 }
             }
         }
-        let jumps = find_jumps_with(&p, &us, &vs, &vals, &hs, &edges, &clamped, h * 0.005, &usable, early_exit);
+        let jumps = find_jumps_with(
+            &p,
+            &us,
+            &vs,
+            &vals,
+            &hs,
+            &edges,
+            &clamped,
+            h * 0.005,
+            &usable,
+            early_exit,
+        );
         let mut out: Vec<(usize, f64)> = jumps.iter().map(|(&id, j)| (id, j.t)).collect();
         out.sort_by_key(|&(id, _)| id);
         out
@@ -8499,7 +9856,13 @@ mod tests {
     #[test]
     fn jumps_unchanged_by_early_exit() {
         // 途中で候補を外しても、見つかる段差（辺と位置）は外さないときと同じ
-        for src in ["floor(2x)", "tan(x) y", "1/x + 1/y", "floor(x) + floor(y)", "sign(x) + y"] {
+        for src in [
+            "floor(2x)",
+            "tan(x) y",
+            "1/x + 1/y",
+            "floor(x) + floor(y)",
+            "sign(x) + y",
+        ] {
             let (fast, full) = (jumps_of(src, true), jumps_of(src, false));
             assert!(!full.is_empty(), "{src}: 段差が見つからない");
             assert_eq!(fast, full, "{src}");
@@ -8511,7 +9874,10 @@ mod tests {
         // floor(2x) の段差: 段差の所で三角形を切り分けるので、どの三角形も段差をまたがない
         // （3頂点の値がすべて同じ整数）。段差の縁は x = 0.5 k の線の上にそろう。
         // 高さの範囲は値（−2〜1）が全部入る広さにする（範囲の外の段は描かないので）
-        let d = Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 2.0] };
+        let d = Domain {
+            lo: [-1.0, -1.0, -3.0],
+            hi: [1.0, 1.0, 2.0],
+        };
         let p = prog("floor(2x)", &["x", "y"]);
         let m = explicit_surface(&p, d, 13, 2);
         assert!(!m.indices.is_empty());
@@ -8519,15 +9885,26 @@ mod tests {
         for t in m.indices.chunks_exact(3) {
             let v = |k: u32| {
                 let k = k as usize * 3;
-                [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+                [
+                    m.positions[k] as f64,
+                    m.positions[k + 1] as f64,
+                    m.positions[k + 2] as f64,
+                ]
             };
             let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
-            assert!(a[2] == b[2] && b[2] == c[2], "段差をまたぐ三角形 {a:?} {b:?} {c:?}");
+            assert!(
+                a[2] == b[2] && b[2] == c[2],
+                "段差をまたぐ三角形 {a:?} {b:?} {c:?}"
+            );
             area += ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2.0;
             for q in [a, b, c] {
                 // 頂点の x は、段差のすぐ手前か格子点
                 let k = (2.0 * q[0]).floor();
-                assert!(q[2] == k || (q[2] - k).abs() == 1.0 && (2.0 * q[0] - (2.0 * q[0]).round()).abs() < 1e-3);
+                assert!(
+                    q[2] == k
+                        || (q[2] - k).abs() == 1.0
+                            && (2.0 * q[0] - (2.0 * q[0]).round()).abs() < 1e-3
+                );
             }
         }
         // 段差で抜けた所が無い: 面積は 2 × 2 = 4（向きもすべて上向き）
@@ -8537,7 +9914,15 @@ mod tests {
         assert!(w.indices.len() > m.indices.len());
         // なめらかな急な関数は段差とみなさない
         let p = prog("20 x", &["x", "y"]);
-        let full = explicit_surface(&p, Domain { lo: [-1.0, -1.0, -30.0], hi: [1.0, 1.0, 30.0] }, 10, 2);
+        let full = explicit_surface(
+            &p,
+            Domain {
+                lo: [-1.0, -1.0, -30.0],
+                hi: [1.0, 1.0, 30.0],
+            },
+            10,
+            2,
+        );
         assert_eq!(full.positions.len(), 11 * 11 * 3);
     }
 
@@ -8548,10 +9933,15 @@ mod tests {
             .map(|t| {
                 let v = |k: u32| {
                     let k = k as usize * 3;
-                    [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+                    [
+                        m.positions[k] as f64,
+                        m.positions[k + 1] as f64,
+                        m.positions[k + 2] as f64,
+                    ]
                 };
                 let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
-                let area = (((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2.0).abs();
+                let area =
+                    (((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2.0).abs();
                 let hi = a[2].max(b[2]).max(c[2]);
                 let lo = a[2].min(b[2]).min(c[2]);
                 (area, hi - lo)
@@ -8562,19 +9952,35 @@ mod tests {
     #[test]
     fn step_corners_have_no_spikes() {
         // floor(x) + floor(y) の段差の線が交わる所（格子の点）に、針のような三角形が立たない
-        let d = Domain { lo: [-3.1, -3.1, -10.0], hi: [3.1, 3.1, 10.0] };
-        let m = explicit_surface_full(&prog("floor(x) + floor(y)", &["x", "y"]), d, 60, 2, ComplexMode::Off, false);
+        let d = Domain {
+            lo: [-3.1, -3.1, -10.0],
+            hi: [3.1, 3.1, 10.0],
+        };
+        let m = explicit_surface_full(
+            &prog("floor(x) + floor(y)", &["x", "y"]),
+            d,
+            60,
+            2,
+            ComplexMode::Off,
+            false,
+        );
         let tris = tri_spreads(&m);
         let total: f64 = tris.iter().map(|t| t.0).sum();
         let spikes: f64 = tris.iter().filter(|t| t.1 > 0.5).map(|t| t.0).sum();
         assert!((total - 6.2 * 6.2).abs() < 0.05, "面積 {total}");
-        assert!(spikes <= 0.0005 * total, "針の面積 {spikes}（全体 {total}）");
+        assert!(
+            spikes <= 0.0005 * total,
+            "針の面積 {spikes}（全体 {total}）"
+        );
     }
 
     #[test]
     fn low_steps_are_cut() {
         // 表示範囲の高さの 3% より低い段差（1 段 1/3、範囲の高さ 12.8）も、斜面ではなく段として描く
-        let d = Domain { lo: [-5.0, -5.0, -6.4], hi: [5.0, 5.0, 6.4] };
+        let d = Domain {
+            lo: [-5.0, -5.0, -6.4],
+            hi: [5.0, 5.0, 6.4],
+        };
         let m = explicit_surface(&prog("floor(3x)/3", &["x", "y"]), d, 60, 2);
         let slopes = tri_spreads(&m).iter().filter(|t| t.1 > 0.1).count();
         assert_eq!(slopes, 0);
@@ -8603,7 +10009,9 @@ mod tests {
                 if ka == kb || (ka[0] == kb[0] && ka[1] == kb[1]) || !inside(a) || !inside(b) {
                     continue;
                 }
-                *count.entry(if ka < kb { (ka, kb) } else { (kb, ka) }).or_default() += 1;
+                *count
+                    .entry(if ka < kb { (ka, kb) } else { (kb, ka) })
+                    .or_default() += 1;
             }
         }
         count.values().filter(|&&c| c == 1).count()
@@ -8613,9 +10021,17 @@ mod tests {
     fn step_corners_have_no_gaps() {
         // 段差の線が交わる所・三角形の中で終わる所に、向こうが見える隙間が開かない（壁つき）。
         // 段の角で、真ん中の三角形を空けたまま壁を立てていなかったとき、階段のサンプルで白い隙間が見えた
-        for src in ["floor(x)/2 + floor(y)/4", "floor(x) + floor(y)", "round(x) round(y) / 8"] {
-            let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
-            let m = explicit_surface_full(&prog(src, &["x", "y"]), d, 150, 2, ComplexMode::Off, true);
+        for src in [
+            "floor(x)/2 + floor(y)/4",
+            "floor(x) + floor(y)",
+            "round(x) round(y) / 8",
+        ] {
+            let d = Domain {
+                lo: [-10.0, -10.0, -6.0],
+                hi: [10.0, 10.0, 6.0],
+            };
+            let m =
+                explicit_surface_full(&prog(src, &["x", "y"]), d, 150, 2, ComplexMode::Off, true);
             // 修正前は 678・32・508 本
             assert_eq!(open_edges_inside(&m, d), 0, "{src}");
         }
@@ -8626,14 +10042,29 @@ mod tests {
         // mod(x y, z) = 0 は x y = n z（n は整数）の面。z > 0 では F ∈ [0, z)、z < 0 では F ∈ (z, 0] で、
         // F は 0 に触れるだけで符号が変わらない。前は F = 0 ちょうどを正に数えて段差のセルを選んでいたので、
         // z < 0 の側しか描けなかった（z = x y の面が z > 0 で 16%、z < 0 で 97%）
-        let d = Domain { lo: [-4.0, -4.0, -3.0], hi: [4.0, 4.0, 3.0] };
-        let m = implicit_solid_opt(&prog("mod(x y, z)", &["x", "y", "z"]), d, 48, &[], 0, Refine::Normal);
+        let d = Domain {
+            lo: [-4.0, -4.0, -3.0],
+            hi: [4.0, 4.0, 3.0],
+        };
+        let m = implicit_solid_opt(
+            &prog("mod(x y, z)", &["x", "y", "z"]),
+            d,
+            48,
+            &[],
+            0,
+            Refine::Normal,
+        );
         let h = 0.2;
-        let cells: crate::adaptive::HashSet<[i64; 3]> =
-            m.positions.chunks_exact(3).map(|p| [0, 1, 2].map(|a| (p[a] as f64 / h).floor() as i64)).collect();
+        let cells: crate::adaptive::HashSet<[i64; 3]> = m
+            .positions
+            .chunks_exact(3)
+            .map(|p| [0, 1, 2].map(|a| (p[a] as f64 / h).floor() as i64))
+            .collect();
         let near = |q: [f64; 3]| {
             let c = q.map(|v| (v / h).floor() as i64);
-            (-1..=1).any(|a| (-1..=1).any(|b| (-1..=1).any(|e| cells.contains(&[c[0] + a, c[1] + b, c[2] + e]))))
+            (-1..=1).any(|a| {
+                (-1..=1).any(|b| (-1..=1).any(|e| cells.contains(&[c[0] + a, c[1] + b, c[2] + e])))
+            })
         };
         for nn in [1.0, -1.0, 2.0] {
             let (mut hit, mut all) = ([0; 2], [0; 2]);
@@ -8651,7 +10082,12 @@ mod tests {
             }
             for side in 0..2 {
                 let r = hit[side] as f64 / all[side] as f64;
-                assert!(r > 0.9, "x y = {nn} z の面の、z {} 0 の側が {:.0}% しか描けていない", ["> ", "<"][side], 100.0 * r);
+                assert!(
+                    r > 0.9,
+                    "x y = {nn} z の面の、z {} 0 の側が {:.0}% しか描けていない",
+                    ["> ", "<"][side],
+                    100.0 * r
+                );
             }
         }
     }
@@ -8660,26 +10096,57 @@ mod tests {
     fn wall_normals_face_lower_side() {
         // 段差の壁の法線は、三角形の向き（表側）と同じで、段の低い側を向く。
         // 段差の線の向きは三角形ごとに入れ替わるので、そろっていないと壁が縞模様になる
-        for (src, low) in [("floor(2 x)", -1.0), ("floor(-2 x)", 1.0), ("floor(2 x) + floor(2 y)", -1.0)] {
-            let m = explicit_surface_full(&prog(src, &["x", "y"]), Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 3.0] }, 13, 2, ComplexMode::Off, true);
+        for (src, low) in [
+            ("floor(2 x)", -1.0),
+            ("floor(-2 x)", 1.0),
+            ("floor(2 x) + floor(2 y)", -1.0),
+        ] {
+            let m = explicit_surface_full(
+                &prog(src, &["x", "y"]),
+                Domain {
+                    lo: [-1.0, -1.0, -3.0],
+                    hi: [1.0, 1.0, 3.0],
+                },
+                13,
+                2,
+                ComplexMode::Off,
+                true,
+            );
             let v = |i: u32| {
                 let k = i as usize * 3;
-                [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+                [
+                    m.positions[k] as f64,
+                    m.positions[k + 1] as f64,
+                    m.positions[k + 2] as f64,
+                ]
             };
             let mut walls = 0;
             for t in m.indices.chunks_exact(3) {
                 let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
-                let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
-                let g = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                let (e1, e2) = (
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                );
+                let g = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
                 let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
                 // x = 0.5 の段差の壁（法線がほぼ ±x）
-                if len < 1e-9 || (g[0] / len).abs() < 0.99 || ((a[0] + b[0] + c[0]) / 3.0 - 0.5).abs() > 1e-3 {
+                if len < 1e-9
+                    || (g[0] / len).abs() < 0.99
+                    || ((a[0] + b[0] + c[0]) / 3.0 - 0.5).abs() > 1e-3
+                {
                     continue;
                 }
                 walls += 1;
                 assert!(g[0] * low > 0.0, "{src}: 壁が段の高い側を向いている");
                 for &i in t {
-                    assert!(m.normals[i as usize * 3] as f64 * g[0] > 0.0, "{src}: 頂点の法線が面と逆");
+                    assert!(
+                        m.normals[i as usize * 3] as f64 * g[0] > 0.0,
+                        "{src}: 頂点の法線が面と逆"
+                    );
                 }
             }
             assert!(walls > 0, "{src}: 壁が無い");
@@ -8700,19 +10167,32 @@ mod tests {
         }
         for t in m.indices.chunks_exact(3) {
             for e in [(t[0], t[1]), (t[1], t[2])] {
-                let (a, b) = (root(&mut parent, e.0 as usize), root(&mut parent, e.1 as usize));
+                let (a, b) = (
+                    root(&mut parent, e.0 as usize),
+                    root(&mut parent, e.1 as usize),
+                );
                 parent[a] = b;
             }
         }
         let used: crate::adaptive::HashSet<usize> = m.indices.iter().map(|&k| k as usize).collect();
-        used.iter().map(|&k| root(&mut parent, k)).collect::<crate::adaptive::HashSet<_>>().len()
+        used.iter()
+            .map(|&k| root(&mut parent, k))
+            .collect::<crate::adaptive::HashSet<_>>()
+            .len()
     }
 
     #[test]
     fn close_surfaces_stay_apart() {
         // 半径 1 と 1.15 の2つの球（間は 0.15 = 格子の間隔の 1.5 倍）。1つのセルを両方の球が通る所があるが、くっつかずに2枚になる
         let p = prog("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", &AXES);
-        let m = implicit_surface(&p, Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40);
+        let m = implicit_surface(
+            &p,
+            Domain {
+                lo: [-2.0; 3],
+                hi: [2.0; 3],
+            },
+            40,
+        );
         assert_eq!(pieces(&m), 2);
         // 頂点はどれも、どちらかの球の上にある（2つの球の間の、くっついた所に頂点が無い）
         for q in m.positions.chunks_exact(3) {
@@ -8726,12 +10206,20 @@ mod tests {
         // Re(1/(x + iy)) は原点の極で +∞ から −∞ に飛ぶ。範囲の外の値は範囲の少し外にそろえて描くので、
         // 極の周りに穴が空かない。表示範囲の高さ ±3 の外に出る所（|x/(x² + y²)| > 3: 半径 1/6 の円 2 つ）は
         // 上端・下端で切って描かないので、平面に落とした面積は 4 − 2π/36 以上（穴があればこれより小さくなる）
-        let d = Domain { lo: [-1.0, -1.0, -3.0], hi: [1.0, 1.0, 3.0] };
+        let d = Domain {
+            lo: [-1.0, -1.0, -3.0],
+            hi: [1.0, 1.0, 3.0],
+        };
         let p = prog("1 / (x + i y)", &["x", "y"]);
         let m = explicit_surface_full(&p, d, 40, 2, ComplexMode::Re, false);
         let mut area = 0.0;
         for t in m.indices.chunks_exact(3) {
-            let v = |k: u32| [m.positions[k as usize * 3] as f64, m.positions[k as usize * 3 + 1] as f64];
+            let v = |k: u32| {
+                [
+                    m.positions[k as usize * 3] as f64,
+                    m.positions[k as usize * 3 + 1] as f64,
+                ]
+            };
             let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
             area += ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.0;
         }
@@ -8745,8 +10233,22 @@ mod tests {
     fn rotated_explicit_keeps_complex_colors() {
         // 回した陽関数（表示中の座標どうしの回転）でも、高さを |f| にして色分けの値を持つ
         let p = prog("(x + i y)^2", &["x", "y"]);
-        let dom = Domain { lo: [-1.0, -1.0, -10.0], hi: [1.0, 1.0, 10.0] };
-        let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], dom, 4, ComplexMode::Abs, false, false, 20.0);
+        let dom = Domain {
+            lo: [-1.0, -1.0, -10.0],
+            hi: [1.0, 1.0, 10.0],
+        };
+        let shape = explicit_nd(
+            &p,
+            2,
+            [0, 1, 2],
+            &[0.0; 3],
+            dom,
+            4,
+            ComplexMode::Abs,
+            false,
+            false,
+            20.0,
+        );
         assert_eq!(shape.complex.len(), shape.points.len()); // 3次元の点1つにつき3つ
         for q in shape.points.chunks_exact(3) {
             // |(x+iy)²| = x² + y²（頂点は f32 なので、その精度で）
@@ -8856,7 +10358,10 @@ mod tests {
     fn rim_is_cut_exactly_at_the_top() {
         // 1/sqrt(1 − x² − y²) は表示範囲の上端 z = 6 を、半径 √(1 − 1/36) の円で横切る。
         // 上端で切った縁の点は、格子の細かさに関係なく、この円のすぐ近くにある（切れ込み・トゲが無い）
-        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let d = Domain {
+            lo: [-10.0, -10.0, -6.0],
+            hi: [10.0, 10.0, 6.0],
+        };
         let m = explicit_surface(&prog("1/sqrt(1 - x^2 - y^2)", &["x", "y"]), d, 150, 2);
         let r0 = (1.0f64 - 1.0 / 36.0).sqrt();
         let rim: Vec<f64> = m
@@ -8866,19 +10371,32 @@ mod tests {
             .map(|q| ((q[0] * q[0] + q[1] * q[1]) as f64).sqrt())
             .collect();
         assert!(rim.len() > 50, "{}", rim.len());
-        assert!(rim.iter().all(|r| (r - r0).abs() < 1e-4), "{:?}", rim.iter().map(|r| r - r0).fold(0.0f64, |a, b| a.max(b.abs())));
+        assert!(
+            rim.iter().all(|r| (r - r0).abs() < 1e-4),
+            "{:?}",
+            rim.iter()
+                .map(|r| r - r0)
+                .fold(0.0f64, |a, b| a.max(b.abs()))
+        );
         // 上端より上の頂点は描かない
-        assert!(m.indices.iter().all(|&k| m.positions[3 * k as usize + 2] <= 6.0));
+        assert!(m
+            .indices
+            .iter()
+            .all(|&k| m.positions[3 * k as usize + 2] <= 6.0));
         // 穴が無い: 三角形が 1 つだけの辺（縁）は、上端の円の上だけにある（定義域の縁 r = 1 の近くの三角形も描くので、
         // 上端のすぐ下に切れ込みができない）
-        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = crate::adaptive::HashMap::default();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> =
+            crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 *count.entry((a.min(b), a.max(b))).or_default() += 1;
             }
         }
         let z = |k: u32| m.positions[3 * k as usize + 2];
-        let holes = count.iter().filter(|&(&(a, b), &c)| c == 1 && !(z(a) == 6.0 && z(b) == 6.0)).count();
+        let holes = count
+            .iter()
+            .filter(|&(&(a, b), &c)| c == 1 && !(z(a) == 6.0 && z(b) == 6.0))
+            .count();
         assert_eq!(holes, 0);
     }
 
@@ -8897,12 +10415,20 @@ mod tests {
     }
 
     /// 形の正しさの報告（7.1）と同じ表示範囲
-    const SHAPE_DOM: Domain = Domain { lo: [-10.0, -10.0, -6.4], hi: [10.0, 10.0, 6.4] };
+    const SHAPE_DOM: Domain = Domain {
+        lo: [-10.0, -10.0, -6.4],
+        hi: [10.0, 10.0, 6.4],
+    };
 
     #[test]
     fn thin_peak_is_found() {
         // 幅 0.02 の山（格子の間隔 0.13）。格子の点がたまたま乗らないので、細分の前は、ほぼ平らなまま
-        let m = explicit_surface(&prog("5 exp(-2000((x-1.23)^2 + (y-0.77)^2))", &["x", "y"]), SHAPE_DOM, 150, 2);
+        let m = explicit_surface(
+            &prog("5 exp(-2000((x-1.23)^2 + (y-0.77)^2))", &["x", "y"]),
+            SHAPE_DOM,
+            150,
+            2,
+        );
         let top = m.positions.chunks_exact(3).filter(|q| q[2] >= 4.5).count();
         assert!(top >= 1, "高さ 4.5 以上の頂点が無い");
     }
@@ -8910,7 +10436,12 @@ mod tests {
     #[test]
     fn thin_ridge_is_continuous() {
         // 幅 0.05 の曲がった尾根。どの x の所でも、尾根の上の頂点がある
-        let m = explicit_surface(&prog("3 exp(-400 (y - sin(x))^2)", &["x", "y"]), SHAPE_DOM, 150, 2);
+        let m = explicit_surface(
+            &prog("3 exp(-400 (y - sin(x))^2)", &["x", "y"]),
+            SHAPE_DOM,
+            150,
+            2,
+        );
         for k in 0..39 {
             let x = -9.5 + 0.5 * k as f64;
             let top = m
@@ -8926,7 +10457,12 @@ mod tests {
     #[test]
     fn thin_pole_is_found() {
         // 極の半径は、高さ 6 で 0.02。表示範囲の上端（z ≥ 6.3）にかかる頂点がある
-        let m = explicit_surface(&prog("1/(400 ((x-0.31)^2 + (y+0.57)^2))", &["x", "y"]), SHAPE_DOM, 150, 2);
+        let m = explicit_surface(
+            &prog("1/(400 ((x-0.31)^2 + (y+0.57)^2))", &["x", "y"]),
+            SHAPE_DOM,
+            150,
+            2,
+        );
         let top = m.positions.chunks_exact(3).filter(|q| q[2] >= 6.3).count();
         assert!(top >= 8, "上端にかかる頂点 {top} 個");
     }
@@ -8934,10 +10470,25 @@ mod tests {
     #[test]
     fn repeated_variables_are_not_refined_much() {
         // 同じ変数が何度も出る式（区間演算が広めになる）でも、三角形はほとんど増えない
-        let d = Domain { lo: [-5.0, -5.0, -30.0], hi: [5.0, 5.0, 30.0] };
+        let d = Domain {
+            lo: [-5.0, -5.0, -30.0],
+            hi: [5.0, 5.0, 30.0],
+        };
         for src in ["x sin(x) cos(y) / 3", "(x - y)(x + y)/10"] {
-            let a = explicit_surface_opt(&prog(src, &["x", "y"]), d, 150, 2, ComplexMode::Off, false, false).indices.len();
-            let b = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2).indices.len();
+            let a = explicit_surface_opt(
+                &prog(src, &["x", "y"]),
+                d,
+                150,
+                2,
+                ComplexMode::Off,
+                false,
+                false,
+            )
+            .indices
+            .len();
+            let b = explicit_surface(&prog(src, &["x", "y"]), d, 150, 2)
+                .indices
+                .len();
             assert!(b as f64 <= 1.05 * a as f64, "{src}: {} → {}", a / 3, b / 3);
         }
     }
@@ -8949,7 +10500,9 @@ mod tests {
             [s.points[k], s.points[k + 1], s.points[k + 2]]
         };
         let (_, tris) = s.tris.as_ref().expect("細かくした三角形");
-        tris.chunks_exact(3).map(|t| [p(t[0]), p(t[1]), p(t[2])]).collect()
+        tris.chunks_exact(3)
+            .map(|t| [p(t[0]), p(t[1]), p(t[2])])
+            .collect()
     }
 
     #[test]
@@ -8957,7 +10510,10 @@ mod tests {
         // 段と段を結ぶ三角形（3 頂点の z の差が 0.4 を超えるもの）が無い（変更前は 4,500 個・13,500 個）
         let r = (-5.0, 5.0);
         let tol = 3f64.sqrt() * 10.0 * 1e-3;
-        for src in [["u", "v", "floor(u)"], ["u cos(v)", "u sin(v)", "floor(3u)/2"]] {
+        for src in [
+            ["u", "v", "floor(u)"],
+            ["u cos(v)", "u sin(v)", "floor(3u)/2"],
+        ] {
             let s = parametric_surface_nd_opt(&[progs3(src, &["u", "v"])], r, r, 150, Some(tol));
             assert!(s.keep_full, "{src:?}");
             let bad = shape_tris(&s)
@@ -8965,7 +10521,9 @@ mod tests {
                 .filter(|t| t.iter().all(|q| q.iter().all(|x| x.is_finite())))
                 .filter(|t| {
                     let z = t.map(|q| q[2]);
-                    z.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)) - z.iter().fold(f64::INFINITY, |a, &b| a.min(b)) > 0.4
+                    z.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+                        - z.iter().fold(f64::INFINITY, |a, &b| a.min(b))
+                        > 0.4
                 })
                 .count();
             assert_eq!(bad, 0, "{src:?}");
@@ -8977,7 +10535,13 @@ mod tests {
         // tan(u) の極をまたぐ偽の面（z > 3 と z < −3 の頂点を両方持つ三角形）が無い
         let r = (-5.0, 5.0);
         let tol = 3f64.sqrt() * 10.0 * 1e-3;
-        let s = parametric_surface_nd_opt(&[progs3(["u", "v", "tan(u)"], &["u", "v"])], r, r, 150, Some(tol));
+        let s = parametric_surface_nd_opt(
+            &[progs3(["u", "v", "tan(u)"], &["u", "v"])],
+            r,
+            r,
+            150,
+            Some(tol),
+        );
         let bridges = shape_tris(&s)
             .iter()
             .filter(|t| t.iter().any(|q| q[2] > 3.0) && t.iter().any(|q| q[2] < -3.0))
@@ -9000,7 +10564,14 @@ mod tests {
         assert!(high(&fine) >= 40, "{}", high(&fine));
         assert!(top(&fine) >= 0.9, "{}", top(&fine));
         // 射影した曲面にも、細かくした三角形が使われる
-        let m = project(&fine, &View::identity(3), Domain { lo: [-5.0; 3], hi: [5.0; 3] });
+        let m = project(
+            &fine,
+            &View::identity(3),
+            Domain {
+                lo: [-5.0; 3],
+                hi: [5.0; 3],
+            },
+        );
         assert!(m.indices.len() / 3 > 2 * 150 * 150);
     }
 
@@ -9017,13 +10588,19 @@ mod tests {
         let count = s.points.len() / 3;
         let mut sheet = vec![usize::MAX; count];
         for t in tris.chunks_exact(3) {
-            let k = t.iter().map(|&k| k as usize).find(|&k| k < base).map_or(usize::MAX, |k| k / (41 * 41));
+            let k = t
+                .iter()
+                .map(|&k| k as usize)
+                .find(|&k| k < base)
+                .map_or(usize::MAX, |k| k / (41 * 41));
             for &v in t {
                 sheet[v as usize] = sheet[v as usize].min(k);
             }
         }
         for which in 0..2 {
-            let uv: Vec<[f64; 2]> = (0..count).map(|k| [grid[2 * k] as f64, grid[2 * k + 1] as f64]).collect();
+            let uv: Vec<[f64; 2]> = (0..count)
+                .map(|k| [grid[2 * k] as f64, grid[2 * k + 1] as f64])
+                .collect();
             let mine: Vec<[u32; 3]> = tris
                 .chunks_exact(3)
                 .filter(|t| t.iter().all(|&k| sheet[k as usize] == which))
@@ -9039,18 +10616,28 @@ mod tests {
         // 細かくした曲面と一様な曲面をつなげても、三角形の数と点の対応がそのまま
         let bump = progs3(["u", "v", "exp(-200 (u^2 + v^2))"], &["u", "v"]);
         let plane = progs3(["u", "v", "1"], &["u", "v"]);
-        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let d = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let a = parametric_surface_nd_opt(&[bump], (-2.03, 1.97), (-2.03, 1.97), 30, Some(0.01));
         let b = parametric_surface_nd(&[plane], (-2.0, 2.0), (-2.0, 2.0), 30);
         assert!(a.tris.is_some() && b.tris.is_none());
-        let (ma, mb) = (project(&a, &View::identity(3), d), project(&b, &View::identity(3), d));
+        let (ma, mb) = (
+            project(&a, &View::identity(3), d),
+            project(&b, &View::identity(3), d),
+        );
         let merged = merge_shapes(vec![a, b]).unwrap();
         let mm = project(&merged, &View::identity(3), d);
         assert_eq!(mm.indices.len(), ma.indices.len() + mb.indices.len());
         assert_eq!(mm.positions.len(), ma.positions.len() + mb.positions.len());
         // 平面 z = 1 の三角形は、z = 1 の点だけでできている
         let z = |k: u32| mm.positions[3 * k as usize + 2];
-        let flat = mm.indices.chunks_exact(3).filter(|t| t.iter().all(|&k| z(k) == 1.0)).count();
+        let flat = mm
+            .indices
+            .chunks_exact(3)
+            .filter(|t| t.iter().all(|&k| z(k) == 1.0))
+            .count();
         assert_eq!(flat, mb.indices.len() / 3);
     }
 
@@ -9071,31 +10658,57 @@ mod tests {
             count
         };
         let names = ["t1", "t2", "t3", "t4"];
-        let p4: Vec<Program> = ["t_1", "t_2", "t_3", "t_4"].iter().map(|v| prog(v, &names)).collect();
+        let p4: Vec<Program> = ["t_1", "t_2", "t_3", "t_4"]
+            .iter()
+            .map(|v| prog(v, &names))
+            .collect();
         let s = parametric_edges_nd(&[p4], &[(-1.0, 1.0); 4], 400, 1e-3);
         assert_eq!(curves(&s), 32);
         // 頂点はどれも、座標が ±1 か、1 つの座標だけが範囲の中
         for p in s.points.chunks_exact(4).filter(|p| p[0].is_finite()) {
-            assert!(p.iter().filter(|v| (v.abs() - 1.0).abs() > 1e-12).count() <= 1, "{p:?}");
+            assert!(
+                p.iter().filter(|v| (v.abs() - 1.0).abs() > 1e-12).count() <= 1,
+                "{p:?}"
+            );
         }
         let names = ["u", "v", "t"];
-        let p3: Vec<Program> = ["u cos(v)", "u sin(v)", "t"].iter().map(|e| prog(e, &names)).collect();
-        assert_eq!(curves(&parametric_edges_nd(&[p3], &[(0.0, 1.0), (0.0, 6.0), (0.0, 1.0)], 400, 1e-3)), 12);
+        let p3: Vec<Program> = ["u cos(v)", "u sin(v)", "t"]
+            .iter()
+            .map(|e| prog(e, &names))
+            .collect();
+        assert_eq!(
+            curves(&parametric_edges_nd(
+                &[p3],
+                &[(0.0, 1.0), (0.0, 6.0), (0.0, 1.0)],
+                400,
+                1e-3
+            )),
+            12
+        );
     }
 
     #[test]
     fn box_caps_cover_the_faces() {
         // x² + y² + z² = a² を a の範囲で重ねた立体（中身の詰まった球）の、表示範囲 ±5 の面のふた
         let p = prog("x^2 + y^2 + z^2 - a^2", &["x", "y", "z", "a"]);
-        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let d = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let area_of = |m: &Mesh, axis: usize, at: f64| {
             let mut area = 0.0;
             for t in m.indices.chunks_exact(3) {
                 let v = |k: u32| [0, 1, 2].map(|x| m.positions[3 * k as usize + x] as f64);
                 let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
                 if [a, b, c].iter().all(|q| (q[axis] - at).abs() < 0.01) {
-                    let (e1, e2) = ([0, 1, 2].map(|x| b[x] - a[x]), [0, 1, 2].map(|x| c[x] - a[x]));
-                    area += 0.5 * (e1[(axis + 1) % 3] * e2[(axis + 2) % 3] - e1[(axis + 2) % 3] * e2[(axis + 1) % 3]).abs();
+                    let (e1, e2) = (
+                        [0, 1, 2].map(|x| b[x] - a[x]),
+                        [0, 1, 2].map(|x| c[x] - a[x]),
+                    );
+                    area += 0.5
+                        * (e1[(axis + 1) % 3] * e2[(axis + 2) % 3]
+                            - e1[(axis + 2) % 3] * e2[(axis + 1) % 3])
+                            .abs();
                 }
             }
             area
@@ -9120,10 +10733,16 @@ mod tests {
         let m = Field::new(&p, &[(0.0, 6.0)], 24, d).box_caps(d, 80, None);
         for axis in 0..3 {
             let a = area_of(&m, axis, 5.0);
-            assert!((a - 11.0 * std::f64::consts::PI).abs() < 0.05 * 11.0 * std::f64::consts::PI, "{a}");
+            assert!(
+                (a - 11.0 * std::f64::consts::PI).abs() < 0.05 * 11.0 * std::f64::consts::PI,
+                "{a}"
+            );
         }
         // 面に届かない（半径 4）なら空
-        assert!(Field::new(&p, &[(0.0, 4.0)], 24, d).box_caps(d, 40, None).indices.is_empty());
+        assert!(Field::new(&p, &[(0.0, 4.0)], 24, d)
+            .box_caps(d, 40, None)
+            .indices
+            .is_empty());
         // 切り口 x ≤ 0 を残すなら、x > 0 の部分は描かない（x = 5 の面は無くなり、ほかの面は半分）
         let m = f.box_caps(d, 40, Some((0, 0.0, true)));
         assert!(m.positions.chunks_exact(3).all(|q| q[0] <= 1e-9));
@@ -9135,7 +10754,10 @@ mod tests {
     #[test]
     fn smooth_torus_is_not_refined() {
         // ふつうのトーラスは、一様な格子のまま（点の数も同じ）
-        let torus = progs3(["(3 + cos v) cos u", "(3 + cos v) sin u", "sin v"], &["u", "v"]);
+        let torus = progs3(
+            ["(3 + cos v) cos u", "(3 + cos v) sin u", "sin v"],
+            &["u", "v"],
+        );
         let tau = std::f64::consts::TAU;
         let tol = 3f64.sqrt() * 10.0 * 1e-3;
         let s = parametric_surface_nd_opt(&[torus], (0.0, tau), (0.0, tau), 150, Some(tol));
@@ -9201,7 +10823,10 @@ mod tests {
 
     #[test]
     fn param_surface_cylinder() {
-        let d = Domain { lo: [-2.0; 3], hi: [2.0; 3] };
+        let d = Domain {
+            lo: [-2.0; 3],
+            hi: [2.0; 3],
+        };
         let p = progs3(["cos(u)", "sin(u)", "v"], &["u", "v"]);
         let shape = parametric_surface_nd(&[p], (0.0, std::f64::consts::TAU), (-1.0, 1.0), 20);
         let m = project(&shape, &View::identity(3), d);
@@ -9218,12 +10843,28 @@ mod tests {
         let p = progs3(["t sin(v) cos(u)", "t sin(v) sin(u)", "t cos(v)"], &vars);
         let pi = std::f64::consts::PI;
         let shape = parametric_solid_nd(&[p], [(0.0, 2.0 * pi), (0.0, pi), (0.0, 1.0)], 24);
-        let m = project(&shape, &View::identity(3), Domain { lo: [-2.0; 3], hi: [2.0; 3] });
+        let m = project(
+            &shape,
+            &View::identity(3),
+            Domain {
+                lo: [-2.0; 3],
+                hi: [2.0; 3],
+            },
+        );
         assert_eq!(m.grid_coords.len(), m.positions.len());
         // 体積はおよそ 4π/3（多面体で近似するので少し小さい）、外側の面（t = 1）の法線は外向き
-        assert!((signed_volume(&m, 0) - 4.0 * pi / 3.0).abs() < 0.1, "{}", signed_volume(&m, 0));
+        assert!(
+            (signed_volume(&m, 0) - 4.0 * pi / 3.0).abs() < 0.1,
+            "{}",
+            signed_volume(&m, 0)
+        );
         let mut outer = 0;
-        for ((q, nv), g) in m.positions.chunks_exact(3).zip(m.normals.chunks_exact(3)).zip(m.grid_coords.chunks_exact(3)) {
+        for ((q, nv), g) in m
+            .positions
+            .chunks_exact(3)
+            .zip(m.normals.chunks_exact(3))
+            .zip(m.grid_coords.chunks_exact(3))
+        {
             let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
             // t を固定した面（格子線用の t 成分が NO_GRID）のうち、t = 1 の面
             if g[2] == NO_GRID && len > 0.5 && q[2].abs() < 0.9 {
@@ -9243,7 +10884,12 @@ mod tests {
     fn curve_adaptive_and_breaks() {
         // 円: 点はすべて半径 1 の上
         let p = progs3(["cos(t)", "sin(t)", "0"], &["t"]);
-        let pts = project(&parametric_curve_nd(&[p], (0.0, std::f64::consts::TAU), 8, 1e-3), &View::identity(3), dom()).positions;
+        let pts = project(
+            &parametric_curve_nd(&[p], (0.0, std::f64::consts::TAU), 8, 1e-3),
+            &View::identity(3),
+            dom(),
+        )
+        .positions;
         assert!(pts.len() / 3 > 9, "曲がっている所は細かく分け直される");
         for q in pts.chunks_exact(3) {
             assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 1.0).abs() < 1e-5);
@@ -9257,12 +10903,28 @@ mod tests {
     #[test]
     fn projection_of_4d() {
         // 4次元のクリフォードトーラス (cos u, sin u, cos v, sin v)。x, y, w を表示すると半径1の円柱
-        let p: Vec<Program> = ["cos(u)", "sin(u)", "cos(v)", "sin(v)"].iter().map(|s| prog(s, &["u", "v"])).collect();
+        let p: Vec<Program> = ["cos(u)", "sin(u)", "cos(v)", "sin(v)"]
+            .iter()
+            .map(|s| prog(s, &["u", "v"]))
+            .collect();
         let shape = parametric_surface_nd(&[p], (0.0, 6.0), (0.0, 6.0), 10);
         assert_eq!(shape.dims, 4);
-        let rows: [ViewRow; 3] = [0, 1, 3].map(|a| (0.0, (0..4).map(|k| (k == a) as u8 as f64).collect()));
-        let view = View { rows, center: [0.0; 3], hidden: Vec::new(), dist: 0.0 };
-        let m = project(&shape, &view, Domain { lo: [-2.0; 3], hi: [2.0; 3] });
+        let rows: [ViewRow; 3] =
+            [0, 1, 3].map(|a| (0.0, (0..4).map(|k| (k == a) as u8 as f64).collect()));
+        let view = View {
+            rows,
+            center: [0.0; 3],
+            hidden: Vec::new(),
+            dist: 0.0,
+        };
+        let m = project(
+            &shape,
+            &view,
+            Domain {
+                lo: [-2.0; 3],
+                hi: [2.0; 3],
+            },
+        );
         for q in m.positions.chunks_exact(3) {
             assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 1.0).abs() < 1e-5);
         }
@@ -9273,7 +10935,12 @@ mod tests {
         // 4次元の点 (1, 0, 0, w) を、w 方向の距離 4 の視点から見ると、x = 4 / (4 − w) 倍になる
         let rows = identity_rows(4);
         let w_row: ViewRow = (0.0, vec![0.0, 0.0, 0.0, 1.0]);
-        let view = View { rows, center: [0.0; 3], hidden: vec![(w_row, 0.0)], dist: 4.0 };
+        let view = View {
+            rows,
+            center: [0.0; 3],
+            hidden: vec![(w_row, 0.0)],
+            dist: 4.0,
+        };
         assert!((view.apply(&[1.0, 0.0, 0.0, 2.0])[0] - 2.0).abs() < 1e-12); // 手前（w = 2）は大きく
         assert!((view.apply(&[1.0, 0.0, 0.0, -4.0])[0] - 0.5).abs() < 1e-12); // 奥（w = −4）は小さく
         assert!(view.apply(&[1.0, 0.0, 0.0, 5.0])[0].is_nan()); // 視点より後ろは描かない
@@ -9288,22 +10955,55 @@ mod tests {
                 *count.entry((u.min(v), u.max(v))).or_insert(0usize) += 1;
             }
         }
-        (count.values().filter(|&&c| c == 1).count(), count.values().filter(|&&c| c >= 3).count())
+        (
+            count.values().filter(|&&c| c == 1).count(),
+            count.values().filter(|&&c| c >= 3).count(),
+        )
     }
 
     #[test]
     fn implicit_mesh_unchanged() {
         // 速くした implicit_solid と、速くする前の版（implicit_solid_reference）の出力（頂点・三角形の集合）が同じ。
         // F が飛ぶ所（tan の極など）は、その後で面を張らないようにしたので（implicit_pole_is_not_a_surface）、ここでは比べない
-        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let big = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let cases: Vec<(&str, Vec<&str>, Domain, usize, Vec<(f64, f64)>)> = vec![
             ("x^2+y^2+z^2-4.01", AXES.to_vec(), big, 40, vec![]),
             ("x^2+y^2+z^2-4", AXES.to_vec(), big, 40, vec![]),
-            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", AXES.to_vec(), big, 40, vec![]),
-            ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", AXES.to_vec(), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40, vec![]),
-            ("(x^2 + y^2 + z^2 - 0.49)^2", AXES.to_vec(), dom(), 30, vec![]),
+            (
+                "sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)",
+                AXES.to_vec(),
+                big,
+                40,
+                vec![],
+            ),
+            (
+                "(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)",
+                AXES.to_vec(),
+                Domain {
+                    lo: [-2.0; 3],
+                    hi: [2.0; 3],
+                },
+                40,
+                vec![],
+            ),
+            (
+                "(x^2 + y^2 + z^2 - 0.49)^2",
+                AXES.to_vec(),
+                dom(),
+                30,
+                vec![],
+            ),
             ("x y^2", AXES.to_vec(), dom(), 21, vec![]),
-            ("x^2 + y^2 + z^2 - r^2", vec!["x", "y", "z", "r"], dom(), 30, vec![(0.3, 0.7)]),
+            (
+                "x^2 + y^2 + z^2 - r^2",
+                vec!["x", "y", "z", "r"],
+                dom(),
+                30,
+                vec![(0.3, 0.7)],
+            ),
         ];
         for (src, vars, d, n, ranges) in cases {
             let p = prog(src, &vars);
@@ -9311,7 +11011,10 @@ mod tests {
             let b = implicit_solid_reference(&p, d, n, &ranges, 8);
             assert!(!a.indices.is_empty(), "{src}");
             // 空のブロックを飛ばすようにして（S9）、頂点の順番はブロックの順になったので、集合で比べる
-            assert!(mesh_sets(&a) == mesh_sets(&b), "{src}: 頂点・三角形の集合が違う");
+            assert!(
+                mesh_sets(&a) == mesh_sets(&b),
+                "{src}: 頂点・三角形の集合が違う"
+            );
         }
     }
 
@@ -9332,7 +11035,11 @@ mod tests {
                 p[a] = b;
             }
         }
-        let used: crate::adaptive::HashSet<usize> = m.indices.iter().map(|&v| root(&mut p, v as usize)).collect();
+        let used: crate::adaptive::HashSet<usize> = m
+            .indices
+            .iter()
+            .map(|&v| root(&mut p, v as usize))
+            .collect();
         used.len()
     }
 
@@ -9341,7 +11048,14 @@ mod tests {
         let err = m
             .positions
             .chunks_exact(3)
-            .map(|q| (q.iter().map(|&v| (v as f64 - c).powi(2)).sum::<f64>().sqrt() - r).abs())
+            .map(|q| {
+                (q.iter()
+                    .map(|&v| (v as f64 - c).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+                    - r)
+                    .abs()
+            })
             .fold(0.0, f64::max);
         (m.positions.len() / 3, err)
     }
@@ -9349,9 +11063,17 @@ mod tests {
     #[test]
     fn small_sphere_is_found() {
         // 範囲 ±10・細かさ 80（h = 0.25）で、格子より小さい球。細分しないと、半径 0.1 の球は頂点が 0 個
-        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let d = Domain {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+        };
         let small = prog("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.01", &AXES);
-        assert_eq!(implicit_solid_opt(&small, d, 80, &[], 0, Refine::Off).positions.len(), 0);
+        assert_eq!(
+            implicit_solid_opt(&small, d, 80, &[], 0, Refine::Off)
+                .positions
+                .len(),
+            0
+        );
         let m = implicit_surface(&small, d, 80);
         let (count, err) = sphere_fit(&m, 0.12, 0.1);
         assert!(count >= 20, "頂点 {count} 個");
@@ -9360,7 +11082,10 @@ mod tests {
         assert_eq!(components(&m), 1);
         // 半径 0.3 の球（細分しないと頂点 26 個）
         let mid = prog("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.09", &AXES);
-        let before = implicit_solid_opt(&mid, d, 80, &[], 0, Refine::Off).positions.len() / 3;
+        let before = implicit_solid_opt(&mid, d, 80, &[], 0, Refine::Off)
+            .positions
+            .len()
+            / 3;
         let m = implicit_surface(&mid, d, 80);
         let (count, err) = sphere_fit(&m, 0.12, 0.3);
         assert!(count >= 100, "頂点 {count} 個（細分しないと {before} 個）");
@@ -9404,13 +11129,25 @@ mod tests {
     #[test]
     fn small_sphere_without_intervals_is_found() {
         // 区間演算が使えない式（複素数を通る式）でも、勾配からの見積もりで見つける。|exp(i x)| = 1
-        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
-        let p = prog("abs(exp(i x)) ((x-0.12)^2+(y-0.12)^2+(z-0.12)^2) - 0.04", &AXES);
+        let d = Domain {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+        };
+        let p = prog(
+            "abs(exp(i x)) ((x-0.12)^2+(y-0.12)^2+(z-0.12)^2) - 0.04",
+            &AXES,
+        );
         assert!(!p.supports_interval());
-        let before = implicit_solid_opt(&p, d, 80, &[], 0, Refine::Off).positions.len() / 3;
+        let before = implicit_solid_opt(&p, d, 80, &[], 0, Refine::Off)
+            .positions
+            .len()
+            / 3;
         let m = implicit_surface(&p, d, 80);
         let (count, err) = sphere_fit(&m, 0.12, 0.2);
-        assert!(count >= 50 && count > 2 * before, "頂点 {count} 個（細分しないと {before} 個）");
+        assert!(
+            count >= 50 && count > 2 * before,
+            "頂点 {count} 個（細分しないと {before} 個）"
+        );
         assert!(err < 0.03, "半径のずれ {err}");
         assert_eq!(bad_edges(&m), (0, 0));
     }
@@ -9419,7 +11156,14 @@ mod tests {
     fn thin_torus_is_closed() {
         // 管の半径 0.05、h = 0.125。つながった 1 つの閉じた曲面になる
         let p = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.0025", &AXES);
-        let m = implicit_surface(&p, Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 80);
+        let m = implicit_surface(
+            &p,
+            Domain {
+                lo: [-5.0; 3],
+                hi: [5.0; 3],
+            },
+            80,
+        );
         assert_eq!(bad_edges(&m), (0, 0));
         assert_eq!(components(&m), 1);
     }
@@ -9427,11 +11171,29 @@ mod tests {
     #[test]
     fn refinement_never_cracks() {
         // 大きい球と小さい球を掛け合わせた式・近い 2 つの球で、縁の辺が無い
-        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let big = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         for (src, d, n) in [
-            ("(x^2+y^2+z^2-4) ((x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.01)", big, 80),
-            ("(x^2+y^2+z^2-4) ((x-2.6)^2+(y-0.1)^2+(z-0.1)^2-0.0225)", big, 80),
-            ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40),
+            (
+                "(x^2+y^2+z^2-4) ((x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.01)",
+                big,
+                80,
+            ),
+            (
+                "(x^2+y^2+z^2-4) ((x-2.6)^2+(y-0.1)^2+(z-0.1)^2-0.0225)",
+                big,
+                80,
+            ),
+            (
+                "(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)",
+                Domain {
+                    lo: [-2.0; 3],
+                    hi: [2.0; 3],
+                },
+                40,
+            ),
         ] {
             let m = implicit_surface(&prog(src, &AXES), d, n);
             assert_eq!(bad_edges(&m).0, 0, "{src}");
@@ -9442,7 +11204,10 @@ mod tests {
     fn flags_bit0_skips_refinement() {
         // 細分しないなら、細分を足す前（S9）と同じ結果
         let p = prog("(x-0.12)^2+(y-0.12)^2+(z-0.12)^2-0.09", &AXES);
-        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let d = Domain {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+        };
         let off = implicit_solid_opt(&p, d, 80, &[], 0, Refine::Off);
         let s9 = implicit_solid_with(&p, d, 80, &[], 0, false, Refine::Off);
         assert_eq!(off.positions, s9.positions);
@@ -9465,23 +11230,43 @@ mod tests {
     #[test]
     fn implicit_pole_is_not_a_surface() {
         // tan(x) = z の極 x = ±π/2, ±3π/2 では F が +∞ から −∞ へ飛ぶ。そこに偽の面を張らない（変更前は頂点の約半分）
-        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let d = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let h = 10.0 / 80.0;
-        let poles: Vec<f64> = [-1.5, -0.5, 0.5, 1.5].iter().map(|k| k * std::f64::consts::PI).collect();
+        let poles: Vec<f64> = [-1.5, -0.5, 0.5, 1.5]
+            .iter()
+            .map(|k| k * std::f64::consts::PI)
+            .collect();
         let m = implicit_surface(&prog("tan(x) - z", &AXES), d, 80);
         assert!(m.positions.len() / 3 > 10_000, "本当の曲面は残る");
         assert_eq!(fake_pole_vertices(&m, &poles, h, f64::tan), 0);
         // 1/x = z（x の範囲をずらして、極 x = 0 が格子の点にならないようにする）
-        let d = Domain { lo: [-4.95, -5.0, -5.0], hi: [5.05, 5.0, 5.0] };
+        let d = Domain {
+            lo: [-4.95, -5.0, -5.0],
+            hi: [5.05, 5.0, 5.0],
+        };
         let m = implicit_surface(&prog("1/x - z", &AXES), d, 80);
         assert!(m.positions.len() / 3 > 5_000, "本当の曲面は残る");
         assert_eq!(fake_pole_vertices(&m, &[0.0], h, |x| 1.0 / x), 0);
         // 2D 表示の陰関数の曲線 tan(x) = y にも、極の縦線を描かない
-        let c = implicit_curve_2d(&prog("tan(x) - y", &["x", "y"]), Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 200);
+        let c = implicit_curve_2d(
+            &prog("tan(x) - y", &["x", "y"]),
+            Domain {
+                lo: [-5.0; 3],
+                hi: [5.0; 3],
+            },
+            200,
+        );
         let near_pole = c
             .positions
             .chunks_exact(3)
-            .filter(|q| q[0].is_finite() && poles.iter().any(|p| (q[0] as f64 - p).abs() < 0.05) && ((q[0] as f64).tan() - q[1] as f64).abs() > 2.0)
+            .filter(|q| {
+                q[0].is_finite()
+                    && poles.iter().any(|p| (q[0] as f64 - p).abs() < 0.05)
+                    && ((q[0] as f64).tan() - q[1] as f64).abs() > 2.0
+            })
             .count();
         assert_eq!(near_pole, 0, "極の縦線");
         assert!(c.positions.len() > 300, "本当の曲線は残る");
@@ -9493,7 +11278,10 @@ mod tests {
         // 縁の辺（三角形が 1 つだけの辺）は、定義域の縁（円柱 x² + y² = 36）と半球の上に乗る（格子の間隔 0.25。
         // 変更前は 1 マスほど内側で、ギザギザに途切れていた）。
         // 縁では面が垂直なので、Surface Nets の角の丸まりで、縁の辺は z = 0 より 1 マスほど上で切れる（z ≤ 2 マスまで許す）
-        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let d = Domain {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+        };
         let m = implicit_surface(&prog("sqrt(36 - x^2 - y^2) - z", &AXES), d, 80);
         let mut count: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
@@ -9522,8 +11310,14 @@ mod tests {
             }
         }
         assert!(border > 100, "縁の頂点 {border} 個");
-        assert!(off_edge <= 0.05, "縁の頂点が定義域の縁から {off_edge} 離れている");
-        assert!(off_sphere <= 0.05, "縁の頂点が半球から {off_sphere} 離れている");
+        assert!(
+            off_edge <= 0.05,
+            "縁の頂点が定義域の縁から {off_edge} 離れている"
+        );
+        assert!(
+            off_sphere <= 0.05,
+            "縁の頂点が半球から {off_sphere} 離れている"
+        );
         assert!(top <= 0.5, "縁の頂点の高さが {top}");
     }
 
@@ -9531,7 +11325,10 @@ mod tests {
     fn implicit_step_edge_is_straight() {
         // floor(x) − z + y/5 = 0（陽関数に直さず、陰関数のまま）。面は段差 x = n の所で終わり、その縁の辺（三角形が 1 つだけの辺）は
         // 平面 x = n にまっすぐ乗る（格子の間隔 0.25。枝ごとに作って切り取る前は、格子に沿ってギザギザだった）
-        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
+        let d = Domain {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+        };
         let m = implicit_surface(&prog("floor(x) - z + y/5", &AXES), d, 80);
         let mut count: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
         for t in m.indices.chunks_exact(3) {
@@ -9567,8 +11364,12 @@ mod tests {
                 *count.entry((a.min(b), a.max(b))).or_default() += 1;
             }
         }
-        let inside = |v: u32| (0..3).all(|k| (m.positions[3 * v as usize + k] as f64).abs() < inner);
-        let border = count.iter().filter(|(&(a, b), &c)| c == 1 && inside(a) && inside(b)).count();
+        let inside =
+            |v: u32| (0..3).all(|k| (m.positions[3 * v as usize + k] as f64).abs() < inner);
+        let border = count
+            .iter()
+            .filter(|(&(a, b), &c)| c == 1 && inside(a) && inside(b))
+            .count();
         let many = count.values().filter(|&&c| c >= 3).count();
         (border, many)
     }
@@ -9576,15 +11377,28 @@ mod tests {
     #[test]
     fn stitched_refinement_has_no_cracks() {
         // 細い部分（円錐の先・細い首）を 2 倍の細かさで作り直しても、継ぎ目にひびが無い
-        let d = Domain { lo: [-10.0; 3], hi: [10.0; 3] };
-        for src in ["x^2 + y^2 - z^2", "(x^2+y^2+z^2)^2 - 30 x y z", "x^2 + y^2 - (z^2 - 4)^2 / 20 - 0.01"] {
+        let d = Domain {
+            lo: [-10.0; 3],
+            hi: [10.0; 3],
+        };
+        for src in [
+            "x^2 + y^2 - z^2",
+            "(x^2+y^2+z^2)^2 - 30 x y z",
+            "x^2 + y^2 - (z^2 - 4)^2 / 20 - 0.01",
+        ] {
             let m = implicit_surface(&prog(src, &AXES), d, 80);
             assert_eq!(crack_counts(&m, 9.9), (0, 0), "{src}");
         }
         // 円錐の先: 原点の近くに頂点がある（作り直す前は、格子の間隔 0.25 で丸まる）
         let m = implicit_surface(&prog("x^2 + y^2 - z^2", &AXES), d, 80);
-        let before = implicit_solid_opt(&prog("x^2 + y^2 - z^2", &AXES), d, 80, &[], 0, Refine::Off);
-        let tip = |m: &Mesh| m.positions.chunks_exact(3).map(|q| q.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt()).fold(f64::INFINITY, f64::min);
+        let before =
+            implicit_solid_opt(&prog("x^2 + y^2 - z^2", &AXES), d, 80, &[], 0, Refine::Off);
+        let tip = |m: &Mesh| {
+            m.positions
+                .chunks_exact(3)
+                .map(|q| q.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt())
+                .fold(f64::INFINITY, f64::min)
+        };
         eprintln!("TIP {} (before {})", tip(&m), tip(&before));
         assert!(tip(&m) < tip(&before), "{} / {}", tip(&m), tip(&before));
     }
@@ -9593,9 +11407,16 @@ mod tests {
     fn stitched_seams_have_no_cracks() {
         // ブロックを市松模様に選んで 2 倍の細かさにし（継ぎ目がたくさんある状態）、継ぎ目にひびが無いか。
         // 円錐の先・細い首・(x² + y² + z²)² = 30 x y z
-        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let d = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let n = 40;
-        for src in ["x^2 + y^2 - z^2", "(x^2+y^2+z^2)^2 - 30 x y z", "x^2 + y^2 - (z^2 - 4)^2 / 20 - 0.01"] {
+        for src in [
+            "x^2 + y^2 - z^2",
+            "(x^2+y^2+z^2)^2 - 30 x y z",
+            "x^2 + y^2 - (z^2 - 4)^2 / 20 - 0.01",
+        ] {
             let p = prog(src, &AXES);
             let combos = sample_combos(&[], 0);
             let field = SparseField::build(&p, &combos, &[], d, n, true);
@@ -9623,8 +11444,16 @@ mod tests {
     fn steep_root_is_still_a_surface() {
         // 急なだけで本当に 0 になる所は、今までどおり面を張る（頂点の数が、極の判定をしない版と同じ）。
         // 小さい図形の作り直し（半径 1 の球は 20 マスなので作り直す）は比べない
-        let d = Domain { lo: [-2.0; 3], hi: [2.0; 3] };
-        for src in ["x^3 - z", "x^(1/3) - z", "1000 (x^2+y^2+z^2-1)", "exp(5x) - z - 1"] {
+        let d = Domain {
+            lo: [-2.0; 3],
+            hi: [2.0; 3],
+        };
+        for src in [
+            "x^3 - z",
+            "x^(1/3) - z",
+            "1000 (x^2+y^2+z^2-1)",
+            "exp(5x) - z - 1",
+        ] {
             let p = prog(src, &AXES);
             let a = implicit_solid_opt(&p, d, 40, &[], 0, Refine::Off);
             let b = implicit_solid_reference(&p, d, 40, &[], 0);
@@ -9638,9 +11467,20 @@ mod tests {
         }
         // z (x² + y²) = 1 は、z 軸に向かって伸びる本当の曲面。頂点の数が 95% 以上残る
         let p = prog("z (x^2+y^2) - 1", &AXES);
-        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
-        let (a, b) = (implicit_surface(&p, d, 80), implicit_solid_reference(&p, d, 80, &[], 0));
-        assert!(a.positions.len() as f64 >= 0.95 * b.positions.len() as f64, "{} / {}", a.positions.len(), b.positions.len());
+        let d = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
+        let (a, b) = (
+            implicit_surface(&p, d, 80),
+            implicit_solid_reference(&p, d, 80, &[], 0),
+        );
+        assert!(
+            a.positions.len() as f64 >= 0.95 * b.positions.len() as f64,
+            "{} / {}",
+            a.positions.len(),
+            b.positions.len()
+        );
     }
 
     /// 頂点の集合と三角形の集合（位置を丸めて並べ替えたもの。順番によらずに比べる）
@@ -9668,23 +11508,62 @@ mod tests {
     #[test]
     fn sparse_equals_dense() {
         // 区間演算で空のブロックを飛ばしても、全部のブロックを計算したときと頂点・三角形の集合が同じ
-        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let big = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let cases: Vec<(&str, Vec<&str>, Domain, usize, Vec<(f64, f64)>)> = vec![
             ("x^2+y^2+z^2-4", AXES.to_vec(), big, 80, vec![]),
             ("x^2+y^2+z^2-4.01", AXES.to_vec(), big, 80, vec![]),
-            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", AXES.to_vec(), big, 60, vec![]),
-            ("(sqrt(x^2+y^2)-3)^2+z^2-0.04", AXES.to_vec(), big, 120, vec![]),
-            ("(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)", AXES.to_vec(), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 40, vec![]),
-            ("(x^2 + y^2 + z^2 - 0.49)^2", AXES.to_vec(), dom(), 30, vec![]),
+            (
+                "sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)",
+                AXES.to_vec(),
+                big,
+                60,
+                vec![],
+            ),
+            (
+                "(sqrt(x^2+y^2)-3)^2+z^2-0.04",
+                AXES.to_vec(),
+                big,
+                120,
+                vec![],
+            ),
+            (
+                "(x^2 + y^2 + z^2 - 1) (x^2 + y^2 + z^2 - 1.3225)",
+                AXES.to_vec(),
+                Domain {
+                    lo: [-2.0; 3],
+                    hi: [2.0; 3],
+                },
+                40,
+                vec![],
+            ),
+            (
+                "(x^2 + y^2 + z^2 - 0.49)^2",
+                AXES.to_vec(),
+                dom(),
+                30,
+                vec![],
+            ),
             ("z (x^2+y^2) - 1", AXES.to_vec(), big, 80, vec![]),
-            ("x^2 + y^2 + z^2 - r^2", vec!["x", "y", "z", "r"], dom(), 30, vec![(0.3, 0.7)]),
+            (
+                "x^2 + y^2 + z^2 - r^2",
+                vec!["x", "y", "z", "r"],
+                dom(),
+                30,
+                vec![(0.3, 0.7)],
+            ),
         ];
         for (src, vars, d, n, ranges) in cases {
             let p = prog(src, &vars);
             let sparse = implicit_solid_with(&p, d, n, &ranges, 8, false, Refine::Off);
             let dense = implicit_solid_with(&p, d, n, &ranges, 8, true, Refine::Off);
             assert!(!sparse.indices.is_empty(), "{src}");
-            assert!(mesh_sets(&sparse) == mesh_sets(&dense), "{src}: 頂点・三角形の集合が違う");
+            assert!(
+                mesh_sets(&sparse) == mesh_sets(&dense),
+                "{src}: 頂点・三角形の集合が違う"
+            );
         }
     }
 
@@ -9692,14 +11571,27 @@ mod tests {
     fn sparse_field_saves_memory() {
         // 球（細かさ 200）で、F の値を持つ点が、密な格子（203³ 点）の 1/5 以下
         let p = prog("x^2+y^2+z^2-4.01", &AXES);
-        let d = Domain { lo: [-5.0 - 0.05; 3], hi: [5.0 + 0.05; 3] }; // implicit_solid と同じく 1 マス広げた範囲
+        let d = Domain {
+            lo: [-5.0 - 0.05; 3],
+            hi: [5.0 + 0.05; 3],
+        }; // implicit_solid と同じく 1 マス広げた範囲
         let n = 202;
         let field = SparseField::build(&p, &[vec![]], &[], d, n, false);
         let dense = (n + 1).pow(3);
         assert!(field.stored() * 5 <= dense, "{} / {dense}", field.stored());
         // 区間演算が使えない式は、全部を持つ
         let g = prog("abs(gamma(x + i y)) - z", &AXES);
-        let field = SparseField::build(&g, &[vec![]], &[], Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 40, false);
+        let field = SparseField::build(
+            &g,
+            &[vec![]],
+            &[],
+            Domain {
+                lo: [-5.0; 3],
+                hi: [5.0; 3],
+            },
+            40,
+            false,
+        );
         assert!(field.stored() >= 41usize.pow(3));
     }
 
@@ -9708,7 +11600,14 @@ mod tests {
         // 範囲 ±5・細かさ 80 では y = 2 などが格子の座標になり、球の6つの極が格子の平面にちょうど接する。
         // 符号の変わる曲面なので、接するだけの所として扱わず、閉じた曲面になる
         let p = prog("x^2+y^2+z^2-4", &AXES);
-        let m = implicit_surface(&p, Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 80);
+        let m = implicit_surface(
+            &p,
+            Domain {
+                lo: [-5.0; 3],
+                hi: [5.0; 3],
+            },
+            80,
+        );
         assert!(!m.indices.is_empty());
         assert_eq!(bad_edges(&m), (0, 0));
     }
@@ -9717,7 +11616,14 @@ mod tests {
     fn torus_tangent_to_grid_is_closed() {
         // z = ±0.2 の円が格子の平面に接するトーラス（表示範囲の端にはかからない）
         let p = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.04", &AXES);
-        let m = implicit_surface(&p, Domain { lo: [-5.0; 3], hi: [5.0; 3] }, 200);
+        let m = implicit_surface(
+            &p,
+            Domain {
+                lo: [-5.0; 3],
+                hi: [5.0; 3],
+            },
+            200,
+        );
         assert!(!m.indices.is_empty());
         assert_eq!(bad_edges(&m), (0, 0));
     }
@@ -9740,7 +11646,11 @@ mod tests {
         // 符号が変わる面と、接するだけの面が混ざっていても描ける: x y² = 0 は平面 x = 0 と y = 0
         let p = prog("x y^2", &AXES);
         let m = implicit_surface(&p, dom(), 21);
-        let on_y0 = m.positions.chunks_exact(3).filter(|q| q[1].abs() < 0.02 && q[0].abs() > 0.2).count();
+        let on_y0 = m
+            .positions
+            .chunks_exact(3)
+            .filter(|q| q[1].abs() < 0.02 && q[0].abs() > 0.2)
+            .count();
         assert!(on_y0 > 50, "y = 0 の面の頂点 {on_y0}");
     }
 
@@ -9780,7 +11690,11 @@ mod tests {
                 .map(|t| {
                     let v = |k: u32| {
                         let k = k as usize * 3;
-                        [m.positions[k] as f64, m.positions[k + 1] as f64, m.positions[k + 2] as f64]
+                        [
+                            m.positions[k] as f64,
+                            m.positions[k + 1] as f64,
+                            m.positions[k + 2] as f64,
+                        ]
                     };
                     let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
                     let (e1, e2) = ([b[0] - a[0], b[1] - a[1]], [c[0] - a[0], c[1] - a[1]]);
@@ -9789,7 +11703,11 @@ mod tests {
                 .sum()
         };
         let m = f.cap(dom(), 2, 0.0, true, 60);
-        assert!((area(&m) - 0.49 * std::f64::consts::PI).abs() < 0.01, "{}", area(&m));
+        assert!(
+            (area(&m) - 0.49 * std::f64::consts::PI).abs() < 0.01,
+            "{}",
+            area(&m)
+        );
         assert!(m.positions.chunks_exact(3).all(|q| q[2] == 0.0));
         // 下側を残すなら、ふたは上（+z）向き。上側を残すなら下向き
         assert!(m.normals[2] == 1.0);
@@ -9822,7 +11740,11 @@ mod tests {
         // z = x y の塗り分け: 頂点は z = 0、格子線用の座標の3つ目が値
         let p = prog("x y", &["x", "y"]);
         let m = flat_map(&p, dom(), 4, ComplexMode::Off);
-        for (q, g) in m.positions.chunks_exact(3).zip(m.grid_coords.chunks_exact(3)) {
+        for (q, g) in m
+            .positions
+            .chunks_exact(3)
+            .zip(m.grid_coords.chunks_exact(3))
+        {
             assert_eq!(q[2], 0.0);
             assert!((g[2] - q[0] * q[1]).abs() < 1e-6);
         }
@@ -9832,7 +11754,10 @@ mod tests {
     #[test]
     fn combos() {
         assert_eq!(sample_combos(&[], 10), vec![Vec::<f64>::new()]);
-        assert_eq!(sample_combos(&[(0.0, 1.0)], 3), vec![vec![0.0], vec![0.5], vec![1.0]]);
+        assert_eq!(
+            sample_combos(&[(0.0, 1.0)], 3),
+            vec![vec![0.0], vec![0.5], vec![1.0]]
+        );
         assert_eq!(sample_combos(&[(0.0, 1.0), (0.0, 1.0)], 100).len(), 64 * 64);
     }
 
@@ -9840,7 +11765,10 @@ mod tests {
     fn sheets_of_many_params() {
         // 4次元の立方体 (t₁, t₂, t₃, t₄): 両端だけなら、面は 4C2 · 2² = 24 枚
         let vars = ["t1", "t2", "t3", "t4"];
-        let progs: Vec<Program> = ["t_1", "t_2", "t_3", "t_4"].iter().map(|v| prog(v, &vars)).collect();
+        let progs: Vec<Program> = ["t_1", "t_2", "t_3", "t_4"]
+            .iter()
+            .map(|v| prog(v, &vars))
+            .collect();
         let r = [(-1.0, 1.0); 4];
         assert_eq!(sheet_layout(4, 1, 100).1, 24);
         assert_eq!(sheet_layout(4, 2, 100).1, 54); // 中を通る面も入れると 6 · 3²
@@ -9867,14 +11795,23 @@ mod tests {
         let shape = parametric_sheets_nd(&[progs], &r, 2, 20);
         let per = shape.grid.as_ref().unwrap().0.pow(2);
         assert_eq!(shape.points.len(), 54 * per * 4);
-        assert!(shape.points.chunks_exact(per * 4).any(|f| f.chunks_exact(4).all(|p| p[2] == 0.0 && p[3] == 0.0)));
+        assert!(shape
+            .points
+            .chunks_exact(per * 4)
+            .any(|f| f.chunks_exact(4).all(|p| p[2] == 0.0 && p[3] == 0.0)));
     }
 
     #[test]
     fn coarse_versions() {
         // 細かい格子の曲面: 粗い版は点を間引いた格子で、端は同じ
-        let torus: Vec<Program> =
-            ["(1.5 + 0.5cos(v)) cos(u)", "(1.5 + 0.5cos(v)) sin(u)", "0.5sin(v)"].iter().map(|s| prog(s, &["u", "v"])).collect();
+        let torus: Vec<Program> = [
+            "(1.5 + 0.5cos(v)) cos(u)",
+            "(1.5 + 0.5cos(v)) sin(u)",
+            "0.5sin(v)",
+        ]
+        .iter()
+        .map(|s| prog(s, &["u", "v"]))
+        .collect();
         let shape = parametric_surface_nd(&[torus], (0.0, 6.0), (0.0, 6.0), 300);
         let m = project(&shape, &View::identity(3), dom());
         assert_eq!(m.indices.len() / 3, 180_000);
@@ -9886,7 +11823,16 @@ mod tests {
             assert!(m.lod.contains(&corner));
         }
         // 小さいメッシュには作らない
-        let small = project(&parametric_surface_nd(&[progs3(["u", "v", "0"], &["u", "v"])], (0.0, 1.0), (0.0, 1.0), 50), &View::identity(3), dom());
+        let small = project(
+            &parametric_surface_nd(
+                &[progs3(["u", "v", "0"], &["u", "v"])],
+                (0.0, 1.0),
+                (0.0, 1.0),
+                50,
+            ),
+            &View::identity(3),
+            dom(),
+        );
         assert!(small.lod.is_empty());
 
         // 格子でないメッシュ: 頂点をまとめた粗い版。球の表面から離れない
@@ -9902,22 +11848,38 @@ mod tests {
         // 粗い版の三角形は裏返っていない（球の中心から見た向きが、元の三角形と同じ）
         let v = |k: u32| {
             let k = k as usize * 3;
-            [sphere.positions[k] as f64, sphere.positions[k + 1] as f64, sphere.positions[k + 2] as f64]
+            [
+                sphere.positions[k] as f64,
+                sphere.positions[k + 1] as f64,
+                sphere.positions[k + 2] as f64,
+            ]
         };
-        let side = |t: &[u32]| dot3(tri_normal(&sphere.positions, [t[0], t[1], t[2]]), v(t[0])).signum();
+        let side =
+            |t: &[u32]| dot3(tri_normal(&sphere.positions, [t[0], t[1], t[2]]), v(t[0])).signum();
         let full = side(&sphere.indices[..3]);
-        let flipped = sphere.lod.chunks_exact(3).filter(|t| side(t) != full).count();
+        let flipped = sphere
+            .lod
+            .chunks_exact(3)
+            .filter(|t| side(t) != full)
+            .count();
         assert!(flipped * 200 < lod, "{flipped} / {lod}");
         // まとめても、粗い版の番号はずれない
         let n0 = sphere.positions.len() as u32 / 3;
         let merged = merge(vec![small, sphere], false);
-        assert!(!merged.lod.is_empty() && merged.lod.iter().all(|&k| k < merged.positions.len() as u32 / 3));
+        assert!(
+            !merged.lod.is_empty()
+                && merged
+                    .lod
+                    .iter()
+                    .all(|&k| k < merged.positions.len() as u32 / 3)
+        );
         assert!(merged.lod.len() < merged.indices.len() && n0 > 0);
     }
 
     /// 3 つ以上の三角形に使われる辺の数
     fn crowded_edges(m: &Mesh) -> usize {
-        let mut count: crate::adaptive::HashMap<(u32, u32), usize> = crate::adaptive::HashMap::default();
+        let mut count: crate::adaptive::HashMap<(u32, u32), usize> =
+            crate::adaptive::HashMap::default();
         for t in m.indices.chunks_exact(3) {
             for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
                 *count.entry((a.min(b), a.max(b))).or_default() += 1;
@@ -9929,14 +11891,23 @@ mod tests {
     #[test]
     fn implicit_lod_is_manifold() {
         // 陰関数の粗い版は、F の格子を間引いて作り直す。頂点をまとめる方法と違い、3 つ以上の三角形が集まる辺ができない
-        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
-        for (src, n) in [("x^2 + y^2 + z^2 - 16.3", 150), ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", 80)] {
+        let big = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
+        for (src, n) in [
+            ("x^2 + y^2 + z^2 - 16.3", 150),
+            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", 80),
+        ] {
             let m = implicit_surface(&prog(src, &AXES), big, n);
             let lod = m.lod_mesh.as_ref().expect("粗い版が無い");
             let tris = lod.indices.len() / 3;
             assert!((20_000..=45_000).contains(&tris), "{src}: {tris}");
             assert_eq!(crowded_edges(lod), 0, "{src}");
-            assert!(lod.indices.iter().all(|&k| (k as usize) < lod.positions.len() / 3));
+            assert!(lod
+                .indices
+                .iter()
+                .all(|&k| (k as usize) < lod.positions.len() / 3));
             assert_eq!(lod.normals.len(), lod.positions.len());
         }
         // 球の粗い版の頂点は、球の表面の近く
@@ -9947,7 +11918,11 @@ mod tests {
             assert!((r - 16.3f64.sqrt()).abs() < 0.1, "{r}");
         }
         // 小さいメッシュには作らない。リストでまとめると粗い版もまとまる
-        assert!(implicit_surface(&prog("x^2 + y^2 + z^2 - 4", &AXES), big, 40).lod_mesh.is_none());
+        assert!(
+            implicit_surface(&prog("x^2 + y^2 + z^2 - 4", &AXES), big, 40)
+                .lod_mesh
+                .is_none()
+        );
         let a = implicit_surface(&prog("x^2 + y^2 + z^2 - 16.3", &AXES), big, 150);
         let b = implicit_surface(&prog("x^2 + y^2 + z^2 - 4", &AXES), big, 40);
         let (la, nb) = (a.lod_mesh.as_ref().unwrap().indices.len(), b.indices.len());
@@ -9963,7 +11938,8 @@ mod tests {
             .chunks_exact(3)
             .map(|p| {
                 let next = ids.len() as u32;
-                *ids.entry([0, 1, 2].map(|a| (p[a] as f64 * 1e4).round() as i64)).or_insert(next)
+                *ids.entry([0, 1, 2].map(|a| (p[a] as f64 * 1e4).round() as i64))
+                    .or_insert(next)
             })
             .collect();
         let mut count: crate::adaptive::HashMap<(u32, u32), (usize, [f64; 3])> = Default::default();
@@ -9973,11 +11949,18 @@ mod tests {
                 if va == vb {
                     continue;
                 }
-                let mid = [0, 1, 2].map(|k| 0.5 * (m.positions[3 * a as usize + k] + m.positions[3 * b as usize + k]) as f64);
+                let mid = [0, 1, 2].map(|k| {
+                    0.5 * (m.positions[3 * a as usize + k] + m.positions[3 * b as usize + k]) as f64
+                });
                 count.entry((va.min(vb), va.max(vb))).or_insert((0, mid)).0 += 1;
             }
         }
-        count.values().filter(|(c, q)| *c == 1 && (0..3).all(|k| q[k] > d.lo[k] + margin && q[k] < d.hi[k] - margin)).count()
+        count
+            .values()
+            .filter(|(c, q)| {
+                *c == 1 && (0..3).all(|k| q[k] > d.lo[k] + margin && q[k] < d.hi[k] - margin)
+            })
+            .count()
     }
 
     #[test]
@@ -9985,7 +11968,10 @@ mod tests {
         // ジャイロイドは表示範囲の中で縁の無い面。面が格子の平面にほぼ重なる所（x = ±7π/4 など）では、格子の面の上で F の符号が
         // 市松に入れ替わる。面の両側のセルで「どちらの対角がつながるか」の判断が食い違うと、四角形が張られず穴が開いていた。
         // 細かさ 80（粗い版も）・40・24（回転の再生中）のどれでも、穴の縁が無い
-        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let d = Domain {
+            lo: [-10.0, -10.0, -6.0],
+            hi: [10.0, 10.0, 6.0],
+        };
         let p = prog("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", &AXES);
         for n in [80, 40, 24] {
             let m = implicit_solid_opt(&p, d, n, &[], 0, Refine::Light);
@@ -10001,11 +11987,22 @@ mod tests {
     #[test]
     fn field_split_matches_whole() {
         // F の計算をかたまりで 3 つに分けてつなげた値は、1 回で計算した値と同じ。その値を渡して作ったメッシュも同じ
-        let big = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let big = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         let cases: [(&str, &[&str], Vec<(f64, f64)>); 3] = [
-            ("x^2 + y^2 + z^2 - 4.01", &AXES, vec![]),                       // まばら
-            ("sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", &AXES, vec![]), // 密
-            ("(x - a)^2 + y^2 + z^2 - 1", &["x", "y", "z", "a"], vec![(-2.0, 2.0)]), // 範囲で重ねた立体
+            ("x^2 + y^2 + z^2 - 4.01", &AXES, vec![]), // まばら
+            (
+                "sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)",
+                &AXES,
+                vec![],
+            ), // 密
+            (
+                "(x - a)^2 + y^2 + z^2 - 1",
+                &["x", "y", "z", "a"],
+                vec![(-2.0, 2.0)],
+            ), // 範囲で重ねた立体
         ];
         for (src, vars, ranges) in cases {
             let p = prog(src, vars);
@@ -10028,7 +12025,12 @@ mod tests {
             }
             let (_, all) = run(FieldMode::Chunks(0, c));
             assert_eq!(vals.len(), all.values.len(), "{src}");
-            assert!(vals.iter().zip(&all.values).all(|(x, y)| x.to_bits() == y.to_bits()), "{src}");
+            assert!(
+                vals.iter()
+                    .zip(&all.values)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "{src}"
+            );
             let (given, _) = run(FieldMode::Given(vals));
             assert_eq!(given.positions, whole.positions, "{src}");
             assert_eq!(given.indices, whole.indices, "{src}");
@@ -10039,12 +12041,23 @@ mod tests {
     fn flat_slice_has_no_zero_length_segments() {
         // floor の段: ちょうど 0 になる格子点で、長さの無い線（描画側では丸に見える）を作らない
         // 鞍形 (x² − y²)/4 の切り口 x = ±y も、格子点をちょうど通る（細かさによっては、f32 に丸めると同じ点になる）
-        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
-        for (src, n) in [("floor(x)/2 + floor(y)/4", 320), ("(x^2 - y^2)/4", 320), ("(x^2 - y^2)/4", 1200)] {
+        let d = Domain {
+            lo: [-10.0, -10.0, -6.0],
+            hi: [10.0, 10.0, 6.0],
+        };
+        for (src, n) in [
+            ("floor(x)/2 + floor(y)/4", 320),
+            ("(x^2 - y^2)/4", 320),
+            ("(x^2 - y^2)/4", 1200),
+        ] {
             let m = implicit_curve_2d(&prog(src, &["x", "y"]), d, n);
             assert!(!m.positions.is_empty());
             for seg in m.positions.chunks_exact(9) {
-                assert!(seg[0..3] != seg[3..6], "{src}（{n}）: 長さの無い線 {:?}", &seg[0..3]);
+                assert!(
+                    seg[0..3] != seg[3..6],
+                    "{src}（{n}）: 長さの無い線 {:?}",
+                    &seg[0..3]
+                );
             }
         }
     }
@@ -10064,7 +12077,10 @@ mod tests {
 
     #[test]
     fn flat_curve_touching_zero() {
-        let d = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
+        let d = Domain {
+            lo: [-10.0, -10.0, -6.0],
+            hi: [10.0, 10.0, 6.0],
+        };
         // 0 に接するだけの円: 線になる（点は描かない）
         let m = implicit_curve_2d(&prog("(x^2 + y^2 - 4)^2", &["x", "y"]), d, 320);
         let (segs, dots) = segments_and_dots(&m);
@@ -10072,16 +12088,27 @@ mod tests {
         assert!(segs.len() > 100, "線分 {} 本", segs.len());
         for s in &segs {
             for p in [[s[0], s[1]], [s[2], s[3]]] {
-                assert!((p[0].hypot(p[1]) - 2.0).abs() < 0.02, "円から外れた点 {p:?}");
+                assert!(
+                    (p[0].hypot(p[1]) - 2.0).abs() < 0.02,
+                    "円から外れた点 {p:?}"
+                );
             }
         }
         // 0 に接するだけの1点: 格子点の上（原点）でも、格子の線から外れた所でも、点を1つだけ描く
-        for (src, at) in [("x^2 + y^2", [0.0, 0.0]), ("(x - 0.3)^2 + (y - 0.21)^2", [0.3, 0.21]), ("abs(x - 1.1) + 2 (y + 0.37)^2", [1.1, -0.37])] {
+        for (src, at) in [
+            ("x^2 + y^2", [0.0, 0.0]),
+            ("(x - 0.3)^2 + (y - 0.21)^2", [0.3, 0.21]),
+            ("abs(x - 1.1) + 2 (y + 0.37)^2", [1.1, -0.37]),
+        ] {
             let m = implicit_curve_2d(&prog(src, &["x", "y"]), d, 320);
             let (segs, dots) = segments_and_dots(&m);
             assert!(segs.is_empty(), "{src}: 線分 {}", segs.len());
             assert_eq!(dots.len(), 1, "{src}: 点 {dots:?}");
-            assert!((dots[0][0] - at[0]).abs() < 1e-3 && (dots[0][1] - at[1]).abs() < 1e-3, "{src}: {:?}", dots[0]);
+            assert!(
+                (dots[0][0] - at[0]).abs() < 1e-3 && (dots[0][1] - at[1]).abs() < 1e-3,
+                "{src}: {:?}",
+                dots[0]
+            );
         }
         // 0 にならない（極小が 0 より大きい）: 何も描かない
         for src in ["x^2 + y^2 + 1", "(x - 0.3)^2 + (y - 0.21)^2 + 0.01"] {
@@ -10089,7 +12116,11 @@ mod tests {
             assert!(m.positions.is_empty(), "{src}: {:?}", segments_and_dots(&m));
         }
         // ふつうの曲線（符号が変わる）には、余計な点を足さない
-        let (_, dots) = segments_and_dots(&implicit_curve_2d(&prog("x^2 + y^2 - 4", &["x", "y"]), d, 320));
+        let (_, dots) = segments_and_dots(&implicit_curve_2d(
+            &prog("x^2 + y^2 - 4", &["x", "y"]),
+            d,
+            320,
+        ));
         assert!(dots.is_empty());
     }
 
@@ -10097,13 +12128,34 @@ mod tests {
     fn rotated_slice_has_no_tiny_segments() {
         // 回した階段の切り口: 格子点をちょうど通る所で、ほぼ同じ点の組（描画側では丸に見える）を作らない
         let p = prog("floor(x)/2 + floor(y)/4", &["x", "y"]);
-        let base = Domain { lo: [-10.0, -10.0, -6.0], hi: [10.0, 10.0, 6.0] };
-        let ext = Domain { lo: [-15.5; 3], hi: [15.5; 3] };
+        let base = Domain {
+            lo: [-10.0, -10.0, -6.0],
+            hi: [10.0, 10.0, 6.0],
+        };
+        let ext = Domain {
+            lo: [-15.5; 3],
+            hi: [15.5; 3],
+        };
         for deg in [0.5f64, 30.0, 82.6, 133.9] {
             let a = deg.to_radians();
-            let shape = explicit_nd(&p, 2, [0, 1, 2], &[0.0; 3], ext, 200, ComplexMode::Off, true, false, 12.0);
+            let shape = explicit_nd(
+                &p,
+                2,
+                [0, 1, 2],
+                &[0.0; 3],
+                ext,
+                200,
+                ComplexMode::Off,
+                true,
+                false,
+                12.0,
+            );
             let view = View {
-                rows: [(0.0, vec![a.cos(), -a.sin(), 0.0]), (0.0, vec![a.sin(), a.cos(), 0.0]), (0.0, vec![0.0, 0.0, 1.0])],
+                rows: [
+                    (0.0, vec![a.cos(), -a.sin(), 0.0]),
+                    (0.0, vec![a.sin(), a.cos(), 0.0]),
+                    (0.0, vec![0.0, 0.0, 1.0]),
+                ],
                 center: [0.0; 3],
                 hidden: Vec::new(),
                 dist: 0.0,
@@ -10121,32 +12173,78 @@ mod tests {
     fn slice_of_surface() {
         // 球面 (2 sin u cos v, 2 sin u sin v, 2 cos u) と平面 z = 0 の交わりは、半径 2 の円
         let sphere = progs3(["2sin(u)cos(v)", "2sin(u)sin(v)", "2cos(u)"], &["u", "v"]);
-        let shape = parametric_surface_nd(&[sphere], (0.0, std::f64::consts::PI), (0.0, std::f64::consts::TAU), 60);
-        let m = project(&shape, &View::identity(3), Domain { lo: [-3.0; 3], hi: [3.0; 3] });
+        let shape = parametric_surface_nd(
+            &[sphere],
+            (0.0, std::f64::consts::PI),
+            (0.0, std::f64::consts::TAU),
+            60,
+        );
+        let m = project(
+            &shape,
+            &View::identity(3),
+            Domain {
+                lo: [-3.0; 3],
+                hi: [3.0; 3],
+            },
+        );
         let line = slice_mesh(&m, 0.0);
-        let pts: Vec<&[f32]> = line.positions.chunks_exact(3).filter(|p| p[0].is_finite()).collect();
+        let pts: Vec<&[f32]> = line
+            .positions
+            .chunks_exact(3)
+            .filter(|p| p[0].is_finite())
+            .collect();
         assert!(pts.len() >= 100);
         for p in pts {
-            assert!(p[2] == 0.0 && ((p[0] * p[0] + p[1] * p[1]).sqrt() - 2.0).abs() < 0.01, "{p:?}");
+            assert!(
+                p[2] == 0.0 && ((p[0] * p[0] + p[1] * p[1]).sqrt() - 2.0).abs() < 0.01,
+                "{p:?}"
+            );
         }
         // 2D の z = f(x, y) の切り口: 変数が2つの式でも、曲線 f = 0 を描ける（x² + y² − 1 = 0 は単位円）
-        let c = implicit_curve_2d(&prog("x^2 + y^2 - 1", &["x", "y"]), Domain { lo: [-2.0; 3], hi: [2.0; 3] }, 80);
-        assert!(c.positions.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 1.0).abs() < 0.02));
+        let c = implicit_curve_2d(
+            &prog("x^2 + y^2 - 1", &["x", "y"]),
+            Domain {
+                lo: [-2.0; 3],
+                hi: [2.0; 3],
+            },
+            80,
+        );
+        assert!(c
+            .positions
+            .chunks_exact(3)
+            .filter(|p| p[0].is_finite())
+            .all(|p| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 1.0).abs() < 0.02));
     }
 
     /// 速さの目安を測る    /// 速さの目安を測る: `cargo test --release -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn timing() {
-        let d = Domain { lo: [-5.0; 3], hi: [5.0; 3] };
+        let d = Domain {
+            lo: [-5.0; 3],
+            hi: [5.0; 3],
+        };
         for n in [80, 120, 200] {
             let t = std::time::Instant::now();
             let m = implicit_surface(&prog("sin(x) + sin(y) + sin(z)", &AXES), d, n);
-            println!("陰関数 n = {n}: {:?}, 三角形 {}", t.elapsed(), m.indices.len() / 3);
+            println!(
+                "陰関数 n = {n}: {:?}, 三角形 {}",
+                t.elapsed(),
+                m.indices.len() / 3
+            );
         }
         let t = std::time::Instant::now();
-        let m = explicit_surface(&prog("sin(x) cos(y) + exp(-x^2 - y^2)", &["x", "y"]), d, 400, 2);
-        println!("陽関数 n = 400: {:?}, 三角形 {}", t.elapsed(), m.indices.len() / 3);
+        let m = explicit_surface(
+            &prog("sin(x) cos(y) + exp(-x^2 - y^2)", &["x", "y"]),
+            d,
+            400,
+            2,
+        );
+        println!(
+            "陽関数 n = 400: {:?}, 三角形 {}",
+            t.elapsed(),
+            m.indices.len() / 3
+        );
         // 3次元球面の中身（4変数）
         let vars = ["t1", "t2", "t3", "t4"];
         let ball = [
@@ -10163,12 +12261,22 @@ mod tests {
             let shape = parametric_sheets_nd(std::slice::from_ref(&progs), &r, div, 150);
             let t1 = t.elapsed();
             let mesh = project(&shape, &View::identity(4), d);
-            println!("4変数 div = {div}: 計算 {t1:?} + 射影 {:?}, 三角形 {}", t.elapsed() - t1, mesh.indices.len() / 3);
+            println!(
+                "4変数 div = {div}: 計算 {t1:?} + 射影 {:?}, 三角形 {}",
+                t.elapsed() - t1,
+                mesh.indices.len() / 3
+            );
         }
-        let torus: Vec<Program> = ["(3 + cos(v)) cos(u)", "(3 + cos(v)) sin(u)", "sin(v)"].iter().map(|s| prog(s, &["u", "v"])).collect();
+        let torus: Vec<Program> = ["(3 + cos(v)) cos(u)", "(3 + cos(v)) sin(u)", "sin(v)"]
+            .iter()
+            .map(|s| prog(s, &["u", "v"]))
+            .collect();
         let t = std::time::Instant::now();
         let shape = parametric_surface_nd(&[torus], (0.0, tau), (0.0, tau), 400);
-        println!("媒介変数表示の曲面 n = 400: {:?}, 点 {}", t.elapsed(), shape.points.len() / 3);
+        println!(
+            "媒介変数表示の曲面 n = 400: {:?}, 点 {}",
+            t.elapsed(),
+            shape.points.len() / 3
+        );
     }
 }
-

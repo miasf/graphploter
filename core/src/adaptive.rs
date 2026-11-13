@@ -293,7 +293,12 @@ impl<V: Clone> Triangulation<V> {
 
     /// 生きている三角形（向きと頂点の並びは [`Refined::tris`] と同じ）
     pub fn tris(&self) -> Vec<[u32; 3]> {
-        self.st.tris.iter().filter(|t| t.alive).map(|t| [t.v[2], t.v[0], t.v[1]]).collect()
+        self.st
+            .tris
+            .iter()
+            .filter(|t| t.alive)
+            .map(|t| [t.v[2], t.v[0], t.v[1]])
+            .collect()
     }
 
     /// 三角形 `tris`（[`Triangulation::tris`] の並びのもの）を、それぞれの斜辺で二分する。継ぎ目が合うように、
@@ -304,7 +309,10 @@ impl<V: Clone> Triangulation<V> {
             .iter()
             .filter(|t| {
                 let e = key(t[1], t[2]);
-                self.st.adjacent(e).iter().any(|&k| k != NO && self.st.tris[k as usize].v == [t[1], t[2], t[0]])
+                self.st
+                    .adjacent(e)
+                    .iter()
+                    .any(|&k| k != NO && self.st.tris[k as usize].v == [t[1], t[2], t[0]])
             })
             .map(|t| (key(t[1], t[2]), f64::NAN))
             .collect();
@@ -314,7 +322,11 @@ impl<V: Clone> Triangulation<V> {
     /// 細かくした結果
     pub fn finish(self) -> Refined<V> {
         let tris = self.tris();
-        Refined { uv: self.st.uv, vals: self.st.vals, tris }
+        Refined {
+            uv: self.st.uv,
+            vals: self.st.vals,
+            tris,
+        }
     }
 }
 
@@ -406,7 +418,11 @@ pub fn refine_keep<V: Clone>(
                     ],
                     mid,
                     history: tri.history,
-                    pos: [st.uv[tri.v[0] as usize], st.uv[tri.v[1] as usize], st.uv[tri.v[2] as usize]],
+                    pos: [
+                        st.uv[tri.v[0] as usize],
+                        st.uv[tri.v[1] as usize],
+                        st.uv[tri.v[2] as usize],
+                    ],
                     pass,
                 };
                 if let Some(err) = decide(&c) {
@@ -443,7 +459,11 @@ pub fn refine_keep<V: Clone>(
                     ],
                     mid,
                     history: tri.history,
-                    pos: [st.uv[tri.v[0] as usize], st.uv[tri.v[1] as usize], st.uv[tri.v[2] as usize]],
+                    pos: [
+                        st.uv[tri.v[0] as usize],
+                        st.uv[tri.v[1] as usize],
+                        st.uv[tri.v[2] as usize],
+                    ],
                     pass,
                 };
                 if let Some(err) = decide(&c) {
@@ -460,7 +480,10 @@ pub fn refine_keep<V: Clone>(
             marked.sort_by(|a, b| b.0.total_cmp(&a.0));
             marked.truncate(room.max(1));
         }
-        let edges: Vec<(Edge, f64)> = marked.iter().map(|&(err, t)| (st.tris[t as usize].edge(), err)).collect();
+        let edges: Vec<(Edge, f64)> = marked
+            .iter()
+            .map(|&(err, t)| (st.tris[t as usize].edge(), err))
+            .collect();
         added += split_marked(&mut st, edges, eval);
         cands = std::mem::take(&mut st.born)
             .into_iter()
@@ -473,7 +496,11 @@ pub fn refine_keep<V: Clone>(
 /// 辺 `marked`（と、分けると決めた三角形のずれ）を二分する。継ぎ目を合わせるために先に分ける向こうの三角形の斜辺も
 /// たどれるだけたどり、中点をまとめて計算してから分ける。このパスで作った三角形は `st.born` に入る。
 /// 戻り値は増えた三角形の数
-fn split_marked<V: Clone>(st: &mut State<V>, marked: Vec<(Edge, f64)>, eval: &mut Eval<'_, V>) -> usize {
+fn split_marked<V: Clone>(
+    st: &mut State<V>,
+    marked: Vec<(Edge, f64)>,
+    eval: &mut Eval<'_, V>,
+) -> usize {
     let mut split: HashSet<Edge> = HashSet::default();
     let mut order: Vec<(Edge, f64)> = Vec::new();
     let mut stack: Vec<Edge> = Vec::new();

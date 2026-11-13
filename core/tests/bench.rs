@@ -29,7 +29,13 @@ struct Setup {
 
 impl Setup {
     fn new(r: f64, res: u32, ires: u32) -> Setup {
-        Setup { domain: cube(r), res, ires, dims: 3, xw: 0.0 }
+        Setup {
+            domain: cube(r),
+            res,
+            ires,
+            dims: 3,
+            xw: 0.0,
+        }
     }
 }
 
@@ -92,7 +98,10 @@ fn bad_edges(indices: &[u32]) -> (usize, usize) {
             *count.entry((u.min(v), u.max(v))).or_insert(0usize) += 1;
         }
     }
-    (count.values().filter(|&&c| c == 1).count(), count.values().filter(|&&c| c >= 3).count())
+    (
+        count.values().filter(|&&c| c == 1).count(),
+        count.values().filter(|&&c| c >= 3).count(),
+    )
 }
 
 fn header() {
@@ -138,7 +147,11 @@ fn bench_report() {
         "abs(zeta(x + i y))",
         "sqrt(4 - x^2 - y^2)",
     ] {
-        row(&format!("z = {f}"), 150, &best(&format!("z = {f}"), Setup::new(5.0, 150, 80)));
+        row(
+            &format!("z = {f}"),
+            150,
+            &best(&format!("z = {f}"), Setup::new(5.0, 150, 80)),
+        );
     }
 
     println!("\n## 陰関数（範囲 ±5。小さい球は ±10）\n");
@@ -166,11 +179,17 @@ fn bench_report() {
     }
     println!("\n陰関数の部分ごとの時間（ms）: F の計算 / 接する所の候補探し / セルの頂点 / 辺の四角形と法線\n");
     for (f, n, p) in phases {
-        println!("- {f}（{n}）: {:.2} / {:.2} / {:.2} / {:.2}", p[0], p[1], p[2], p[3]);
+        println!(
+            "- {f}（{n}）: {:.2} / {:.2} / {:.2} / {:.2}",
+            p[0], p[1], p[2], p[3]
+        );
     }
 
     println!("\n## 媒介変数表示（「メッシュ」は n 次元の点を計算した後の射影を含む。射影だけの時間は別の列）\n");
-    println!("| {:<40} | {:>4} | {:>9} | {:>9} | {:>9} | {:>8} |", "図形", "細かさ", "点の計算", "射影だけ", "粗い版", "三角形");
+    println!(
+        "| {:<40} | {:>4} | {:>9} | {:>9} | {:>9} | {:>8} |",
+        "図形", "細かさ", "点の計算", "射影だけ", "粗い版", "三角形"
+    );
     println!("|{}|", ["---"; 6].join("|"));
     let param = [
         ("曲面（4 次元）", "(cos u, sin u, cos v, sin v)", 4, 150),
@@ -179,7 +198,13 @@ fn bench_report() {
         ("多変数 k=4", "(t_1, t_2, t_3, t_4)", 4, 150),
     ];
     for (label, src, dims, res) in param {
-        let s = Setup { domain: cube(8.0), res, ires: 80, dims, xw: 0.5 };
+        let s = Setup {
+            domain: cube(8.0),
+            res,
+            ires: 80,
+            dims,
+            xw: 0.5,
+        };
         let mut r = best(src, s);
         let st = r.stats();
         let shape = r.take_shape().expect("媒介変数表示の形");
@@ -189,7 +214,9 @@ fn bench_report() {
         // 射影だけ（回転を変えて描き直すとき）の時間。3 回の最小
         let proj = (0..3)
             .map(|_| {
-                let p = shape.project(&s.domain, dims, &[0, 1, 2], &rotation, &vec![0.0; rd], 0.0).unwrap();
+                let p = shape
+                    .project(&s.domain, dims, &[0, 1, 2], &rotation, &vec![0.0; rd], 0.0)
+                    .unwrap();
                 p.stats()[1]
             })
             .fold(f64::INFINITY, f64::min);
@@ -217,7 +244,10 @@ fn bench_report() {
         let r = run(f, s);
         let h = 10.0 / 80.0;
         let poles: Vec<f64> = if pole {
-            [-1.5, -0.5, 0.5, 1.5].iter().map(|k| k * std::f64::consts::PI).collect()
+            [-1.5, -0.5, 0.5, 1.5]
+                .iter()
+                .map(|k| k * std::f64::consts::PI)
+                .collect()
         } else {
             vec![0.0]
         };
@@ -230,7 +260,12 @@ fn bench_report() {
                 poles.iter().any(|c| (x - c).abs() < h) && (g - z).abs() > 2.0
             })
             .count();
-        println!("- {f}（細かさ 80、x の範囲 {:.2}〜{:.2}）: 極の平面の上の偽の頂点 {fake} / {}", s.domain[0], s.domain[1], pos.len() / 3);
+        println!(
+            "- {f}（細かさ 80、x の範囲 {:.2}〜{:.2}）: 極の平面の上の偽の頂点 {fake} / {}",
+            s.domain[0],
+            s.domain[1],
+            pos.len() / 3
+        );
     }
     // |Γ(x + iy)| の極 x = 0, −1, …, −4 の周り（半径 0.3）で、高さが表示範囲の上限 5 以上の頂点の数
     let r = run("z = abs(gamma(x + i y))", Setup::new(5.0, 150, 80));
@@ -240,10 +275,15 @@ fn bench_report() {
             let c = -(k as f64);
             let n = pos
                 .chunks_exact(3)
-                .filter(|q| ((q[0] as f64 - c).powi(2) + (q[1] as f64).powi(2)).sqrt() < 0.3 && q[2] >= 5.0)
+                .filter(|q| {
+                    ((q[0] as f64 - c).powi(2) + (q[1] as f64).powi(2)).sqrt() < 0.3 && q[2] >= 5.0
+                })
                 .count();
             format!("x = {}: {n}", -(k as i32))
         })
         .collect();
-    println!("- z = abs(gamma(x + i y))（細かさ 150）の極の周りで z ≥ 5 の頂点: {}", counts.join(", "));
+    println!(
+        "- z = abs(gamma(x + i y))（細かさ 150）の極の周りで z ≥ 5 の頂点: {}",
+        counts.join(", ")
+    );
 }

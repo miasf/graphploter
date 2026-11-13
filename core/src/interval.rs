@@ -58,7 +58,10 @@ impl Interval {
             return None;
         }
         let pad = |x: f64| 1e-12 * (x.abs() + 1.0);
-        Some(Interval { lo: self.lo - pad(self.lo), hi: self.hi + pad(self.hi) })
+        Some(Interval {
+            lo: self.lo - pad(self.lo),
+            hi: self.hi + pad(self.hi),
+        })
     }
 }
 
@@ -86,7 +89,11 @@ pub(crate) fn sub(a: Interval, b: Interval) -> Iv {
 
 pub(crate) fn mul(a: Interval, b: Interval) -> Iv {
     let p = [a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi];
-    Interval::new(p.iter().copied().fold(f64::INFINITY, f64::min), p.iter().copied().fold(f64::NEG_INFINITY, f64::max)).widen()
+    Interval::new(
+        p.iter().copied().fold(f64::INFINITY, f64::min),
+        p.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    )
+    .widen()
 }
 
 /// 1 / b。分母が 0 を含めば「分からない」
@@ -113,7 +120,11 @@ pub(crate) fn powi(a: Interval, e: i32) -> Iv {
         return increasing(a, |x| x.powi(e));
     }
     let (l, h) = (a.lo.powi(e), a.hi.powi(e));
-    nonneg(if a.contains(0.0) { Interval::new(0.0, l.max(h)).widen() } else { Interval::new(l.min(h), l.max(h)).widen() })
+    nonneg(if a.contains(0.0) {
+        Interval::new(0.0, l.max(h)).widen()
+    } else {
+        Interval::new(l.min(h), l.max(h)).widen()
+    })
 }
 
 /// 値が 0 以上と分かっている区間で、丸めの分だけ広げて負になった下の端を 0 に戻す
@@ -133,7 +144,11 @@ pub(crate) fn pow(a: Interval, b: Interval) -> Iv {
         if a.lo < 0.0 || (e < 0.0 && a.lo <= 0.0) {
             return None;
         }
-        return if e > 0.0 { increasing(a, |x| x.powf(e)) } else { decreasing(a, |x| x.powf(e)) };
+        return if e > 0.0 {
+            increasing(a, |x| x.powf(e))
+        } else {
+            decreasing(a, |x| x.powf(e))
+        };
     }
     // 指数も動くとき: 底が正なら a^b = exp(b ln a)
     if a.lo <= 0.0 {
@@ -170,7 +185,8 @@ pub(crate) fn cos(a: Interval) -> Iv {
 /// 区間に c + kπ の形の点（tan などの極）が入るか。端のすぐ近くも「入る」とみなす
 fn has_pole(a: Interval, c: f64) -> bool {
     let k = ((a.lo - c) / PI).ceil();
-    k * PI + c <= a.hi + 1e-9 * (a.hi.abs() + 1.0) || (k - 1.0) * PI + c >= a.lo - 1e-9 * (a.lo.abs() + 1.0)
+    k * PI + c <= a.hi + 1e-9 * (a.hi.abs() + 1.0)
+        || (k - 1.0) * PI + c >= a.lo - 1e-9 * (a.lo.abs() + 1.0)
 }
 
 /// tan: 極（π/2 + kπ）が入れば分からない。入らなければ単調に増える
@@ -332,14 +348,18 @@ mod tests {
     const XYZ: [&str; 3] = ["x", "y", "z"];
 
     fn prog(src: &str) -> Program {
-        Program::compile(&parse(src).unwrap_or_else(|e| panic!("{src}: {e:?}")), &XYZ).unwrap_or_else(|e| panic!("{src}: {e}"))
+        Program::compile(&parse(src).unwrap_or_else(|e| panic!("{src}: {e:?}")), &XYZ)
+            .unwrap_or_else(|e| panic!("{src}: {e}"))
     }
 
     /// 決まった種の乱数（0〜1）
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 11) as f64 / (1u64 << 53) as f64
         }
     }
@@ -404,7 +424,11 @@ mod tests {
                 let mut cols: [Vec<f64>; 3] = Default::default();
                 for k in 0..50 {
                     for (ax, b) in boxes.iter().enumerate() {
-                        let t = if k < 8 { ((k >> ax) & 1) as f64 } else { rng.next() };
+                        let t = if k < 8 {
+                            ((k >> ax) & 1) as f64
+                        } else {
+                            rng.next()
+                        };
                         cols[ax].push(b.lo + (b.hi - b.lo) * t);
                     }
                 }
@@ -429,20 +453,37 @@ mod tests {
     fn interval_is_tight_enough() {
         let p = prog("x^2+y^2+z^2-4");
         let b = |lo: f64, hi: f64| [Interval::new(lo, hi); 3];
-        assert!(!p.eval_interval(&b(3.0, 4.0)).may_contain_zero(), "原点から離れた箱");
-        assert!(p.eval_interval(&b(1.0, 1.5)).may_contain_zero(), "球の面をまたぐ箱");
-        assert!(!p.eval_interval(&b(-0.5, 0.5)).may_contain_zero(), "球の中の箱");
+        assert!(
+            !p.eval_interval(&b(3.0, 4.0)).may_contain_zero(),
+            "原点から離れた箱"
+        );
+        assert!(
+            p.eval_interval(&b(1.0, 1.5)).may_contain_zero(),
+            "球の面をまたぐ箱"
+        );
+        assert!(
+            !p.eval_interval(&b(-0.5, 0.5)).may_contain_zero(),
+            "球の中の箱"
+        );
         // 0 をまたぐ箱での sqrt(x² + y²)（丸めの分だけ広げて x² の下の端が負になると「分からない」になっていた）
         let t = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.04");
-        assert!(!t.eval_interval(&b(-0.2, 0.2)).may_contain_zero(), "トーラスの軸の上の箱");
-        assert!(!prog("sqrt(abs(x)) + 1").eval_interval(&b(-0.2, 0.2)).may_contain_zero());
+        assert!(
+            !t.eval_interval(&b(-0.2, 0.2)).may_contain_zero(),
+            "トーラスの軸の上の箱"
+        );
+        assert!(!prog("sqrt(abs(x)) + 1")
+            .eval_interval(&b(-0.2, 0.2))
+            .may_contain_zero());
     }
 
     #[test]
     fn interval_support() {
         assert!(!prog("gamma(x) - z").supports_interval());
         assert!(!prog("x + i y").supports_interval());
-        assert_eq!(prog("gamma(x) - z").eval_interval(&[Interval::point(1.0); 3]), Range::Unknown);
+        assert_eq!(
+            prog("gamma(x) - z").eval_interval(&[Interval::point(1.0); 3]),
+            Range::Unknown
+        );
         for src in EXPRS {
             assert!(prog(src).supports_interval(), "{src}");
         }

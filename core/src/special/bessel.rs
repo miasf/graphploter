@@ -131,7 +131,8 @@ pub fn bessel_y(nu: C, z: C) -> C {
         // Y_ν(w e^(iπs)) = e^(−iπνs) Y_ν(w) + 2is cos(πν) J_ν(w)
         let (w, s) = reflect(z);
         let i = C::new(0.0, 1.0);
-        return (-i * PI * nu * s).exp() * bessel_y(nu, w) + 2.0 * i * s * (PI * nu).cos() * bessel_j(nu, w);
+        return (-i * PI * nu * s).exp() * bessel_y(nu, w)
+            + 2.0 * i * s * (PI * nu).cos() * bessel_j(nu, w);
     }
     if use_schlafli(nu, z) {
         return schlafli(nu, z).1;
@@ -141,9 +142,7 @@ pub fn bessel_y(nu: C, z: C) -> C {
         let w = z - nu * (PI / 2.0) - PI / 4.0;
         return (2.0 / (PI * z)).sqrt() * (w.sin() * p + w.cos() * q);
     }
-    let f = |nu: C| {
-        ((nu * PI).cos() * bessel_j(nu, z) - bessel_j(-nu, z)) / (nu * PI).sin()
-    };
+    let f = |nu: C| ((nu * PI).cos() * bessel_j(nu, z) - bessel_j(-nu, z)) / (nu * PI).sin();
     if is_integer(nu) {
         nudge(f, nu)
     } else {
@@ -207,7 +206,11 @@ pub fn bessel_k(nu: C, z: C) -> C {
 /// 球ベッセル関数 jₙ(z) = √(π / 2z) J_{n+1/2}(z)
 pub fn spherical_j(n: C, z: C) -> C {
     if z == C::new(0.0, 0.0) {
-        return if n == C::new(0.0, 0.0) { C::new(1.0, 0.0) } else { z };
+        return if n == C::new(0.0, 0.0) {
+            C::new(1.0, 0.0)
+        } else {
+            z
+        };
     }
     (PI / (2.0 * z)).sqrt() * bessel_j(n + 0.5, z)
 }
@@ -255,8 +258,12 @@ pub fn airy_prime(z: C) -> (C, C) {
     if z.norm() <= 5.0 {
         let w = z * z * z / 9.0;
         let fp = z * z / 2.0 * hyp0f1(C::new(5.0 / 3.0, 0.0), w);
-        let gp = hyp0f1(C::new(4.0 / 3.0, 0.0), w) + z * z * z / 4.0 * hyp0f1(C::new(7.0 / 3.0, 0.0), w);
-        return (AIRY_C1 * fp - AIRY_C2 * gp, s3 * (AIRY_C1 * fp + AIRY_C2 * gp));
+        let gp =
+            hyp0f1(C::new(4.0 / 3.0, 0.0), w) + z * z * z / 4.0 * hyp0f1(C::new(7.0 / 3.0, 0.0), w);
+        return (
+            AIRY_C1 * fp - AIRY_C2 * gp,
+            s3 * (AIRY_C1 * fp + AIRY_C2 * gp),
+        );
     }
     let two_thirds = C::new(2.0 / 3.0, 0.0);
     if z.re >= 0.0 {

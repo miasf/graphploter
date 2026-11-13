@@ -54,7 +54,7 @@ def cases():
             continue
         name, opts, src = line.split("\t")
         # 陰関数（= のある式か、変数 z を含む式）で、設定の付いていないもの
-        if opts != "0" or name[0] not in "suij" or name in ("s_stairs", "s_saddle", "s_gauss", "s_absgamma", "s_abszeta", "s_bessel"):
+        if opts != "0" or name[0] not in "suijk" or name in ("s_stairs", "s_saddle", "s_gauss", "s_absgamma", "s_abszeta", "s_bessel"):
             continue
         if only and only not in name and only not in src:
             continue

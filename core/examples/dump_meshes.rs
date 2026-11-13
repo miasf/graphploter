@@ -41,15 +41,20 @@ fn main() {
             continue;
         }
         let cols: Vec<&str> = line.splitn(3, '\t').collect();
-        let [name, walls, src] = cols[..] else { panic!("行の形が違う: {line}") };
+        let [name, walls, src] = cols[..] else {
+            panic!("行の形が違う: {line}")
+        };
         if only.as_deref().is_some_and(|o| !name.contains(o)) {
             continue;
         }
         let mut opts = walls.split(',');
         let walls = opts.next().unwrap_or("0");
-        let (mut rot, mut flags, mut res, mut ires, mut local) = ([0.0f64; 10], 0u32, RES, IRES, false);
+        let (mut rot, mut flags, mut res, mut ires, mut local) =
+            ([0.0f64; 10], 0u32, RES, IRES, false);
         for o in opts {
-            let (k, v) = o.split_once('=').unwrap_or_else(|| panic!("設定の形が違う: {o}"));
+            let (k, v) = o
+                .split_once('=')
+                .unwrap_or_else(|| panic!("設定の形が違う: {o}"));
             let num: f64 = v.parse().unwrap_or_else(|_| panic!("設定の値が違う: {o}"));
             match k {
                 // 回転角の並びは (x,y), (x,z), (x,w), (x,w2), (y,z), …
@@ -96,7 +101,9 @@ fn main() {
             Ok(mut r) if local => match r.take_shape() {
                 Some(shape) => {
                     tag = "[回す前]";
-                    shape.project(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5], 0.0).map_err(|_| ())
+                    shape
+                        .project(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5], 0.0)
+                        .map_err(|_| ())
                 }
                 None => Ok(r),
             },
@@ -111,11 +118,21 @@ fn main() {
                 let out_side = |k: u32, a: usize, hi: bool| {
                     let v = p[k as usize * 3 + a] as f64;
                     let m = (DOMAIN[2 * a + 1] - DOMAIN[2 * a]) * 1e-3;
-                    if hi { v > DOMAIN[2 * a + 1] + m } else { v < DOMAIN[2 * a] - m }
+                    if hi {
+                        v > DOMAIN[2 * a + 1] + m
+                    } else {
+                        v < DOMAIN[2 * a] - m
+                    }
                 };
                 let ix: Vec<u32> = ix
                     .chunks_exact(3)
-                    .filter(|t| !(0..3).any(|a| [false, true].iter().any(|&h| t.iter().all(|&k| out_side(k, a, h)))))
+                    .filter(|t| {
+                        !(0..3).any(|a| {
+                            [false, true]
+                                .iter()
+                                .any(|&h| t.iter().all(|&k| out_side(k, a, h)))
+                        })
+                    })
                     .flatten()
                     .copied()
                     .collect();
@@ -130,7 +147,13 @@ fn main() {
                     f.write_all(&v.to_le_bytes()).unwrap();
                 }
                 let (fragments, flipped) = topology(&p, &ix);
-                writeln!(meta, "{name}\t{}\t{ms:.0}\t{tag}{}\t{fragments}\t{flipped:.2}", ix.len() / 3, r.kind()).unwrap();
+                writeln!(
+                    meta,
+                    "{name}\t{}\t{ms:.0}\t{tag}{}\t{fragments}\t{flipped:.2}",
+                    ix.len() / 3,
+                    r.kind()
+                )
+                .unwrap();
             }
             Err(_) => writeln!(meta, "{name}\t0\t{ms:.0}\tエラー").unwrap(),
         }
@@ -147,7 +170,8 @@ fn topology(p: &[f32], ix: &[u32]) -> (usize, f64) {
         .chunks_exact(3)
         .map(|q| {
             let next = ids.len() as u32;
-            *ids.entry([0, 1, 2].map(|a| (q[a] as f64 * 1e4).round() as i64)).or_insert(next)
+            *ids.entry([0, 1, 2].map(|a| (q[a] as f64 * 1e4).round() as i64))
+                .or_insert(next)
         })
         .collect();
     let mut parent: Vec<u32> = (0..ids.len() as u32).collect();
@@ -176,9 +200,15 @@ fn topology(p: &[f32], ix: &[u32]) -> (usize, f64) {
     }
     let mut sizes: HashMap<u32, usize> = HashMap::new();
     for t in ix.chunks_exact(3) {
-        *sizes.entry(root(&mut parent, vid[t[0] as usize])).or_default() += 1;
+        *sizes
+            .entry(root(&mut parent, vid[t[0] as usize]))
+            .or_default() += 1;
     }
     let fragments = sizes.values().filter(|&&s| s <= 12).count();
-    let dup: usize = edges.values().filter(|&&c| c > 1).map(|&c| c as usize).sum();
+    let dup: usize = edges
+        .values()
+        .filter(|&&c| c > 1)
+        .map(|&c| c as usize)
+        .sum();
     (fragments, 100.0 * dup as f64 / total.max(1) as f64)
 }

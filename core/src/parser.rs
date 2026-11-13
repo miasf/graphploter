@@ -51,7 +51,9 @@ impl Expr {
             Expr::Var(v) => f(v).unwrap_or_else(|| self.clone()),
             Expr::Num(_) | Expr::Const(_) => self.clone(),
             Expr::Neg(a) => Expr::Neg(Box::new(a.substitute(f))),
-            Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(a.substitute(f)), Box::new(b.substitute(f))),
+            Expr::Bin(o, a, b) => {
+                Expr::Bin(*o, Box::new(a.substitute(f)), Box::new(b.substitute(f)))
+            }
             Expr::Call(g, args) => Expr::Call(*g, args.iter().map(|a| a.substitute(f)).collect()),
             Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| a.substitute(f)).collect()),
             Expr::List(args) => Expr::List(args.iter().map(|a| a.substitute(f)).collect()),
@@ -65,7 +67,9 @@ impl Expr {
             Expr::Num(_) | Expr::Const(_) => false,
             Expr::Neg(a) => a.uses_var(name),
             Expr::Bin(_, a, b) => a.uses_var(name) || b.uses_var(name),
-            Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(|a| a.uses_var(name)),
+            Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => {
+                args.iter().any(|a| a.uses_var(name))
+            }
         }
     }
 }
@@ -165,7 +169,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
         let start = i;
 
         // 数値
-        if c.is_ascii_digit() || (c == '.' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())) {
+        if c.is_ascii_digit() || (c == '.' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()))
+        {
             while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                 i += 1;
             }
@@ -174,7 +179,10 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 Ok(n) => n,
                 Err(_) => return err(format!("数値 \"{s}\" を読めません"), start),
             };
-            out.push(Token { tok: Tok::Num(n), pos: start });
+            out.push(Token {
+                tok: Tok::Num(n),
+                pos: start,
+            });
             continue;
         }
 
@@ -184,10 +192,14 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             while i < chars.len() && chars[i].is_alphabetic() {
                 // 数字を含む名前（hyp2F1 など）は英字の並びの外まで見て探す
                 let full: String = chars[i..].iter().collect();
-                if let Some((name, tok)) =
-                    names.iter().find(|(n, _)| n.chars().any(|d| d.is_ascii_digit()) && full.starts_with(n))
+                if let Some((name, tok)) = names
+                    .iter()
+                    .find(|(n, _)| n.chars().any(|d| d.is_ascii_digit()) && full.starts_with(n))
                 {
-                    out.push(Token { tok: tok.clone(), pos: i });
+                    out.push(Token {
+                        tok: tok.clone(),
+                        pos: i,
+                    });
                     i += name.chars().count();
                     continue;
                 }
@@ -197,10 +209,16 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 }
                 let rest: String = chars[i..end].iter().collect();
                 if let Some((name, tok)) = names.iter().find(|(n, _)| rest.starts_with(n)) {
-                    out.push(Token { tok: tok.clone(), pos: i });
+                    out.push(Token {
+                        tok: tok.clone(),
+                        pos: i,
+                    });
                     i += name.chars().count();
                 } else {
-                    out.push(Token { tok: Tok::Var(chars[i].to_string()), pos: i });
+                    out.push(Token {
+                        tok: Tok::Var(chars[i].to_string()),
+                        pos: i,
+                    });
                     i += 1;
                 }
             }
@@ -214,7 +232,9 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 }
                 let digits: String = chars[ds..i].iter().collect();
                 match out.last_mut() {
-                    Some(Token { tok: Tok::Var(v), .. }) if !digits.is_empty() && v.chars().count() == 1 => {
+                    Some(Token {
+                        tok: Tok::Var(v), ..
+                    }) if !digits.is_empty() && v.chars().count() == 1 => {
                         // w₁ は w と同じ座標（4次元目）
                         if !(v == "w" && digits == "1") {
                             v.push_str(&digits);
@@ -243,7 +263,10 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
         out.push(Token { tok, pos: i });
         i += 1;
     }
-    out.push(Token { tok: Tok::Eof, pos: chars.len() });
+    out.push(Token {
+        tok: Tok::Eof,
+        pos: chars.len(),
+    });
     Ok(out)
 }
 
@@ -313,7 +336,12 @@ impl Parser {
                     BinOp::Div
                 }
                 // 次に値が始まるなら暗黙の掛け算
-                Tok::Num(_) | Tok::Var(_) | Tok::Const(_) | Tok::Func(_) | Tok::LParen | Tok::LBracket => BinOp::Mul,
+                Tok::Num(_)
+                | Tok::Var(_)
+                | Tok::Const(_)
+                | Tok::Func(_)
+                | Tok::LParen
+                | Tok::LBracket => BinOp::Mul,
                 _ => return Ok(lhs),
             };
             let rhs = self.unary()?;
@@ -414,7 +442,12 @@ impl Parser {
         if !f.arities().contains(&args.len()) {
             let counts: Vec<String> = f.arities().iter().map(|n| n.to_string()).collect();
             return err(
-                format!("{} の引数は {} 個です（{} 個あります）", f.names()[0], counts.join(" か "), args.len()),
+                format!(
+                    "{} の引数は {} 個です（{} 個あります）",
+                    f.names()[0],
+                    counts.join(" か "),
+                    args.len()
+                ),
                 pos,
             );
         }
@@ -465,7 +498,11 @@ mod tests {
         // -x^2 = -(x^2)
         assert_eq!(
             parse("-x^2").unwrap(),
-            Expr::Neg(Box::new(Expr::Bin(BinOp::Pow, var("x"), Box::new(Expr::Num(2.0)))))
+            Expr::Neg(Box::new(Expr::Bin(
+                BinOp::Pow,
+                var("x"),
+                Box::new(Expr::Num(2.0))
+            )))
         );
     }
 
@@ -474,8 +511,14 @@ mod tests {
         let a = parse("sin(x)").unwrap();
         assert_eq!(parse("sin x").unwrap(), a);
         assert_eq!(parse("sinx").unwrap(), a);
-        assert!(matches!(parse("sinh(x)").unwrap(), Expr::Call(Func::Sinh, _)));
-        assert!(matches!(parse("sin^2 x").unwrap(), Expr::Bin(BinOp::Pow, _, _)));
+        assert!(matches!(
+            parse("sinh(x)").unwrap(),
+            Expr::Call(Func::Sinh, _)
+        ));
+        assert!(matches!(
+            parse("sin^2 x").unwrap(),
+            Expr::Bin(BinOp::Pow, _, _)
+        ));
     }
 
     #[test]

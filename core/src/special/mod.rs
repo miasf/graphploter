@@ -151,7 +151,9 @@ pub fn digamma(z: C) -> C {
     // B₂/2, B₄/4, B₆/6, B₈/8, B₁₀/10, B₁₂/12
     let series = z2
         * (1.0 / 12.0
-            - z2 * (1.0 / 120.0 - z2 * (1.0 / 252.0 - z2 * (1.0 / 240.0 - z2 * (1.0 / 132.0 - z2 * (691.0 / 32760.0))))));
+            - z2 * (1.0 / 120.0
+                - z2 * (1.0 / 252.0
+                    - z2 * (1.0 / 240.0 - z2 * (1.0 / 132.0 - z2 * (691.0 / 32760.0))))));
     acc + z.ln() - 0.5 / z - series
 }
 
@@ -231,7 +233,11 @@ pub fn zeta(s: C) -> C {
     if s.re < 0.5 {
         let two = C::new(2.0, 0.0);
         let pi = C::new(PI, 0.0);
-        return two.powc(s) * pi.powc(s - 1.0) * (PI * s / 2.0).sin() * gamma(1.0 - s) * zeta(1.0 - s);
+        return two.powc(s)
+            * pi.powc(s - 1.0)
+            * (PI * s / 2.0).sin()
+            * gamma(1.0 - s)
+            * zeta(1.0 - s);
     }
     // 項の数は、虚部が大きいほど増やす（ボーウェインの誤差の見積もりによる）
     let n = (50.0 + 1.3 * s.im.abs()).min(400.0) as usize;
@@ -297,7 +303,11 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
     // ν が負の整数: J₋ₙ = (−1)ⁿ Jₙ、I₋ₙ = Iₙ
     if nu.im == 0.0 && nu.re < 0.0 && nu.re == nu.re.round() {
         let n = -nu.re;
-        let f = if sign < 0.0 && n % 2.0 == 1.0 { -1.0 } else { 1.0 };
+        let f = if sign < 0.0 && n % 2.0 == 1.0 {
+            -1.0
+        } else {
+            1.0
+        };
         return f * bessel_series(-nu, z, sign);
     }
     if sign < 0.0 && z.re < 0.0 && z.norm() > 10.0 {
@@ -312,7 +322,11 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
         return bessel_j_asymptotic(nu, z);
     }
     if z == C::new(0.0, 0.0) {
-        return if nu == C::new(0.0, 0.0) { C::new(1.0, 0.0) } else { C::new(0.0, 0.0) };
+        return if nu == C::new(0.0, 0.0) {
+            C::new(1.0, 0.0)
+        } else {
+            C::new(0.0, 0.0)
+        };
     }
     let h = z / 2.0;
     let h2 = sign * h * h;
@@ -347,16 +361,28 @@ mod tests {
     fn gamma_real() {
         // Γ(n) = (n-1)!
         assert!(close(gamma(C::new(5.0, 0.0)), C::new(24.0, 0.0), 1e-12));
-        assert!(close(gamma(C::new(0.5, 0.0)), C::new(PI.sqrt(), 0.0), 1e-12));
+        assert!(close(
+            gamma(C::new(0.5, 0.0)),
+            C::new(PI.sqrt(), 0.0),
+            1e-12
+        ));
         // Γ(-1/2) = -2√π
-        assert!(close(gamma(C::new(-0.5, 0.0)), C::new(-2.0 * PI.sqrt(), 0.0), 1e-12));
+        assert!(close(
+            gamma(C::new(-0.5, 0.0)),
+            C::new(-2.0 * PI.sqrt(), 0.0),
+            1e-12
+        ));
     }
 
     #[test]
     fn gamma_complex() {
         // Γ(i) ≈ -0.15494982830181 - 0.49801566811836 i
         let g = gamma(C::new(0.0, 1.0));
-        assert!(close(g, C::new(-0.154_949_828_301_810_7, -0.498_015_668_118_356), 1e-12));
+        assert!(close(
+            g,
+            C::new(-0.154_949_828_301_810_7, -0.498_015_668_118_356),
+            1e-12
+        ));
     }
 
     #[test]
@@ -380,7 +406,11 @@ mod tests {
         assert!(close(digamma(r(1.0)), r(-0.577_215_664_901_532_9), 1e-12));
         assert!(close(digamma(r(0.5)), r(-1.963_510_026_021_423_5), 1e-12));
         assert!(close(digamma(r(-0.5)), r(0.036_489_973_978_576_52), 1e-11));
-        assert!(close(digamma(C::new(0.0, 1.0)), C::new(0.094_650_320_622_476_97, 2.076_674_047_468_581), 1e-11));
+        assert!(close(
+            digamma(C::new(0.0, 1.0)),
+            C::new(0.094_650_320_622_476_97, 2.076_674_047_468_581),
+            1e-11
+        ));
     }
 
     #[test]
@@ -390,8 +420,16 @@ mod tests {
         assert!(close(erf(r(3.5)), r(0.999_999_256_901_627_7), 1e-13));
         assert!(close(erf(r(-4.0)), r(-0.999_999_984_582_742_1), 1e-13));
         assert!(close(erfc(r(5.0)), r(1.537_459_794_428_034_8e-12), 1e-10));
-        assert!(close(erf(C::new(1.0, 1.0)), C::new(1.316_151_281_697_947_7, 0.190_453_469_237_834_7), 1e-12));
-        assert!(close(erf(C::new(3.0, 2.0)), C::new(0.998_963_278_856_817_3, -0.000_011_546_724_379_290_6), 1e-11));
+        assert!(close(
+            erf(C::new(1.0, 1.0)),
+            C::new(1.316_151_281_697_947_7, 0.190_453_469_237_834_7),
+            1e-12
+        ));
+        assert!(close(
+            erf(C::new(3.0, 2.0)),
+            C::new(0.998_963_278_856_817_3, -0.000_011_546_724_379_290_6),
+            1e-11
+        ));
     }
 
     #[test]
@@ -410,13 +448,41 @@ mod tests {
     #[test]
     fn bessel() {
         let r = |x: f64| C::new(x, 0.0);
-        assert!(close(bessel_j(r(0.0), r(1.0)), r(0.765_197_686_557_966_6), 1e-13));
-        assert!(close(bessel_j(r(1.0), r(2.5)), r(0.497_094_102_464_274_1), 1e-13));
-        assert!(close(bessel_j(r(0.0), r(10.0)), r(-0.245_935_764_451_348_3), 1e-11));
-        assert!(close(bessel_j(r(0.0), r(30.0)), r(-0.086_367_983_581_040_2), 1e-7));
-        assert!(close(bessel_j(r(0.5), r(1.0)), r((2.0 / PI).sqrt() * 1f64.sin()), 1e-13));
-        assert!(close(bessel_j(r(-1.0), r(2.5)), r(-0.497_094_102_464_274_1), 1e-13));
-        assert!(close(bessel_i(r(0.0), r(1.0)), r(1.266_065_877_752_008_4), 1e-13));
+        assert!(close(
+            bessel_j(r(0.0), r(1.0)),
+            r(0.765_197_686_557_966_6),
+            1e-13
+        ));
+        assert!(close(
+            bessel_j(r(1.0), r(2.5)),
+            r(0.497_094_102_464_274_1),
+            1e-13
+        ));
+        assert!(close(
+            bessel_j(r(0.0), r(10.0)),
+            r(-0.245_935_764_451_348_3),
+            1e-11
+        ));
+        assert!(close(
+            bessel_j(r(0.0), r(30.0)),
+            r(-0.086_367_983_581_040_2),
+            1e-7
+        ));
+        assert!(close(
+            bessel_j(r(0.5), r(1.0)),
+            r((2.0 / PI).sqrt() * 1f64.sin()),
+            1e-13
+        ));
+        assert!(close(
+            bessel_j(r(-1.0), r(2.5)),
+            r(-0.497_094_102_464_274_1),
+            1e-13
+        ));
+        assert!(close(
+            bessel_i(r(0.0), r(1.0)),
+            r(1.266_065_877_752_008_4),
+            1e-13
+        ));
         assert!(close(bessel_j(r(2.0), r(0.0)), r(0.0), 1e-15));
     }
 
