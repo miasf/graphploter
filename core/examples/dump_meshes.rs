@@ -7,6 +7,8 @@
 //! 式の一覧は 1 行 1 式で「名前<TAB>壁(0/1)<TAB>式」。# で始まる行と空行は飛ばす。
 //! 壁の欄には、カンマで区切って設定を足せる: `0,xy=14.4,xz=10,flags=1,ires=40,res=75`
 //! （xy・xz・yz は回転角（度）、flags は plot の flags（1: 再生・ドラッグ中の軽い計算）、ires・res は細かさ）。
+//! `local=1` を付けると、回転だけが変わった依頼（flags のビット 3）として計算し、回す前の形（陰関数）ができたら、
+//! それをその回転で射影したメッシュを書き出す（再生・ドラッグ中に描画側で回して描くものと同じ）。説明の頭に「[回す前]」を付ける。
 //! 出力は 名前.bin（頂点の数 u32・番号の数 u32・頂点座標 f32 × 3・三角形の頂点番号 u32、すべてリトルエンディアン）と、
 //! 全部の式の結果をまとめた meta.tsv（名前・三角形の数・時間 ms・説明 or エラー・破片の数・裏返りの割合 %）。
 //! 破片は、頂点（同じ位置はまとめる）でつながった成分のうち三角形が 12 個以下のもの。裏返りは、同じ向きで 2 つ以上の
@@ -45,7 +47,7 @@ fn main() {
         }
         let mut opts = walls.split(',');
         let walls = opts.next().unwrap_or("0");
-        let (mut rot, mut flags, mut res, mut ires) = ([0.0f64; 10], 0u32, RES, IRES);
+        let (mut rot, mut flags, mut res, mut ires, mut local) = ([0.0f64; 10], 0u32, RES, IRES, false);
         for o in opts {
             let (k, v) = o.split_once('=').unwrap_or_else(|| panic!("設定の形が違う: {o}"));
             let num: f64 = v.parse().unwrap_or_else(|_| panic!("設定の値が違う: {o}"));
@@ -57,6 +59,7 @@ fn main() {
                 "flags" => flags = num as u32,
                 "res" => res = num as u32,
                 "ires" => ires = num as u32,
+                "local" => local = num != 0.0,
                 _ => panic!("知らない設定: {o}"),
             }
         }
@@ -86,8 +89,19 @@ fn main() {
             false,
             1,
             false,
-            flags,
+            flags | if local { 8 } else { 0 },
         );
+        let mut tag = "";
+        let r = match r {
+            Ok(mut r) if local => match r.take_shape() {
+                Some(shape) => {
+                    tag = "[回す前]";
+                    shape.project(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5], 0.0).map_err(|_| ())
+                }
+                None => Ok(r),
+            },
+            r => r.map_err(|_| ()),
+        };
         let ms = t.elapsed().as_secs_f64() * 1e3;
         match r {
             Ok(r) => {
@@ -116,7 +130,7 @@ fn main() {
                     f.write_all(&v.to_le_bytes()).unwrap();
                 }
                 let (fragments, flipped) = topology(&p, &ix);
-                writeln!(meta, "{name}\t{}\t{ms:.0}\t{}\t{fragments}\t{flipped:.2}", ix.len() / 3, r.kind()).unwrap();
+                writeln!(meta, "{name}\t{}\t{ms:.0}\t{tag}{}\t{fragments}\t{flipped:.2}", ix.len() / 3, r.kind()).unwrap();
             }
             Err(_) => writeln!(meta, "{name}\t0\t{ms:.0}\tエラー").unwrap(),
         }
