@@ -257,26 +257,38 @@ struct Solved {
     axis: usize,
     /// 残り 2 つの座標（軸の順）の式
     g: Program,
-    /// v の係数の符号（F の勾配の v の成分の符号。面の表の向きをそろえる）
+    /// v の係数 a（残り 2 つの座標の式）
+    a: Program,
+    /// a の符号（F の勾配の v の成分の符号。面の表の向きをそろえる）。範囲の中で符号が変わるかもしれないなら 0
+    /// （そのときは格子のマスごとに、4 つの角の a の符号がそろうマスだけを描く）
     sign: f64,
 }
 
 /// 部品 `sub` = 0 を、どれかの座標 v について解いた陽関数 v = g にできるなら、その式。
-/// `sub` が v について 1 次（a v + b）で、範囲 `bbox` の中で a が 0 にならない（区間演算で確かめる）ものだけ。
-/// このとき陰関数定理の条件 ∂F/∂v = a ≠ 0 が範囲全体で成り立ち、範囲の中の面は v = −b/a の 1 枚だけ。縦（z）を先に試す
+/// `sub` が v について 1 次（a v + b）なら、a ≠ 0 の所では陰関数定理の条件 ∂F/∂v = a ≠ 0 が成り立ち、面は v = −b/a の 1 枚。
+/// 範囲 `bbox` の中で a が 0 にならない（区間演算で確かめる）座標を先に選ぶ（縦 z から）。どの座標でも a が 0 になるかもしれなければ、
+/// 最初に 1 次になった座標で、a ≠ 0 のマスだけを描く（mod(x y z, 4) = 2 の枝 x y z − 4τ − 2 は z について 1 次で、a = x y は
+/// x = 0・y = 0 でだけ 0）
 fn solve_linear(sub: &Program, bbox: Domain) -> Option<Solved> {
     use crate::interval::{Interval, Range};
-    let found = [2, 0, 1].into_iter().find_map(|v| {
-        let (g, a) = sub.solved_for(v)?;
+    let mut varying: Option<Solved> = None;
+    for v in [2, 0, 1] {
+        let Some((g, a)) = sub.solved_for(v) else { continue };
         let (ua, va) = others(v);
         let boxes = [ua, va].map(|k| Interval::new(bbox.lo[k], bbox.hi[k]));
-        match a.eval_interval(&boxes) {
-            Range::Known(i) if i.lo > 0.0 => Some((v, g, 1.0)),
-            Range::Known(i) if i.hi < 0.0 => Some((v, g, -1.0)),
-            _ => None,
+        let sign = match a.eval_interval(&boxes) {
+            Range::Known(i) if i.lo > 0.0 => 1.0,
+            Range::Known(i) if i.hi < 0.0 => -1.0,
+            _ => 0.0,
+        };
+        if sign != 0.0 {
+            return Some(Solved { axis: v, g, a, sign });
         }
-    });
-    found.map(|(axis, g, sign)| Solved { axis, g, sign })
+        if varying.is_none() && !a.is_constant() {
+            varying = Some(Solved { axis: v, g, a, sign });
+        }
+    }
+    varying
 }
 
 /// 薄い枝の陽関数の面 v = g を、範囲 `bbox` の中で、枝の条件 `conds` が成り立つかもしれないマスだけ三角形にする。
@@ -423,6 +435,25 @@ fn thin_graph(sv: &Solved, conds: &[Cond], bbox: Domain, dom: Domain, n: usize, 
     let Some((fh, fs)) = eval_nodes(&nodes) else { return Mesh::default() };
     let h = |l: usize| fh[nid[&l]];
     let side = |q: usize, l: usize| fs[q][nid[&l]];
+    // a の符号が範囲の中で変わるかもしれないなら、格子点ごとの a の符号（0 に近すぎる点は 0）
+    let asign: Vec<f64> = if sv.sign != 0.0 {
+        Vec::new()
+    } else {
+        let (us, vs): (Vec<f64>, Vec<f64>) = nodes.iter().map(|&l| uv(l)).unzip();
+        let mut out = vec![C::new(0.0, 0.0); nodes.len()];
+        sv.a.eval_batch(&[&us, &vs], &mut out);
+        let vals: Vec<f64> = out.iter().map(|&c| as_real(c)).collect();
+        let big = vals.iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+        vals.iter().map(|&v| if v.is_finite() && v.abs() > 1e-9 * big { v.signum() } else { 0.0 }).collect()
+    };
+    // マスの a の符号（4 つの角でそろわなければ 0 で、そのマスは描かない。面がそこで v の向きに立つ・極になる）
+    let cell_sign = |c: [usize; 4]| -> f64 {
+        if sv.sign != 0.0 {
+            return sv.sign;
+        }
+        let s0 = asign[nid[&c[0]]];
+        if s0 != 0.0 && c.iter().all(|&l| asign[nid[&l]] == s0) { s0 } else { 0.0 }
+    };
     let point = |l: usize| {
         let (u, v) = uv(l);
         let mut p = [0.0; 3];
@@ -436,12 +467,12 @@ fn thin_graph(sv: &Solved, conds: &[Cond], bbox: Domain, dom: Domain, n: usize, 
     let mut mesh = Mesh::default();
     let mut index: crate::adaptive::HashMap<usize, u32> = Default::default();
     // 法線: 面 F = a (v − g) = 0 の勾配の向き sign(a) (e_v − ∇g)。∇g は、そのマスの角の差分
-    let mut vert = |mesh: &mut Mesh, l: usize, gu: f64, gv: f64| -> u32 {
+    let mut vert = |mesh: &mut Mesh, l: usize, gu: f64, gv: f64, sign: f64| -> u32 {
         *index.entry(l).or_insert_with(|| {
             let mut nr = [0.0; 3];
-            nr[ua] = -gu * sv.sign;
-            nr[va] = -gv * sv.sign;
-            nr[axis] = sv.sign;
+            nr[ua] = -gu * sign;
+            nr[va] = -gv * sign;
+            nr[axis] = sign;
             let len = (nr[0] * nr[0] + nr[1] * nr[1] + nr[2] * nr[2]).sqrt();
             let k = mesh.push_vertex(point(l));
             mesh.normals.extend(nr.map(|c| (c / len) as f32));
@@ -449,15 +480,17 @@ fn thin_graph(sv: &Solved, conds: &[Cond], bbox: Domain, dom: Domain, n: usize, 
         })
     };
     // 三角形の向き: (ua, va, axis) が右手系なら、u→v の向きに回すと +axis の向き
-    let flip = (((ua + 1) % 3 == va) as i8 * 2 - 1) as f64 * sv.sign < 0.0;
+    let right = ((ua + 1) % 3 == va) as i8 * 2 - 1;
     for &(i, j) in &fine_cells {
         let c = corners(i, j);
-        if !may_have(c, &h, &side, nc) {
+        let sign = cell_sign(c);
+        if sign == 0.0 || !may_have(c, &h, &side, nc) {
             continue;
         }
+        let flip = right as f64 * sign < 0.0;
         let gu = 0.5 * ((h(c[1]) - h(c[0])) + (h(c[3]) - h(c[2]))) / du;
         let gv = 0.5 * ((h(c[2]) - h(c[0])) + (h(c[3]) - h(c[1]))) / dv;
-        let k = c.map(|l| vert(&mut mesh, l, gu, gv));
+        let k = c.map(|l| vert(&mut mesh, l, gu, gv, sign));
         for t in [[k[0], k[1], k[3]], [k[0], k[3], k[2]]] {
             mesh.indices.extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
         }

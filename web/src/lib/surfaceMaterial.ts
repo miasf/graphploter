@@ -30,6 +30,11 @@ export interface GridUniforms {
   uHeatRange: { value: THREE.Vector2 }
   /** 1 なら裏面を暗くしない（2D 表示では面の表裏に意味が無い） */
   uNoBackShade: { value: number }
+  /**
+   * 1 なら格子線を、格子用の座標に 3D オブジェクトの行列を掛けた位置（表示中の座標）で引く。
+   * 回す前の形で作った陰関数は、オブジェクトを回して描くので、そのままでは格子線も一緒に回ってしまう
+   */
+  uGridWorld: { value: number }
 }
 
 export function createGridUniforms(pixelScale: { value: number } = { value: 1 }): GridUniforms {
@@ -44,6 +49,7 @@ export function createGridUniforms(pixelScale: { value: number } = { value: 1 })
     uHeat: { value: 0 },
     uHeatRange: { value: new THREE.Vector2(-1, 1) },
     uNoBackShade: { value: 0 },
+    uGridWorld: { value: 0 },
   }
 }
 
@@ -121,9 +127,12 @@ export function createSurfaceMaterial(grid: GridUniforms, clippingPlanes: THREE.
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
-        '#include <common>\nattribute vec3 gridCoord;\nattribute vec3 complexValue;\nvarying vec3 vGridPos;\nvarying vec3 vComplex;',
+        '#include <common>\nattribute vec3 gridCoord;\nattribute vec3 complexValue;\nvarying vec3 vGridPos;\nvarying vec3 vComplex;\nuniform float uGridWorld;',
       )
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGridPos = gridCoord;\nvComplex = complexValue;')
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\nvGridPos = uGridWorld > 0.5 ? (modelMatrix * vec4(gridCoord, 1.0)).xyz : gridCoord;\nvComplex = complexValue;',
+      )
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)
       .replace('#include <color_fragment>', '#include <color_fragment>\n' + FRAGMENT_APPLY)

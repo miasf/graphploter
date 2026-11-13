@@ -77,9 +77,9 @@ fn reprojected_surface_matches_the_rotation() {
         let ix = m.indices();
         let ours = ix.chunks_exact(3).filter(|t| t.iter().all(|&k| inside(&pos[k as usize * 3..k as usize * 3 + 3]))).count();
         if xy != 0.0 {
-            // 回した道の格子の間隔は、表示範囲の一番狭い座標（z）に合わせるので、x・y の向きには細かい
+            // 回す前の形は、マスの数を表示範囲と同じにして、表示範囲より広い立方体に作る（マスが 1.5〜2.5 倍大きい）ので、三角形は少ない
             let ratio = ours as f64 / direct as f64;
-            assert!((0.5..4.0).contains(&ratio), "{xy}, {xz}: 三角形の数が {ours}（式から作ると {direct}）");
+            assert!((0.15..1.5).contains(&ratio), "{xy}, {xz}: 三角形の数が {ours}（式から作ると {direct}）");
         }
         // 切り口のふたも、その回転のもの（ふたの点は球の中）
         let caps = m.take_field().expect("ふたの元が無い");
@@ -176,6 +176,93 @@ fn timing_report() {
             }
             let old = t.elapsed().as_secs_f64() * 1e3 / 3.0;
             println!("| `{src}` | {ires}{} | {build:.0} | {reuse:.1} | {old:.0} |", if flags == 1 { "（再生中）" } else { "" });
+        }
+    }
+}
+
+/// 法線のずれ（`cargo test --release --test rotated_implicit normal_report -- --ignored --nocapture`）:
+/// 頂点の法線と、本当の面の向き（式の勾配を細かい刻みで求めたもの）の角度（度）。止まったとき（80）と再生中（24）
+#[test]
+#[ignore]
+fn normal_report() {
+    let cases = [
+        "x^2 + y^2 + z^2 = 25",
+        "(sqrt(x^2 + y^2) - 6)^2 + z^2 = 4",
+        "sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x) = 0",
+        "cos(x) + cos(y) + cos(z) = 0",
+        "((x/4)^2 + 9/4 (y/4)^2 + (z/4)^2 - 1)^3 - (x/4)^2 (z/4)^3 - 9/80 (y/4)^2 (z/4)^3 = 0",
+        "(x/4)^2 (y/4)^2 + (y/4)^2 (z/4)^2 + (z/4)^2 (x/4)^2 - (x/4) (y/4) (z/4) = 0",
+        "x^2 + y^2 = z^2",
+        "abs(x) + abs(y) + abs(z) = 6",
+        "x^8 + y^8 + z^8 = 5^8",
+    ];
+    println!("| 式 | 細かさ | 平均 ° | 95% ° | 最大 ° |");
+    println!("|---|---|---|---|---|");
+    for src in cases {
+        let prog = rotated_prog_none(src);
+        for (ires, flags) in [(80u32, 0u32), (24, 1)] {
+            let r = plot(
+                src, &DOMAIN, 150, ires, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+                &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, flags,
+            )
+            .unwrap_or_else(|_| panic!("{src}"));
+            let (pos, nrm) = (r.positions(), r.normals());
+            let mut errs: Vec<f64> = Vec::new();
+            let h = 1e-5;
+            for (p, n) in pos.chunks_exact(3).zip(nrm.chunks_exact(3)) {
+                if !inside(p) {
+                    continue;
+                }
+                let at = |d: [f64; 3]| {
+                    let mut o = [C::new(0.0, 0.0)];
+                    prog.eval_batch(&[&[p[0] as f64 + d[0]], &[p[1] as f64 + d[1]], &[p[2] as f64 + d[2]]], &mut o);
+                    o[0].re
+                };
+                let g = [0, 1, 2].map(|a| {
+                    let mut e = [0.0; 3];
+                    e[a] = h;
+                    (at(e) - at(e.map(|v| -v))) / (2.0 * h)
+                });
+                let len = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+                if !(len.is_finite() && len > 1e-9) {
+                    continue;
+                }
+                let d = ((g[0] * n[0] as f64 + g[1] * n[1] as f64 + g[2] * n[2] as f64) / len).abs().min(1.0);
+                errs.push(d.acos().to_degrees());
+            }
+            errs.sort_by(|a, b| a.total_cmp(b));
+            let mean = errs.iter().sum::<f64>() / errs.len().max(1) as f64;
+            let p95 = errs.get(errs.len() * 95 / 100).copied().unwrap_or(0.0);
+            let max = errs.last().copied().unwrap_or(0.0);
+            println!("| `{src}` | {ires} | {mean:.2} | {p95:.2} | {max:.1} |");
+        }
+    }
+}
+
+/// 回さない、表示中の座標の F
+fn rotated_prog_none(src: &str) -> eval::Program {
+    rotated_prog(src, &[0.0; 10])
+}
+
+#[test]
+fn transform_matches_projection() {
+    // 回す前のメッシュに 1 次式を掛けたもの（描画側で 3D オブジェクトを回す）が、射影し直したメッシュと同じ
+    let src = "(x - 6)^2 + y^2 + (z - 2)^2 = 25";
+    let mut r = mesh(src, &angles(0.4, 0.2), 40, true);
+    let shape = r.take_shape().unwrap();
+    assert!(shape.rigid());
+    let local = shape.local_mesh().unwrap().positions();
+    for (xy, xz) in [(0.4, 0.2), (1.7, -0.6)] {
+        let rot = angles(xy, xz);
+        let t = shape.transform(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5]).unwrap().transform();
+        assert_eq!(t.len(), 12);
+        let projected = shape.project(&DOMAIN, 3, &[0, 1, 2], &rot, &[0.0; 5], 0.0).unwrap().positions();
+        assert_eq!(local.len(), projected.len());
+        for (p, q) in local.chunks_exact(3).zip(projected.chunks_exact(3)) {
+            for a in 0..3 {
+                let v = t[4 * a] * p[0] as f64 + t[4 * a + 1] * p[1] as f64 + t[4 * a + 2] * p[2] as f64 + t[4 * a + 3];
+                assert!((v - q[a] as f64).abs() < 1e-3, "{xy}, {xz}: {v} と {}", q[a]);
+            }
         }
     }
 }

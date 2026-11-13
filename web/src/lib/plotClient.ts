@@ -119,17 +119,22 @@ function send<T>(worker: number, req: PlotRequest): Promise<T> {
 const lastInputs = new Map<number, string>()
 
 /**
- * 回転だけが変わった依頼（前の依頼と、回転・切り口以外が同じ）なら、陰関数を回す前の形で作る印（PLOT_LOCAL）を付ける。
- * 回し始めの 1 回は今までの道で描き、2 回目に回す前の形を作って、その後は回すだけで描く。
+ * 回転だけが変わった、細かく作る依頼（前の依頼と、回転・切り口以外が同じ）なら、陰関数を回す前の形で作る印（PLOT_LOCAL）を付ける。
+ * 回して止めたときに回す前の形を作り、次に回すときは回すだけで描く。
  * スライダー・式が変わったときは今までの道（回す前の形は表示範囲より広いので、作るのが数倍遅い）。
  * F の計算を分けるときは、全部の Worker が同じ印で計算する必要があるので、ここで決める
  */
 function markRotationOnly(req: PlotRequest) {
   const { requestId: _r, cut: _c, field: _f, space, ...rest } = req
   const { rotation: _rot, ...spaceRest } = space
-  // 細かさ・細かくしない印は、使い回す側（Worker）が見るので比べない（再生中に細かさが変わっても、回す前の形を作り直さない）
-  const inputs = JSON.stringify({ ...rest, implicitResolution: 0, flags: rest.flags & ~PLOT_NO_REFINE, space: spaceRest })
-  if (lastInputs.get(req.itemId) === inputs && space.rotation.some((a) => a !== 0)) req.flags |= PLOT_LOCAL
+  // 細かさ（陽関数・陰関数とも）・細かくしない印は、使い回す側（Worker）が見るので比べない（再生中・2 段階の表示で細かさが変わっても、
+  // 回転だけが変わったとみなす）
+  const inputs = JSON.stringify({ ...rest, resolution: 0, implicitResolution: 0, flags: rest.flags & ~PLOT_NO_REFINE, space: spaceRest })
+  // 再生・ドラッグ中（PLOT_NO_REFINE）は作らない。回す前の形は表示範囲より広く細かく作るので、再生中の軽い計算の 8 倍ほどかかり、
+  // 回し始めの 1 コマがカクッと止まる。回し始めは今までどおり軽く作り直し、止まったとき（細かく作る依頼）に作っておけば、
+  // 次に回すときは Worker が覚えた形を回すだけで描ける（細かさが違っても、再生中なら使い回す）
+  const moving = (req.flags & PLOT_NO_REFINE) !== 0
+  if (lastInputs.get(req.itemId) === inputs && space.rotation.some((a) => a !== 0) && !moving) req.flags |= PLOT_LOCAL
   lastInputs.set(req.itemId, inputs)
 }
 
