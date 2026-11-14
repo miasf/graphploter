@@ -13,7 +13,7 @@
   import RotationPanel from './lib/RotationPanel.svelte'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
-  import { lastBreakdown } from './lib/timings'
+  import { lastBreakdown, recordBreakdown } from './lib/timings'
   import { Budget } from './lib/budget'
   import type {
     ComplexMode,
@@ -126,6 +126,13 @@
   onMount(() => {
     viewer = new Viewer(viewerEl)
     viewer.setMotionMode(motionMode)
+    if (BENCH) {
+      // ベンチマーク: 保存した状態は読まず、自動保存もしない（loaded を false のままにする）
+      viewer.setDark(dark)
+      viewer.setPerspective(perspective / 100)
+      startBench(viewer)
+      return () => viewer?.dispose()
+    }
     ;(async () => {
       // 共有リンクで開いた、またはブラウザに保存してあるなら、その状態に戻す
       const saved = await loadInitial()
@@ -389,8 +396,11 @@
   // （スライダーを動かし続けても、依頼が溜まって遅れないように）
   const running = new Set<number>()
   const again = new Set<number>()
+  /** 最後に計算を頼んだ・計算が終わった時刻（ベンチマークが、計算が全部終わるのを待つのに使う） */
+  let lastPlotActivity = 0
 
   function schedule(item: PlotItem, delay = 200) {
+    lastPlotActivity = performance.now()
     clearTimeout(timers.get(item.id))
     timers.set(item.id, setTimeout(() => replot(item), delay))
   }
@@ -456,10 +466,12 @@
       return
     }
     running.add(item.id)
+    lastPlotActivity = performance.now()
     try {
       await replotNow(item, full)
     } finally {
       running.delete(item.id)
+      lastPlotActivity = performance.now()
       // 粗い版の計算中に新しい依頼が来ていたら、細かい計算はせずに、新しい依頼を（必要なら2段階で）計算する
       if (again.delete(item.id) && items.includes(item)) replot(item)
       else if (fineNext.delete(item.id) && items.includes(item)) replot(item, true)
@@ -722,7 +734,7 @@
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
     viewer.setPlotTransform(item.id, res.mesh.transform)
     viewer.setCap(item.id, res.cap, item)
-    lastBreakdown.set(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source })
+    recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
     const plain = space.axes.every((a, k) => a === k) && space.rotation.every((a) => a === 0)
     const size = /^複素平面の点/.test(res.kind) && plain
@@ -1296,6 +1308,54 @@
     requestAnimationFrame(playFrame)
   }
 
+  // ---- ベンチマーク（?bench=1。計画 S0 の 6。lib/bench.ts） ----
+
+  const BENCH = new URLSearchParams(location.search).get('bench') === '1'
+  /** ベンチマークの進み具合と結果（画面の左上に出す） */
+  let benchText = $state('')
+
+  /** 計算が全部終わり、0.6 秒たっても次の依頼が無くなるまで待つ */
+  async function benchIdle() {
+    const until = performance.now() + 180_000
+    while (performance.now() < until) {
+      await new Promise((r) => setTimeout(r, 100))
+      const busy = running.size > 0 || again.size > 0 || fineNext.size > 0 || animating
+      if (!busy && performance.now() - lastPlotActivity > 600) return
+    }
+  }
+
+  async function startBench(v: Viewer) {
+    const { runBench } = await import('./lib/bench')
+    await runBench(
+      {
+        viewer: v,
+        idle: benchIdle,
+        play(k) {
+          playing[GLOBAL_GROUP] = k === null ? [] : [k]
+          animationChanged()
+        },
+        async load(c) {
+          for (const key of Object.keys(playing)) playing[Number(key)] = []
+          playingParams = []
+          playingSlices = []
+          animationChanged()
+          for (const it of [...items]) removeItem(it)
+          folders = []
+          resolution = c.res ?? 150
+          implicitResolution = c.ires ?? 80
+          items.push(newItem(''))
+          await addSample({
+            label: c.label,
+            items: c.items,
+            view: { dims: c.dims, half: c.half, rotation: c.rotation, perspective: c.perspective },
+          })
+          await benchIdle()
+        },
+      },
+      (text) => (benchText = text),
+    )
+  }
+
   // ---- 例の読み込み ----
 
   /** サンプルを一覧の最後に追加する（今ある式は消さない） */
@@ -1576,6 +1636,9 @@
   </aside>
 
   <main class="viewer" bind:this={viewerEl}></main>
+  {#if BENCH}
+    <pre class="bench-report">{benchText}</pre>
+  {/if}
 
   <!-- 設定: ボタンで項目の一覧を出し、選んだ項目だけを表示する（下までスクロールしなくてよいように） -->
   <div
@@ -2536,5 +2599,24 @@
       border-radius: 3px;
       background: var(--border-strong);
     }
+  }
+  /* ベンチマーク（?bench=1）の結果。左上に重ねる */
+  .bench-report {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 1000;
+    max-width: min(900px, calc(100vw - 16px));
+    max-height: 45vh;
+    overflow: auto;
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.35;
+    background: rgba(255, 255, 255, 0.92);
+    color: #1f1f24;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    white-space: pre;
   }
 </style>
