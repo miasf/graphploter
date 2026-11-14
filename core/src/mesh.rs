@@ -5,6 +5,7 @@ use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
 mod pieces;
+mod singular;
 pub use pieces::in_inscribed_ball;
 
 /// 表示範囲（直方体）。添字 0, 1, 2 が x, y, z。
@@ -2079,7 +2080,10 @@ pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64,
     }
     let mut mesh = mesh.unwrap_or_else(|| implicit_solid_with(prog, dom, n, ranges, samples, false, refine));
     if ranges.is_empty() && refine != Refine::Off {
-        let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min) * 1e-3;
+        let cell = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
+        // 面が自分と交わる線・尖った点を、X の字・円錐の先のまま描く（singular.rs）
+        singular::sharpen_singularities(&mut mesh, prog, cell);
+        let h = cell * 1e-3;
         gradient_normals(&mut mesh, prog, h);
         if let Some(l) = mesh.lod_mesh.as_deref_mut() {
             gradient_normals(l, prog, h);
