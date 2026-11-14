@@ -570,7 +570,10 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         return Err(format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")));
     }
     let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
-    Ok(Plot::Implicit { prog: Program::compile_with(&f, &shown_refs, &consts)?, from, local })
+    let prog = Program::compile_with(&f, &shown_refs, &consts)?;
+    // 線・点だけの解として描く式は、回す前の形（面のメッシュを 3D オブジェクトとして回す）を使わない
+    let local = local.filter(|_| prog.common_zero_sets().is_none());
+    Ok(Plot::Implicit { prog, from, local })
 }
 
 /// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）

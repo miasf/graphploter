@@ -151,6 +151,85 @@ impl Program {
         (ids.into_iter().map(|i| self.sub_program(i)).collect(), true)
     }
 
+    /// 実数の定数の命令なら、その値
+    fn real_const(&self, i: usize) -> Option<f64> {
+        match self.code.ops[i] {
+            Op::Const(c) if c.im == 0.0 => Some(c.re),
+            _ => None,
+        }
+    }
+
+    /// 命令 i が、実数ならいつも 0 以上で、0 になるのが「ある式 A = 0」の所だけの形（A^(偶数)・|A|・A·A）なら、その A
+    fn nonneg_base(&self, i: usize) -> Option<usize> {
+        match &self.code.ops[i] {
+            Op::Call1(Func::Abs, a) => Some(*a),
+            Op::Bin(BinOp::Mul, a, b) if a == b => Some(*a),
+            Op::Bin(BinOp::Pow, a, e) => {
+                let e = self.real_const(*e)?;
+                (e > 0.0 && e % 2.0 == 0.0).then_some(*a)
+            }
+            _ => None,
+        }
+    }
+
+    /// 命令 i を、符号 `sign` を付けた項の和に分けて、どの項も 0 以上の形（[`Program::nonneg_base`]）なら、
+    /// (項の A, 符号) を `out` に足す。0 以上の形でない項・0 でない定数の項があれば false
+    fn nonneg_terms(&self, i: usize, sign: f64, out: &mut Vec<(usize, f64)>) -> bool {
+        match &self.code.ops[i] {
+            Op::Bin(BinOp::Add, a, b) => self.nonneg_terms(*a, sign, out) && self.nonneg_terms(*b, sign, out),
+            Op::Bin(BinOp::Sub, a, b) => self.nonneg_terms(*a, sign, out) && self.nonneg_terms(*b, -sign, out),
+            Op::Neg(a) => self.nonneg_terms(*a, -sign, out),
+            Op::Const(c) => c.re == 0.0 && c.im == 0.0,
+            Op::Bin(BinOp::Mul, a, b) if self.real_const(*a).is_some_and(|c| c != 0.0) => {
+                self.nonneg_terms(*b, sign * self.real_const(*a).unwrap().signum(), out)
+            }
+            Op::Bin(BinOp::Mul, a, b) if self.real_const(*b).is_some_and(|c| c != 0.0) => {
+                self.nonneg_terms(*a, sign * self.real_const(*b).unwrap().signum(), out)
+            }
+            Op::Bin(BinOp::Div, a, b) if self.real_const(*b).is_some_and(|c| c != 0.0) => {
+                self.nonneg_terms(*a, sign * self.real_const(*b).unwrap().signum(), out)
+            }
+            _ => match self.nonneg_base(i) {
+                Some(base) => {
+                    out.push((base, sign));
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
+    /// F = 0 の解が面にならず、いくつかの式が同時に 0 になる所（線・点）だけになる形なら、因数ごとに、同時に 0 になる式の組。
+    ///
+    /// 因数（[`Program::zero_factors`]）のどれもが「0 以上の項の和」（$A^2 + B^2$・$|A| + |B|$・$-A^4 - 3B^2$ など。符号は全部の項で同じ）で、
+    /// 項の A が 2 つ以上あるとき。$A^2 + B^2 = 0 \iff A = B = 0$ なので、式が 3 つの座標で 2 つなら線、3 つ以上なら点になる。
+    /// 実数だけで計算できない式（0 以上と言えない）、面になる因数が混ざる式（`(x^2 + y^2)(z - 1) = 0`）は None
+    pub fn common_zero_sets(&self) -> Option<Vec<Vec<Program>>> {
+        if !self.code.real {
+            return None;
+        }
+        let (factors, _) = self.zero_factors();
+        let mut out = Vec::new();
+        for f in factors.iter().filter(|f| !f.is_constant()) {
+            let mut terms = Vec::new();
+            if !f.nonneg_terms(f.code.outs[0], 1.0, &mut terms) || terms.iter().any(|t| t.1 != terms[0].1) {
+                return None;
+            }
+            let mut bases: Vec<usize> = Vec::new();
+            for (b, _) in terms {
+                if !bases.contains(&b) {
+                    bases.push(b);
+                }
+            }
+            let parts: Vec<Program> = bases.into_iter().map(|b| f.sub_program(b)).filter(|p| !p.is_constant()).collect();
+            if parts.len() < 2 {
+                return None;
+            }
+            out.push(parts);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// F を分数 N/D の形に直す（通分）。F = 0 は「N = 0 で、D ≠ 0」と同じで、N には D の極（符号は変わるが零点でない所）が無い。
     /// `tan` → `sin/cos`、`cot` → `cos/sin`、`sec`・`csc` → `1/cos`・`1/sin`、割り算と負のべきは分母へ、和・差は通分する。
     /// それ以外の関数は、引数の中に割り算があっても、そのまま 1 つの項として扱う。

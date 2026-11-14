@@ -136,7 +136,8 @@ function looksLikeDefinition(source: string): boolean {
  * 陰関数として計算し直したもの（「陰関数（… を回したもの）」）なら3乗
  */
 function costOf(kind: string, curve: boolean, flat: boolean): Cost {
-  if (!flat && !curve && /^(陰関数|範囲で重ねた立体)/.test(kind)) return 'volume'
+  // 陰関数の線・点だけの解（`陰関数（線だけの解）`）は曲線だが、陰関数の面を作ってから線を取り出すので、時間は細かさの 3 乗
+  if (!flat && (/^陰関数/.test(kind) || (!curve && /^範囲で重ねた立体/.test(kind)))) return 'volume'
   if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
   return 'surface'
 }

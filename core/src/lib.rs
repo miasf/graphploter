@@ -18,6 +18,7 @@ pub mod interval;
 pub mod mesh;
 pub mod parser;
 pub mod special;
+pub mod system;
 pub mod timing;
 
 use wasm_bindgen::prelude::*;
@@ -705,6 +706,14 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             mesh::add_cluster_lod(&mut m);
             let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
             b.local = Some((local, lp.used_params().to_vec()));
+        }
+        // 面にならず、線・点だけになる式（A² + B² = 0 は A = B = 0 の線）: 交わる線・点として描く
+        P::Implicit { prog, .. } if prog.common_zero_sets().is_some() => {
+            let sets = prog.common_zero_sets().unwrap_or_default();
+            let (m, kind) = system::common_zero_sets(&sets, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            b.inner = m;
+            b.kind = kind;
+            b.curve = true;
         }
         P::Implicit { prog, .. } => {
             b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
