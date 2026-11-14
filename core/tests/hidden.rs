@@ -6,11 +6,16 @@ const R: f64 = 3.0;
 
 /// `dims` 次元で x, y, z を表示（断面の値は全部 0）。`style` を [`hidden_style`] で渡してから描く
 fn run(src: &str, dims: u32, style: &[f64]) -> Result<MeshResult, ()> {
+    run_stacked(src, dims, style, &vec![f64::NAN; 2 * dims as usize])
+}
+
+/// [`run`] で、次元の設定の「範囲で重ねる」（座標ごとの [最小, 最大]。重ねない座標は NaN）を付ける版
+fn run_stacked(src: &str, dims: u32, style: &[f64], coord_ranges: &[f64]) -> Result<MeshResult, ()> {
     let n = dims as usize;
     let rd = equation::rot_dims(n);
     hidden_style(style.to_vec());
     plot(
-        src, &[-R, R, -R, R, -R, R], 48, 40, "", &[], "", &[], "", dims, &[0, 1, 2], &vec![0.0; n], &vec![f64::NAN; 2 * n], "",
+        src, &[-R, R, -R, R, -R, R], 48, 40, "", &[], "", &[], "", dims, &[0, 1, 2], &vec![0.0; n], coord_ranges, "",
         &[], 16, &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, false, 1, false, 0,
     )
     .map_err(|_| ())
@@ -87,4 +92,30 @@ fn volume_values() {
     // 呼ぶのは 1 回だけ: 次の plot はふつうの断面
     let m = run("w = x y z", 4, &[]).unwrap();
     assert_eq!(m.volume_n(), 0);
+}
+
+#[test]
+fn own_style_wins_over_global_stack() {
+    // 次元の設定で w を「範囲で重ねる」（0 〜 2）にしていても、式の見せ方が断面以外なら、式の設定を使う
+    let stack = [f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0, 2.0];
+    let m = run_stacked("w = x^2 + y^2 + z^2", 4, &[], &stack).unwrap();
+    assert_eq!(m.kind(), "範囲で重ねた立体");
+    let m = run_stacked("w = x^2 + y^2 + z^2", 4, &style(1.0, 5.0, 4, &[(3, 1.0, 5.0)]), &stack).unwrap();
+    assert_eq!(m.kind(), "陰関数（w の値ごとに 5 枚）");
+}
+
+#[test]
+fn stacked_by_own_range() {
+    // 式ごとの「範囲で重ねる」: 1 ≤ w ≤ 4 なら、1 ≤ x² + y² + z² ≤ 4 の殻（境界は半径 1 と 2 の球）
+    let m = run("w = x^2 + y^2 + z^2", 4, &style(4.0, 5.0, 4, &[(3, 1.0, 4.0)])).unwrap();
+    assert_eq!(m.kind(), "範囲で重ねた立体");
+    let p = m.positions();
+    assert!(!p.is_empty());
+    for q in p.chunks_exact(3) {
+        let r = ((q[0] * q[0] + q[1] * q[1] + q[2] * q[2]) as f64).sqrt();
+        assert!((r - 1.0).abs() < 0.1 || (r - 2.0).abs() < 0.1, "{r}");
+    }
+    // 範囲が 1 点なら断面
+    let m = run("w = x^2 + y^2 + z^2", 4, &style(4.0, 5.0, 4, &[(3, 1.0, 1.0)])).unwrap();
+    assert_eq!(m.kind(), "陰関数");
 }

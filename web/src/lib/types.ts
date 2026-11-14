@@ -35,11 +35,13 @@ export interface GridStyle {
  */
 /**
  * 表示していない座標（w 以降）を使う式の見せ方。slice: 断面（スライダーの値 1 つ）、layers: 等値面を何枚も（範囲を等分した値ごとの図形を重ね、値で色を付ける）、
- * planes: 断面の塗り分け（表示範囲の中の平面を w = f の値で塗る）、volume: 伝達関数（値に色と不透明度を割り当てて重ね塗りする）
+ * planes: 断面の塗り分け（表示範囲の中の平面を w = f の値で塗る）、volume: 伝達関数（値に色と不透明度を割り当てて重ね塗りする）、
+ * stack: 範囲で重ねる（範囲で動かしたとき通る領域を立体で描く。次元の設定の「範囲で重ねる」を、この式だけの範囲で使う）。
+ * slice 以外では、次元の設定の「範囲で重ねる」より、式の設定を優先する
  */
-export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume'
+export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume' | 'stack'
 /** 計算エンジンに渡す HiddenMode の番号の順 */
-export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume']
+export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume', 'stack']
 /** 値の色の対応表。shade は式の色の明暗 */
 export type ColorMap = 'viridis' | 'turbo' | 'shade'
 /** 伝達関数の不透明度の形。flat: 一様、high: 値が大きいほど濃い、low: 小さいほど濃い、bands: 何枚かの値の所だけ濃い（等値面風） */

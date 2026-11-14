@@ -2244,9 +2244,11 @@
     cursor: pointer;
     box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
   }
+  /* 開いているとき: 塗りつぶす（式の ⚙ と同じ見せ方） */
   .settings-toggle.on {
-    border-color: #2d70b3;
-    color: #2d70b3;
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
   }
   .settings-card {
     position: absolute;

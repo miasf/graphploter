@@ -522,7 +522,8 @@ thread_local! {
 /// `values` = [見せ方, 枚数, 座標 0 の範囲の最小, 最大, 座標 1 の …]（範囲は全部の座標の分。表示していない座標の分だけ使う。
 /// NaN なら断面の値だけ）。見せ方は 0: 断面（今まで）、1: 等値面を何枚も（範囲を `枚数` 等分した値ごとの図形を重ね、値で色を付ける）、
 /// 2: 断面の塗り分け（各軸に `枚数` 枚の平面を、値で塗る）、3: 伝達関数（格子での値を返す。描画側で光線を進めて塗る）。
-/// 2・3 は「表示していない座標 = 式」の形のときだけ
+/// 4: 範囲で重ねる（式ごとの範囲で、通る領域を描く）。2・3 は「表示していない座標 = 式」の形のときだけ。
+/// 断面以外では、式が使っている表示していない座標について、次元の設定の「範囲で重ねる」より、この見せ方を優先する
 #[wasm_bindgen]
 pub fn hidden_style(values: Vec<f64>) {
     HIDDEN_STYLE.with(|h| *h.borrow_mut() = values);
@@ -545,12 +546,32 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
         }
     };
     let dom = ctx.dom;
+    // 式が使っている、表示していない座標
+    let used = plot.used_params();
+    let hidden: Vec<usize> =
+        (0..space.dims).filter(|k| !space.axes.contains(k) && used.contains(&equation::coord_name(*k))).collect();
+    // 式ごとの見せ方を、次元の設定の「範囲で重ねる」より優先する（その座標は断面の値として扱う。重ねると、値を変えても同じ立体になる）
+    let mut own = space.clone();
+    for &k in &hidden {
+        if let Some(r) = own.ranges.get_mut(k) {
+            *r = None;
+        }
+    }
     match mode {
+        // 範囲で重ねる: 式ごとの範囲で、通る領域（立体）を描く。範囲が 1 点の座標は断面
+        4 => {
+            for &k in &hidden {
+                let (a, b) = range_of(k);
+                if a < b {
+                    own.ranges[k] = Some((a, b));
+                } else {
+                    own.slice[k] = a;
+                }
+            }
+            let p = equation::compile_with(source, params, &own)?;
+            build(&p, &Ctx { space: &own, ..ctx.clone() })
+        }
         1 => {
-            // 式が使っている、表示していない座標
-            let used = plot.used_params();
-            let hidden: Vec<usize> =
-                (0..space.dims).filter(|k| !space.axes.contains(k) && used.contains(&equation::coord_name(*k))).collect();
             if hidden.is_empty() {
                 return build(plot, ctx);
             }
@@ -578,7 +599,7 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
             let mut curve = None;
             let mut kind = String::new();
             for idx in 0..total {
-                let mut sp = space.clone();
+                let mut sp = own.clone();
                 let mut rest = idx;
                 for (j, &k) in hidden.iter().enumerate() {
                     sp.slice[k] = values[j][rest % values[j].len()];

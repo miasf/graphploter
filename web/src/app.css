@@ -9,6 +9,9 @@
   --border-strong: #cfcfcb;
   --hover: #f0f0ed;
   --error: #c7362f;
+  /* 開いている・選ばれているボタンの塗り（カーソルを乗せたときの薄い色と見分けられるように、はっきりした色） */
+  --accent: #2d70b3;
+  --on-accent: #ffffff;
   --mono: ui-monospace, 'SF Mono', Consolas, 'Cascadia Mono', monospace;
   --sans: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
   color-scheme: light;
@@ -25,6 +28,8 @@
   --border-strong: #44454c;
   --hover: #2a2b30;
   --error: #ff6b63;
+  --accent: #4f8fd4;
+  --on-accent: #ffffff;
   color-scheme: dark;
 }
 

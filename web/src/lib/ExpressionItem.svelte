@@ -203,6 +203,7 @@
     { mode: 'layers', label: '等値面を何枚も' },
     { mode: 'planes', label: '断面の塗り分け' },
     { mode: 'volume', label: '伝達関数（色と透明度）' },
+    { mode: 'stack', label: '範囲で重ねる（通る領域）' },
   ]
   const COLORMAPS: { map: HiddenStyle['colormap']; label: string }[] = [
     { map: 'viridis', label: 'viridis（紫 → 緑 → 黄）' },
@@ -529,7 +530,7 @@
               </select>
             </div>
             {#if hidden.mode !== 'slice'}
-              {#if hidden.mode !== 'volume' || hidden.opacity === 'bands'}
+              {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (hidden.mode === 'volume' && hidden.opacity === 'bands')}
                 <div class="sliders">
                   <span class="label">{hidden.mode === 'layers' ? '枚数' : hidden.mode === 'planes' ? '各軸の枚数' : '濃い所の数'}</span>
                   <input
@@ -544,6 +545,7 @@
                   <span class="value">{hidden.count}</span>
                 </div>
               {/if}
+              {#if hidden.mode !== 'stack'}
               <div class="complex-mode">
                 <span class="label">色</span>
                 <select value={hidden.colormap} onchange={(e) => onHidden({ colormap: e.currentTarget.value as HiddenStyle['colormap'] })}>
@@ -552,6 +554,7 @@
                   {/each}
                 </select>
               </div>
+              {/if}
               {#if hidden.mode === 'volume'}
                 <div class="complex-mode">
                   <span class="label">不透明度</span>
@@ -578,6 +581,8 @@
               <p class="hint">
                 {#if hidden.mode === 'layers'}
                   範囲を等分した値ごとの図形を重ね、値で色を付けています（{hiddenCoords.length >= 2 ? '色は 1 つ目の座標の値。' : ''}範囲は式の下の欄）。
+                {:else if hidden.mode === 'stack'}
+                  範囲で動かしたときに図形が通る領域を、立体で描いています（範囲は式の下の欄。何等分して調べるかは右上の ⚙ の「範囲で重ねる枚数」）。
                 {:else if hidden.mode === 'planes'}
                   表示範囲の中の平面（各軸に等間隔）を、{prettyName(hiddenCoords[0])} = f の値で塗っています（{prettyName(hiddenCoords[0])} = f(x, y, z) の形の式だけ）。
                 {:else}
@@ -919,10 +924,17 @@
   }
   .complex-mode {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
+    gap: 4px 8px;
+  }
+  /* 見出しは折り返さない（選択欄の文字が長いと、見出しが 1 文字ずつ縦に並んでいた）。入りきらなければ選択欄が次の行へ */
+  .complex-mode .label {
+    white-space: nowrap;
   }
   .complex-mode select {
+    min-width: 0;
+    max-width: 100%;
     font: inherit;
     padding: 2px 4px;
     border: 1px solid var(--border-strong);
@@ -1036,9 +1048,18 @@
     cursor: pointer;
     border-radius: 6px;
   }
-  .icon:hover,
-  .icon.active {
-    background: var(--hover);
-    color: var(--text);
+  /* カーソルを乗せたときの薄い色は、マウスのある端末だけ（スマホでは押した後も残り、開いているように見えるため） */
+  @media (hover: hover) {
+    .icon:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+  }
+  /* 開いているとき: 塗りつぶして、閉じているとき・乗せたときとはっきり見分けられるようにする */
+  .icon.active,
+  .icon.active:hover {
+    background: var(--accent);
+    color: var(--on-accent);
+    border-radius: 6px;
   }
 </style>
