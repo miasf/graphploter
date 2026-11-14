@@ -1002,12 +1002,18 @@
     const next = { ...prev, ...patch }
     item.hidden = next
     if (next.mode !== 'slice') ensureHiddenRanges(item)
-    // 等値面を何枚も重ねるときは、最初は半透明にする（重なった面が見えるように）
-    if (next.mode === 'layers' && prev.mode !== 'layers' && item.opacity === 1) item.opacity = 0.35
+    // 見せ方を切り替えたら、面の濃さをその見せ方の既定値にする（自分で動かした値は変えない）。
+    // 等値面・塗り分けは重なった面が見えるように薄く、伝達関数は面の濃さを全体の不透明度に掛けるので 100%
+    if (next.mode !== prev.mode && (item.opacity === 1 || item.opacity === HIDDEN_OPACITY[prev.mode])) {
+      item.opacity = HIDDEN_OPACITY[next.mode]
+    }
     const recompute = next.mode !== prev.mode || (next.count !== prev.count && next.mode !== 'volume')
     if (recompute) schedule(item, next.mode === prev.mode ? 150 : 0)
     else viewer?.setStyle(item.id, item)
   }
+
+  /** 見せ方ごとの面の濃さの既定値 */
+  const HIDDEN_OPACITY: Record<HiddenStyle['mode'], number> = { slice: 1, layers: 0.35, planes: 0.6, volume: 1, stack: 0.45 }
 
   /** 見せ方が断面でないとき、式が使っている表示していない座標の範囲の入力欄を用意する（断面のスライダーの範囲）。用意したら true */
   function ensureHiddenRanges(item: PlotItem): boolean {

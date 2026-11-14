@@ -326,6 +326,7 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           {
             latex: 'w=\\sin x+\\cos y+z',
             options: {
+              opacity: 0.6,
               hidden: { mode: 'planes', count: 2, colormap: 'turbo', opacity: 'flat', density: 0.5 },
               ranges: { w: ['-3', '3'] },
             },
