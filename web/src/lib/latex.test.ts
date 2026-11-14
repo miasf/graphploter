@@ -76,6 +76,7 @@ for (const [input, want] of [
   ['\\left(\\cos t,\\sin t,t\\right),z\\ge0', '(cost,sint,t),z>=0'],
   ['0\\leq z\\lt\\sin x', '0<=z<sinx'],
   ['x\\gt y\\geqslant 1', 'x>y>=1'],
+  ['x\\leqq y\\geqq z', 'x<=y>=z'],
 ]) {
   check(input, squash(latexToText(input)), want)
 }
