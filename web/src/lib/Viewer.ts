@@ -9,7 +9,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
-import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, volumeTexture, type VolumeUniforms } from './volumeMaterial'
+import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
 /** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
@@ -1533,8 +1533,25 @@ export class Viewer {
     u.uSteps.value = Math.min(192, Math.max(64, Math.round(1.5 * v.n)))
     u.uN.value = v.n
     u.uComplex.value = v.values.length === 2 * v.n ** 3 ? 1 : 0
-    const geo = new THREE.BoxGeometry(d.xmax - d.xmin, d.ymax - d.ymin, d.zmax - d.zmin)
-    geo.translate((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
+    // 値の範囲が無い格子は、不等式の領域の霧。境目の薄い所を踏み外さないよう、歩数を多めにする
+    u.uRegion.value = mesh.valueRange ? 0 : 1
+    u.uRayMin.value.copy(u.uBoxMin.value)
+    u.uRayMax.value.copy(u.uBoxMax.value)
+    if (!mesh.valueRange) {
+      u.uSteps.value = Math.min(256, Math.max(96, Math.round(2.5 * v.n)))
+      // 光線は、領域（境目から 3 マスまで）を囲む箱の中だけ進める（何も無い所を歩くのが、霧の重さのほとんど）
+      const b = regionBounds(v.values, v.n, [d.xmin, d.ymin, d.zmin], [d.xmax, d.ymax, d.zmax])
+      if (!b) {
+        u.uTex.value.dispose()
+        return
+      }
+      u.uRayMin.value.set(...b[0])
+      u.uRayMax.value.set(...b[1])
+    }
+    const lo = u.uRayMin.value
+    const hi = u.uRayMax.value
+    const geo = new THREE.BoxGeometry(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z)
+    geo.translate((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2)
     const box = new THREE.Mesh(geo, createVolumeMaterial(u))
     box.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
     box.renderOrder = 1 // 半透明の面より後に重ねる

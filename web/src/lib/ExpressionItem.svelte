@@ -249,14 +249,29 @@
   const canField = $derived(/^(複素数の)?陰関数(?!（不等式)/.test(item.kind ?? ''))
   /** 伝達関数で描いている値が複素数（色は偏角。色の対応表は使わない） */
   const complexVolume = $derived(/の伝達関数（.*色は偏角/.test(item.kind ?? ''))
-  /** 選べる見せ方。表示していない座標を使わない陰関数は、曲面か F の値の伝達関数か */
+  /** 3D の不等式の領域（標準は境目の面とふた。⚙ で霧に切り替えられる） */
+  const isRegion = $derived(/^不等式の領域(?!（2D）)/.test(item.kind ?? '') && !/の投影/.test(item.kind ?? ''))
+  /** 不等式の領域を霧で描いている */
+  const regionFog = $derived(isRegion && /霧/.test(item.kind ?? ''))
+  /** 選べる見せ方。表示していない座標を使わない陰関数は、曲面か F の値の伝達関数か。不等式の領域は、霧か境目の面か */
   const hiddenModes = $derived(
-    hiddenCoords.length > 0
-      ? [...HIDDEN_MODES, ...(canField || hidden.mode === 'field' ? [{ mode: 'field' as const, label: '陰関数の F の値を伝達関数で' }] : [])]
-      : [
-          { mode: 'slice' as const, label: '曲面（F = 0）' },
-          { mode: 'field' as const, label: 'F の値を伝達関数で（色と透明度）' },
-        ],
+    isRegion || hidden.mode === 'fog'
+      ? hiddenCoords.length > 0
+        ? [
+            { mode: 'slice' as const, label: '断面（境目の面とふた）' },
+            { mode: 'fog' as const, label: '断面（霧。重い）' },
+            ...HIDDEN_MODES.filter((m) => m.mode !== 'slice'),
+          ]
+        : [
+            { mode: 'slice' as const, label: '境目の面とふた' },
+            { mode: 'fog' as const, label: '霧（中身を薄く塗る。回すと重い）' },
+          ]
+      : hiddenCoords.length > 0
+        ? [...HIDDEN_MODES, ...(canField || hidden.mode === 'field' ? [{ mode: 'field' as const, label: '陰関数の F の値を伝達関数で' }] : [])]
+        : [
+            { mode: 'slice' as const, label: '曲面（F = 0）' },
+            { mode: 'field' as const, label: 'F の値を伝達関数で（色と透明度）' },
+          ],
   )
   /** 伝達関数で描く見せ方か */
   const isVolume = $derived(hidden.mode === 'volume' || hidden.mode === 'field')
@@ -391,7 +406,7 @@
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
       {/if}
     {/if}
-    {#if hidden.mode === 'slice' || hidden.mode === 'field'}
+    {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
       <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
       {#each hiddenCoords.filter((n) => item.slice && n in item.slice) as name (name)}
         <div class="own-slice">
@@ -594,7 +609,7 @@
               </p>
             {/if}
           {/if}
-          {#if hiddenCoords.length > 0 || canField || hidden.mode === 'field'}
+          {#if hiddenCoords.length > 0 || canField || hidden.mode === 'field' || isRegion || hidden.mode === 'fog'}
             <div class="complex-mode">
               <span class="label">{hiddenCoords.length > 0 ? `${hiddenCoords.map(prettyName).join('・')} の見せ方` : '描き方'}</span>
               <select value={hidden.mode} onchange={(e) => onHidden({ mode: e.currentTarget.value as HiddenStyle['mode'] })}>
@@ -603,7 +618,7 @@
                 {/each}
               </select>
             </div>
-            {#if hidden.mode === 'slice' || hidden.mode === 'field'}
+            {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
               {#each hiddenCoords.filter((n) => !(item.slice && n in item.slice)) as name (name)}
                 <button
                   class="link"
@@ -612,7 +627,30 @@
                 >
               {/each}
             {/if}
-            {#if hidden.mode !== 'slice'}
+            {#if regionFog}
+              <label class="check">
+                <input type="checkbox" checked={hidden.lit ?? true} onchange={(e) => onHidden({ lit: e.currentTarget.checked })} />
+                境目に陰影を付ける
+              </label>
+              <div class="sliders">
+                <span class="label">濃さ</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={hidden.density}
+                  aria-label="霧の濃さ"
+                  oninput={(e) => onHidden({ density: e.currentTarget.valueAsNumber })}
+                />
+                <span class="value">{Math.round(hidden.density * 100)}%</span>
+              </div>
+              <p class="hint">
+                領域の中身を式の色の霧で薄く塗り、境目を濃くしています（表示範囲の箱の中を光線で重ね塗り）。
+                光線を表示範囲の箱の中で何百歩も進めるので、回している間は境目の面よりかなり重くなります。
+              </p>
+            {/if}
+            {#if hidden.mode !== 'slice' && hidden.mode !== 'fog'}
               {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (isVolume && ((hidden.opacity === 'bands' && !complexVolume) || hidden.opacity === 'zero'))}
                 <div class="sliders">
                   <span class="label">{hidden.mode === 'layers' ? '枚数' : hidden.mode === 'planes' ? '各軸の枚数' : hidden.opacity === 'zero' ? '面の幅' : '濃い所の数'}</span>

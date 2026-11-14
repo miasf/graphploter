@@ -10,6 +10,9 @@ export interface VolumeUniforms {
   uTex: { value: THREE.Data3DTexture }
   uBoxMin: { value: THREE.Vector3 }
   uBoxMax: { value: THREE.Vector3 }
+  /** 光線を進める箱（格子の箱 uBoxMin〜uBoxMax の中。不等式の領域の霧では、領域を囲む箱に縮めて、何も無い所を歩かない） */
+  uRayMin: { value: THREE.Vector3 }
+  uRayMax: { value: THREE.Vector3 }
   /** 色を付ける値の範囲（外の値は描かない） */
   uRange: { value: THREE.Vector2 }
   uColormap: { value: number }
@@ -26,7 +29,7 @@ export interface VolumeUniforms {
   uCutOn: { value: number }
   /** 全体の不透明度（式の「面の濃さ」） */
   uOpacity: { value: number }
-  /** 視線を進める歩数（格子の 1 辺の点の数の 1.5 倍。64〜192） */
+  /** 視線を進める歩数（格子の 1 辺の点の数の 1.5 倍。64〜192。不等式の領域の霧は 2.5 倍、256 まで） */
   uSteps: { value: number }
   /** 重ね方（0: 手前から重ね塗り, 1: 最大値, 2: 最小値, 3: 平均値） */
   uBlend: { value: number }
@@ -43,6 +46,11 @@ export interface VolumeUniforms {
    * （値の範囲は [0, q]。何枚かの値の所だけ濃い形は、|f| が 2 のべき乗の所）
    */
   uComplex: { value: number }
+  /**
+   * 1 なら不等式の領域の霧（テクスチャの値は境目までの距離の見積もり G / |∇G|。負なら中身）。中身を式の色で薄く塗り、
+   * 境目（格子の 1 マスくらいの幅）を濃くして、勾配で陰影を付ける。重ね方・色の対応表・不透明度の形は使わない
+   */
+  uRegion: { value: number }
 }
 
 const VERTEX = /* glsl */ `
@@ -60,6 +68,8 @@ precision highp sampler3D;
 uniform sampler3D uTex;
 uniform vec3 uBoxMin;
 uniform vec3 uBoxMax;
+uniform vec3 uRayMin;
+uniform vec3 uRayMax;
 uniform vec2 uRange;
 uniform float uColormap;
 uniform float uShape;
@@ -76,6 +86,7 @@ uniform float uN;
 uniform float uWidth;
 uniform float uLit;
 uniform float uComplex;
+uniform float uRegion;
 varying vec3 vWorld;
 ${COLORMAP_GLSL}
 
@@ -163,8 +174,8 @@ vec3 lit(vec3 c, vec3 g, vec3 dir, vec3 size, float span, float always) {
 void main() {
   vec3 dir = normalize(vWorld - cameraPosition);
   vec3 inv = 1.0 / dir;
-  vec3 t0 = (uBoxMin - cameraPosition) * inv;
-  vec3 t1 = (uBoxMax - cameraPosition) * inv;
+  vec3 t0 = (uRayMin - cameraPosition) * inv;
+  vec3 t1 = (uRayMax - cameraPosition) * inv;
   vec3 tlo = min(t0, t1);
   vec3 thi = max(t0, t1);
   float tn = max(max(max(tlo.x, tlo.y), tlo.z), 0.0);
@@ -184,8 +195,10 @@ void main() {
   vec3 size = uBoxMax - uBoxMin;
   float diag = length(size);
   // 歩数は格子の細かさに合わせる（格子の 1 マスより細かく進んでも、値は補間なので変わらない）
-  const int MAX_STEPS = 192;
-  float steps = clamp(uSteps, 1.0, float(MAX_STEPS));
+  const int MAX_STEPS = 256;
+  // 歩幅は格子の箱のいちばん長い辺 / uSteps でそろえる（箱の真ん中を通る光線は今までどおり uSteps 歩。
+  // 光線が短い所・縮めた箱では歩数が減る）
+  float steps = clamp(ceil(uSteps * (tf - tn) / max(max(size.x, size.y), size.z)), 1.0, float(MAX_STEPS));
   float dt = (tf - tn) / steps;
   // 縞が出ないよう、画素ごとに出発点を少しずらす。白色の乱数だとザラつきが目立つので、隣の画素どうしで値が散らばる模様
   // （Interleaved Gradient Noise）にする
@@ -208,6 +221,22 @@ void main() {
     vec2 z = texture(uTex, q).rg;
     float v = uComplex > 0.5 ? length(z) : z.x;
     if (!(v == v)) continue;
+    if (uRegion > 0.5) {
+      // 境目からの距離（格子の 1.5 マスを 1 とする）。中身は薄く、境目は濃く塗る（中身だけだと形の縁が分からず、ただの色の塊に見える）。
+      // 境目の幅が視線の 1 歩より細いと、歩く所によって境目を踏んだり外したりして、点々のムラになる
+      float x = v / (1.5 * max(max(size.x, size.y), size.z) / uN);
+      float skin = exp(-0.5 * x * x);
+      float dens = 0.35 * (1.0 - smoothstep(-1.0, 1.0, x)) + 1.6 * skin;
+      if (dens < 1e-4) continue;
+      float a = 1.0 - exp(-k * dens * dt);
+      vec3 c = uBase;
+      // 陰影は境目の近くだけ（値は距離なので、勾配がそのまま面の法線。中の霧は勾配があてにならず、計算も重い）
+      if (uLit > 0.5 && abs(x) < 4.0 && a > 0.002) c = mix(c, lit(c, gradAt(q, size), dir, size, 1.0, 1.0), exp(-0.125 * x * x));
+      acc.rgb += (1.0 - acc.a) * a * c;
+      acc.a += (1.0 - acc.a) * a;
+      if (acc.a > 0.98) break;
+      continue;
+    }
     float s = span > 0.0 ? (v - uRange.x) / span : 0.5;
     // 複素数の |f| は範囲 [0, q] の外（q より大きい値）も端として描く（q は分布から決めた目安なので）
     if (uClamp > 0.5 || uComplex > 0.5) s = clamp(s, 0.0, 1.0);
@@ -237,7 +266,8 @@ void main() {
     acc.a += (1.0 - acc.a) * a;
     if (acc.a > 0.98) break;
   }
-  if (uBlend > 0.5) {
+  // 不等式の領域の霧は、重ね方によらず重ね塗り
+  if (uBlend > 0.5 && uRegion < 0.5) {
     if (cnt < 0.5) discard;
     float s = uBlend > 2.5 ? sum / cnt : best;
     // 不透明度は、まとめた値での濃さの形を最大 1 にそろえて 1.5 乗したもの × 濃さの 2 倍（濃さ 50% で、形の最大の所が不透明）。
@@ -272,6 +302,36 @@ export function volumeTexture(values: Float32Array, n: number): THREE.Data3DText
   return tex
 }
 
+/**
+ * 不等式の領域の霧の格子（値は境目までの距離。負なら中身）で、中身と境目から 3 マスまでの点を囲む箱（表示範囲の座標。
+ * 格子の箱 lo〜hi からはみ出さない）。そういう点が無ければ null（何も描かない）
+ */
+export function regionBounds(values: Float32Array, n: number, lo: number[], hi: number[]): [[number, number, number], [number, number, number]] | null {
+  const cell = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / (n - 1)
+  const limit = 3 * cell
+  const mn = [n, n, n]
+  const mx = [-1, -1, -1]
+  let i = 0
+  for (let z = 0; z < n; z++)
+    for (let y = 0; y < n; y++)
+      for (let x = 0; x < n; x++, i++) {
+        if (!(values[i] < limit)) continue
+        if (x < mn[0]) mn[0] = x
+        if (x > mx[0]) mx[0] = x
+        if (y < mn[1]) mn[1] = y
+        if (y > mx[1]) mx[1] = y
+        if (z < mn[2]) mn[2] = z
+        if (z > mx[2]) mx[2] = z
+      }
+  if (mx[0] < 0) return null
+  // 格子点の間も少し含める（1 マス広げる）
+  const at = (a: number, k: number) => lo[a] + ((hi[a] - lo[a]) * Math.min(n - 1, Math.max(0, k))) / (n - 1)
+  return [
+    [at(0, mn[0] - 1), at(1, mn[1] - 1), at(2, mn[2] - 1)],
+    [at(0, mx[0] + 1), at(1, mx[1] + 1), at(2, mx[2] + 1)],
+  ]
+}
+
 export function createVolumeMaterial(u: VolumeUniforms): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: u as unknown as Record<string, THREE.IUniform>,
@@ -288,6 +348,8 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
     uTex: { value: tex },
     uBoxMin: { value: new THREE.Vector3() },
     uBoxMax: { value: new THREE.Vector3(1, 1, 1) },
+    uRayMin: { value: new THREE.Vector3() },
+    uRayMax: { value: new THREE.Vector3(1, 1, 1) },
     uRange: { value: new THREE.Vector2(0, 1) },
     uColormap: { value: 0 },
     uShape: { value: 0 },
@@ -304,6 +366,7 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
     uWidth: { value: 2 },
     uLit: { value: 1 },
     uComplex: { value: 0 },
+    uRegion: { value: 0 },
   }
 }
 

@@ -59,7 +59,8 @@ pub struct MeshResult {
     outline: (Vec<f32>, Vec<f32>),
     /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
     value_range: Option<(f64, f64)>,
-    /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）
+    /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）。
+    /// value_range が無ければ、不等式の領域の霧（値は G = max G_i。G ≤ 0 が中身）
     volume: Option<(Vec<f32>, usize)>,
 }
 
@@ -463,6 +464,7 @@ pub fn plot(
         local: flags & FLAG_LOCAL != 0,
         range: &range,
         view: space.view(perspective),
+        region_fog: !flat && hidden.first().is_some_and(|&m| m == 6.0),
     };
     // 表示していない座標の見せ方（2D 表示では、今までどおり断面）
     let hidden_on = !flat && hidden.first().is_some_and(|&m| m >= 1.0);
@@ -529,6 +531,7 @@ thread_local! {
 /// NaN なら断面の値だけ）。見せ方は 0: 断面（今まで）、1: 等値面を何枚も（範囲を `枚数` 等分した値ごとの図形を重ね、値で色を付ける）、
 /// 2: 断面の塗り分け（各軸に `枚数` 枚の平面を、値で塗る）、3: 伝達関数（格子での値を返す。描画側で光線を進めて塗る）。
 /// 4: 範囲で重ねる（式ごとの範囲で、通る領域を描く）。2・3 は「表示していない座標 = 式」の形のときだけ。
+/// 6: 霧（不等式の領域の中身を霧で塗る。境目までの距離の格子を返す。ほかの式は断面と同じ）。
 /// 5: 陰関数の F の値の伝達関数（陰関数 F(x, y, z) = 0 の F の値を格子で返す。表示していない座標を使わない式にも使える）。
 /// 断面以外では、式が使っている表示していない座標について、次元の設定の「範囲で重ねる」より、この見せ方を優先する
 #[wasm_bindgen]
@@ -752,6 +755,48 @@ fn complex_volume(f: &eval::Program, dom: mesh::Domain, n: usize) -> (Vec<f32>, 
     (vals.into_iter().flat_map(|v| [v.re as f32, v.im as f32]).collect(), q)
 }
 
+/// 不等式の領域の霧の格子の値: G を、境目 G = 0 までの距離の見積もり G / |∇G|（表示範囲の座標の長さ）にする。
+/// 描画側は、この値の符号で中身か外か、大きさで境目に近いかが分かる（G の大きさは式によって桁が違うので、そのままでは境目の幅を決められない。
+/// 描画側で勾配を求めると、歩くたびにテクスチャを 6 回多く読むので重い）。勾配は中心差分（端では片側）。
+/// 勾配が 0 の所は、境目から遠いとみなす（符号だけ残す）
+fn region_distance(g: &[f32], dom: mesh::Domain, n: usize) -> Vec<f32> {
+    let h: Vec<f64> = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / (n - 1) as f64).collect();
+    let idx = |x: usize, y: usize, z: usize| (z * n + y) * n + x;
+    let mut out = vec![f32::NAN; g.len()];
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                let v = g[idx(x, y, z)];
+                if v.is_nan() {
+                    continue;
+                }
+                let p = [x, y, z];
+                let mut grad2 = 0.0f64;
+                for a in 0..3 {
+                    let (mut lo, mut hi) = (p, p);
+                    lo[a] = p[a].saturating_sub(1);
+                    hi[a] = (p[a] + 1).min(n - 1);
+                    let (gl, gh) = (g[idx(lo[0], lo[1], lo[2])], g[idx(hi[0], hi[1], hi[2])]);
+                    // 隣が定義されない所は、自分の値で代える（片側の差分）
+                    let gl = if gl.is_nan() { v } else { gl } as f64;
+                    let gh = if gh.is_nan() { v } else { gh } as f64;
+                    let d = (gh - gl) / (h[a] * (hi[a] - lo[a]).max(1) as f64);
+                    grad2 += d * d;
+                }
+                let gl = grad2.sqrt();
+                out[idx(x, y, z)] = if gl > 0.0 && gl.is_finite() {
+                    (v as f64 / gl) as f32
+                } else if v <= 0.0 {
+                    -1e4
+                } else {
+                    1e4
+                };
+            }
+        }
+    }
+    out
+}
+
 /// 表示範囲の格子（1 辺 `n` 点。x が最も速く変わる）での `f` の値（実部）
 fn grid_values(f: &eval::Program, dom: mesh::Domain, n: usize) -> Vec<f32> {
     grid_complex(f, dom, n).into_iter().map(|v| eval::as_real(v) as f32).collect()
@@ -894,6 +939,9 @@ struct Ctx<'a> {
     range: &'a dyn Fn(&str) -> (f64, f64),
     /// 回転・射影（4次元の遠近法を含む）
     view: mesh::View,
+    /// 不等式の領域を霧（G = max G_i の格子。描画側で G ≤ 0 の中身を塗る）で描くか。3D で、見せ方が霧（6）のときだけ。
+    /// 標準は今までどおり境目の面とふた（霧は光線を箱の中で何百歩も進めるので、回している間が十数倍重い）
+    region_fog: bool,
 }
 
 /// 作った図形。媒介変数表示などは、回転・射影する前の n 次元の点（`shape`）で持つ
@@ -1168,6 +1216,20 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = m;
             b.curve = inner.curve;
             b.kind = format!("{}（不等式で切り取り）", inner.kind);
+        }
+        // 霧: G = max G_i（全部の不等式を満たす所が G ≤ 0）を格子で返す。面を作らないので、境目の面を作るより軽い
+        // （面は G_i ごとに格子で計算した上で、細分・切り取り・ふたを作る）
+        P::System { eqs, cuts, .. } if eqs.is_empty() && ctx.region_fog => {
+            let n = ctx.implicit_resolution.clamp(24, 128);
+            let mut g = grid_values(&cuts[0], dom, n);
+            for c in &cuts[1..] {
+                for (a, v) in g.iter_mut().zip(grid_values(c, dom, n)) {
+                    // どちらかが定義されない所は、領域の外（NaN）
+                    *a = if a.is_nan() || v.is_nan() { f32::NAN } else { a.max(v) };
+                }
+            }
+            b.kind.push_str(&format!("（霧、{n}³）"));
+            b.volume = Some((region_distance(&g, dom, n), n));
         }
         P::System { eqs, cuts, .. } if eqs.is_empty() => {
             b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);

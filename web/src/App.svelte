@@ -167,7 +167,8 @@
         grid: it.grid,
         lineWidth: it.lineWidth,
         complexMode: it.complexMode,
-        hidden: it.hidden && it.hidden.mode !== 'slice' ? it.hidden : undefined,
+        // 断面のままでも、霧の濃さ・陰影などを変えていれば残す
+        hidden: it.hidden && JSON.stringify(it.hidden) !== JSON.stringify(DEFAULT_HIDDEN) ? it.hidden : undefined,
         complexCoords: it.complexCoords || undefined,
         slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
         walls: it.walls,
@@ -724,7 +725,8 @@
     dropParam(item)
     // 範囲で重ねた立体は、内側の境界面（穴など）が外から見えないので、最初は半透明にする
     // 媒介変数が4つ以上の図形も、面が何枚も重なるので同じようにする
-    if (/^(範囲で重ねた立体|媒介変数表示の多変数|不等式の領域)/.test(res.kind) && !item.solidSeen) {
+    // 不等式の領域の霧は、中身を薄く塗るので不透明のまま
+    if (/^(範囲で重ねた立体|媒介変数表示の多変数|不等式の領域)/.test(res.kind) && !/霧/.test(res.kind) && !item.solidSeen) {
       item.solidSeen = true
       if (item.opacity === 1) item.opacity = 0.45
     }
@@ -1017,6 +1019,11 @@
     if (next.mode !== prev.mode && (item.opacity === 1 || item.opacity === HIDDEN_OPACITY[prev.mode])) {
       item.opacity = HIDDEN_OPACITY[next.mode]
     }
+    // 不等式の領域: 境目の面は最初から半透明（45%）にしているので、霧にするときは不透明に、境目の面に戻すときは 45% に戻す
+    if (/^不等式の領域/.test(item.kind ?? '')) {
+      if (next.mode === 'fog' && prev.mode !== 'fog' && item.opacity === 0.45) item.opacity = 1
+      if (prev.mode === 'fog' && next.mode === 'slice' && item.opacity === 1) item.opacity = 0.45
+    }
     const recompute = next.mode !== prev.mode || (next.count !== prev.count && next.mode !== 'volume' && next.mode !== 'field')
     if (recompute) schedule(item, next.mode === prev.mode ? 150 : 0)
     else viewer?.setStyle(item.id, item)
@@ -1044,10 +1051,10 @@
   }
 
   /** 見せ方ごとの面の濃さの既定値 */
-  const HIDDEN_OPACITY: Record<HiddenStyle['mode'], number> = { slice: 1, layers: 0.35, planes: 0.6, volume: 1, stack: 0.45, field: 1 }
+  const HIDDEN_OPACITY: Record<HiddenStyle['mode'], number> = { slice: 1, layers: 0.35, planes: 0.6, volume: 1, stack: 0.45, field: 1, fog: 1 }
 
-  /** 表示していない座標の範囲の欄を使う見せ方か（断面と陰関数の F の値は、断面の値を使う） */
-  const usesHiddenRanges = (mode: HiddenStyle['mode']) => mode !== 'slice' && mode !== 'field'
+  /** 表示していない座標の範囲の欄を使う見せ方か（断面・陰関数の F の値・不等式の領域の霧は、断面の値を使う） */
+  const usesHiddenRanges = (mode: HiddenStyle['mode']) => mode !== 'slice' && mode !== 'field' && mode !== 'fog'
 
   /** 見せ方が断面でないとき、式が使っている表示していない座標の範囲の入力欄を用意する（断面のスライダーの範囲）。用意したら true */
   function ensureHiddenRanges(item: PlotItem): boolean {

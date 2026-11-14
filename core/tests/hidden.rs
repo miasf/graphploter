@@ -215,3 +215,35 @@ fn complex_volume_values() {
     assert_eq!(m.take_volume().len(), 2 * n * n * n);
     assert_eq!(m.value_range()[0], 0.0);
 }
+
+/// 不等式の領域の霧（見せ方 6）: 境目までの距離の見積もり（負なら中身）。標準（見せ方なし）は今までどおり境目の面
+#[test]
+fn region_fog_distance() {
+    let m = run("x^2 + y^2 + z^2 ≤ 4", 3, &[]).unwrap();
+    assert_eq!(m.volume_n(), 0);
+    assert!(!m.positions().is_empty());
+    let mut m = run("x^2 + y^2 + z^2 ≤ 4", 3, &style(6.0, 5.0, 3, &[])).unwrap();
+    assert!(m.kind().contains("霧"), "{}", m.kind());
+    assert!(m.value_range().is_empty());
+    let n = m.volume_n() as usize;
+    let v = m.take_volume();
+    let at = |i: usize| -R + 2.0 * R * i as f64 / (n - 1) as f64;
+    // 球の境目の近くでは、距離の見積もりが r − 2 に近い（G / |∇G| = (r² − 4) / 2r）
+    for (x, y, z) in [(20, 20, 30), (30, 20, 20), (5, 20, 20), (20, 20, 20)] {
+        let r = (at(x).powi(2) + at(y).powi(2) + at(z).powi(2)).sqrt();
+        let want = (r * r - 4.0) / (2.0 * r).max(1e-9);
+        let got = v[(z * n + y) * n + x] as f64;
+        if r > 1e-6 {
+            assert!((got - want).abs() < 0.05 * want.abs().max(0.2), "{x} {y} {z}: {got} {want}");
+        } else {
+            assert!(got < 0.0);
+        }
+    }
+    // 2 本: 中身は両方を満たす所だけ
+    let mut m = run("z ≥ 0, x^2 + y^2 + z^2 ≤ 4", 3, &style(6.0, 5.0, 3, &[])).unwrap();
+    let n = m.volume_n() as usize;
+    let v = m.take_volume();
+    let c = n / 2;
+    assert!(v[((c - 5) * n + c) * n + c] > 0.0);
+    assert!(v[((c + 5) * n + c) * n + c] < 0.0);
+}

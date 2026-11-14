@@ -37,12 +37,13 @@ export interface GridStyle {
  * 表示していない座標（w 以降）を使う式の見せ方。slice: 断面（スライダーの値 1 つ）、layers: 等値面を何枚も（範囲を等分した値ごとの図形を重ね、値で色を付ける）、
  * planes: 断面の塗り分け（表示範囲の中の平面を w = f の値で塗る）、volume: 伝達関数（値に色と不透明度を割り当てて重ね塗りする）、
  * stack: 範囲で重ねる（範囲で動かしたとき通る領域を立体で描く。次元の設定の「範囲で重ねる」を、この式だけの範囲で使う）、
- * field: 陰関数の F の値の伝達関数（F(x, y, z) = 0 の F の値を、volume と同じ描き方で塗る。表示していない座標は断面の値）。
+ * field: 陰関数の F の値の伝達関数（F(x, y, z) = 0 の F の値を、volume と同じ描き方で塗る。表示していない座標は断面の値）、
+ * fog: 霧（不等式の領域の中身を、境目の面とふたではなく霧で塗る。表示していない座標は断面の値）。
  * slice 以外では、次元の設定の「範囲で重ねる」より、式の設定を優先する
  */
-export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume' | 'stack' | 'field'
+export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume' | 'stack' | 'field' | 'fog'
 /** 計算エンジンに渡す HiddenMode の番号の順 */
-export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume', 'stack', 'field']
+export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume', 'stack', 'field', 'fog']
 /** 値の色の対応表。shade は式の色の明暗 */
 export type ColorMap = 'viridis' | 'turbo' | 'shade'
 /**
