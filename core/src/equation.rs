@@ -534,6 +534,37 @@ pub fn complexify_coords(e: &Expr, space: &Space) -> Result<Expr, String> {
     }))
 }
 
+/// 座標系の式（計画 9 章の S36）。組 `(X, Y, Z)` の 3 つの成分を、表示中の 3 つの座標の式としてコンパイルする。
+/// 定数はパラメータ（表示していない座標は使えない）。成分が 3 つでない・ほかの変数を使うときはエラー
+pub fn compile_coord_map(source: &str, params: &Params, space: &Space) -> Result<crate::coords::CoordMap, String> {
+    const MSG: &str = "座標系の式は、x, y, z の式を 3 つ書いてください";
+    let shown = space.shown();
+    let shown_refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+    let msg = || {
+        if shown == ["x", "y", "z"] {
+            MSG.to_string()
+        } else {
+            format!("座標系の式は、{} の式を 3 つ書いてください", shown.join(", "))
+        }
+    };
+    let e = crate::parser::parse(source).map_err(|e| e.to_string())?;
+    let Expr::Tuple(items) = e else { return Err(msg()) };
+    if items.len() != 3 {
+        return Err(msg());
+    }
+    let mut progs = Vec::with_capacity(3);
+    for item in &items {
+        let mut vars = Vec::new();
+        item.collect_vars(&mut vars);
+        if vars.iter().any(|v| !shown.contains(v) && !params.contains_key(v)) || matches!(item, Expr::Tuple(_) | Expr::List(_)) {
+            return Err(msg());
+        }
+        progs.push(Program::compile_with(item, &shown_refs, params)?);
+    }
+    let [a, b, c]: [Program; 3] = progs.try_into().map_err(|_| msg())?;
+    Ok(crate::coords::CoordMap::new([a, b, c]))
+}
+
 /// 「表示していない座標 h = h を使わない式 f」の形の式なら、(f, h の座標の番号)。f の変数は表示中の 3 つの座標
 /// （ほかの表示していない座標は断面の値、回転は代入済み）。断面の塗り分け・伝達関数（[`crate::plot`] の `hidden`）に使う。
 /// この形でない式・h が絡む回転をしている式はエラー

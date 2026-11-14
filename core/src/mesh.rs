@@ -46,6 +46,8 @@ pub struct Mesh {
     pub note: String,
     /// 作るのにかかった時間の内訳（`lib.rs` の入口で記録する。メッシュを作る関数自体は 0 のまま）
     pub stats: Stats,
+    /// 座標系で移した先 T(q)（頂点ごとに 3 つ。[`crate::coords`]）。空なら座標系なし。描画側が位置と混ぜる
+    pub target: Vec<f32>,
 }
 
 /// メッシュを作るのにかかった時間の内訳（ミリ秒）
@@ -8433,6 +8435,7 @@ impl LocalMesh {
                 lod_mesh: None,
                 note: src.note.clone(),
                 stats: src.stats,
+                target: Vec::new(),
             }
         };
         let mut out = move_mesh(&self.mesh);
