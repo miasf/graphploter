@@ -26,6 +26,8 @@ export interface VolumeUniforms {
   uCutOn: { value: number }
   /** 全体の不透明度（式の「面の濃さ」） */
   uOpacity: { value: number }
+  /** 視線を進める歩数（格子の 1 辺の点の数の 1.5 倍。64〜192） */
+  uSteps: { value: number }
 }
 
 const VERTEX = /* glsl */ `
@@ -52,6 +54,7 @@ uniform vec3 uBase;
 uniform vec4 uCut;
 uniform float uCutOn;
 uniform float uOpacity;
+uniform float uSteps;
 varying vec3 vWorld;
 ${COLORMAP_GLSL}
 
@@ -88,15 +91,18 @@ void main() {
   if (tf <= tn) discard;
   vec3 size = uBoxMax - uBoxMin;
   float diag = length(size);
-  const int STEPS = 256;
-  float dt = (tf - tn) / float(STEPS);
+  // 歩数は格子の細かさに合わせる（格子の 1 マスより細かく進んでも、値は補間なので変わらない）
+  const int MAX_STEPS = 192;
+  float steps = clamp(uSteps, 1.0, float(MAX_STEPS));
+  float dt = (tf - tn) / steps;
   // 縞が出ないよう、画素ごとに出発点を少しずらす。白色の乱数だとザラつきが目立つので、隣の画素どうしで値が散らばる模様
   // （Interleaved Gradient Noise）にする
   float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
   float k = 24.0 * uDensity * uDensity / diag;
   vec4 acc = vec4(0.0);
   float span = uRange.y - uRange.x;
-  for (int i = 0; i < STEPS; i++) {
+  for (int i = 0; i < MAX_STEPS; i++) {
+    if (float(i) >= steps) break;
     float t = tn + (float(i) + jitter) * dt;
     vec3 p = cameraPosition + dir * t;
     float v = texture(uTex, (p - uBoxMin) / size).r;
@@ -156,6 +162,7 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
     uCut: { value: new THREE.Vector4() },
     uCutOn: { value: 0 },
     uOpacity: { value: 1 },
+    uSteps: { value: 120 },
   }
 }
 

@@ -658,7 +658,9 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
             let (f, k) = equation::hidden_field(source, params, space)?;
             let name = equation::coord_name(k);
             if mode == 2 {
-                let n = ctx.resolution.clamp(8, 200);
+                // 平面は平らなので、陽関数の細かさの半分で足りる（色は頂点の間でなめらかに補間される）。
+                // 陽関数の細かさ（既定 150）のままだと、各軸 3 枚で三角形が 40 万個を超えて重かった
+                let n = (ctx.resolution / 2).clamp(16, 100);
                 let mut m = mesh::Mesh::default();
                 for axis in 0..3 {
                     let (ua, va) = equation::others(axis);
