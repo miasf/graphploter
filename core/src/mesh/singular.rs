@@ -4,7 +4,8 @@
 //! X の字を作れず、交わる 1 マス手前で折れ曲がった「く」の字が向かい合う形になる（交わりが消える）。円錐の先（ケーリーの 3 次曲面の 4 点）も丸まる。
 //! そうした所では $F = 0$ かつ $\nabla F = 0$ で、ヘッセ行列が正と負の両方の向きに曲がる（鞍の形）。
 //!
-//! 1. 隣り合う三角形の向きが 45° より大きく違う辺の頂点を候補にする（なめらかな所はここで外れるので、ほとんどの式は何もしない）
+//! 1. 周りの三角形の向きがそろっていない頂点を候補にし（なめらかな所はここで外れるので、ほとんどの式は何もしない）、
+//!    1 回だけ微分して、勾配が小さくヘッセ行列が鞍の形の頂点に絞る
 //! 2. 候補から $\nabla F = 0$ をガウス・ニュートン法で解く（ヘッセ行列は中心差分）。線の向きにはヘッセ行列が 0 なので動かず、
 //!    線へ垂直に寄る。寄った点で $F \approx 0$ で、ヘッセ行列の固有値に正と負の両方があれば特異点。
 //!    $(x^2+y^2+z^2-1)^2 = 0$ のような二重の面（固有値が 1 つだけ）・ひげのような線（同じ符号の固有値だけ）は外れる
@@ -14,8 +15,8 @@
 
 use super::*;
 
-/// 候補にする、隣り合う三角形の向きの違い（cos）
-const TURN_COS: f64 = 0.7;
+/// 候補にする、頂点の周りの三角形の向きの平均の長さ（これより短ければ候補。周りの向きがそろっていれば 1）
+const TURN_COS: f64 = 0.97;
 /// 特異点の周りで三角形を捨てる半径（格子の何マス分か）。丸まるのは 1 マスほどなので、その外から結び直す
 const CUT: f64 = 1.5;
 /// $\nabla F = 0$ へ寄せるくり返しの回数（減衰が強いので、1 回で寄る距離は 9 割ほど）
@@ -23,7 +24,7 @@ const STEPS: usize = 14;
 /// 鞍の形とみなす、正と負の固有値の大きさ（いちばん大きい固有値に対する割合）
 const SADDLE: f64 = 0.01;
 /// 候補の頂点の数の上限（多すぎる式は、ほとんどが特異点ではない折れ目なので、何もしない）
-const MAX_CANDIDATES: usize = 20_000;
+const MAX_CANDIDATES: usize = 5_000;
 
 /// 点ごとの値・勾配・ヘッセ行列（19 点の中心差分。幅 `e`）。どれかが有限でなければ None
 fn derivs(prog: &Program, pts: &[[f64; 3]], e: f64) -> Vec<Option<(f64, [f64; 3], [[f64; 3]; 3])>> {
@@ -128,8 +129,10 @@ fn onto_singular(prog: &Program, starts: &[[f64; 3]], h: f64, reach: f64) -> Vec
     let mut last: Vec<Option<(f64, [f64; 3], [[f64; 3]; 3])>> = vec![None; starts.len()];
     // 寄せる前の点でのヘッセ行列の大きさ
     let mut first = vec![0.0f64; starts.len()];
+    // 寄り切った点（勾配が十分小さい）。それ以上は計算しない
+    let mut done = vec![false; starts.len()];
     for step in 0..=STEPS {
-        let idx: Vec<usize> = (0..cur.len()).filter(|&k| alive[k]).collect();
+        let idx: Vec<usize> = (0..cur.len()).filter(|&k| alive[k] && !done[k]).collect();
         if idx.is_empty() {
             break;
         }
@@ -141,8 +144,18 @@ fn onto_singular(prog: &Program, starts: &[[f64; 3]], h: f64, reach: f64) -> Vec
                 continue;
             };
             last[k] = Some((f, g, hm));
+            let hn = hm.iter().flatten().map(|v| v * v).sum::<f64>().sqrt();
             if step == 0 {
-                first[k] = hm.iter().flatten().map(|v| v * v).sum::<f64>().sqrt();
+                first[k] = hn;
+            }
+            if norm(g) <= 1e-4 * hn * h {
+                done[k] = true;
+                continue;
+            }
+            // 届く範囲を出たら、もう寄せない
+            if norm([0, 1, 2].map(|c| cur[k][c] - starts[k][c])) > reach {
+                alive[k] = false;
+                continue;
             }
             if step == STEPS {
                 continue;
@@ -232,39 +245,45 @@ pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) {
         return;
     }
     let pos: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
-    let tri_n: Vec<[f64; 3]> = mesh
-        .indices
-        .chunks_exact(3)
-        .map(|t| {
-            let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
-            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-            let l = norm(n);
-            if l > 0.0 { n.map(|x| x / l) } else { [0.0; 3] }
-        })
-        .collect();
-    // 1. 辺ごとに、両側の三角形の向きの違いを見る
-    let mut edge_tri: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
-    let mut cand = vec![false; pos.len()];
-    for (ti, t) in mesh.indices.chunks_exact(3).enumerate() {
-        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-            let key = (a.min(b), a.max(b));
-            if let Some(&o) = edge_tri.get(&key) {
-                let (n1, n2) = (tri_n[ti], tri_n[o]);
-                let cos = n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2];
-                if cos < TURN_COS {
-                    for &v in t.iter().chain(&mesh.indices[3 * o..3 * o + 3]) {
-                        cand[v as usize] = true;
-                    }
-                }
-            } else {
-                edge_tri.insert(key, ti);
+    // 1. 頂点ごとに、周りの三角形の向き（単位ベクトル）の平均の長さを見る。向きがそろっていれば 1 に近く、
+    //    急に折れている所（丸まった交わり・尖った点）では短くなる。辺の表を作らないので、三角形が多い式でも軽い
+    let mut sum = vec![[0.0f64; 3]; pos.len()];
+    let mut cnt = vec![0u32; pos.len()];
+    for t in mesh.indices.chunks_exact(3) {
+        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let l = norm(n);
+        if !(l > 0.0) {
+            continue;
+        }
+        for &w in t {
+            let s = &mut sum[w as usize];
+            for k in 0..3 {
+                s[k] += n[k] / l;
             }
+            cnt[w as usize] += 1;
         }
     }
+    let cand: Vec<bool> = (0..pos.len()).map(|w| cnt[w] >= 2 && norm(sum[w]) < TURN_COS * cnt[w] as f64).collect();
     let starts: Vec<[f64; 3]> = (0..pos.len()).filter(|&v| cand[v]).map(|v| pos[v]).collect();
     if starts.is_empty() || starts.len() > MAX_CANDIDATES {
+        return;
+    }
+    // 1'. 1 回だけ微分して絞る: 特異点から距離 d の所では |∇F| ≈ ‖H‖ d なので、|∇F| が ‖H‖ の 3 マス分より大きい頂点
+    // （なめらかな面が粗い格子で折れて見えるだけの所。極小曲面など）と、ヘッセ行列が鞍の形でない頂点は、ニュートン法にかけない
+    let first = derivs(prog, &starts, 1e-2 * h);
+    let starts: Vec<[f64; 3]> = starts
+        .into_iter()
+        .zip(first)
+        .filter_map(|(p, d)| {
+            let (_, g, hm) = d?;
+            let hn = hm.iter().flatten().map(|v| v * v).sum::<f64>().sqrt();
+            (hn > 0.0 && norm(g) <= 3.0 * hn * h && saddle(&hm)).then_some(p)
+        })
+        .collect();
+    if starts.is_empty() {
         return;
     }
     // 2. 特異点（鞍の形のものだけ）。近すぎる点はまとめる
