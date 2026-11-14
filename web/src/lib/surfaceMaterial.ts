@@ -87,9 +87,51 @@ vec3 cmapTurbo(float t) {
   vec2 v2 = v4.zw * v4.z;
   return vec3(dot(v4, kr) + dot(v2, kr2), dot(v4, kg) + dot(v2, kg2), dot(v4, kb) + dot(v2, kb2));
 }
+// 線形 sRGB ⇔ OKLab（Björn Ottosson）
+vec3 linToOklab(vec3 c) {
+  vec3 l = vec3(
+    0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b,
+    0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b,
+    0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b);
+  l = pow(max(l, 0.0), vec3(1.0 / 3.0));
+  return vec3(
+    0.2104542553 * l.x + 0.7936177850 * l.y - 0.0040720468 * l.z,
+    1.9779984951 * l.x - 2.4285922050 * l.y + 0.4505937099 * l.z,
+    0.0259040371 * l.x + 0.7827717662 * l.y - 0.8086757660 * l.z);
+}
+vec3 oklabToLin(vec3 c) {
+  vec3 l = vec3(
+    c.x + 0.3963377774 * c.y + 0.2158037573 * c.z,
+    c.x - 0.1055613458 * c.y - 0.0638541728 * c.z,
+    c.x - 0.0894841775 * c.y - 1.2914855480 * c.z);
+  l = l * l * l;
+  return vec3(
+    4.0767416621 * l.x - 3.3077115913 * l.y + 0.2309699292 * l.z,
+    -1.2684380046 * l.x + 2.6097574011 * l.y - 0.3413193965 * l.z,
+    -0.0041960863 * l.x - 0.7034186147 * l.y + 1.7076147010 * l.z);
+}
+// 式の色の明暗: OKLab の明るさを 0.3〜0.94 で動かし、色相は式の色のまま。鮮やかさは式の色の明るさの所で最大（式の色そのもの）にし、
+// 暗い側・明るい側へ向かって少し落とす（線形の色を混ぜると途中が灰色に寄ってくすむため）。表せない色は鮮やかさを下げて収める
+vec3 cmapShade(float t, vec3 base) {
+  vec3 lab = linToOklab(max(base, 0.0));
+  float L0 = clamp(lab.x, 0.4, 0.85);
+  float L = mix(0.3, 0.94, t);
+  float k = L < L0 ? mix(0.7, 1.0, (L - 0.3) / (L0 - 0.3)) : mix(1.0, 0.35, (L - L0) / (0.94 - L0));
+  vec3 c = oklabToLin(vec3(L, lab.yz * k));
+  if (any(lessThan(c, vec3(-1e-4))) || any(greaterThan(c, vec3(1.0001)))) {
+    float lo = 0.0, hi = k;
+    for (int i = 0; i < 10; i++) {
+      float m = 0.5 * (lo + hi);
+      vec3 q = oklabToLin(vec3(L, lab.yz * m));
+      if (any(lessThan(q, vec3(-1e-4))) || any(greaterThan(q, vec3(1.0001)))) hi = m; else lo = m;
+    }
+    c = oklabToLin(vec3(L, lab.yz * lo));
+  }
+  return clamp(c, 0.0, 1.0);
+}
 vec3 colormap(float t, float which, vec3 base) {
   t = clamp(t, 0.0, 1.0);
-  if (which > 1.5) return mix(base * 0.2, mix(base, vec3(1.0), 0.7), t);
+  if (which > 1.5) return cmapShade(t, base);
   vec3 srgb = clamp(which > 0.5 ? cmapTurbo(t) : cmapViridis(t), 0.0, 1.0);
   return pow(srgb, vec3(2.2));
 }
@@ -98,11 +140,7 @@ vec3 colormap(float t, float which, vec3 base) {
 /** COLORMAP_GLSL の colormap と同じ色（JS 版。曲線の頂点の色に使う）。返す色は線形の色空間 */
 export function colormapColor(t: number, which: 'viridis' | 'turbo' | 'shade', base: THREE.Color, out: THREE.Color): THREE.Color {
   t = Math.min(1, Math.max(0, t))
-  if (which === 'shade') {
-    const dark = base.clone().multiplyScalar(0.2)
-    const light = base.clone().lerp(new THREE.Color(1, 1, 1), 0.7)
-    return out.copy(dark).lerp(light, t)
-  }
+  if (which === 'shade') return shadeColor(t, base, out)
   let r: number, g: number, b: number
   if (which === 'turbo') {
     const v4 = [1, t, t * t, t * t * t]
@@ -223,4 +261,47 @@ export function createSurfaceMaterial(grid: GridUniforms, clippingPlanes: THREE.
   }
   m.customProgramCacheKey = () => 'surface-with-grid'
   return m
+}
+
+function linToOklab(r: number, g: number, b: number): [number, number, number] {
+  const l = Math.cbrt(Math.max(0, 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b))
+  const m = Math.cbrt(Math.max(0, 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b))
+  const s = Math.cbrt(Math.max(0, 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b))
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ]
+}
+function oklabToLin(L: number, a: number, b: number): [number, number, number] {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3
+  return [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ]
+}
+const outOfGamut = (c: number[]) => c.some((v) => v < -1e-4 || v > 1.0001)
+
+/** COLORMAP_GLSL の cmapShade と同じ（式の色の明暗。OKLab で明るさだけを動かし、色相と鮮やかさを保つ） */
+function shadeColor(t: number, base: THREE.Color, out: THREE.Color): THREE.Color {
+  const [L0raw, a, b] = linToOklab(base.r, base.g, base.b)
+  const L0 = Math.min(0.85, Math.max(0.4, L0raw))
+  const L = 0.3 + (0.94 - 0.3) * t
+  const k = L < L0 ? 0.7 + 0.3 * ((L - 0.3) / (L0 - 0.3)) : 1 + (0.35 - 1) * ((L - L0) / (0.94 - L0))
+  let c = oklabToLin(L, a * k, b * k)
+  if (outOfGamut(c)) {
+    let lo = 0
+    let hi = k
+    for (let i = 0; i < 10; i++) {
+      const m = (lo + hi) / 2
+      if (outOfGamut(oklabToLin(L, a * m, b * m))) hi = m
+      else lo = m
+    }
+    c = oklabToLin(L, a * lo, b * lo)
+  }
+  const cl = (v: number) => Math.min(1, Math.max(0, v))
+  return out.setRGB(cl(c[0]), cl(c[1]), cl(c[2]))
 }
