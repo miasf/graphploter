@@ -29,7 +29,7 @@ fn run_full(src: &str, r: f64, ires: u32, dims: u32, w: f64, rot: &[(usize, f64)
         src, &[-r, r, -r, r, -r, r], 64, ires, "", &[], "", &[], "", dims, &[0, 1, 2], &slice,
         &vec![f64::NAN; 2 * n], "", &[], 16, &rotation, &vec![0.0; rd], 0.0, complex, false, false, 1, false, 0,
     )
-    .unwrap_or_else(|e| panic!("{src} が計算できない: {:?}", e))
+    .unwrap_or_else(|_| panic!("{src} が計算できない"))
 }
 
 /// 線分の端（NaN で区切った点）
@@ -753,5 +753,110 @@ fn region_time() {
         let all = best(src);
         let sum: f64 = faces.iter().map(|f| best(f)).sum();
         println!("{src}\t{all:.1} ms\t面ごとの合計 {sum:.1} ms\t{:.2} 倍", all / sum);
+    }
+}
+
+// ---- 点と 2D 表示（計画 S32） ----
+
+/// 2D 表示（`slice` なら切り口、そうでなければ投影）。表示範囲 ±5
+fn run_flat(src: &str, slice: bool) -> MeshResult {
+    let rd = equation::rot_dims(3);
+    plot(
+        src, &[-R, R, -R, R, -R, R], 64, N, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+        &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, true, 1, slice, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が計算できない"))
+}
+
+/// 点のメッシュ（同じ点を 2 つと NaN）の点
+fn dots(m: &MeshResult) -> Vec<[f64; 3]> {
+    m.positions().chunks_exact(9).map(|s| [s[0] as f64, s[1] as f64, s[2] as f64]).collect()
+}
+
+fn close(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
+    (0..3).all(|k| (a[k] - b[k]).abs() <= tol)
+}
+
+#[test]
+fn points_of_three_equations() {
+    let m = run_with("x = y = z = 1", R, N, 3, 0.0, 0.0);
+    assert_eq!(m.kind(), "連立方程式の点（1 個）");
+    let p = dots(&m);
+    assert!(p.len() == 1 && close(p[0], [1.0; 3], 1e-6), "{p:?}");
+    let s2 = 2f64.sqrt();
+    let p = dots(&run_with("x^2 + y^2 + z^2 = 4, x = y, z = 0", R, N, 3, 0.0, 0.0));
+    assert_eq!(p.len(), 2, "{p:?}");
+    for want in [[s2, s2, 0.0], [-s2, -s2, 0.0]] {
+        assert!(p.iter().any(|q| close(*q, want, 1e-6)), "{p:?}");
+    }
+    // 式の順番を入れ替えても、同じ点
+    let orders = ["sin(x) = cos(y), cos(y) = tan(z), tan(z) = 0.5", "tan(z) = 0.5, sin(x) = cos(y), cos(y) = tan(z)", "cos(y) = tan(z), tan(z) = 0.5, sin(x) = cos(y)"];
+    let sets: Vec<Vec<[f64; 3]>> = orders.iter().map(|s| dots(&run_with(s, R, N, 3, 0.0, 0.0))).collect();
+    for (src, p) in orders.iter().zip(&sets) {
+        assert_eq!(p.len(), 18, "{src}");
+        for q in p {
+            assert!(sets[0].iter().any(|r| close(*q, *r, 1e-6)), "{src}: {q:?}");
+        }
+    }
+}
+
+#[test]
+fn points_respect_inequalities() {
+    let p = dots(&run_with("x^2 + y^2 + z^2 = 4, x = y, z = 0, x ≥ 0", R, N, 3, 0.0, 0.0));
+    assert_eq!(p.len(), 1, "{p:?}");
+}
+
+#[test]
+fn flat_intersection_points() {
+    let m = run_flat("y = x, y = x^2", true);
+    assert_eq!(m.kind(), "連立方程式の点（2 個）");
+    let p = dots(&m);
+    for want in [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]] {
+        assert!(p.iter().any(|q| close(*q, want, 1e-6)), "{p:?}");
+    }
+}
+
+#[test]
+fn flat_region_area() {
+    let m = run_flat("y ≤ x^2", true);
+    assert_eq!(m.kind(), "不等式の領域（2D）");
+    let a = area(&m.positions(), &m.indices());
+    let want = 100.0 - 20.0 * 5f64.sqrt() / 3.0;
+    assert!((a / want - 1.0).abs() <= 0.01, "{a}");
+    let m = run_flat("x^2 + y^2 ≤ 9, y ≥ 0", true);
+    let p = m.positions();
+    let a = area(&p, &m.indices());
+    assert!((a / (4.5 * std::f64::consts::PI) - 1.0).abs() <= 0.01, "{a}");
+    for sx in [-3.0, 3.0] {
+        assert!(p.chunks_exact(3).any(|q| (q[0] as f64 - sx).abs() <= 0.02 && (q[1] as f64).abs() <= 0.02), "{sx}");
+    }
+}
+
+#[test]
+fn flat_curve_is_clipped() {
+    let m = run_flat("x^2 + y^2 = 4, y ≥ 0", true);
+    let c = curve_metrics(&m.positions(), &[]);
+    assert!((c.length / (2.0 * std::f64::consts::PI) - 1.0).abs() <= 0.005, "{c:?}");
+}
+
+#[test]
+fn flat_projection_of_ball() {
+    let m = run_flat("x^2 + y^2 + z^2 ≤ 4", false);
+    let p = m.positions();
+    assert!(!p.is_empty());
+    let rmax = p.chunks_exact(3).map(|q| ((q[0] * q[0] + q[1] * q[1]) as f64).sqrt()).fold(0.0, f64::max);
+    assert!((rmax - 2.0).abs() <= 0.02, "{rmax}");
+    assert!(p.chunks_exact(3).all(|q| q[2] == 0.0));
+}
+
+/// 切った線に、長さの無い線分（描画側が点とみなす）が残らない
+#[test]
+fn clipped_lines_have_no_dots() {
+    for (src, flat) in [("x^2 + y^2 = 4, y ≥ 0", true), ("y = x, z = 0, 0 ≤ x ≤ 1", false), ("x^2 + y^2 = 4, z = 0, y ≥ 0", false)] {
+        let m = if flat { run_flat(src, true) } else { run_with(src, R, N, 3, 0.0, 0.0) };
+        for s in m.positions().chunks_exact(9) {
+            let d: f32 = (0..3).map(|c| (s[c] - s[3 + c]).abs()).sum();
+            assert!(d > 1e-5, "{src}: {s:?}");
+        }
     }
 }

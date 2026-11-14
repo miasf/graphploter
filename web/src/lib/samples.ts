@@ -172,6 +172,41 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     ],
   },
   {
+    title: '連立方程式・不等式',
+    samples: [
+      {
+        label: 'ヴィヴィアーニの曲線（球と円柱の交わり）',
+        view: { dims: 3, half: 3 },
+        items: [
+          { latex: 'x^2+y^2+z^2=4', options: { color: '#2d70b3', opacity: 0.3 } },
+          { latex: 'x^2+y^2=2x', options: { color: '#388c46', opacity: 0.3 } },
+          { latex: 'x^2+y^2+z^2=4,x^2+y^2=2x', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: 'sin x = cos y = tan z（交わる線）',
+        items: [{ latex: '\\sin x=\\cos y=\\tan z', options: { color: '#6042a6', lineWidth: 4 } }],
+      },
+      { label: '領域 x ≤ y ≤ z', items: [{ latex: 'x\\le y\\le z', options: { color: '#c74440' } }] },
+      {
+        label: 'シュタインメッツの立体（2 本の円柱の共通部分）',
+        items: [{ latex: 'x^2+y^2\\le9,x^2+z^2\\le9', options: { color: '#fa7e19' } }],
+      },
+      {
+        label: '領域 0 ≤ z ≤ sin x cos y',
+        items: [{ latex: '0\\le z\\le\\sin x\\cos y', options: { color: '#2d70b3' } }],
+      },
+      { label: '半球 x² + y² + z² = 4, z ≥ 0', items: [{ latex: 'x^2+y^2+z^2=4,z\\ge0', options: { color: '#388c46' } }] },
+      {
+        label: '線分 y = x, z = 0, 0 ≤ x ≤ 1 と、点 x = y = z = 1',
+        items: [
+          { latex: 'y=x,z=0,0\\le x\\le1', options: { color: '#c74440', lineWidth: 5 } },
+          { latex: 'x=y=z=1', options: { color: '#2d70b3', lineWidth: 6 } },
+        ],
+      },
+    ],
+  },
+  {
     title: '複素数・特殊関数',
     samples: [
       {

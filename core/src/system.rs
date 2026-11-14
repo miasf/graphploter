@@ -2,7 +2,7 @@
 //!
 //! 2 つの式 $F_1 = F_2 = 0$ の線は、$F_1 = 0$ の面のメッシュの上で $F_2$ の等高線（値 0）を取り出し、
 //! ニュートン法で 2 つの面の上へ寄せて作る（[`intersection_curve`]）。寄らない点（`tan` の極の偽の線など）は捨てる。
-//! 3 つ以上の式の点は、はじめの 2 つの線の上で 3 つ目の式の符号が変わる所から、全部の式の上へ寄せて作る（[`common_points`]）。
+//! 3 つ以上の式の点は、はじめの 2 つの線の上で 3 つ目の式の符号が変わる所から、全部の式の上へ寄せて作る（[`points_on_curve`]）。
 //!
 //! 今は、$A^2 + B^2 = 0$ のように式の形から「面にならず、線・点だけになる」と分かる陰関数に使う
 //! （[`crate::eval::Program::common_zero_sets`]）。複素数の陰関数 $\operatorname{Re} F = \operatorname{Im} F = 0$・連立方程式の土台にもなる。
@@ -89,6 +89,11 @@ fn solve(mut m: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
 /// どの式の値も $10^{-4} h |\nabla F_k|$ 以下になった点を「寄った」とする（寄らなければ None）。
 /// 途中で値が有限でなくなった点も None
 pub fn newton_onto(progs: &[&Program], points: &[[f64; 3]], h: f64) -> Vec<Option<[f64; 3]>> {
+    newton_onto_in(progs, points, h, 3)
+}
+
+/// [`newton_onto`] で、はじめの `dims` 個の座標だけを動かす版（2D 表示では横・奥の 2 つ。縦の座標は 0 のまま）
+pub fn newton_onto_in(progs: &[&Program], points: &[[f64; 3]], h: f64, dims: usize) -> Vec<Option<[f64; 3]>> {
     let m = progs.len();
     let d = 1e-5 * h;
     let mut cur: Vec<[f64; 3]> = points.to_vec();
@@ -113,8 +118,17 @@ pub fn newton_onto(progs: &[&Program], points: &[[f64; 3]], h: f64) -> Vec<Optio
         let vals: Vec<Vec<f64>> = progs.iter().map(|p| values_at(p, &cols)).collect();
         for (j, &k) in active.iter().enumerate() {
             let f: Vec<f64> = (0..m).map(|i| vals[i][7 * j]).collect();
-            let jac: Vec<[f64; 3]> =
-                (0..m).map(|i| [0, 1, 2].map(|c| (vals[i][7 * j + 1 + 2 * c] - vals[i][7 * j + 2 + 2 * c]) / (2.0 * d))).collect();
+            let jac: Vec<[f64; 3]> = (0..m)
+                .map(|i| {
+                    [0, 1, 2].map(|c| {
+                        if c < dims {
+                            (vals[i][7 * j + 1 + 2 * c] - vals[i][7 * j + 2 + 2 * c]) / (2.0 * d)
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
             if f.iter().chain(jac.iter().flatten()).any(|v| !v.is_finite()) {
                 alive[k] = false;
                 continue;
@@ -124,7 +138,7 @@ pub fn newton_onto(progs: &[&Program], points: &[[f64; 3]], h: f64) -> Vec<Optio
                 f[i].abs() <= 1e-4 * h * g
             });
             if step == NEWTON_STEPS {
-                break;
+                continue;
             }
             let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
             let jjt: Vec<Vec<f64>> = (0..m).map(|r| (0..m).map(|c| dot(&jac[r], &jac[c])).collect()).collect();
@@ -214,35 +228,51 @@ pub fn intersection_curve(f1: &Program, f2: &Program, dom: Domain, n: usize, ref
     Mesh { positions: out, ..Default::default() }
 }
 
-/// 式 `progs`（3 つ以上）がどれも 0 になる点。はじめの 2 つの式の線の上で、3 つ目の式の符号が変わる所を探し、全部の式の上へ寄せる。
-/// 半マスより近い点は 1 つにまとめる。描画側が点とみなすよう、点ごとに同じ点を 2 つと NaN を並べる
-pub fn common_points(progs: &[Program], dom: Domain, n: usize, refine: Refine) -> Mesh {
-    assert!(progs.len() >= 3);
-    let (points, segs) = curve_points(&progs[0], &progs[1], dom, n, refine);
-    let h = cell(dom, n);
-    let mut seeds = Vec::new();
-    if !points.is_empty() {
-        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| points.iter().map(|p| p[c]).collect());
-        let g = values_at(&progs[2], &cols);
-        for [a, b] in segs {
-            let (ga, gb) = (g[a], g[b]);
-            if ga.is_finite() && gb.is_finite() && (ga < 0.0) != (gb < 0.0) {
-                let s = ga / (ga - gb);
-                seeds.push([0, 1, 2].map(|c| points[a][c] + s * (points[b][c] - points[a][c])));
-            }
-        }
-    }
-    let refs: Vec<&Program> = progs.iter().collect();
+/// 点を、互いに `tol` より近いものを 1 つにまとめ、表示範囲（はじめの `dims` 個の座標）の外を捨てる
+fn distinct_inside(points: impl IntoIterator<Item = [f64; 3]>, dom: Domain, dims: usize, tol: f64) -> Vec<[f64; 3]> {
     let mut found: Vec<[f64; 3]> = Vec::new();
-    for p in newton_onto(&refs, &seeds, h).into_iter().flatten() {
-        let inside = (0..3).all(|c| p[c] >= dom.lo[c] - 1e-9 * h && p[c] <= dom.hi[c] + 1e-9 * h);
-        let near = |q: &[f64; 3]| (0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>() < (0.5 * h).powi(2);
+    for p in points {
+        let inside = (0..dims).all(|c| p[c] >= dom.lo[c] - 1e-9 && p[c] <= dom.hi[c] + 1e-9);
+        let near = |q: &[f64; 3]| (0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>() < tol * tol;
         if inside && !found.iter().any(near) {
             found.push(p);
         }
     }
-    let mut out = Vec::with_capacity(found.len() * 9);
-    for p in found {
+    found
+}
+
+/// 線分の両端の値 `g` の符号が違う所に、直線補間で点を置く
+fn sign_changes(points: &[[f64; 3]], segs: &[[usize; 2]], g: &[f64]) -> Vec<[f64; 3]> {
+    let mut seeds = Vec::new();
+    for &[a, b] in segs {
+        let (ga, gb) = (g[a], g[b]);
+        if ga.is_finite() && gb.is_finite() && (ga < 0.0) != (gb < 0.0) {
+            let s = ga / (ga - gb);
+            seeds.push([0, 1, 2].map(|c| points[a][c] + s * (points[b][c] - points[a][c])));
+        }
+    }
+    seeds
+}
+
+/// 式 `progs`（3 つ以上）がどれも 0 になる点。はじめの 2 つの式の線の上で、3 つ目の式の符号が変わる所を探し、全部の式の上へ寄せる。
+/// 互いに 0.25h より近い点は 1 つにまとめ、表示範囲の外の点は捨てる
+pub fn points_on_curve(progs: &[Program], dom: Domain, n: usize, refine: Refine) -> Vec<[f64; 3]> {
+    assert!(progs.len() >= 3);
+    let (points, segs) = curve_points(&progs[0], &progs[1], dom, n, refine);
+    let h = cell(dom, n);
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| points.iter().map(|p| p[c]).collect());
+    let seeds = sign_changes(&points, &segs, &values_at(&progs[2], &cols));
+    let refs: Vec<&Program> = progs.iter().collect();
+    distinct_inside(newton_onto(&refs, &seeds, h).into_iter().flatten(), dom, 3, 0.25 * h)
+}
+
+/// 点を、描画側が点とみなす形（同じ点を 2 つと NaN）の曲線のメッシュにする
+pub fn points_mesh(points: &[[f64; 3]]) -> Mesh {
+    let mut out = Vec::with_capacity(points.len() * 9);
+    for p in points {
         let p = p.map(|v| v as f32);
         out.extend_from_slice(&p);
         out.extend_from_slice(&p);
@@ -251,12 +281,47 @@ pub fn common_points(progs: &[Program], dom: Domain, n: usize, refine: Refine) -
     Mesh { positions: out, ..Default::default() }
 }
 
+/// 点のうち、不等式 `cuts`（G ≤ 0）を全部満たすもの
+pub fn points_inside(points: Vec<[f64; 3]>, cuts: &[Program]) -> Vec<[f64; 3]> {
+    let mut keep = vec![true; points.len()];
+    for g in cuts {
+        for (k, v) in values_of(g)(&points).into_iter().enumerate() {
+            keep[k] &= v <= 0.0;
+        }
+    }
+    points.into_iter().zip(keep).filter_map(|(p, k)| k.then_some(p)).collect()
+}
+
+/// 2D 表示の、2 本の式 F_1 = F_2 = 0 の交点（縦の座標は 0）。`implicit_curve_2d(F_1)` の線分の上で F_2 の符号が変わる所を探し、
+/// 横・奥の座標だけを動かすニュートン法で寄せる
+pub fn flat_points(f1: &Program, f2: &Program, dom: Domain, n: usize) -> Vec<[f64; 3]> {
+    let curve = mesh::implicit_curve_2d(f1, dom, n);
+    let mut points = Vec::new();
+    let mut segs = Vec::new();
+    for s in curve.positions.chunks_exact(9) {
+        if s[..6].iter().all(|v| v.is_finite()) {
+            points.push([s[0] as f64, s[1] as f64, 0.0]);
+            points.push([s[3] as f64, s[4] as f64, 0.0]);
+            segs.push([points.len() - 2, points.len() - 1]);
+        }
+    }
+    let h = (0..2).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
+    let seeds = sign_changes(&points, &segs, &values_of(f2)(&points));
+    distinct_inside(newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten(), dom, 2, 0.25 * h)
+}
+
 /// 因数ごとの「同時に 0 になる式の組」（[`Program::common_zero_sets`]）を描く。式が 2 つの組は線、3 つ以上の組は点。
 /// 戻り値はメッシュ（曲線）と、説明（線か点か）
 pub fn common_zero_sets(sets: &[Vec<Program>], dom: Domain, n: usize, refine: Refine) -> (Mesh, String) {
     let meshes: Vec<Mesh> = sets
         .iter()
-        .map(|s| if s.len() == 2 { intersection_curve(&s[0], &s[1], dom, n, refine) } else { common_points(s, dom, n, refine) })
+        .map(|s| {
+            if s.len() == 2 {
+                intersection_curve(&s[0], &s[1], dom, n, refine)
+            } else {
+                points_mesh(&points_on_curve(s, dom, n, refine))
+            }
+        })
         .collect();
     let (lines, points) = (sets.iter().any(|s| s.len() == 2), sets.iter().any(|s| s.len() > 2));
     let what = match (lines, points) {
@@ -445,6 +510,10 @@ pub fn clip_segments(positions: &mut Vec<f32>, value: &mut dyn FnMut(&[[f64; 3]]
     }
     let ts = edge_cuts(&mixed, value, rounds);
     for (&(a, b, _, _), t) in mixed.iter().zip(ts) {
+        // 残る部分がほとんど無い線分は捨てる（長さの無い線は、描画側が点とみなして丸を付ける）
+        if t <= 1e-6 {
+            continue;
+        }
         emit(&mut out, a, [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c])));
     }
     *positions = out;

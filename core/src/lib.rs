@@ -772,6 +772,14 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
             }
         }
+        // 等式 3 本の点: 2 本の交わる線の上で 3 本目の符号が変わる所から寄せる。不等式を満たす点だけ残す
+        P::System { eqs, cuts, .. } if eqs.len() == 3 => {
+            let pts = system::points_on_curve(eqs, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            let pts = system::points_inside(pts, cuts);
+            b.curve = true;
+            b.kind = format!("連立方程式の点（{} 個）", pts.len());
+            b.inner = system::points_mesh(&pts);
+        }
         // 不等式の領域: 面 G_i = 0 ごとに作り、ほかの不等式で切り取る。切り口と表示範囲の端には、ふたをする
         P::System { eqs, cuts, .. } if eqs.is_empty() => {
             b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);
@@ -802,6 +810,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Implicit { prog, .. } | P::Solid { prog, .. } => prog.uses_var_index(2),
         // 傾いた座標系の陽関数は、3 次元の曲面を作ってから押しつぶす（2D の切り口では、この道にならない）
         P::Tilted { .. } => true,
+        P::System { eqs, cuts, .. } => eqs.iter().chain(cuts).any(|p| p.uses_var_index(2)),
         _ => false,
     };
     // 回した陽関数: 回す前の形を n 次元の点で作り、回して射影してから平面に描く（plot・Shape::project）
@@ -835,6 +844,13 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
         let mut b = build(plot, &ctx3)?.settle();
         b.kind = format!("{}の投影", b.kind);
+        // 不等式の領域は、境目の面と表示範囲の端のふたをまとめて平らにする（端で切れた所も塗る）
+        if let P::System { eqs, cuts, .. } = plot {
+            if eqs.is_empty() {
+                let caps = mesh::Field::region(cuts).box_caps(dom, ctx.implicit_resolution.max(8), None);
+                b.inner = mesh::merge(vec![std::mem::take(&mut b.inner), caps], false);
+            }
+        }
         b.fields.clear();
         if b.shape.is_none() {
             mesh::flatten(&mut b.inner, b.curve);
@@ -897,7 +913,28 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } => {}
-        P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
+        // 縦の座標 = 0 の 2 次元の問題として描く（切り口、または縦の座標を使わない式）
+        P::System { eqs, cuts, .. } => match eqs.len() {
+            0 => {
+                b.kind = "不等式の領域（2D）".into();
+                b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
+            }
+            1 => {
+                b.curve = true;
+                b.kind = "陰関数の曲線（不等式で切り取り）".into();
+                b.inner = mesh::implicit_curve_2d(&eqs[0], dom, res2);
+                for g in cuts {
+                    system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
+                }
+            }
+            2 => {
+                let pts = system::points_inside(system::flat_points(&eqs[0], &eqs[1], dom, res2), cuts);
+                b.curve = true;
+                b.kind = format!("連立方程式の点（{} 個）", pts.len());
+                b.inner = system::points_mesh(&pts);
+            }
+            _ => return Err("2D 表示では、等式は 2 本までにしてください".into()),
+        },
     }
     Ok(b)
 }
