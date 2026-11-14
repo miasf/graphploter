@@ -450,6 +450,37 @@ pub fn clip_segments(positions: &mut Vec<f32>, value: &mut dyn FnMut(&[[f64; 3]]
     *positions = out;
 }
 
+/// 不等式の領域 G_1 ≤ 0, …, G_k ≤ 0 の境目の面。面 G_i = 0 ごとに今の陰関数の道で作り、ほかの全部の G_j ≤ 0 で切り取ってまとめる
+/// （角が立つ）。陰関数の粗い版も同じように切ってまとめる（どれかの面に粗い版が無ければ、全体の粗い版を作らない）
+pub fn region_faces(cuts: &[Program], dom: Domain, n: usize, refine: Refine) -> Mesh {
+    if mesh::field_mode_is_split() {
+        mesh::mark_unsplittable();
+        return Mesh::default();
+    }
+    let mut parts = Vec::new();
+    let mut lods = Vec::new();
+    for (i, g) in cuts.iter().enumerate() {
+        let mut m = mesh::implicit_solid_opt(g, dom, n, &[], 0, refine);
+        for (j, other) in cuts.iter().enumerate() {
+            if j != i {
+                trim_mesh(&mut m, &mut values_of(other), 8);
+            }
+        }
+        lods.push(m.lod_mesh.take());
+        parts.push(m);
+    }
+    if cuts.len() == 1 {
+        let mut m = parts.pop().unwrap_or_default();
+        m.lod_mesh = lods.pop().flatten();
+        return m;
+    }
+    let mut out = mesh::merge(parts, false);
+    if lods.iter().all(|l| l.is_some()) {
+        out.lod_mesh = Some(Box::new(mesh::merge(lods.into_iter().flatten().map(|b| *b).collect(), false)));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

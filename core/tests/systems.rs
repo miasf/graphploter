@@ -494,3 +494,264 @@ fn trim_time() {
         println!("{src}\t{best:.1} ms");
     }
 }
+
+// ---- 不等式の領域（計画 S31） ----
+
+/// 点 p から三角形 abc までの距離（Ericson の最近点）
+fn dist_tri(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+    let sub = |u: [f64; 3], v: [f64; 3]| [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+    let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    let at = |s: f64, t: f64| [0, 1, 2].map(|k| a[k] + s * (b[k] - a[k]) + t * (c[k] - a[k]));
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    let q = if d1 <= 0.0 && d2 <= 0.0 {
+        a
+    } else {
+        let bp = sub(p, b);
+        let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            b
+        } else {
+            let vc = d1 * d4 - d3 * d2;
+            if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+                at(d1 / (d1 - d3), 0.0)
+            } else {
+                let cp = sub(p, c);
+                let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+                if d6 >= 0.0 && d5 <= d6 {
+                    c
+                } else {
+                    let vb = d5 * d2 - d1 * d6;
+                    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+                        at(0.0, d2 / (d2 - d6))
+                    } else {
+                        let va = d3 * d6 - d5 * d4;
+                        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+                            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+                            [0, 1, 2].map(|k| b[k] + w * (c[k] - b[k]))
+                        } else {
+                            let den = 1.0 / (va + vb + vc);
+                            at(vb * den, vc * den)
+                        }
+                    }
+                }
+            }
+        }
+    };
+    let d = sub(p, q);
+    dot(d, d).sqrt()
+}
+
+/// 点の列から、メッシュ（三角形）までの距離（H より遠ければ H）
+fn dist_to_mesh(pts: &[[f64; 3]], p: &[f32], idx: &[u32]) -> Vec<f64> {
+    let cell = |v: f64| (v / H).floor() as i64;
+    let mut grid: std::collections::HashMap<[i64; 3], Vec<usize>> = Default::default();
+    for (k, t) in idx.chunks_exact(3).enumerate() {
+        let vs = [vert(p, t[0]), vert(p, t[1]), vert(p, t[2])];
+        let lo = [0, 1, 2].map(|c| cell(vs.iter().map(|v| v[c]).fold(f64::INFINITY, f64::min)));
+        let hi = [0, 1, 2].map(|c| cell(vs.iter().map(|v| v[c]).fold(f64::NEG_INFINITY, f64::max)));
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    grid.entry([x, y, z]).or_default().push(k);
+                }
+            }
+        }
+    }
+    pts.iter()
+        .map(|&q| {
+            let c = q.map(cell);
+            let mut best = H;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for &k in grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).into_iter().flatten() {
+                            let t = &idx[3 * k..3 * k + 3];
+                            best = best.min(dist_tri(q, vert(p, t[0]), vert(p, t[1]), vert(p, t[2])));
+                        }
+                    }
+                }
+            }
+            best
+        })
+        .collect()
+}
+
+/// 符号付きの体積（外向きの三角形なら正）
+fn volume(p: &[f32], idx: &[u32]) -> f64 {
+    idx.chunks_exact(3)
+        .map(|t| {
+            let (a, b, c) = (vert(p, t[0]), vert(p, t[1]), vert(p, t[2]));
+            (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0
+        })
+        .sum()
+}
+
+/// 面を表示範囲で切り取ったもの（陰関数の面は、表示範囲の少し外まで作る）と、表示範囲の端のふたを合わせた (点, 三角形)
+fn closed_region(src: &str) -> (Vec<f32>, Vec<u32>) {
+    use graph_core::{mesh::Mesh, system};
+    let mut m = run_with(src, R, N, 3, 0.0, 0.0);
+    let mut faces = Mesh { positions: m.positions(), indices: m.indices(), ..Default::default() };
+    // ふたは面から対角線の 1e-4 倍だけ内側に作るので、同じ所で切る
+    let lim = R - 2.0 * R * 3f64.sqrt() * 1e-4;
+    for a in 0..3 {
+        for s in [-1.0, 1.0] {
+            system::trim_mesh(&mut faces, &mut |pts: &[[f64; 3]]| pts.iter().map(|q| s * q[a] - lim).collect(), 30);
+        }
+    }
+    let caps = m.take_field().unwrap().caps(-1, 0.0, false, 0, N).unwrap();
+    let base = faces.positions.len() as u32 / 3;
+    let mut p = faces.positions;
+    p.extend(caps.positions());
+    let mut idx = faces.indices;
+    idx.extend(caps.indices().iter().map(|k| k + base));
+    (p, idx)
+}
+
+/// 正解の角の線の点から、メッシュまでの距離の (最大, 平均)（h の倍数）
+fn corner_dist(src: &str, line: &[[f64; 3]]) -> (f64, f64) {
+    let m = run_with(src, R, N, 3, 0.0, 0.0);
+    let d = dist_to_mesh(line, &m.positions(), &m.indices());
+    let max = d.iter().cloned().fold(0.0, f64::max);
+    let out = (max / H, d.iter().sum::<f64>() / d.len() as f64 / H);
+    println!("角 {src}: 最大 {:.3}h 平均 {:.3}h", out.0, out.1);
+    out
+}
+
+#[test]
+fn cube_has_sharp_corners() {
+    let src = "abs(x) ≤ 2, abs(y) ≤ 2, abs(z) ≤ 2";
+    let m = run_with(src, R, N, 3, 0.0, 0.0);
+    assert_eq!(m.kind(), "不等式の領域（3 本）");
+    let (p, idx) = (m.positions(), m.indices());
+    for c in 0..8 {
+        let corner = [0, 1, 2].map(|k| if c >> k & 1 == 1 { 2.0 } else { -2.0 });
+        let near = p.chunks_exact(3).any(|q| (0..3).all(|k| (q[k] as f64 - corner[k]).abs() <= 0.01));
+        assert!(near, "{corner:?}");
+    }
+    let mut edges = Vec::new();
+    for a in 0..3 {
+        for s in [[-2.0, -2.0], [-2.0, 2.0], [2.0, -2.0], [2.0, 2.0]] {
+            edges.extend(truth(
+                move |t| {
+                    let mut q = [0.0; 3];
+                    q[a] = t;
+                    q[(a + 1) % 3] = s[0];
+                    q[(a + 2) % 3] = s[1];
+                    q
+                },
+                -2.0,
+                2.0,
+            ));
+        }
+    }
+    let (max, _) = corner_dist(src, &edges);
+    assert!(max <= 0.1, "{max}");
+    let v = volume(&p, &idx);
+    assert!((v / 64.0 - 1.0).abs() <= 0.01, "{v}");
+}
+
+#[test]
+fn wedge_region() {
+    let src = "x ≤ y ≤ z";
+    let line = truth(|t| [t, t, t], -R, R);
+    let (max, _) = corner_dist(src, &line);
+    assert!(max <= 0.1, "{max}");
+    let (p, idx) = closed_region(src);
+    let v = volume(&p, &idx);
+    assert!((v / (1000.0 / 6.0) - 1.0).abs() <= 0.01, "{v}");
+}
+
+#[test]
+fn steinmetz_region() {
+    let src = "x^2 + y^2 ≤ 9, x^2 + z^2 ≤ 9";
+    let mut line = truth(|t| [3.0 * t.cos(), 3.0 * t.sin(), 3.0 * t.sin()], 0.0, 2.0 * std::f64::consts::PI);
+    line.extend(truth(|t| [3.0 * t.cos(), 3.0 * t.sin(), -3.0 * t.sin()], 0.0, 2.0 * std::f64::consts::PI));
+    let (max, _) = corner_dist(src, &line);
+    assert!(max <= 0.1, "{max}");
+    let m = run_with(src, R, N, 3, 0.0, 0.0);
+    let v = volume(&m.positions(), &m.indices());
+    assert!((v / 144.0 - 1.0).abs() <= 0.01, "{v}");
+}
+
+#[test]
+fn thin_region_keeps_its_edge() {
+    use std::f64::consts::PI;
+    let mut line = Vec::new();
+    for k in -2..=2 {
+        let x = k as f64 * PI;
+        if x.abs() < R {
+            line.extend(truth(move |t| [x, t, 0.0], -R, R));
+        }
+        let y = PI / 2.0 + k as f64 * PI;
+        if y.abs() < R {
+            line.extend(truth(move |t| [t, y, 0.0], -R, R));
+        }
+    }
+    let (max, mean) = corner_dist("0 ≤ z ≤ sin(x) cos(y)", &line);
+    assert!(mean <= 0.05 && max <= 0.6, "{max} {mean}");
+}
+
+#[test]
+fn single_inequality() {
+    let a = run_with("x^2 + y^2 + z^2 < 4", R, N, 3, 0.0, 0.0);
+    let b = run_with("x^2 + y^2 + z^2 = 4", R, N, 3, 0.0, 0.0);
+    assert_eq!(a.kind(), "不等式の領域");
+    assert_eq!(a.positions(), b.positions());
+    assert_eq!(a.indices(), b.indices());
+    // x ≤ y: 端のふたは x = −5・y = 5 で全体、z = ±5 で半分、x = 5・y = −5 には無い
+    let mut m = run_with("x ≤ y", R, N, 3, 0.0, 0.0);
+    let caps = m.take_field().unwrap().caps(-1, 0.0, false, 0, N).unwrap();
+    let (p, idx) = (caps.positions(), caps.indices());
+    let face_area = |axis: usize, at: f64| {
+        let tris: Vec<u32> = idx
+            .chunks_exact(3)
+            .filter(|t| t.iter().all(|&k| (vert(&p, k)[axis] - at).abs() < 0.01))
+            .flatten()
+            .copied()
+            .collect();
+        area(&p, &tris)
+    };
+    for (axis, at, want) in [(0, -R, 100.0), (1, R, 100.0), (2, R, 50.0), (2, -R, 50.0), (0, R, 0.0), (1, -R, 0.0)] {
+        let a = face_area(axis, at);
+        assert!((a - want).abs() <= 1.0, "{axis} {at}: {a}");
+    }
+}
+
+#[test]
+fn region_cap_has_corners() {
+    let mut m = run_with("abs(x) ≤ 2, abs(y) ≤ 2, abs(z) ≤ 2", R, N, 3, 0.0, 0.0);
+    let cap = m.take_field().unwrap().cap(2, 0.3, true, N).unwrap();
+    let (p, idx) = (cap.positions(), cap.indices());
+    let a = area(&p, &idx);
+    assert!((a / 16.0 - 1.0).abs() <= 0.005, "{a}");
+    for (sx, sy) in [(-2.0, -2.0), (-2.0, 2.0), (2.0, -2.0), (2.0, 2.0)] {
+        let near = p.chunks_exact(3).any(|q| (q[0] as f64 - sx).abs() <= 0.02 && (q[1] as f64 - sy).abs() <= 0.02);
+        assert!(near, "{sx} {sy}");
+    }
+}
+
+#[test]
+#[ignore]
+fn region_time() {
+    let best = |src: &str| {
+        (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                run_with(src, R, N, 3, 0.0, 0.0);
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for (src, faces) in [
+        ("abs(x) ≤ 2, abs(y) ≤ 2, abs(z) ≤ 2", vec!["abs(x) - 2 = 0", "abs(y) - 2 = 0", "abs(z) - 2 = 0"]),
+        ("x ≤ y ≤ z", vec!["x - y = 0", "y - z = 0"]),
+        ("x^2 + y^2 ≤ 9, x^2 + z^2 ≤ 9", vec!["x^2 + y^2 - 9 = 0", "x^2 + z^2 - 9 = 0"]),
+        ("0 ≤ z ≤ sin(x) cos(y)", vec!["0 - z = 0", "z - sin(x) cos(y) = 0"]),
+    ] {
+        let all = best(src);
+        let sum: f64 = faces.iter().map(|f| best(f)).sum();
+        println!("{src}\t{all:.1} ms\t面ごとの合計 {sum:.1} ms\t{:.2} 倍", all / sum);
+    }
+}

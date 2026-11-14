@@ -321,6 +321,7 @@ impl Plot {
             Plot::System { base, eqs, cuts, .. } => {
                 let cut = if cuts.is_empty() { "" } else { "（不等式で切り取り）" };
                 match (eqs.len(), base) {
+                    (0, _) if cuts.len() > 1 => format!("不等式の領域（{} 本）", cuts.len()),
                     (0, _) => "不等式の領域".into(),
                     (1, Some(b)) => format!("{}{cut}", b.kind_label()),
                     (1, None) => format!("陰関数{cut}"),
@@ -1209,8 +1210,8 @@ mod tests {
             ("x = y = z = 1", "連立方程式の点"),
             ("x ≤ y", "不等式の領域"),
             ("x^2 + y^2 + z^2 < 4", "不等式の領域"),
-            ("x ≤ y ≤ z", "不等式の領域"),
-            ("0 ≤ z ≤ sin(x) cos(y)", "不等式の領域"),
+            ("x ≤ y ≤ z", "不等式の領域（2 本）"),
+            ("0 ≤ z ≤ sin(x) cos(y)", "不等式の領域（2 本）"),
             ("x^2 + y^2 + z^2 = 4, z ≥ 0", "陰関数（不等式で切り取り）"),
             ("z = x^2 + y^2, z ≤ 4", "z = f(x, y)（不等式で切り取り）"),
             ("y = [1, 2] x, z = 0", "連立方程式の曲線 × 2"),

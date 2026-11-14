@@ -772,6 +772,11 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
             }
         }
+        // 不等式の領域: 面 G_i = 0 ごとに作り、ほかの不等式で切り取る。切り口と表示範囲の端には、ふたをする
+        P::System { eqs, cuts, .. } if eqs.is_empty() => {
+            b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            b.fields.push(mesh::Field::region(cuts));
+        }
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
     }
     Ok(b)
