@@ -129,3 +129,36 @@ pub fn trim_to_domain(m: &mut Mesh, dom: Domain, curve: bool, flat: bool) {
         }
     }
 }
+
+/// 座標系の格子（座標曲線。計画 9 章の S39）の、元の位置（座標の値）。作る範囲の箱 `dom` の面のうち、`faces` のビット a が立っている
+/// 「座標 a が範囲の最小」の面ごとに、残り 2 つの座標のどちらか 1 つを動かし、もう 1 つを範囲を `lines` 等分した値に固定した線を引く
+/// （1 本 64 点。線の間は NaN）。2D 表示（`flat`）では、縦の座標の面（ビット 2）だけを、縦の座標 0 の平面に引く
+pub fn grid_lines(dom: Domain, lines: usize, faces: u32, flat: bool) -> Vec<f32> {
+    const POINTS: usize = 64;
+    let lines = lines.clamp(1, 64);
+    let mut out = Vec::new();
+    for a in 0..3 {
+        if flat && a != 2 {
+            continue;
+        }
+        if !flat && faces & (1 << a) == 0 {
+            continue;
+        }
+        let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+        let fixed = if flat { 0.0 } else { dom.lo[a] };
+        for (vary, hold) in [(b, c), (c, b)] {
+            for k in 0..=lines {
+                let hv = dom.lo[hold] + (dom.hi[hold] - dom.lo[hold]) * k as f64 / lines as f64;
+                for j in 0..POINTS {
+                    let mut p = [0.0; 3];
+                    p[a] = fixed;
+                    p[hold] = hv;
+                    p[vary] = dom.lo[vary] + (dom.hi[vary] - dom.lo[vary]) * j as f64 / (POINTS - 1) as f64;
+                    out.extend(p.map(|v| v as f32));
+                }
+                out.extend_from_slice(&[f32::NAN; 3]);
+            }
+        }
+    }
+    out
+}

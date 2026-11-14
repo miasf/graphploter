@@ -14,7 +14,7 @@
   import CoordPanel from './lib/CoordPanel.svelte'
   import { COORD_PRESETS, engineName } from './lib/coords'
   import SpacePanel from './lib/SpacePanel.svelte'
-  import { requestCap, requestPlot } from './lib/plotClient'
+  import { requestCap, requestCoordGrid, requestPlot } from './lib/plotClient'
   import { lastBreakdown, recordBreakdown } from './lib/timings'
   import { Budget } from './lib/budget'
   import type {
@@ -1348,6 +1348,7 @@
       map: [...p.map],
       names: [...p.names],
       ranges: p.ranges.map((r) => [...r]) as CoordSystem['ranges'],
+      grid: { on: true, faces: 4 },
       morph: 1,
     }
     coordSystems.push(c)
@@ -1369,6 +1370,7 @@
     if (!c) return
     c.morph = Math.min(1, Math.max(0, s))
     for (const it of items) if (it.coordSys === cid) viewer?.setMorph(it.id, c.morph)
+    viewer?.setCoordGridMorph(cid, c.morph)
   }
 
   function renameCoord(cid: number, name: string) {
@@ -1394,6 +1396,69 @@
     item.coordSys = id
     schedule(item, 0)
   }
+
+  // ---- 座標系の格子（座標曲線。計画 S39） ----
+
+  /** 格子を描いている座標系の番号と、最新の依頼の番号（古い返事を捨てる） */
+  const gridShown = new Set<number>()
+  const gridToken = new Map<number, number>()
+  let gridTimer: ReturnType<typeof setTimeout> | undefined
+
+  /** 格子の設定を変える */
+  function setCoordGrid(cid: number, grid: { on: boolean; faces: number }) {
+    const c = coordSystems.find((x) => x.id === cid)
+    if (c) c.grid = grid
+  }
+
+  /** 座標系を使う、表示中の式がある座標系の格子を頼み直す（それ以外の座標系の格子は消す） */
+  function refreshCoordGrids() {
+    if (!viewer) return
+    const params = currentParams()
+    const wanted = new Set<number>()
+    for (const c of coordSystems) {
+      const grid = c.grid ?? { on: true, faces: 4 }
+      if (!grid.on || !items.some((it) => it.visible && !it.param && it.coordSys === c.id)) continue
+      let req: ReturnType<typeof coordRequest>
+      try {
+        req = coordRequest({ coordSys: c.id } as PlotItem)
+      } catch {
+        continue // 式の誤りは、式の行に出る
+      }
+      if (!req) continue
+      wanted.add(c.id)
+      const token = (gridToken.get(c.id) ?? 0) + 1
+      gridToken.set(c.id, token)
+      requestCoordGrid({ ...req, params, lines: 8, faces: grid.faces, flat }).then((res) => {
+        if (gridToken.get(c.id) !== token) return
+        const now = coordSystems.find((x) => x.id === c.id)
+        if (res.ok && now) {
+          viewer?.setCoordGrid(c.id, res.positions, res.target, now.morph)
+          gridShown.add(c.id)
+        } else {
+          viewer?.setCoordGrid(c.id, null, null, 0)
+          gridShown.delete(c.id)
+        }
+      })
+    }
+    for (const id of [...gridShown]) {
+      if (wanted.has(id)) continue
+      gridToken.set(id, (gridToken.get(id) ?? 0) + 1)
+      viewer?.setCoordGrid(id, null, null, 0)
+      gridShown.delete(id)
+    }
+  }
+
+  // 座標系（移行の値を除く）・式の座標系と表示・パラメータ・2D 表示が変わったら、少し待ってから格子を頼み直す
+  $effect(() => {
+    const key = JSON.stringify([
+      coordSystems.map((c) => [c.id, c.map, c.ranges, c.names, c.grid]),
+      items.map((it) => [it.coordSys, it.visible, !!it.param, it.param?.name, it.param?.re, it.param?.im]),
+      flat,
+    ])
+    void key
+    clearTimeout(gridTimer)
+    gridTimer = setTimeout(refreshCoordGrids, 150)
+  })
 
   /** 式の ⚙ の「座標系」から、その座標系の設定を開く */
   function openCoord(cid: number | undefined) {
@@ -2068,6 +2133,7 @@
                 sys={tabCoord}
                 onShape={(m, r) => setCoordShape(tabCoord.id, m, r)}
                 onNames={(n) => setCoordNames(tabCoord.id, n)}
+                onGrid={(g) => setCoordGrid(tabCoord.id, g)}
                 onMorph={(v) => setMorph(tabCoord.id, v)}
                 playing={playingMorph.includes(tabCoord.id)}
                 onPlay={() => togglePlayMorph(tabCoord.id)}

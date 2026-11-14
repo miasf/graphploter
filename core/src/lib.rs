@@ -281,6 +281,61 @@ fn record_stats(mesh: &mut mesh::Mesh, start: f64, lod_start: f64, end: f64) {
     mesh.stats = mesh::Stats { eval_ms, mesh_ms: (lod_start - start - eval_ms).max(0.0), lod_ms: end - lod_start, points, phases };
 }
 
+/// 座標系の格子（座標曲線。計画 9 章の S39）。`map`・`names` は [`coord_system`] と同じ、`ranges` は作る範囲
+/// [x の最小, 最大, y …, z …]、`param_names`・`param_values` は [`plot`] と同じパラメータ。`lines` は範囲を何等分した所に線を引くか、
+/// `faces` は線を引く面（ビット a: 座標 a が範囲の最小の面）、`flat` は 2D 表示（縦の座標 0 の平面に引く）。
+/// 結果は曲線: `take_positions` が元の位置（座標の値）、`take_target` が座標系で移した先。描画側が移行の値で混ぜる
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn coord_grid(
+    map: &str,
+    names: &str,
+    ranges: &[f64],
+    param_names: &str,
+    param_values: &[f64],
+    lines: u32,
+    faces: u32,
+    flat: bool,
+) -> Result<MeshResult, JsError> {
+    let names_v: Vec<String> = names.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let pn: Vec<&str> = param_names.split(',').filter(|s| !s.is_empty()).collect();
+    if ranges.len() != 6 || param_values.len() != 2 * pn.len() {
+        return Err(JsError::new("内部エラー: 座標系の格子の指定が合っていません"));
+    }
+    let consts: eval::Params =
+        pn.iter().enumerate().map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1]))).collect();
+    let mut space = equation::Space::standard();
+    space.coord_names = <[String; 3]>::try_from(names_v).ok();
+    let c = equation::compile_coord_map(map, &consts, &space).map_err(|e| JsError::new(&e))?;
+    let dom = mesh::Domain { lo: [ranges[0], ranges[2], ranges[4]], hi: [ranges[1], ranges[3], ranges[5]] };
+    let mut positions = coords::grid_lines(dom, lines as usize, faces, flat);
+    let target = c.apply_line(&mut positions, flat);
+    let inner = mesh::Mesh { positions, target, ..Default::default() };
+    Ok(MeshResult {
+        inner,
+        kind: String::new(),
+        params: Vec::new(),
+        curve: true,
+        shape_curve: true,
+        used_params: Vec::new(),
+        param: None,
+        local_available: false,
+        shape: None,
+        explicit_used: None,
+        local: None,
+        transform: None,
+        field: None,
+        solid: false,
+        flat,
+        flat_slice: false,
+        outline: Default::default(),
+        outline_target: Default::default(),
+        coord: None,
+        value_range: None,
+        volume: None,
+    })
+}
+
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
 #[wasm_bindgen]
 pub fn check_expression(source: &str) -> Result<(), JsError> {

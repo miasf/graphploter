@@ -147,6 +147,8 @@ export class Viewer {
   private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
   /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
   private morphValues = new Map<number, number>()
+  /** 座標系の格子（計画 S39。座標系の番号 → 線と、元の位置・移した先・移行の値） */
+  private coordGrids = new Map<number, { line: THREE.LineSegments; q: Float32Array; target: Float32Array; s: number }>()
   /** 表示範囲の外を切り落とす6枚の平面 */
   private boxPlanes: THREE.Plane[] = []
   /** 切り口の平面（切らないなら null） */
@@ -1015,6 +1017,7 @@ export class Viewer {
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
     if (this.domain) this.buildFrame(this.domain)
+    for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
   }
 
   /** 表示範囲を設定し、軸・目盛り・枠を作り直す */
@@ -1225,6 +1228,49 @@ export class Viewer {
     if (m && style) this.applyPlot(id, this.morphed(id, m), style)
   }
 
+  /**
+   * 座標系の格子（座標曲線。計画 S39）を描く・消す（`q` が null なら消す）。`q` は元の位置（座標の値）、`target` は移した先
+   * （点の列。線の間は NaN）。移行の値 `s` で混ぜて描く。枠・方眼より少し濃い色の細い線で、表示範囲・切り口で切る
+   */
+  setCoordGrid(cid: number, q: Float32Array | null, target: Float32Array | null, s: number) {
+    const old = this.coordGrids.get(cid)
+    if (old) {
+      old.line.geometry.dispose()
+      ;(old.line.material as THREE.Material).dispose()
+      this.scene.remove(old.line)
+      this.coordGrids.delete(cid)
+    }
+    this.dirty = true
+    if (!q || !target || q.length !== target.length) return
+    const mat = new THREE.LineBasicMaterial({ color: this.theme.box, transparent: true, opacity: 0.55, clippingPlanes: this.clipPlanes })
+    const line = new THREE.LineSegments(new THREE.BufferGeometry(), mat)
+    line.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
+    line.frustumCulled = false
+    this.scene.add(line)
+    const g = { line, q, target, s: -1 }
+    this.coordGrids.set(cid, g)
+    this.setCoordGridMorph(cid, s)
+  }
+
+  /** 座標系の格子の移行の値を変える（形だけを差し替える） */
+  setCoordGridMorph(cid: number, s: number) {
+    const g = this.coordGrids.get(cid)
+    if (!g || g.s === s) return
+    g.s = s
+    const pts = mixPositions(g.q, g.target, Math.min(1, Math.max(0, s)))
+    // 点の列を、隣り合う 2 点ずつの線分にする（NaN の所は線を切る）
+    const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
+    const seg: number[] = []
+    for (let k = 0; k + 5 < pts.length; k += 3) {
+      if (ok(k) && ok(k + 3)) for (let j = 0; j < 6; j++) seg.push(pts[k + j])
+    }
+    g.line.geometry.dispose()
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3))
+    g.line.geometry = geo
+    this.dirty = true
+  }
+
   /** 移行のスライダーの値で位置を混ぜた形。s = 0 なら、計算エンジンが返した位置と法線をそのまま使う */
   private morphed(id: number, m: { mesh: MeshData; weld: Int32Array | null }): MeshData {
     const { mesh } = m
@@ -1347,6 +1393,7 @@ export class Viewer {
       }
     }
     for (const id of this.plots.keys()) this.updateStencil(id)
+    for (const g of this.coordGrids.values()) (g.line.material as THREE.Material).clippingPlanes = this.clipPlanes
     this.dirty = true
   }
 

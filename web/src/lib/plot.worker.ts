@@ -11,6 +11,7 @@ import init, {
   hidden_style,
   complex_coords,
   coord_system,
+  coord_grid,
   last_used_params,
   plot,
   take_field_values,
@@ -20,7 +21,7 @@ import init, {
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
-import type { CapData, CapRequest, CapResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
+import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
 import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -222,7 +223,37 @@ function reusable(cached: NonNullable<ReturnType<typeof shapes.get>>, key: strin
   return cached.ires === req.implicitResolution && cached.thorough === ((req.flags & PLOT_THOROUGH) !== 0)
 }
 
-self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
+self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridRequest>) => {
+  if ('type' in ev.data && ev.data.type === 'grid') {
+    // 座標系の格子（計画 S39）
+    const g = ev.data
+    await ready
+    let res: CoordGridResponse
+    try {
+      const used = new Set<string>()
+      const names = ['x', 'y', 'z']
+      const ranges = g.ranges.flatMap((r, k) => {
+        const [a, b] = range(`座標系の ${names[k]}`, r, g.params, used)
+        return [a, a < b ? b : a + 1]
+      })
+      const m = coord_grid(
+        g.map,
+        g.names,
+        new Float64Array(ranges),
+        Object.keys(g.params).join(','),
+        new Float64Array(Object.values(g.params).flatMap((p) => [p.re, p.im])),
+        g.lines,
+        g.faces,
+        g.flat,
+      )
+      res = { requestId: g.requestId, ok: true, positions: m.take_positions(), target: m.take_target() }
+      m.free()
+    } catch (e) {
+      res = { requestId: g.requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+    self.postMessage(res, { transfer: res.ok ? [res.positions.buffer as ArrayBuffer, res.target.buffer as ArrayBuffer] : [] })
+    return
+  }
   if ('type' in ev.data) {
     const { requestId, itemId, cut, resolution } = ev.data
     await ready

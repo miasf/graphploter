@@ -9,6 +9,8 @@
     sys: CoordSystem
     /** 式・範囲を変えた（計算し直す） */
     onShape: (map: CoordSystem['map'], ranges: CoordSystem['ranges']) => void
+    /** 格子（座標曲線）の設定を変えた */
+    onGrid: (grid: { on: boolean; faces: number }) => void
     /** 座標の名前を変えた（計算し直す） */
     onNames: (names: [string, string, string]) => void
     /** 移行のスライダーを動かした（計算し直さない） */
@@ -17,7 +19,9 @@
     playing: boolean
     onPlay: () => void
   }
-  let { sys, onShape, onNames, onMorph, playing, onPlay }: Props = $props()
+  let { sys, onShape, onNames, onGrid, onMorph, playing, onPlay }: Props = $props()
+
+  const grid = $derived(sys.grid ?? { on: true, faces: 4 })
 
   const names = $derived(sys.names ?? (['x', 'y', 'z'] as [string, string, string]))
 
@@ -80,6 +84,22 @@
     {/each}
   </div>
 
+  <div class="grid-row">
+    <label><input type="checkbox" checked={grid.on} onchange={(e) => onGrid({ ...grid, on: e.currentTarget.checked })} /> 格子を表示</label>
+    <select
+      value={String(grid.faces)}
+      disabled={!grid.on}
+      aria-label="格子を引く面"
+      onchange={(e) => onGrid({ ...grid, faces: Number(e.currentTarget.value) })}
+    >
+      <option value="4">{prettyCoordName(names[2])} が最小の面</option>
+      <option value="2">{prettyCoordName(names[1])} が最小の面</option>
+      <option value="1">{prettyCoordName(names[0])} が最小の面</option>
+      <option value="7">3 つとも</option>
+    </select>
+  </div>
+  <p class="hint">格子は、作る範囲の箱の面の上で座標を 1 つだけ動かした線（座標曲線）です。図形と一緒に曲がります（2D 表示では平面の方眼）。</p>
+
   <div class="maps">
     {#each COMPONENTS as c, k (c)}
       <span class="name">{c} =</span>
@@ -129,6 +149,15 @@
     font: 12px var(--mono);
     color: var(--muted);
     text-align: right;
+  }
+  .grid-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .grid-row select {
+    min-width: 0;
   }
   .names {
     display: grid;

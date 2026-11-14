@@ -156,6 +156,11 @@ export interface CoordSystem {
   ranges: [[string, string], [string, string], [string, string]]
   /** 移行のスライダー（0〜1） */
   morph: number
+  /**
+   * 座標系の格子（座標曲線。計画 S39）。on なら、この座標系を使う式があるときに描く（無い古い保存データは on）。
+   * faces は線を引く面（ビット a: 座標 a が範囲の最小の面。既定は 4 = 3 つ目の座標の面）
+   */
+  grid?: { on: boolean; faces: number }
 }
 
 /** フォルダ: 式をまとめて、一覧で折りたためるようにする（Desmos のフォルダと同じ） */
@@ -420,6 +425,26 @@ export interface CapRequest {
 }
 
 export type CapResponse = { requestId: number; cap: CapData | null }
+
+/** 座標系の格子（座標曲線。計画 S39）の依頼。map・ranges・names は PlotRequest.coord と同じ（計算エンジン用の式） */
+export interface CoordGridRequest {
+  type: 'grid'
+  requestId: number
+  map: string
+  ranges: [string, string][]
+  names: string
+  params: Record<string, ParamValue>
+  /** 範囲を何等分した所に線を引くか */
+  lines: number
+  /** 線を引く面（ビット a: 座標 a が範囲の最小の面） */
+  faces: number
+  flat: boolean
+}
+
+/** 座標系の格子: 元の位置（座標の値）と移した先（点の列。線の間は NaN）。式に誤りがあれば error */
+export type CoordGridResponse =
+  | { requestId: number; ok: true; positions: Float32Array; target: Float32Array }
+  | { requestId: number; ok: false; error: string }
 
 export type PlotResponse =
   | {

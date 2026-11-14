@@ -249,3 +249,30 @@ fn greek_names_do_not_break_functions() {
     assert_eq!(val("θ + 10φ + 100ρ"), 320.5);
     assert_eq!(val("2theta"), 1.0);
 }
+
+#[test]
+fn grid_follows_the_map() {
+    // 球座標の格子: 移した先は、どの点も元の位置を T で移したもの
+    let mut m = graph_core::coord_grid(SPHERE, "", &[0.0, 5.0, 0.0, PI, 0.0, TAU], "", &[], 8, 0b111, false).ok().unwrap();
+    let (p, t) = (m.take_positions(), m.take_target());
+    assert_eq!(p.len(), t.len());
+    let mut n = 0;
+    for (q, v) in p.chunks_exact(3).zip(t.chunks_exact(3)) {
+        if !q[0].is_finite() {
+            continue;
+        }
+        let (r, th, ph) = (q[0] as f64, q[1] as f64, q[2] as f64);
+        let want = [r * th.sin() * ph.cos(), r * th.sin() * ph.sin(), r * th.cos()];
+        for k in 0..3 {
+            assert!((v[k] as f64 - want[k]).abs() < 1e-5, "{q:?} {v:?}");
+        }
+        n += 1;
+    }
+    // 3 つの面 × 2 方向 × 9 本 × 64 点
+    assert_eq!(n, 3 * 2 * 9 * 64);
+    // 2D 表示の極座標: 縦の座標は 0、移した先も 0
+    let mut m = graph_core::coord_grid(CYLINDER, "r,theta,z", &[0.0, 5.0, 0.0, TAU, -5.0, 5.0], "", &[], 8, 0b100, true).ok().unwrap();
+    let (p, t) = (m.take_positions(), m.take_target());
+    assert!(p.chunks_exact(3).zip(t.chunks_exact(3)).all(|(q, v)| !q[0].is_finite() || (q[2] == 0.0 && v[2] == 0.0)));
+    assert_eq!(p.chunks_exact(3).filter(|q| q[0].is_finite()).count(), 2 * 9 * 64);
+}

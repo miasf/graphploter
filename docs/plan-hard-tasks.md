@@ -2325,6 +2325,10 @@ s = 1 では、継ぎ目（9.4 の 33 番）の頂点の法線を、移した先
 
 **README**: 「座標系」の節に 1 行足す。
 
+（追記・実装後）入口は `coord_grid(map, names, ranges, param_names, param_values, lines, faces, flat)`（`core/src/lib.rs`、線は `coords::grid_lines`）。
+Worker への依頼は `type: 'grid'`（1 つ目の Worker）。描画は `Viewer.setCoordGrid`・`setCoordGridMorph`（`THREE.LineSegments`、枠の色、表示範囲・切り口で切る）。
+座標系を使う表示中の式があるときだけ描く。式・範囲・名前・格子の設定・パラメータ・2D 表示が変わったら 150 ms 待って頼み直す（移行の値では頼み直さない）。
+
 ---
 
 ### 9.4 危ない所（この章の分）
