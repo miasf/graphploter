@@ -151,6 +151,19 @@ impl Program {
         (ids.into_iter().map(|i| self.sub_program(i)).collect(), true)
     }
 
+    /// 虚部が 0 でない定数（虚数単位 i・複素数のパラメータの値）を含むか
+    pub fn has_complex_const(&self) -> bool {
+        self.code.ops.iter().any(|o| matches!(o, Op::Const(c) if c.im != 0.0))
+    }
+
+    /// 値の実部（`f` = [`Func::Re`]）か虚部（[`Func::Im`]）をとった式
+    pub fn part(&self, f: Func) -> Program {
+        let mut b = Builder::default();
+        let at = b.append(&self.code.ops, &Op::Var);
+        let root = b.push(Op::Call1(f, at[self.code.outs[0]]));
+        Program { code: Code::new(b, vec![root]), vars: self.vars.clone(), used_params: self.used_params.clone() }
+    }
+
     /// 実数の定数の命令なら、その値
     fn real_const(&self, i: usize) -> Option<f64> {
         match self.code.ops[i] {

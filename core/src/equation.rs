@@ -769,8 +769,8 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     }
     let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
     let prog = Program::compile_with(&f, &shown_refs, &consts)?;
-    // 線・点だけの解として描く式は、回す前の形（面のメッシュを 3D オブジェクトとして回す）を使わない
-    let local = local.filter(|_| prog.common_zero_sets().is_none());
+    // 線・点だけの解として描く式・複素数の陰関数（i を含む式）は、回す前の形（面のメッシュを 3D オブジェクトとして回す）を使わない
+    let local = local.filter(|_| prog.common_zero_sets().is_none() && !prog.has_complex_const());
     Ok(Plot::Implicit { prog, from, local })
 }
 

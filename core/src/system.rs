@@ -332,6 +332,28 @@ pub fn common_zero_sets(sets: &[Vec<Program>], dom: Domain, n: usize, refine: Re
     (mesh::merge(meshes, true), format!("陰関数（{what}だけの解）"))
 }
 
+/// 複素数の陰関数として描く式か: 虚部が 0 でない定数（i・複素数のパラメータ）を含み、表示範囲の中の点（6³ 個）で、
+/// 値が有限な点のうち 2 割以上で実数にならない（|Im F| > 10⁻⁹ (1 + |Re F|)）。
+/// `|x + i y| = z^2 + 1` のように i を含んでも値が実数の式、`sqrt(x)` のように定義域の外でだけ複素数になる式は、ふつうの陰関数のまま
+pub fn is_complex_valued(prog: &Program, dom: Domain) -> bool {
+    if !prog.has_complex_const() || prog.vars().len() != 3 {
+        return false;
+    }
+    const K: usize = 6;
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for k in 0..K * K * K {
+        let idx = [k % K, k / K % K, k / (K * K)];
+        for c in 0..3 {
+            cols[c].push(dom.lo[c] + (dom.hi[c] - dom.lo[c]) * (idx[c] as f64 + 0.5) / K as f64);
+        }
+    }
+    let mut out = vec![C::new(0.0, 0.0); K * K * K];
+    prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    let finite: Vec<&C> = out.iter().filter(|v| v.re.is_finite() && v.im.is_finite()).collect();
+    let complex = finite.iter().filter(|v| v.im.abs() > 1e-9 * (1.0 + v.re.abs())).count();
+    !finite.is_empty() && complex * 5 >= finite.len()
+}
+
 /// 式 `prog`（変数は 3 つの座標）を、点の列での値の関数にする（[`trim_mesh`]・[`clip_segments`] の条件）
 pub fn values_of(prog: &Program) -> impl FnMut(&[[f64; 3]]) -> Vec<f64> + '_ {
     move |pts: &[[f64; 3]]| {

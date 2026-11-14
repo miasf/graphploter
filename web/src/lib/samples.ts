@@ -247,6 +247,14 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           },
         ],
       },
+      {
+        label: '複素数の陰関数 e^{ix} = y + iz（らせん）と (x + iy)² = z（放物線 2 本）',
+        view: { dims: 3, half: 3 },
+        items: [
+          { latex: 'e^{ix}=y+iz', options: { color: '#c74440', lineWidth: 4 } },
+          { latex: '\\left(x+iy\\right)^2-z=0', options: { color: '#2d70b3', lineWidth: 4 } },
+        ],
+      },
       { label: '|Γ(x + iy)|', items: [{ latex: 'z=\\left|\\Gamma\\left(x+iy\\right)\\right|', options: { color: '#fa7e19' } }] },
       {
         label: 'Γ(x + iy) の色分け（高さ |Γ|、色は偏角）',

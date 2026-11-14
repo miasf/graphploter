@@ -959,6 +959,13 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
             b.local = Some((local, lp.used_params().to_vec()));
         }
+        // 複素数の陰関数（値が複素数の F = 0）: Re F = Im F = 0 の線として、連立方程式の交わる線と同じ道で描く
+        P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
+            b.curve = true;
+            b.kind = "複素数の陰関数（Re F = Im F = 0 の曲線）".into();
+            let (re, im) = (prog.part(functions::Func::Re), prog.part(functions::Func::Im));
+            b.inner = system::intersection_curve(&re, &im, dom, ctx.implicit_resolution, ctx.implicit_refine);
+        }
         // 面にならず、線・点だけになる式（A² + B² = 0 は A = B = 0 の線）: 交わる線・点として描く
         P::Implicit { prog, .. } if prog.common_zero_sets().is_some() => {
             let sets = prog.common_zero_sets().unwrap_or_default();
@@ -1146,6 +1153,14 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let other = if *axis == 0 { &names[1] } else { &names[0] };
             b.kind = format!("{} = f({})", names[*axis], other);
             b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
+        }
+        // 複素数の陰関数の 2D 表示: Re F = Im F = 0 の交点
+        P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
+            let (re, im) = (prog.part(functions::Func::Re), prog.part(functions::Func::Im));
+            let pts = system::flat_points(&re, &im, dom, res2);
+            b.curve = true;
+            b.kind = format!("複素数の陰関数（Re F = Im F = 0 の点、{} 個）", pts.len());
+            b.inner = system::points_mesh(&pts);
         }
         P::Implicit { prog, from, .. } => {
             b.curve = true;
