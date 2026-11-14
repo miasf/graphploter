@@ -137,6 +137,8 @@ function looksLikeDefinition(source: string): boolean {
  */
 function costOf(kind: string, curve: boolean, flat: boolean): Cost {
   // 陰関数の線・点だけの解（`陰関数（線だけの解）`）は曲線だが、陰関数の面を作ってから線を取り出すので、時間は細かさの 3 乗
+  // 連立方程式・不等式も、陰関数の面を作ってから線を取り出す・切り取るので 3 乗
+  if (!flat && /^(連立方程式|不等式の領域)/.test(kind)) return 'volume'
   if (!flat && (/^陰関数/.test(kind) || (!curve && /^範囲で重ねた立体/.test(kind)))) return 'volume'
   if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
   return 'surface'
@@ -425,7 +427,11 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     // 配列は取り出して渡す（getter だと Rust 側の clone と JavaScript への写しで2回コピーになる）
     const g = geom ?? r
     const transform = transformOnly ? new Float64Array(r.transform) : localTransform
+    const outline = r.take_outline()
+    const outlineDashed = r.take_outline_dashed()
     const mesh = {
+      ...(outline.length > 0 ? { outline } : {}),
+      ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
       positions: g.take_positions(),
       normals: g.take_normals(),
       indices: g.take_indices(),
@@ -474,6 +480,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
+        ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
+        ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),
         ...capTransfer(res.mesh.lod),
         ...capTransfer(res.cap),
       ]

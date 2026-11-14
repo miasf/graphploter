@@ -2,7 +2,7 @@
 //!
 //! 2 つの式 $F_1 = F_2 = 0$ の線は、$F_1 = 0$ の面のメッシュの上で $F_2$ の等高線（値 0）を取り出し、
 //! ニュートン法で 2 つの面の上へ寄せて作る（[`intersection_curve`]）。寄らない点（`tan` の極の偽の線など）は捨てる。
-//! 3 つ以上の式の点は、はじめの 2 つの線の上で 3 つ目の式の符号が変わる所から、全部の式の上へ寄せて作る（[`common_points`]）。
+//! 3 つ以上の式の点は、はじめの 2 つの線の上で 3 つ目の式の符号が変わる所から、全部の式の上へ寄せて作る（[`points_on_curve`]）。
 //!
 //! 今は、$A^2 + B^2 = 0$ のように式の形から「面にならず、線・点だけになる」と分かる陰関数に使う
 //! （[`crate::eval::Program::common_zero_sets`]）。複素数の陰関数 $\operatorname{Re} F = \operatorname{Im} F = 0$・連立方程式の土台にもなる。
@@ -89,6 +89,11 @@ fn solve(mut m: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
 /// どの式の値も $10^{-4} h |\nabla F_k|$ 以下になった点を「寄った」とする（寄らなければ None）。
 /// 途中で値が有限でなくなった点も None
 pub fn newton_onto(progs: &[&Program], points: &[[f64; 3]], h: f64) -> Vec<Option<[f64; 3]>> {
+    newton_onto_in(progs, points, h, 3)
+}
+
+/// [`newton_onto`] で、はじめの `dims` 個の座標だけを動かす版（2D 表示では横・奥の 2 つ。縦の座標は 0 のまま）
+pub fn newton_onto_in(progs: &[&Program], points: &[[f64; 3]], h: f64, dims: usize) -> Vec<Option<[f64; 3]>> {
     let m = progs.len();
     let d = 1e-5 * h;
     let mut cur: Vec<[f64; 3]> = points.to_vec();
@@ -113,8 +118,17 @@ pub fn newton_onto(progs: &[&Program], points: &[[f64; 3]], h: f64) -> Vec<Optio
         let vals: Vec<Vec<f64>> = progs.iter().map(|p| values_at(p, &cols)).collect();
         for (j, &k) in active.iter().enumerate() {
             let f: Vec<f64> = (0..m).map(|i| vals[i][7 * j]).collect();
-            let jac: Vec<[f64; 3]> =
-                (0..m).map(|i| [0, 1, 2].map(|c| (vals[i][7 * j + 1 + 2 * c] - vals[i][7 * j + 2 + 2 * c]) / (2.0 * d))).collect();
+            let jac: Vec<[f64; 3]> = (0..m)
+                .map(|i| {
+                    [0, 1, 2].map(|c| {
+                        if c < dims {
+                            (vals[i][7 * j + 1 + 2 * c] - vals[i][7 * j + 2 + 2 * c]) / (2.0 * d)
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
             if f.iter().chain(jac.iter().flatten()).any(|v| !v.is_finite()) {
                 alive[k] = false;
                 continue;
@@ -124,7 +138,7 @@ pub fn newton_onto(progs: &[&Program], points: &[[f64; 3]], h: f64) -> Vec<Optio
                 f[i].abs() <= 1e-4 * h * g
             });
             if step == NEWTON_STEPS {
-                break;
+                continue;
             }
             let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
             let jjt: Vec<Vec<f64>> = (0..m).map(|r| (0..m).map(|c| dot(&jac[r], &jac[c])).collect()).collect();
@@ -214,35 +228,51 @@ pub fn intersection_curve(f1: &Program, f2: &Program, dom: Domain, n: usize, ref
     Mesh { positions: out, ..Default::default() }
 }
 
-/// 式 `progs`（3 つ以上）がどれも 0 になる点。はじめの 2 つの式の線の上で、3 つ目の式の符号が変わる所を探し、全部の式の上へ寄せる。
-/// 半マスより近い点は 1 つにまとめる。描画側が点とみなすよう、点ごとに同じ点を 2 つと NaN を並べる
-pub fn common_points(progs: &[Program], dom: Domain, n: usize, refine: Refine) -> Mesh {
-    assert!(progs.len() >= 3);
-    let (points, segs) = curve_points(&progs[0], &progs[1], dom, n, refine);
-    let h = cell(dom, n);
-    let mut seeds = Vec::new();
-    if !points.is_empty() {
-        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| points.iter().map(|p| p[c]).collect());
-        let g = values_at(&progs[2], &cols);
-        for [a, b] in segs {
-            let (ga, gb) = (g[a], g[b]);
-            if ga.is_finite() && gb.is_finite() && (ga < 0.0) != (gb < 0.0) {
-                let s = ga / (ga - gb);
-                seeds.push([0, 1, 2].map(|c| points[a][c] + s * (points[b][c] - points[a][c])));
-            }
-        }
-    }
-    let refs: Vec<&Program> = progs.iter().collect();
+/// 点を、互いに `tol` より近いものを 1 つにまとめ、表示範囲（はじめの `dims` 個の座標）の外を捨てる
+fn distinct_inside(points: impl IntoIterator<Item = [f64; 3]>, dom: Domain, dims: usize, tol: f64) -> Vec<[f64; 3]> {
     let mut found: Vec<[f64; 3]> = Vec::new();
-    for p in newton_onto(&refs, &seeds, h).into_iter().flatten() {
-        let inside = (0..3).all(|c| p[c] >= dom.lo[c] - 1e-9 * h && p[c] <= dom.hi[c] + 1e-9 * h);
-        let near = |q: &[f64; 3]| (0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>() < (0.5 * h).powi(2);
+    for p in points {
+        let inside = (0..dims).all(|c| p[c] >= dom.lo[c] - 1e-9 && p[c] <= dom.hi[c] + 1e-9);
+        let near = |q: &[f64; 3]| (0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>() < tol * tol;
         if inside && !found.iter().any(near) {
             found.push(p);
         }
     }
-    let mut out = Vec::with_capacity(found.len() * 9);
-    for p in found {
+    found
+}
+
+/// 線分の両端の値 `g` の符号が違う所に、直線補間で点を置く
+fn sign_changes(points: &[[f64; 3]], segs: &[[usize; 2]], g: &[f64]) -> Vec<[f64; 3]> {
+    let mut seeds = Vec::new();
+    for &[a, b] in segs {
+        let (ga, gb) = (g[a], g[b]);
+        if ga.is_finite() && gb.is_finite() && (ga < 0.0) != (gb < 0.0) {
+            let s = ga / (ga - gb);
+            seeds.push([0, 1, 2].map(|c| points[a][c] + s * (points[b][c] - points[a][c])));
+        }
+    }
+    seeds
+}
+
+/// 式 `progs`（3 つ以上）がどれも 0 になる点。はじめの 2 つの式の線の上で、3 つ目の式の符号が変わる所を探し、全部の式の上へ寄せる。
+/// 互いに 0.25h より近い点は 1 つにまとめ、表示範囲の外の点は捨てる
+pub fn points_on_curve(progs: &[Program], dom: Domain, n: usize, refine: Refine) -> Vec<[f64; 3]> {
+    assert!(progs.len() >= 3);
+    let (points, segs) = curve_points(&progs[0], &progs[1], dom, n, refine);
+    let h = cell(dom, n);
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| points.iter().map(|p| p[c]).collect());
+    let seeds = sign_changes(&points, &segs, &values_at(&progs[2], &cols));
+    let refs: Vec<&Program> = progs.iter().collect();
+    distinct_inside(newton_onto(&refs, &seeds, h).into_iter().flatten(), dom, 3, 0.25 * h)
+}
+
+/// 点を、描画側が点とみなす形（同じ点を 2 つと NaN）の曲線のメッシュにする
+pub fn points_mesh(points: &[[f64; 3]]) -> Mesh {
+    let mut out = Vec::with_capacity(points.len() * 9);
+    for p in points {
         let p = p.map(|v| v as f32);
         out.extend_from_slice(&p);
         out.extend_from_slice(&p);
@@ -251,12 +281,47 @@ pub fn common_points(progs: &[Program], dom: Domain, n: usize, refine: Refine) -
     Mesh { positions: out, ..Default::default() }
 }
 
+/// 点のうち、不等式 `cuts`（G ≤ 0）を全部満たすもの
+pub fn points_inside(points: Vec<[f64; 3]>, cuts: &[Program]) -> Vec<[f64; 3]> {
+    let mut keep = vec![true; points.len()];
+    for g in cuts {
+        for (k, v) in values_of(g)(&points).into_iter().enumerate() {
+            keep[k] &= v <= 0.0;
+        }
+    }
+    points.into_iter().zip(keep).filter_map(|(p, k)| k.then_some(p)).collect()
+}
+
+/// 2D 表示の、2 本の式 F_1 = F_2 = 0 の交点（縦の座標は 0）。`implicit_curve_2d(F_1)` の線分の上で F_2 の符号が変わる所を探し、
+/// 横・奥の座標だけを動かすニュートン法で寄せる
+pub fn flat_points(f1: &Program, f2: &Program, dom: Domain, n: usize) -> Vec<[f64; 3]> {
+    let curve = mesh::implicit_curve_2d(f1, dom, n);
+    let mut points = Vec::new();
+    let mut segs = Vec::new();
+    for s in curve.positions.chunks_exact(9) {
+        if s[..6].iter().all(|v| v.is_finite()) {
+            points.push([s[0] as f64, s[1] as f64, 0.0]);
+            points.push([s[3] as f64, s[4] as f64, 0.0]);
+            segs.push([points.len() - 2, points.len() - 1]);
+        }
+    }
+    let h = (0..2).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
+    let seeds = sign_changes(&points, &segs, &values_of(f2)(&points));
+    distinct_inside(newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten(), dom, 2, 0.25 * h)
+}
+
 /// 因数ごとの「同時に 0 になる式の組」（[`Program::common_zero_sets`]）を描く。式が 2 つの組は線、3 つ以上の組は点。
 /// 戻り値はメッシュ（曲線）と、説明（線か点か）
 pub fn common_zero_sets(sets: &[Vec<Program>], dom: Domain, n: usize, refine: Refine) -> (Mesh, String) {
     let meshes: Vec<Mesh> = sets
         .iter()
-        .map(|s| if s.len() == 2 { intersection_curve(&s[0], &s[1], dom, n, refine) } else { common_points(s, dom, n, refine) })
+        .map(|s| {
+            if s.len() == 2 {
+                intersection_curve(&s[0], &s[1], dom, n, refine)
+            } else {
+                points_mesh(&points_on_curve(s, dom, n, refine))
+            }
+        })
         .collect();
     let (lines, points) = (sets.iter().any(|s| s.len() == 2), sets.iter().any(|s| s.len() > 2));
     let what = match (lines, points) {
@@ -265,6 +330,267 @@ pub fn common_zero_sets(sets: &[Vec<Program>], dom: Domain, n: usize, refine: Re
         _ => "点",
     };
     (mesh::merge(meshes, true), format!("陰関数（{what}だけの解）"))
+}
+
+/// 式 `prog`（変数は 3 つの座標）を、点の列での値の関数にする（[`trim_mesh`]・[`clip_segments`] の条件）
+pub fn values_of(prog: &Program) -> impl FnMut(&[[f64; 3]]) -> Vec<f64> + '_ {
+    move |pts: &[[f64; 3]]| {
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| pts.iter().map(|p| p[c]).collect());
+        values_at(prog, &cols)
+    }
+}
+
+/// 辺 a → b（a が中、b が外）の上の境目の比 s（a から b へ）を、まとめて求める。
+/// 両端の値がどちらも有限なら、はさみうち法（イリノイ法。残った側の値を半分にして、片側だけが動き続けるのを防ぐ）、
+/// 外の端が NaN なら二分。全部の辺を 1 回ずつまとめて計算するのを `rounds` 回くり返し、中の側の端を返す
+fn edge_cuts(
+    ends: &[([f64; 3], [f64; 3], f64, f64)],
+    value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>,
+    rounds: usize,
+) -> Vec<f64> {
+    let mut lo = vec![0.0; ends.len()];
+    let mut hi = vec![1.0; ends.len()];
+    let mut glo: Vec<f64> = ends.iter().map(|e| e.2).collect();
+    let mut ghi: Vec<f64> = ends.iter().map(|e| e.3).collect();
+    // 前の回で動いた側（-1: 中の側, 1: 外の側, 0: まだ）
+    let mut side = vec![0i8; ends.len()];
+    for _ in 0..rounds {
+        let ts: Vec<f64> = (0..ends.len())
+            .map(|k| {
+                let (a, b) = (glo[k], ghi[k]);
+                if a.is_finite() && b.is_finite() && b > a {
+                    let t = lo[k] + (hi[k] - lo[k]) * a / (a - b);
+                    // 端にくっつきすぎないよう、区間の内側に収める
+                    let w = 1e-3 * (hi[k] - lo[k]);
+                    t.clamp(lo[k] + w, hi[k] - w)
+                } else {
+                    0.5 * (lo[k] + hi[k])
+                }
+            })
+            .collect();
+        let pts: Vec<[f64; 3]> =
+            ends.iter().zip(&ts).map(|(&(a, b, _, _), &t)| [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c]))).collect();
+        let g = value(&pts);
+        for k in 0..ends.len() {
+            if g[k] <= 0.0 {
+                lo[k] = ts[k];
+                glo[k] = g[k];
+                if side[k] == -1 {
+                    ghi[k] *= 0.5;
+                }
+                side[k] = -1;
+            } else {
+                hi[k] = ts[k];
+                ghi[k] = g[k];
+                if side[k] == 1 {
+                    glo[k] *= 0.5;
+                }
+                side[k] = 1;
+            }
+        }
+    }
+    lo
+}
+
+/// メッシュのうち、`value`（点の列での G。NaN は外）が 0 以下の所だけを残す。
+/// 中と外が混ざる三角形は、中の側の多角形（三角形か四角形）にする。境目の点は辺ごとに 1 つ（隣の三角形と共有する）で、
+/// 位置は辺の上の二分（`rounds` 回）で求める。新しい頂点の法線・`grid_coords`・`complex` は、辺の両端から同じ比で補間する。
+/// 番号だけの粗い版（`lod`）は空にし（後で作り直す）、陰関数の粗い版（`lod_mesh`）は同じ条件で切る
+pub fn trim_mesh(mesh: &mut Mesh, value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>, rounds: usize) {
+    if let Some(l) = mesh.lod_mesh.as_deref_mut() {
+        trim_mesh(l, value, rounds);
+    }
+    let count = mesh.positions.len() / 3;
+    if count == 0 || mesh.indices.is_empty() {
+        return;
+    }
+    let pos: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let g = value(&pos);
+    let inside: Vec<bool> = g.iter().map(|v| *v <= 0.0).collect();
+    if inside.iter().all(|&b| b) {
+        return;
+    }
+    // 中と外を結ぶ辺（中の頂点, 外の頂点）
+    let mut edge_id: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    for t in mesh.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if inside[a as usize] != inside[b as usize] {
+                let key = if inside[a as usize] { (a, b) } else { (b, a) };
+                edge_id.entry(key).or_insert_with(|| {
+                    edges.push(key);
+                    edges.len() - 1
+                });
+            }
+        }
+    }
+    let ends: Vec<_> = edges.iter().map(|&(a, b)| (pos[a as usize], pos[b as usize], g[a as usize], g[b as usize])).collect();
+    let ts = edge_cuts(&ends, value, rounds);
+    // 残す頂点に新しい番号を付け、境目の点を足す
+    let mut out = Mesh { keep_full: mesh.keep_full, note: mesh.note.clone(), stats: mesh.stats, ..Default::default() };
+    let has_n = mesh.normals.len() == mesh.positions.len();
+    let has_g = mesh.grid_coords.len() == mesh.positions.len();
+    let has_c = mesh.complex.len() == mesh.positions.len();
+    let mut map = vec![u32::MAX; count];
+    let push_mix = |out: &mut Mesh, a: usize, b: usize, t: f64| -> u32 {
+        let mix = |v: &[f32]| -> [f32; 3] { [0, 1, 2].map(|c| v[3 * a + c] + (t as f32) * (v[3 * b + c] - v[3 * a + c])) };
+        out.positions.extend_from_slice(&mix(&mesh.positions));
+        if has_n {
+            let n = mix(&mesh.normals);
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            out.normals.extend(n.iter().map(|v| if len > 0.0 { v / len } else { *v }));
+        }
+        if has_g {
+            out.grid_coords.extend_from_slice(&mix(&mesh.grid_coords));
+        }
+        if has_c {
+            out.complex.extend_from_slice(&mix(&mesh.complex));
+        }
+        (out.positions.len() / 3 - 1) as u32
+    };
+    let keep = |out: &mut Mesh, map: &mut Vec<u32>, v: usize| -> u32 {
+        if map[v] == u32::MAX {
+            map[v] = push_mix(out, v, v, 0.0);
+        }
+        map[v]
+    };
+    let mut cut_at = vec![u32::MAX; edges.len()];
+    for t in mesh.indices.chunks_exact(3) {
+        let n_in = t.iter().filter(|&&v| inside[v as usize]).count();
+        if n_in == 0 {
+            continue;
+        }
+        let mut poly: Vec<u32> = Vec::with_capacity(4);
+        for k in 0..3 {
+            let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
+            if inside[a] {
+                poly.push(keep(&mut out, &mut map, a));
+            }
+            if inside[a] != inside[b] {
+                let key = if inside[a] { (a as u32, b as u32) } else { (b as u32, a as u32) };
+                let e = edge_id[&key];
+                if cut_at[e] == u32::MAX {
+                    cut_at[e] = push_mix(&mut out, key.0 as usize, key.1 as usize, ts[e]);
+                }
+                poly.push(cut_at[e]);
+            }
+        }
+        for k in 1..poly.len() - 1 {
+            out.indices.extend_from_slice(&[poly[0], poly[k], poly[k + 1]]);
+        }
+    }
+    out.lod_mesh = mesh.lod_mesh.take();
+    *mesh = out;
+}
+
+/// 曲線のメッシュ（点の列。NaN で切れ目。交わる線のような「線分ごとに 2 点と NaN」も、長さ 2 の列として同じに扱う）を、
+/// `value` が 0 以下の所だけにする。中と外にまたがる線分は、境目を辺の上で求めて（`rounds` 回）、中の側だけ残す。
+/// 長さの無い列（点）は、中ならそのまま残す。切った後に、ほとんど長さの無い列が残ったら捨てる（描画側が点とみなして丸を付けるため）
+pub fn clip_segments(positions: &mut Vec<f32>, value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>, rounds: usize) {
+    let pts: Vec<Option<[f64; 3]>> = positions
+        .chunks_exact(3)
+        .map(|q| q.iter().all(|v| v.is_finite()).then(|| [q[0] as f64, q[1] as f64, q[2] as f64]))
+        .collect();
+    let finite: Vec<[f64; 3]> = pts.iter().flatten().copied().collect();
+    let gf = value(&finite);
+    let mut g = vec![f64::NAN; pts.len()];
+    let mut k = 0;
+    for (i, p) in pts.iter().enumerate() {
+        if p.is_some() {
+            g[i] = gf[k];
+            k += 1;
+        }
+    }
+    let inside = |i: usize| g[i] <= 0.0;
+    // 中と外にまたがる線分 (i, i + 1) の境目
+    let mut mixed = Vec::new();
+    let mut ends = Vec::new();
+    for i in 0..pts.len().saturating_sub(1) {
+        if let (Some(a), Some(b)) = (pts[i], pts[i + 1]) {
+            if inside(i) != inside(i + 1) {
+                mixed.push(i);
+                ends.push(if inside(i) { (a, b, g[i], g[i + 1]) } else { (b, a, g[i + 1], g[i]) });
+            }
+        }
+    }
+    let ts = edge_cuts(&ends, value, rounds);
+    let mut cut_at: std::collections::HashMap<usize, [f64; 3]> = Default::default();
+    for (k, &i) in mixed.iter().enumerate() {
+        let (a, b, _, _) = ends[k];
+        cut_at.insert(i, [0, 1, 2].map(|c| a[c] + ts[k] * (b[c] - a[c])));
+    }
+    // 列ごとに組み立てる（列と、境目で切った列か）
+    let mut runs: Vec<(Vec<[f64; 3]>, bool)> = Vec::new();
+    let mut cur: (Vec<[f64; 3]>, bool) = (Vec::new(), false);
+    for (i, p) in pts.iter().enumerate() {
+        let Some(p) = *p else {
+            runs.push(std::mem::take(&mut cur));
+            continue;
+        };
+        if inside(i) {
+            cur.0.push(p);
+        }
+        if let Some(q) = cut_at.get(&i) {
+            if inside(i) {
+                // 出ていく: 境目で列を終える
+                cur.0.push(*q);
+                cur.1 = true;
+                runs.push(std::mem::take(&mut cur));
+            } else {
+                // 入ってくる: 境目から新しい列を始める
+                runs.push(std::mem::take(&mut cur));
+                cur = (vec![*q], true);
+            }
+        } else if !inside(i) {
+            runs.push(std::mem::take(&mut cur));
+        }
+    }
+    runs.push(cur);
+    let mut out: Vec<f32> = Vec::with_capacity(positions.len());
+    for (run, cut) in runs.into_iter().filter(|r| !r.0.is_empty()) {
+        // 切って長さがほとんど無くなった列は捨てる（元から点の列は残す）
+        let span = run.iter().map(|q| (0..3).map(|c| (q[c] - run[0][c]).abs()).sum::<f64>()).fold(0.0, f64::max);
+        let scale = 1.0 + run[0].iter().map(|v| v.abs()).sum::<f64>();
+        if cut && span <= 1e-6 * scale {
+            continue;
+        }
+        for q in &run {
+            out.extend(q.iter().map(|v| *v as f32));
+        }
+        out.extend_from_slice(&[f32::NAN; 3]);
+    }
+    *positions = out;
+}
+
+/// 不等式の領域 G_1 ≤ 0, …, G_k ≤ 0 の境目の面。面 G_i = 0 ごとに今の陰関数の道で作り、ほかの全部の G_j ≤ 0 で切り取ってまとめる
+/// （角が立つ）。陰関数の粗い版も同じように切ってまとめる（どれかの面に粗い版が無ければ、全体の粗い版を作らない）
+pub fn region_faces(cuts: &[Program], dom: Domain, n: usize, refine: Refine) -> Mesh {
+    if mesh::field_mode_is_split() {
+        mesh::mark_unsplittable();
+        return Mesh::default();
+    }
+    let mut parts = Vec::new();
+    let mut lods = Vec::new();
+    for (i, g) in cuts.iter().enumerate() {
+        let mut m = mesh::implicit_solid_opt(g, dom, n, &[], 0, refine);
+        for (j, other) in cuts.iter().enumerate() {
+            if j != i {
+                trim_mesh(&mut m, &mut values_of(other), 8);
+            }
+        }
+        lods.push(m.lod_mesh.take());
+        parts.push(m);
+    }
+    if cuts.len() == 1 {
+        let mut m = parts.pop().unwrap_or_default();
+        m.lod_mesh = lods.pop().flatten();
+        return m;
+    }
+    let mut out = mesh::merge(parts, false);
+    if lods.iter().all(|l| l.is_some()) {
+        out.lod_mesh = Some(Box::new(mesh::merge(lods.into_iter().flatten().map(|b| *b).collect(), false)));
+    }
+    out
 }
 
 #[cfg(test)]

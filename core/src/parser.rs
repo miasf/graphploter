@@ -127,7 +127,28 @@ enum Tok {
     RBracket,
     RParen,
     Comma,
+    /// 関係（`=`・不等号）。括弧の外でだけ使える（[`parse_system`]）
+    Rel(Rel),
     Eof,
+}
+
+/// 関係演算子
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rel {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// 関係の連鎖 `a ∘₁ b ∘₂ c …`（`exprs` は `rels` より 1 つ多い。関係が無ければ式 1 つ）
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chain {
+    pub exprs: Vec<Expr>,
+    pub rels: Vec<Rel>,
+    /// 式ごとの、始まりの位置（文字単位）
+    pub pos: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +259,18 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             ']' => Tok::RBracket,
             ')' => Tok::RParen,
             ',' => Tok::Comma,
+            '=' | '＝' => Tok::Rel(Rel::Eq),
+            '≤' | '≦' => Tok::Rel(Rel::Le),
+            '≥' | '≧' => Tok::Rel(Rel::Ge),
+            '<' | '＜' | '>' | '＞' => {
+                let less = matches!(c, '<' | '＜');
+                if matches!(chars.get(i + 1), Some('=' | '＝')) {
+                    out.push(Token { tok: Tok::Rel(if less { Rel::Le } else { Rel::Ge }), pos: i });
+                    i += 2;
+                    continue;
+                }
+                Tok::Rel(if less { Rel::Lt } else { Rel::Gt })
+            }
             _ => return err(format!("使えない文字 '{c}' があります"), i),
         };
         out.push(Token { tok, pos: i });
@@ -281,6 +314,8 @@ impl Parser {
         if *self.peek() == tok {
             self.next();
             Ok(())
+        } else if matches!(self.peek(), Tok::Rel(_)) {
+            err("=・≤ などは、括弧の外に書いてください", self.pos())
         } else {
             err(format!("{what} が必要です"), self.pos())
         }
@@ -438,6 +473,43 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
         return err("ここで式が終わるはずです（余分な文字があります）", p.pos());
     }
     Ok(e)
+}
+
+/// 連立の式を解析する。括弧の外の `,` で行に分け、行ごとに関係の連鎖 `a ∘ b ∘ c …` を読む
+/// （`y = x, z = 0`・`x ≤ y ≤ z`・`0 ≤ x = y`）。関係の無い行もそのまま返す
+///
+/// ```text
+/// system := chain (',' chain)*
+/// chain  := expr (rel expr)*
+/// ```
+pub fn parse_system(src: &str) -> Result<Vec<Chain>, ParseError> {
+    let toks = tokenize(src)?;
+    let mut p = Parser { toks, i: 0 };
+    if *p.peek() == Tok::Eof {
+        return err("式が空です", 0);
+    }
+    let mut out = Vec::new();
+    loop {
+        if matches!(p.peek(), Tok::Comma | Tok::Eof) {
+            return err("`,` の前後に式を書いてください", p.pos());
+        }
+        let mut chain = Chain { exprs: Vec::new(), rels: Vec::new(), pos: vec![p.pos()] };
+        chain.exprs.push(p.expr()?);
+        while let Tok::Rel(r) = *p.peek() {
+            p.next();
+            chain.rels.push(r);
+            chain.pos.push(p.pos());
+            chain.exprs.push(p.expr()?);
+        }
+        out.push(chain);
+        match p.peek() {
+            Tok::Comma => {
+                p.next();
+            }
+            Tok::Eof => return Ok(out),
+            _ => return err("ここで式が終わるはずです（余分な文字があります）", p.pos()),
+        }
+    }
 }
 
 #[cfg(test)]

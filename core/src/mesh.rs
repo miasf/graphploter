@@ -6539,6 +6539,10 @@ pub struct Field {
     /// 表示中の座標 q を、F の変数 p に移す 1 次式 p = A q + b（陰関数を回す前の形で持つとき。[`LocalMesh`]）。
     /// None なら p = q
     pub map: Option<([[f64; 3]; 3], [f64; 3])>,
+    /// 一緒に満たす式 G_j ≤ 0（不等式の領域の 2 本目以降。[`Field::region`]）。ふつうは空。変数は表示中の 3 つの座標
+    pub also: Vec<Program>,
+    /// 不等式の領域（どちらの側が中身か決まっている。表示範囲の端のふたも作る）
+    pub region: bool,
 }
 
 impl Field {
@@ -6565,13 +6569,20 @@ impl Field {
             let pos = v.iter().filter(|&&f| f > 0.0).count();
             negative = neg <= pos;
         }
-        Field { prog: prog.clone(), combos, negative, map: None }
+        Field { prog: prog.clone(), combos, negative, map: None, also: Vec::new(), region: false }
     }
 
     /// 回す前の形の F（変数は回す前の表示中の座標）と、表示中の座標から F の変数への 1 次式 p = A q + b。
     /// どちらの側が中身かは、表示範囲 `dom`（表示中の座標）で決める
     pub fn mapped(prog: &Program, a: [[f64; 3]; 3], b: [f64; 3], dom: Domain) -> Field {
-        let mut f = Field { prog: prog.clone(), combos: vec![Vec::new()], negative: true, map: Some((a, b)) };
+        let mut f = Field {
+            prog: prog.clone(),
+            combos: vec![Vec::new()],
+            negative: true,
+            map: Some((a, b)),
+            also: Vec::new(),
+            region: false,
+        };
         let n = 16;
         let mut cols: [Vec<f64>; 3] = Default::default();
         for k in 0..n {
@@ -6603,9 +6614,22 @@ impl Field {
         field_values(&self.prog, &self.combos, [&p[0], &p[1], &p[2]])
     }
 
-    /// 範囲で重ねた立体か（ふつうの陰関数は、どちらの側が中身か決まっていない）
+    /// 不等式の領域 G_1 ≤ 0, …, G_k ≤ 0 の中身（`cuts` は 1 本以上。変数は表示中の 3 つの座標）
+    pub fn region(cuts: &[Program]) -> Field {
+        Field {
+            prog: cuts[0].clone(),
+            combos: vec![Vec::new()],
+            negative: true,
+            map: None,
+            also: cuts[1..].to_vec(),
+            region: true,
+        }
+    }
+
+    /// 中身の側が決まっているか（範囲で重ねた立体・不等式の領域。表示範囲の端のふたを作る）。
+    /// ふつうの陰関数は、どちらの側が中身か決まっていない
     pub fn is_stacked(&self) -> bool {
-        self.combos.iter().any(|c| !c.is_empty())
+        self.region || self.combos.iter().any(|c| !c.is_empty())
     }
 
     /// 表示範囲の 6 つの面での切り口（中身がはみ出す所をふさぐふた）。面からほんの少し（対角線の 1e-4 倍）内側に作る
@@ -6650,6 +6674,8 @@ impl Field {
             }
         }
         let point = |k: usize| [cols[0][k], cols[1][k], cols[2][k]];
+        // 一緒に満たす式の値（格子点ごと）
+        let also: Vec<Vec<f64>> = self.also.iter().map(|p| field_values(p, &[Vec::new()], [&cols[0], &cols[1], &cols[2]])).collect();
         let f = self.values(cols.clone());
         // 中身なら負になる値
         let g: Vec<f64> = if self.negative { f } else { f.iter().map(|v| -v).collect() };
@@ -6664,16 +6690,51 @@ impl Field {
                         continue;
                     }
                     let mut poly: Vec<[f64; 3]> = Vec::with_capacity(4);
+                    // 多角形の頂点での、一緒に満たす式の値（三角形の辺の上で直線で補間）
+                    let mut vals: Vec<Vec<f64>> = Vec::new();
+                    let at = |k: usize| also.iter().map(|a| a[k]).collect::<Vec<f64>>();
                     for e in 0..3 {
                         let (p, q) = (tri[e], tri[(e + 1) % 3]);
                         if g[p] < 0.0 {
                             poly.push(point(p));
+                            vals.push(at(p));
                         }
                         if (g[p] < 0.0) != (g[q] < 0.0) {
                             let t = g[p] / (g[p] - g[q]);
                             let (pp, pq) = (point(p), point(q));
                             poly.push([0, 1, 2].map(|x| pp[x] + (pq[x] - pp[x]) * t));
+                            vals.push(also.iter().map(|a| a[p] + (a[q] - a[p]) * t).collect());
                         }
+                    }
+                    // 一緒に満たす式で順に切る（凸多角形を半平面で切るくり返し。三角形の中の角も立つ）
+                    for j in 0..also.len() {
+                        if vals.iter().any(|v| !v[j].is_finite()) {
+                            poly.clear();
+                            break;
+                        }
+                        let mut np = Vec::with_capacity(poly.len() + 1);
+                        let mut nv = Vec::with_capacity(poly.len() + 1);
+                        for k in 0..poly.len() {
+                            let l = (k + 1) % poly.len();
+                            let (a, b) = (vals[k][j], vals[l][j]);
+                            if a <= 0.0 {
+                                np.push(poly[k]);
+                                nv.push(vals[k].clone());
+                            }
+                            if (a <= 0.0) != (b <= 0.0) {
+                                let t = a / (a - b);
+                                np.push([0, 1, 2].map(|x| poly[k][x] + (poly[l][x] - poly[k][x]) * t));
+                                nv.push(vals[k].iter().zip(&vals[l]).map(|(u, w)| u + (w - u) * t).collect());
+                            }
+                        }
+                        poly = np;
+                        vals = nv;
+                        if poly.len() < 3 {
+                            break;
+                        }
+                    }
+                    if poly.len() < 3 {
+                        continue;
                     }
                     if let Some((ca, cpos, below)) = clip {
                         poly = clip_poly(&poly, ca, cpos, below);

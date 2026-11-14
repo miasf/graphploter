@@ -55,10 +55,20 @@ pub struct MeshResult {
     flat: bool,
     /// 2D 表示の切り口（射影し直すときも、平面との交わりの線にする）
     flat_slice: bool,
+    /// 2D 表示の不等式の領域の境目の線（実線・点線。線分ごとに 2 点と NaN、または点の列）。ふつうは空
+    outline: (Vec<f32>, Vec<f32>),
 }
 
 #[wasm_bindgen]
 impl MeshResult {
+    /// 2D 表示の不等式の領域の境目の線のうち、実線（`≤`・`≥`）の分を取り出す（Float32Array。無ければ空）
+    pub fn take_outline(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline.0)
+    }
+    /// 同じく、点線（`<`・`>`）の分
+    pub fn take_outline_dashed(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline.1)
+    }
     /// 頂点座標（Float32Array）
     #[wasm_bindgen(getter)]
     pub fn positions(&self) -> Vec<f32> {
@@ -455,6 +465,7 @@ pub fn plot(
         inner,
         flat,
         flat_slice: ctx.flat_slice,
+        outline: built.outline,
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
         shape: built.shape,
         local: built.local,
@@ -570,6 +581,8 @@ struct Built {
     rotated_explicit: bool,
     /// 回す前の形で作った陰関数と、式が使っている名前（[`mesh::LocalMesh`]）
     local: Option<(mesh::LocalMesh, Vec<String>)>,
+    /// 2D 表示の不等式の領域の境目の線（実線, 点線）
+    outline: (Vec<f32>, Vec<f32>),
 }
 
 impl Built {
@@ -602,13 +615,17 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         let rotated_explicit = parts.iter().any(|b| b.rotated_explicit);
         let parts_curve_raw = parts.first().is_some_and(|b| b.curve);
         let fields = parts.iter().flat_map(|b| b.fields.iter().cloned()).collect();
+        let outline = (
+            parts.iter().flat_map(|b| b.outline.0.iter().copied()).collect(),
+            parts.iter().flat_map(|b| b.outline.1.iter().copied()).collect(),
+        );
         // 全部が n 次元の点なら、点のままつなげる（回転だけ変わったとき使い回せる）
         if parts.iter().all(|b| b.shape.is_some()) {
             let shapes: Vec<mesh::NdShape> = parts.into_iter().filter_map(|b| b.shape).collect();
             if let Some(shape) = mesh::merge_shapes(shapes.clone()) {
                 // 切り口の線にするのは射影した後（plot・Shape::project）なので、ここでは元の種類のままにする
                 let curve = parts_curve_raw;
-                return Ok(Built { shape: Some(shape), fields, curve, kind, rotated_explicit, ..Default::default() });
+                return Ok(Built { shape: Some(shape), fields, curve, kind, rotated_explicit, outline, ..Default::default() });
             }
             // つなげられない（点の並べ方が違う）ときは、射影してからつなげる
             let meshes = shapes
@@ -622,7 +639,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                     }
                 })
                 .collect();
-            return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
+            return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
         }
         let meshes = parts
             .into_iter()
@@ -638,7 +655,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 None => b.inner,
             })
             .collect();
-        return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
+        return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
     }
     if ctx.flat {
         return build_2d(plot, ctx);
@@ -748,6 +765,62 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
+        // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
+        // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
+        P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
+            let inner = build(base, ctx)?.settle();
+            let mut m = match &inner.shape {
+                Some(sh) => mesh::project(sh, &ctx.view, dom),
+                None => inner.inner,
+            };
+            for g in cuts {
+                system::trim_mesh(&mut m, &mut system::values_of(g), 8);
+            }
+            b.inner = m;
+            b.curve = inner.curve;
+            b.kind = if cuts.is_empty() { inner.kind } else { format!("{}（不等式で切り取り）", inner.kind) };
+        }
+        // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）。
+        // 不等式があれば、線分を切る
+        P::System { eqs, cuts, .. } if eqs.len() == 2 => {
+            b.curve = true;
+            b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, ctx.implicit_resolution, ctx.implicit_refine);
+            for g in cuts {
+                system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
+            }
+        }
+        // 等式 3 本の点: 2 本の交わる線の上で 3 本目の符号が変わる所から寄せる。不等式を満たす点だけ残す
+        P::System { eqs, cuts, .. } if eqs.len() == 3 => {
+            let pts = system::points_on_curve(eqs, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            let pts = system::points_inside(pts, cuts);
+            b.curve = true;
+            b.kind = format!("連立方程式の点（{} 個）", pts.len());
+            b.inner = system::points_mesh(&pts);
+        }
+        // 不等式の領域: 面 G_i = 0 ごとに作り、ほかの不等式で切り取る。切り口と表示範囲の端には、ふたをする
+        // 媒介変数表示を不等式で切り取る: 射影してから、曲面なら三角形を、曲線なら線分を切る（回転が変わるたびに計算し直す）
+        P::System { base: Some(base), eqs, cuts, .. } if eqs.is_empty() => {
+            let inner = build(base, ctx)?.settle();
+            let mut m = match &inner.shape {
+                Some(sh) => mesh::project(sh, &ctx.view, dom),
+                None => inner.inner,
+            };
+            for g in cuts {
+                if inner.curve {
+                    system::clip_segments(&mut m.positions, &mut system::values_of(g), 12);
+                } else {
+                    system::trim_mesh(&mut m, &mut system::values_of(g), 8);
+                }
+            }
+            b.inner = m;
+            b.curve = inner.curve;
+            b.kind = format!("{}（不等式で切り取り）", inner.kind);
+        }
+        P::System { eqs, cuts, .. } if eqs.is_empty() => {
+            b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            b.fields.push(mesh::Field::region(cuts));
+        }
+        P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
     }
     Ok(b)
 }
@@ -772,6 +845,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Implicit { prog, .. } | P::Solid { prog, .. } => prog.uses_var_index(2),
         // 傾いた座標系の陽関数は、3 次元の曲面を作ってから押しつぶす（2D の切り口では、この道にならない）
         P::Tilted { .. } => true,
+        P::System { eqs, cuts, .. } => eqs.iter().chain(cuts).any(|p| p.uses_var_index(2)),
         _ => false,
     };
     // 回した陽関数: 回す前の形を n 次元の点で作り、回して射影してから平面に描く（plot・Shape::project）
@@ -805,6 +879,13 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
         let mut b = build(plot, &ctx3)?.settle();
         b.kind = format!("{}の投影", b.kind);
+        // 不等式の領域は、境目の面と表示範囲の端のふたをまとめて平らにする（端で切れた所も塗る）
+        if let P::System { eqs, cuts, .. } = plot {
+            if eqs.is_empty() {
+                let caps = mesh::Field::region(cuts).box_caps(dom, ctx.implicit_resolution.max(8), None);
+                b.inner = mesh::merge(vec![std::mem::take(&mut b.inner), caps], false);
+            }
+        }
         b.fields.clear();
         if b.shape.is_none() {
             mesh::flatten(&mut b.inner, b.curve);
@@ -867,6 +948,46 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } => {}
+        // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
+        P::System { base: Some(base), eqs, .. } if eqs.is_empty() && base.param_vars().len() > 0 => {
+            let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
+            let inner = build(plot, &ctx3)?.settle();
+            b.kind = inner.kind;
+            b.curve = inner.curve || ctx.flat_slice;
+            b.inner = flat_finish(inner.inner, inner.curve, ctx.flat_slice);
+        }
+        // 縦の座標 = 0 の 2 次元の問題として描く（切り口、または縦の座標を使わない式）
+        P::System { eqs, cuts, strict, .. } => match eqs.len() {
+            0 => {
+                b.kind = "不等式の領域（2D）".into();
+                b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
+                // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線
+                for (i, g) in cuts.iter().enumerate() {
+                    let mut line = mesh::implicit_curve_2d(g, dom, res2).positions;
+                    for (j, other) in cuts.iter().enumerate() {
+                        if j != i {
+                            system::clip_segments(&mut line, &mut system::values_of(other), 12);
+                        }
+                    }
+                    if strict[i] { &mut b.outline.1 } else { &mut b.outline.0 }.extend(line);
+                }
+            }
+            1 => {
+                b.curve = true;
+                b.kind = "陰関数の曲線（不等式で切り取り）".into();
+                b.inner = mesh::implicit_curve_2d(&eqs[0], dom, res2);
+                for g in cuts {
+                    system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
+                }
+            }
+            2 => {
+                let pts = system::points_inside(system::flat_points(&eqs[0], &eqs[1], dom, res2), cuts);
+                b.curve = true;
+                b.kind = format!("連立方程式の点（{} 個）", pts.len());
+                b.inner = system::points_mesh(&pts);
+            }
+            _ => return Err("2D 表示では、等式は 2 本までにしてください".into()),
+        },
     }
     Ok(b)
 }
@@ -988,6 +1109,7 @@ impl Shape {
             inner,
             flat: self.flat,
             flat_slice: self.flat_slice,
+            outline: Default::default(),
             solid,
             field,
             shape: None,
@@ -1090,6 +1212,7 @@ impl CapSource {
             solid: false,
             flat: false,
             flat_slice: false,
+            outline: Default::default(),
         })
     }
 }

@@ -107,6 +107,8 @@ type PlotObject =
       stencil: StencilCap | null
       /** ステンシルで描く順番を決める番号 */
       order: number
+      /** 2D 表示の不等式の領域の境目の線（実線・点線。group の子） */
+      outlines: LineSegments2[]
     }
   | {
       kind: 'curve'
@@ -717,6 +719,7 @@ export class Viewer {
     this.renderer.setSize(w, h)
     for (const p of this.plots.values()) {
       if (p.kind === 'curve') (p.line.material as LineMaterial).resolution.set(w, h)
+      else for (const l of p.outlines) (l.material as LineMaterial).resolution.set(w, h)
     }
     this.applyViewOffset()
   }
@@ -1215,6 +1218,7 @@ export class Viewer {
         old.grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
         old.grid.uHeat.value = mesh.heat ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = old.geo
+        this.setOutlines(old, mesh)
       }
     } else {
       this.removePlot(id)
@@ -1262,6 +1266,7 @@ export class Viewer {
       ;((p.group.children[0] as THREE.Mesh).material as THREE.Material).clippingPlanes = this.clipPlanes
       // ふたは切り口の平面の上にあるので、切り口の平面では切らない
       if (p.cap) (p.cap.material as THREE.Material).clippingPlanes = this.boxPlanes
+      for (const l of p.outlines) (l.material as THREE.Material).clippingPlanes = this.clipPlanes
       if (p.stencil) {
         ;(p.stencil.inc.material as THREE.Material).clippingPlanes = this.clipPlanes
         ;(p.stencil.dec.material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -1480,9 +1485,44 @@ export class Viewer {
       cap: null,
       stencil: null,
       order: this.nextOrder++,
+      outlines: [],
     })
     this.applyLod(this.plots.get(id)!)
+    this.setOutlines(this.plots.get(id)!, mesh)
     this.scene.add(group)
+  }
+
+  /** 面の式の境目の線（2D 表示の不等式の領域）を作り直す。`<`・`>` の分は点線 */
+  private setOutlines(p: PlotObject, mesh: MeshData) {
+    if (p.kind !== 'surface') return
+    for (const l of p.outlines) {
+      l.geometry.dispose()
+      ;(l.material as THREE.Material).dispose()
+      p.group.remove(l)
+    }
+    p.outlines = []
+    const d = this.domain
+    // 点線の長さは表示範囲の大きさに合わせる（LineMaterial の点線は空間の長さで決まる）
+    const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin) : 20
+    for (const [pts, dashed] of [
+      [mesh.outline, false],
+      [mesh.outlineDashed, true],
+    ] as const) {
+      if (!pts || pts.length === 0) continue
+      const mat = new LineMaterial({
+        linewidth: 2.5,
+        clippingPlanes: this.clipPlanes,
+        dashed,
+        dashSize: span * 0.02,
+        gapSize: span * 0.012,
+      })
+      mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
+      const line = new LineSegments2(this.curveGeometry(pts), mat)
+      if (dashed) line.computeLineDistances()
+      line.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
+      p.outlines.push(line)
+      p.group.add(line)
+    }
   }
 
   /** 曲線の形。点の列を、隣り合う2点ずつの線分にする（NaN の所は線を切る） */
@@ -1573,6 +1613,8 @@ export class Viewer {
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
+    // 境目の線は、面の不透明度によらず式の色のまま
+    for (const l of p.outlines) (l.material as LineMaterial).color.copy(c)
     // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）
     const capColor = c.clone().lerp(new THREE.Color(0xffffff), 0.3)
     if (p.cap) (p.cap.material as THREE.MeshStandardMaterial).color.copy(capColor)

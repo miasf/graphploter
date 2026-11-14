@@ -718,7 +718,7 @@
     dropParam(item)
     // 範囲で重ねた立体は、内側の境界面（穴など）が外から見えないので、最初は半透明にする
     // 媒介変数が4つ以上の図形も、面が何枚も重なるので同じようにする
-    if (/^(範囲で重ねた立体|媒介変数表示の多変数)/.test(res.kind) && !item.solidSeen) {
+    if (/^(範囲で重ねた立体|媒介変数表示の多変数|不等式の領域)/.test(res.kind) && !item.solidSeen) {
       item.solidSeen = true
       if (item.opacity === 1) item.opacity = 0.45
     }
@@ -1464,8 +1464,8 @@
 
   // ---- 立体の切り口 ----
 
-  /** 陰関数・範囲で重ねた立体の式（切り口のふたを計算担当が作る） */
-  const capKinds = ['陰関数', '範囲で重ねた立体']
+  /** 陰関数・範囲で重ねた立体・不等式の領域の式（切り口のふたを計算担当が作る） */
+  const capKinds = ['陰関数', '範囲で重ねた立体', '不等式の領域']
   /** 切り口のふたの細かさ（陰関数の格子の2倍。再生・ドラッグ中は、その式の計算と同じ倍率を掛ける） */
   const capResolution = (id: number) =>
     Math.max(16, Math.round(implicitResolution * 2 * (isCoarse() ? (lastScale.get(id) ?? 0.5) : 1)))
