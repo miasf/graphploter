@@ -393,7 +393,7 @@ pub fn plot(
     timing::reset();
     let hidden = HIDDEN_STYLE.with(|h| std::mem::take(&mut *h.borrow_mut()));
     let complex_coords = COMPLEX_COORDS.with(|c| c.replace(false));
-    let coord_src = COORD_MAP.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let (coord_src, coord_names) = COORD_MAP.with(|c| std::mem::take(&mut *c.borrow_mut()));
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -442,9 +442,15 @@ pub fn plot(
         complex_params: split(complex_params),
         flat_slice: flat && flat_slice,
         complex_coords,
+        coord_names: None,
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
+    }
+    let mut space = space;
+    let names: Vec<String> = coord_names.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if let Ok(names) = <[String; 3]>::try_from(names) {
+        space.coord_names = Some(names);
     }
 
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
@@ -550,7 +556,7 @@ pub fn plot(
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
-        kind: built.kind,
+        kind: equation::rename_kind(&built.kind, &space),
         params: plot.param_vars(),
         curve,
         shape_curve: built.curve,
@@ -566,7 +572,7 @@ pub fn plot(
 
 thread_local! {
     /// 次の [`plot`] だけに効く、座標系の式（[`coord_system`]）
-    static COORD_MAP: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static COORD_MAP: std::cell::RefCell<(String, String)> = const { std::cell::RefCell::new((String::new(), String::new())) };
 }
 
 /// 次の [`plot`] で使う座標系（計画 9 章の S36。その 1 回だけ。呼ばなければ直交座標）。
@@ -574,9 +580,11 @@ thread_local! {
 /// 定数は [`plot`] のパラメータ。空なら座標系なし。
 /// 座標系があると、`plot` の `domain` は「作る範囲」（座標の値の範囲）として使い、結果の `take_target` に頂点ごとの T(q) が入る。
 /// 陽関数・陰関数・連立の図形は作る範囲の箱で切る（媒介変数表示は切らない）。切り口のふたの元・立体の印は返さない
+/// `names` は座標の名前 3 つ（カンマ区切り。例 `r,theta,phi`。計画 S38）。式と座標系の式の中のこの名前を、表示中の 3 つの座標として読む
+/// （同じ名前のパラメータより優先する）。空なら名前なし。ギリシャ文字は解析器が `theta`・`phi`・`rho` と読む
 #[wasm_bindgen]
-pub fn coord_system(map: &str) {
-    COORD_MAP.with(|c| *c.borrow_mut() = map.to_string());
+pub fn coord_system(map: &str, names: &str) {
+    COORD_MAP.with(|c| *c.borrow_mut() = (map.to_string(), names.to_string()));
 }
 
 // ---- 表示していない座標（w 以降）の見せ方 ----

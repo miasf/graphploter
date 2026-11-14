@@ -7,26 +7,47 @@ import type { CoordSystem } from './types'
 /** 用意した座標系の、式（LaTeX。変数は x, y, z）と作る範囲 */
 export const COORD_PRESETS: Record<
   'cylinder' | 'sphere' | 'custom',
-  { name: string; map: CoordSystem['map']; ranges: CoordSystem['ranges']; note: string }
+  { name: string; map: CoordSystem['map']; ranges: CoordSystem['ranges']; names: [string, string, string]; note: string }
 > = {
   cylinder: {
     name: '円柱座標',
-    map: ['x\\cos y', 'x\\sin y', 'z'],
+    map: ['r\\cos\\theta', 'r\\sin\\theta', 'z'],
     ranges: [['0', '5'], ['0', '2\\pi'], ['-5', '5']],
-    note: 'x を半径 r、y を角度 θ、z を高さとみなします（2D 表示では極座標）',
+    names: ['r', 'theta', 'z'],
+    note: '半径 r（x と書いてもよい）、角度 θ（y）、高さ z。2D 表示では極座標',
   },
   sphere: {
     name: '球座標',
-    map: ['x\\sin y\\cos z', 'x\\sin y\\sin z', 'x\\cos y'],
+    map: ['r\\sin\\theta\\cos\\varphi', 'r\\sin\\theta\\sin\\varphi', 'r\\cos\\theta'],
     ranges: [['0', '5'], ['0', '\\pi'], ['0', '2\\pi']],
-    note: 'x を半径 r、y を z 軸からの角 θ、z を xy 平面での角 φ とみなします',
+    names: ['r', 'theta', 'phi'],
+    note: '半径 r（x と書いてもよい）、z 軸からの角 θ（y）、xy 平面での角 φ（z）',
   },
   custom: {
     name: '自作の座標系',
     map: ['x', 'y', 'z'],
     ranges: [['-5', '5'], ['-5', '5'], ['-5', '5']],
+    names: ['x', 'y', 'z'],
     note: 'x, y, z の式を 3 つ書きます。パラメータも使えます',
   },
+}
+
+/**
+ * 座標の名前を、計算エンジンの名前にする（θ・\theta → theta、φ・\varphi → phi、ρ → rho。前後の空白は取る）。
+ * 空なら null（その座標は x, y, z のまま）
+ */
+export function engineName(s: string): string | null {
+  const t = s.trim().replace(/^\\/, '')
+  if (t === '') return null
+  if (['θ', 'ϑ', 'theta', 'vartheta'].includes(t)) return 'theta'
+  if (['φ', 'ϕ', 'phi', 'varphi'].includes(t)) return 'phi'
+  if (['ρ', 'rho'].includes(t)) return 'rho'
+  return t
+}
+
+/** 計算エンジンの名前を、画面に出す名前にする（theta → θ） */
+export function prettyCoordName(s: string): string {
+  return s === 'theta' ? 'θ' : s === 'phi' ? 'φ' : s === 'rho' ? 'ρ' : s
 }
 
 /**

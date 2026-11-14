@@ -272,7 +272,9 @@
 - 座標系（極座標・球座標・自作）: ⚙ 設定 →「座標系」で座標系を作り、式の ⚙ →「座標系」（または設定のチェック）で式ごとに選ぶ
   - 座標系は、座標の値 q = (x, y, z) を空間の点 T(q) へ移す写像。円柱座標（2D 表示では極座標）は T = (x cos y, x sin y, z)、
     球座標は T = (x sin y cos z, x sin y sin z, x cos y)（y が z 軸からの角 θ、z が xy 平面での角 φ）。自作は 3 つの式を自分で書く（パラメータも使える）
-  - 式は今までどおり x, y, z で書き、それを座標の値として読む（球座標の `x = 2` は半径 2 の球、`(t, t, t)` はらせん）。
+  - 式は x, y, z か、座標系の座標の名前で書く（円柱は r, θ, z、球は r, θ, φ。設定で変えられる。英字 1 文字か θ・φ・ρ）。
+    球座標の `r = 2`（`x = 2` と同じ）は半径 2 の球、`(t, t, t)` はらせん。式の説明も `r = f(θ, φ)` のように座標の名前で出す。
+    座標の名前は、同じ名前のパラメータより優先する。θ は `theta` と打つか、数式キーボードの「abc」タブで入れる（φ は `phi`、ρ は `rho`）
     曲線は `(t, t, t)` と書く（`(u, u, u)` は u だけでも曲面と読まれ、つぶれた曲面になる）
   - 「移行」のスライダー s（0〜1）で、(1 − s) q + s T(q) を描く。0 は座標の値をそのまま直交座標とみなした絵、1 は座標系で移した絵。
     ▶ で 0 → 1 → 0 と往復する。計算エンジンは頂点ごとに T(q) を一緒に返すので、s を動かしても式を計算し直さない（法線は混ぜた形から作り直す）
@@ -485,6 +487,7 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
 - 掛け算の `*` は省略可: `2xy`, `x sin(y)`, `(x+1)(x-1)`
 - 括弧なしの関数: `sin x`, `sin^2 x`（= `(sin x)^2`）
 - 定数: `pi`（`π`）, `e`, `i`（虚数単位）
+- `theta`・`θ`, `phi`・`φ`, `rho`・`ρ` は 1 つの名前として読む（座標系の座標の名前に使う。前は `theta` を t·h·e·t·a と読んでいた）
 - 関数: `sin cos tan sec csc cot arcsin arccos arctan sinh cosh tanh arcsinh arccosh arctanh exp ln log sqrt abs floor ceil round sign Re Im conj arg`
 - 特殊関数: `gamma`（Γ）, `beta`, `psi`（ψ）, `zeta`（ζ）, `polylog`, `erf`, `erfi`, `Ei`, `Si`, `besselJ`/`besselY`/`besselI`/`besselK`, `airyAi`, `legendreP`, `hermiteH`, `hyp2F1`, `ellipticK`, `jacobiSN`, `lambertW` など（Wolfram の名前の先頭を小文字にした形。一覧はアプリの「書き方のヒント」）
 - 2 つの引数の関数: `mod(a, b)`（余り）, `min(a, b)`, `max(a, b)`, `nCr(n, r)`（二項係数）, `nPr(n, r)`（順列）

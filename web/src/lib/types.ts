@@ -147,6 +147,11 @@ export interface CoordSystem {
   preset: 'cylinder' | 'sphere' | 'custom'
   /** T の 3 つの成分（LaTeX。変数は x, y, z。パラメータも使える） */
   map: [string, string, string]
+  /**
+   * 座標の名前（計画 S38。計算エンジンの名前: r, theta, phi など。無い古い保存データは x, y, z）。
+   * 座標系を選んだ式と、この座標系の式・範囲では、この名前で 3 つの座標を書ける
+   */
+  names?: [string, string, string]
   /** 作る範囲（座標の値の範囲。LaTeX。2\pi なども書ける）。x, y, z の順 */
   ranges: [[string, string], [string, string], [string, string]]
   /** 移行のスライダー（0〜1） */
@@ -360,10 +365,11 @@ export interface PlotRequest {
   /** 座標を複素数にする */
   complexCoords: boolean
   /**
-   * 座標系（計算エンジン用の式。無ければ直交座標）。map は組 (X, Y, Z) の式、ranges は作る範囲 [最小, 最大] × 3（式）。
+   * 座標系（計算エンジン用の式。無ければ直交座標）。map は組 (X, Y, Z) の式、ranges は作る範囲 [最小, 最大] × 3（式）、
+   * names は座標の名前 3 つ（カンマ区切り。r,theta,phi など。空なら x, y, z だけ）。
    * 座標系があると、domain の代わりに作る範囲で図形を作る（画面の箱は domain のまま）
    */
-  coord: { map: string; ranges: [string, string][] } | null
+  coord: { map: string; ranges: [string, string][]; names: string } | null
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
   /** 2D 表示の描き方。true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影 */

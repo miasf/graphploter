@@ -12,7 +12,7 @@ fn run(src: &str, map: &str, dom: [f64; 6], flat: bool) -> MeshResult {
 }
 
 fn run_with(src: &str, map: &str, dom: [f64; 6], flat: bool, res: u32, ires: u32) -> MeshResult {
-    coord_system(map);
+    coord_system(map, "");
     plot(
         src, &dom, res, ires, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10],
         &[0.0; 5], 0.0, 0, false, flat, 1, false, 0,
@@ -197,4 +197,55 @@ fn timing() {
         let (a, b) = (best("", src), best(SPHERE, src));
         println!("{src}: 座標系なし {a:.2} ms, あり {b:.2} ms（{:.2} 倍）", b / a);
     }
+}
+
+/// 座標の名前（計画 S38）を付けて描く。`params` は (名前, 値) のパラメータ
+fn run_named(src: &str, map: &str, names: &str, params: &[(&str, f64)]) -> MeshResult {
+    coord_system(map, names);
+    let pn: Vec<&str> = params.iter().map(|p| p.0).collect();
+    let pv: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
+    plot(
+        src, &[0.0, 5.0, 0.0, PI, 0.0, TAU], 60, 40, "t", &[0.0, 5.0], &pn.join(","), &pv, "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6],
+        "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が描けない"))
+}
+
+#[test]
+fn coordinate_names() {
+    let names = "r,theta,phi";
+    let same = |a: &MeshResult, b: &MeshResult| a.positions() == b.positions() && a.indices() == b.indices();
+    let x2 = run_named("x = 2", SPHERE, "", &[]);
+    let r2 = run_named("r = 2", SPHERE, names, &[]);
+    assert!(!x2.indices().is_empty());
+    assert!(same(&x2, &r2));
+    // 説明も座標系の名前で
+    assert_eq!(x2.kind(), "x = f(y, z)");
+    assert_eq!(r2.kind(), "r = f(θ, φ)");
+    // r = θ は x = y と同じ。θ・theta のどちらでも
+    let xy = run_named("x = y", SPHERE, "", &[]);
+    for src in ["r = theta", "r = θ"] {
+        assert!(same(&xy, &run_named(src, SPHERE, names, &[])), "{src}");
+    }
+    // 同じ名前のパラメータがあっても、座標の名前を優先する
+    assert!(same(&r2, &run_named("r = 2", SPHERE, names, &[("r", 7.0)])));
+    // 座標系の式も座標の名前で書ける
+    assert!(same(&r2, &run_named("r = 2", "(r sin(theta) cos(phi), r sin(theta) sin(phi), r cos(theta))", names, &[])));
+}
+
+#[test]
+fn greek_names_do_not_break_functions() {
+    use graph_core::{eval::Program, parser::parse};
+    // beta・zeta（中に eta を含む）は今までどおり関数。theta・phi・rho は 1 つの変数
+    let val = |src: &str| {
+        let p = Program::compile(&parse(src).unwrap(), &["theta", "phi", "rho"]).unwrap();
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        p.eval_batch(&[&[0.5], &[2.0], &[3.0]], &mut out);
+        out[0].re
+    };
+    assert!((val("zeta(2)") - PI * PI / 6.0).abs() < 1e-9);
+    assert!((val("beta(2, 3)") - 1.0 / 12.0).abs() < 1e-9);
+    assert_eq!(val("theta + 10 phi + 100 rho"), 320.5);
+    assert_eq!(val("θ + 10φ + 100ρ"), 320.5);
+    assert_eq!(val("2theta"), 1.0);
 }

@@ -286,7 +286,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
       hidden_style(hiddenStyle)
       complex_coords(req.complexCoords)
-      coord_system(req.coord?.map ?? '')
+      coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
       return plot(
         source,
         domainArr,

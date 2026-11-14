@@ -12,7 +12,7 @@
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import CoordPanel from './lib/CoordPanel.svelte'
-  import { COORD_PRESETS } from './lib/coords'
+  import { COORD_PRESETS, engineName } from './lib/coords'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
   import { lastBreakdown, recordBreakdown } from './lib/timings'
@@ -1298,7 +1298,7 @@
   }
 
   /** 計算担当に渡す座標系（計算エンジン用の式に変換する。LaTeX の誤りは投げる） */
-  function coordRequest(item: PlotItem): { map: string; ranges: [string, string][] } | null {
+  function coordRequest(item: PlotItem): { map: string; ranges: [string, string][]; names: string } | null {
     const c = coordOf(item)
     if (!c) return null
     const text = (latex: string, what: string) => {
@@ -1309,7 +1309,30 @@
     return {
       map: `(${c.map.map((m, k) => text(m, ` ${'XYZ'[k]} の式`)).join(', ')})`,
       ranges: c.ranges.map(([a, b], k) => [text(a, ` ${'xyz'[k]} の範囲`), text(b, ` ${'xyz'[k]} の範囲`)] as [string, string]),
+      names: coordNames(c),
     }
+  }
+
+  /**
+   * 計算担当に渡す座標の名前（カンマ区切り。計画 S38）。名前が無い・x, y, z のままなら空。
+   * 空の名前の座標は x, y, z の名前のまま。同じ名前が 2 つあればエラー
+   */
+  function coordNames(c: CoordSystem): string {
+    const n = (c.names ?? ['x', 'y', 'z']).map((s, k) => engineName(s) ?? 'xyz'[k])
+    if (n.join(',') === 'x,y,z') return ''
+    if (new Set(n).size < 3) throw new Error(`座標系「${c.name}」の座標の名前が重なっています`)
+    // 計算エンジンは英字の並びを 1 文字ずつの変数に分けるので、名前は英字 1 文字か θ・φ・ρ（e と i は定数）
+    const ok = (s: string) => ['theta', 'phi', 'rho'].includes(s) || (/^[A-Za-z]$/.test(s) && s !== 'e' && s !== 'i')
+    if (!n.every(ok)) throw new Error(`座標系「${c.name}」の座標の名前は、英字 1 文字（e・i 以外）か θ・φ・ρ にしてください`)
+    return n.join(',')
+  }
+
+  /** 座標の名前を変えた: その座標系の式を計算し直す */
+  function setCoordNames(cid: number, names: [string, string, string]) {
+    const c = coordSystems.find((x) => x.id === cid)
+    if (!c) return
+    c.names = names
+    for (const it of items) if (it.coordSys === cid) schedule(it)
   }
 
   /** 座標系を作る（用意した座標系から。名前は重ならないようにする）。番号を返す */
@@ -1323,6 +1346,7 @@
       name,
       preset,
       map: [...p.map],
+      names: [...p.names],
       ranges: p.ranges.map((r) => [...r]) as CoordSystem['ranges'],
       morph: 1,
     }
@@ -2043,6 +2067,7 @@
               <CoordPanel
                 sys={tabCoord}
                 onShape={(m, r) => setCoordShape(tabCoord.id, m, r)}
+                onNames={(n) => setCoordNames(tabCoord.id, n)}
                 onMorph={(v) => setMorph(tabCoord.id, v)}
                 playing={playingMorph.includes(tabCoord.id)}
                 onPlay={() => togglePlayMorph(tabCoord.id)}

@@ -2,20 +2,30 @@
   // 座標系の設定（計画 9 章の S37）: 3 つの式 T、作る範囲、移行のスライダー（直交座標の見え方 ↔ 座標系で移した見え方）
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
-  import { COORD_PRESETS } from './coords'
+  import { COORD_PRESETS, prettyCoordName } from './coords'
   import type { CoordSystem } from './types'
 
   interface Props {
     sys: CoordSystem
     /** 式・範囲を変えた（計算し直す） */
     onShape: (map: CoordSystem['map'], ranges: CoordSystem['ranges']) => void
+    /** 座標の名前を変えた（計算し直す） */
+    onNames: (names: [string, string, string]) => void
     /** 移行のスライダーを動かした（計算し直さない） */
     onMorph: (s: number) => void
     /** 移行を再生しているか（0 → 1 → 0 と往復する） */
     playing: boolean
     onPlay: () => void
   }
-  let { sys, onShape, onMorph, playing, onPlay }: Props = $props()
+  let { sys, onShape, onNames, onMorph, playing, onPlay }: Props = $props()
+
+  const names = $derived(sys.names ?? (['x', 'y', 'z'] as [string, string, string]))
+
+  function setName(k: number, v: string) {
+    const next = [...names] as [string, string, string]
+    next[k] = v
+    onNames(next)
+  }
 
   const NAMES = ['x', 'y', 'z'] as const
   const COMPONENTS = ['X', 'Y', 'Z'] as const
@@ -59,6 +69,16 @@
     >
   </div>
   <p class="hint">0 で直交座標（座標の値をそのまま x, y, z とみなした絵）、1 で座標系で移した絵です。動かしても計算し直しません。</p>
+
+  <p class="label">座標の名前（式で x, y, z の代わりに使える。theta・phi・rho はギリシャ文字 θ・φ・ρ）</p>
+  <div class="names">
+    {#each NAMES as n, k (n)}
+      <label class="nm">
+        <span class="name">{n} =</span>
+        <input value={prettyCoordName(names[k])} aria-label="座標 {n} の名前" onchange={(e) => setName(k, e.currentTarget.value)} />
+      </label>
+    {/each}
+  </div>
 
   <div class="maps">
     {#each COMPONENTS as c, k (c)}
@@ -109,6 +129,26 @@
     font: 12px var(--mono);
     color: var(--muted);
     text-align: right;
+  }
+  .names {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+  .nm {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .nm input {
+    width: 100%;
+    min-width: 0;
+    padding: 3px 6px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: italic 15px 'Times New Roman', serif;
   }
   .maps {
     display: grid;

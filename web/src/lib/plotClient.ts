@@ -96,7 +96,7 @@ export function requestPlot(
     flags,
     hidden: hidden && { ...hidden },
     complexCoords,
-    coord: coord && { map: coord.map, ranges: coord.ranges.map(([a, b]) => [a, b] as [string, string]) },
+    coord: coord && { map: coord.map, ranges: coord.ranges.map(([a, b]) => [a, b] as [string, string]), names: coord.names },
   }
   return planned(req)
 }
