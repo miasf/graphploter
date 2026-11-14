@@ -12,7 +12,7 @@
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import CoordPanel from './lib/CoordPanel.svelte'
-  import { COORD_PRESETS, engineName } from './lib/coords'
+  import { COORD_PRESETS, GREEK_NAMES, engineName } from './lib/coords'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestCoordGrid, requestPlot } from './lib/plotClient'
   import { lastBreakdown, recordBreakdown } from './lib/timings'
@@ -1321,9 +1321,9 @@
     const n = (c.names ?? ['x', 'y', 'z']).map((s, k) => engineName(s) ?? 'xyz'[k])
     if (n.join(',') === 'x,y,z') return ''
     if (new Set(n).size < 3) throw new Error(`座標系「${c.name}」の座標の名前が重なっています`)
-    // 計算エンジンは英字の並びを 1 文字ずつの変数に分けるので、名前は英字 1 文字か θ・φ・ρ（e と i は定数）
-    const ok = (s: string) => ['theta', 'phi', 'rho'].includes(s) || (/^[A-Za-z]$/.test(s) && s !== 'e' && s !== 'i')
-    if (!n.every(ok)) throw new Error(`座標系「${c.name}」の座標の名前は、英字 1 文字（e・i 以外）か θ・φ・ρ にしてください`)
+    // 計算エンジンは英字の並びを 1 文字ずつの変数に分けるので、名前は英字 1 文字か、1 つの名前として読むギリシャ文字（e と i は定数）
+    const ok = (s: string) => s in GREEK_NAMES || (/^[A-Za-z]$/.test(s) && s !== 'e' && s !== 'i')
+    if (!n.every(ok)) throw new Error(`座標系「${c.name}」の座標の名前は、英字 1 文字（e・i 以外）か θ・φ・ρ・σ・τ・μ・ν にしてください`)
     return n.join(',')
   }
 
@@ -2102,9 +2102,17 @@
                 <button role="tab" class="chip" class:selected={coordTab === c.id} aria-selected={coordTab === c.id}
                   onclick={() => (coordTab = c.id)}>{c.name}</button>
               {/each}
-              <button class="chip" onclick={() => (coordTab = createCoord('cylinder'))} title="円柱座標（2D 表示では極座標）を足す">＋ 円柱座標</button>
-              <button class="chip" onclick={() => (coordTab = createCoord('sphere'))} title="球座標を足す">＋ 球座標</button>
-              <button class="chip" onclick={() => (coordTab = createCoord('custom'))} title="3 つの式を自分で書く">＋ 自作</button>
+              <select class="chip add-coord" value="" aria-label="座標系を足す"
+                onchange={(e) => {
+                  const v = e.currentTarget.value as CoordSystem['preset'] | ''
+                  e.currentTarget.value = ''
+                  if (v) coordTab = createCoord(v)
+                }}>
+                <option value="">＋ 座標系を足す</option>
+                {#each Object.entries(COORD_PRESETS) as [key, p] (key)}
+                  <option value={key}>{p.name}</option>
+                {/each}
+              </select>
             </div>
             {@const tabCoord = coordSystems.find((c) => c.id === coordTab) ?? coordSystems[0]}
             {#if tabCoord}

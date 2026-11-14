@@ -248,6 +248,16 @@ fn greek_names_do_not_break_functions() {
     assert_eq!(val("theta + 10 phi + 100 rho"), 320.5);
     assert_eq!(val("θ + 10φ + 100ρ"), 320.5);
     assert_eq!(val("2theta"), 1.0);
+    // σ・τ・μ・ν（特色ある座標系の名前）も 1 つの名前
+    let val2 = |src: &str| {
+        let p = Program::compile(&parse(src).unwrap(), &["sigma", "tau", "mu", "nu"]).unwrap();
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        p.eval_batch(&[&[1.0], &[2.0], &[3.0], &[4.0]], &mut out);
+        out[0].re
+    };
+    assert_eq!(val2("sigma + 10tau + 100mu + 1000nu"), 4321.0);
+    assert_eq!(val2("σ + 10τ + 100μ + 1000ν"), 4321.0);
+    assert!((val2("tan(sigma)") - 1f64.tan()).abs() < 1e-12);
 }
 
 #[test]
