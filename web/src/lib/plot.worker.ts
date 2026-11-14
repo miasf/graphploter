@@ -137,6 +137,8 @@ function looksLikeDefinition(source: string): boolean {
  */
 function costOf(kind: string, curve: boolean, flat: boolean): Cost {
   // 陰関数の線・点だけの解（`陰関数（線だけの解）`）は曲線だが、陰関数の面を作ってから線を取り出すので、時間は細かさの 3 乗
+  // 連立方程式・不等式も、陰関数の面を作ってから線を取り出す・切り取るので 3 乗
+  if (!flat && /^(連立方程式|不等式の領域)/.test(kind)) return 'volume'
   if (!flat && (/^陰関数/.test(kind) || (!curve && /^範囲で重ねた立体/.test(kind)))) return 'volume'
   if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
   return 'surface'

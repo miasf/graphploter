@@ -748,6 +748,11 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
+        // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）
+        P::System { eqs, cuts, .. } if eqs.len() == 2 && cuts.is_empty() => {
+            b.curve = true;
+            b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, ctx.implicit_resolution, ctx.implicit_refine);
+        }
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
     }
     Ok(b)
