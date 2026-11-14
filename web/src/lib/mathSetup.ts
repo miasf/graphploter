@@ -2,6 +2,7 @@
 
 import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
 import { coordName, latexName, prettyName } from './params'
+import { COMMON_SYMBOLS, SYMBOL_PAGES, type SymbolKey } from './keyboardSymbols'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
 // 相対パスだとスクリプトの場所が基準になってしまうので、ページの URL を基準にした絶対 URL にする
@@ -197,6 +198,99 @@ const SPECIAL_LAYOUT = {
   }),
 }
 
+/** abc タブのキー（keyboardSymbols.ts の書き方 → MathLive のキー） */
+function symbolKey(k: SymbolKey): Partial<VirtualKeyboardKeycap> {
+  if (typeof k === 'string') return { latex: k, tooltip: k }
+  return { ...k, ...(k.label && [...k.label].length > 2 ? { class: 'small' } : {}) }
+}
+
+/**
+ * abc タブ: 文字と、LaTeX で書ける数学記号（keyboardSymbols.ts）。ページごとに層を分け、下の段の ◀ ▶ でめくる。
+ * 真ん中のページ名を押すと目次（分類の一覧）が出て、分類の最初のページへ飛べる
+ */
+const ABC_LAYOUT = (() => {
+  const n = SYMBOL_PAGES.length
+  const id = (j: number) => `abc-${(j + n) % n}`
+  const nav = (k: number, title: string): Partial<VirtualKeyboardKeycap>[] => [
+    { label: '◀', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k - 1)], tooltip: '前のページ' },
+    { label: title, class: 'action small', width: 5, command: ['switchKeyboardLayer', 'abc-index'], tooltip: '目次（分類の一覧）' },
+    { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
+    { label: '[left]', width: 1 },
+    { label: '[right]', width: 1 },
+    { label: '[backspace]', width: 1 },
+  ]
+  const pages = SYMBOL_PAGES.map((page, k) => {
+    let rows: Partial<VirtualKeyboardKeycap>[][]
+    if (page.rows) rows = page.rows.map((r) => r.map(symbolKey))
+    else {
+      rows = []
+      const keys = page.keys ?? []
+      for (let r = 0; r < keys.length; r += 10) rows.push(keys.slice(r, r + 10).map(symbolKey))
+    }
+    while (rows.length < 4) rows.push([]) // ページによって高さが変わらないように
+    rows.push(nav(k, `${page.title} ${k + 1}/${n}`))
+    return { id: id(k), rows }
+  })
+  // 目次: 分類ごとに、最初のページへ飛ぶボタン
+  const sections: Partial<VirtualKeyboardKeycap>[] = []
+  SYMBOL_PAGES.forEach((page, k) => {
+    if (k > 0 && SYMBOL_PAGES[k - 1].section === page.section) return
+    const count = SYMBOL_PAGES.filter((p) => p.section === page.section).length
+    sections.push({
+      label: page.section,
+      class: 'action small',
+      width: 2,
+      command: ['switchKeyboardLayer', id(k)],
+      tooltip: `${page.section}（${count} ページ）`,
+    })
+  })
+  const index: Partial<VirtualKeyboardKeycap>[][] = []
+  for (let r = 0; r < sections.length; r += 5) index.push(sections.slice(r, r + 5))
+  while (index.length < 4) index.push([])
+  index.push([
+    { label: '目次', class: 'action small', width: 5, command: ['switchKeyboardLayer', id(0)], tooltip: '最初のページ' },
+    { label: '[return]', width: 2 },
+    { label: '[left]', width: 1 },
+    { label: '[right]', width: 1 },
+    { label: '[backspace]', width: 1 },
+  ])
+  return {
+    label: 'abc',
+    tooltip: '文字と記号（◀ ▶ でページをめくる。真ん中を押すと目次）',
+    layers: [...pages, { id: 'abc-index', rows: index }],
+  }
+})()
+
+// ---- タブを切り替えて戻ったとき、最後に開いていたページを出す ----
+// MathLive はタブを押すと、そのタブの最初のページ（層）を出す。ページのあるタブ（abc・特殊）は、
+// タブを押した瞬間に行き先を「そのタブで最後に開いていたページ」に書き換える
+
+/** ページのあるタブの層の id（abc-3、special-0 など） */
+const PAGED_LAYER = /^(abc|special)-/
+/** タブ → 最後に開いていたページの層の id */
+const lastPage = new Map<string, string>()
+
+function setupPageMemory() {
+  document.addEventListener(
+    'pointerdown',
+    (e) => {
+      const target = e.target instanceof Element ? e.target : null
+      if (!target?.closest('.ML__keyboard')) return
+      // 今出ているページを覚える（このタブから出ていく前に）
+      const shown = document.querySelector('.ML__keyboard .MLK__layer.is-visible')?.id ?? ''
+      const m = PAGED_LAYER.exec(shown)
+      if (m && !shown.endsWith('-index')) lastPage.set(m[1], shown)
+      // 押したのがタブなら、行き先を最後に開いていたページにする
+      const tab = target.closest('[data-layer]')
+      const to = tab?.getAttribute('data-layer') ?? ''
+      const t = PAGED_LAYER.exec(to)
+      const saved = t ? lastPage.get(t[1]) : undefined
+      if (tab && saved && saved !== to && t![1] !== m?.[1]) tab.setAttribute('data-layer', saved)
+    },
+    true,
+  )
+}
+
 // ---- キーの名前の表示 ----
 // PC: カーソルを少し当てていると名前が出る。スマホ: 長押しで名前が出る（名前が出てから指を離したときは、
 // そのキーを入力しない）。名前はキーの tooltip（MathLive が data-tooltip に入れる）。
@@ -388,6 +482,7 @@ export function setKeyboardDims(dims: number) {
 /** 画面上の数式キーボード（スマホでは入力欄を押すと自動で出る） */
 export function setupKeyboard() {
   setupKeyTips()
+  setupPageMemory()
   setKeyboardDims(3)
 }
 
@@ -397,6 +492,13 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
       label: '123',
       tooltip: '数字と記号',
       rows: [
+        // よく使う記号（abc タブの文字のページにもある）
+        [
+          ...COMMON_SYMBOLS.slice(0, 7).map((k) => k as Partial<VirtualKeyboardKeycap>),
+          '[separator-5]',
+          ...COMMON_SYMBOLS.slice(7).map((k) => k as Partial<VirtualKeyboardKeycap>),
+          { latex: '\\alpha', tooltip: 'アルファ \\alpha' },
+        ],
         [
           { latex: 'x', tooltip: '座標 x' },
           { latex: 'y', tooltip: '座標 y' },
@@ -487,7 +589,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
       ],
     },
     SPECIAL_LAYOUT,
-    'alphabetic',
+    ABC_LAYOUT,
   ]
 }
 
