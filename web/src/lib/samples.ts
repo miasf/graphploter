@@ -285,6 +285,46 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         items: [{ latex: 'x^2+y^2+z^2+w^2=4', options: { color: '#2d70b3' } }],
       },
       {
+        label: 'w = x² + y² + z² を等値面で（w の値ごとに 6 枚）',
+        view: { dims: 4, half: 3 },
+        items: [
+          {
+            latex: 'w=x^2+y^2+z^2',
+            options: {
+              opacity: 0.35,
+              hidden: { mode: 'layers', count: 6, colormap: 'viridis', opacity: 'flat', density: 0.5 },
+              ranges: { w: ['0.5', '8'] },
+            },
+          },
+        ],
+      },
+      {
+        label: 'w = sin x sin y sin z を伝達関数で（等値面風）',
+        view: { dims: 4, half: 3 },
+        items: [
+          {
+            latex: 'w=\\sin x\\sin y\\sin z',
+            options: {
+              hidden: { mode: 'volume', count: 4, colormap: 'turbo', opacity: 'bands', density: 0.5 },
+              ranges: { w: ['-1', '1'] },
+            },
+          },
+        ],
+      },
+      {
+        label: 'w = sin x + cos y + z の断面の塗り分け',
+        view: { dims: 4, half: 3 },
+        items: [
+          {
+            latex: 'w=\\sin x+\\cos y+z',
+            options: {
+              hidden: { mode: 'planes', count: 2, colormap: 'turbo', opacity: 'flat', density: 0.5 },
+              ranges: { w: ['-3', '3'] },
+            },
+          },
+        ],
+      },
+      {
         label: 'クリフォードトーラス',
         dims: 4,
         items: [
