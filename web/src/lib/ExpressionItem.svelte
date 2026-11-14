@@ -188,6 +188,15 @@
   // 色分けをしている間は、計算できなかったときも選べるようにしておく（元に戻せるように）
   /** 複素平面の図形（e^{it} など。横 Re f・奥 Im f）。縦の軸に描くものを選べる */
   const isComplexPlane = $derived(/^複素平面/.test(item.kind ?? ''))
+  /** 複素数の陰関数（値が複素数の F = 0）。曲線か、色分けした曲面かを選べる */
+  const isComplexImplicit = $derived(/^複素数の陰関数/.test(item.kind ?? ''))
+  /** 複素数の陰関数の描き方（色分けの選択肢を、陰関数の意味で読み替える） */
+  const IMPLICIT_COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
+    { mode: 'off', label: 'しない（Re F = Im F = 0 の曲線）' },
+    { mode: 'abs', label: '|F| = 1 の曲面（色は arg F）' },
+    { mode: 're', label: 'Re F = 0 の曲面（色は F）' },
+    { mode: 'im', label: 'Im F = 0 の曲面（色は F）' },
+  ]
   /** 式が使っている、表示していない座標の名前（w, w2, …）。媒介変数表示には使わない（成分が座標そのもの） */
   const hiddenCoords = $derived(
     item.params.length > 0 || item.param
@@ -591,7 +600,24 @@
               </p>
             {/if}
           {/if}
-          {#if isExplicit}
+          {#if isComplexImplicit}
+            <div class="complex-mode">
+              <span class="label">複素数の色分け</span>
+              <select value={item.complexMode ?? 'off'} onchange={(e) => onComplexMode(e.currentTarget.value as ComplexMode)}>
+                {#each IMPLICIT_COMPLEX_MODES as { mode, label } (mode)}
+                  <option value={mode}>{label}</option>
+                {/each}
+              </select>
+            </div>
+            <p class="hint">
+              {#if (item.complexMode ?? 'off') === 'off'}
+                値が複素数の F = 0 は、Re F = 0 と Im F = 0 の交わる線になります（複素数の等式 1 本 = 実数の等式 2 本）。
+              {:else}
+                色は偏角 arg F（赤: 正の実数、水色: 負の実数、黄緑: +i の向き、紫: −i の向き）。|F| が 2 倍になるごとに明るさの縞が1本。
+                Re F = Im F = 0 の線は、縞が集まる所に見えます
+              {/if}
+            </p>
+          {:else if isExplicit}
             <div class="complex-mode">
               <span class="label">複素数の色分け</span>
               <select

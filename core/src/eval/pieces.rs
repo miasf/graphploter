@@ -164,6 +164,16 @@ impl Program {
         Program { code: Code::new(b, vec![root]), vars: self.vars.clone(), used_params: self.used_params.clone() }
     }
 
+    /// 値に関数 `f`（`Re`・`Im`・`Abs` など）を掛けて `c` を引いた式 f(F) − c（複素数の陰関数の、色分けする曲面）
+    pub fn level_of(&self, f: Func, c: f64) -> Program {
+        let mut b = Builder::default();
+        let at = b.append(&self.code.ops, &Op::Var);
+        let v = b.push(Op::Call1(f, at[self.code.outs[0]]));
+        let k = b.push(Op::Const(C::new(c, 0.0)));
+        let root = b.push(Op::Bin(BinOp::Sub, v, k));
+        Program { code: Code::new(b, vec![root]), vars: self.vars.clone(), used_params: self.used_params.clone() }
+    }
+
     /// 実数の定数の命令なら、その値
     fn real_const(&self, i: usize) -> Option<f64> {
         match self.code.ops[i] {

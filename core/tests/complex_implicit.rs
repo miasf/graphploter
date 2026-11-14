@@ -5,10 +5,15 @@ use graph_core::{equation, plot, MeshResult};
 const R: f64 = 3.0;
 
 fn run(src: &str, flat: bool) -> MeshResult {
+    run_mode(src, flat, 0)
+}
+
+/// 複素数の色分け `mode`（0: しない, 1: |F| = 1, 2: Re F = 0, 3: Im F = 0）を付けて描く
+fn run_mode(src: &str, flat: bool, mode: u32) -> MeshResult {
     let rd = equation::rot_dims(3);
     plot(
         src, &[-R, R, -R, R, -R, R], 48, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
-        &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, flat, 1, flat, 0,
+        &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, mode, false, flat, 1, flat, 0,
     )
     .unwrap_or_else(|_| panic!("{src} が計算できない"))
 }
@@ -69,5 +74,28 @@ fn flat_points() {
     let p = pts(&m);
     for want in [1.0, -1.0] {
         assert!(p.iter().any(|q| (q[0] - want).abs() < 1e-6 && q[1].abs() < 1e-6), "{p:?}");
+    }
+}
+
+#[test]
+fn colored_surfaces() {
+    let src = "e^(i x) = y + i z";
+    // |F| = 1 の曲面: 頂点で |e^{ix} − y − iz| = 1、色分けの値が頂点ごとにある
+    let m = run_mode(src, false, 1);
+    assert_eq!(m.kind(), "複素数の陰関数（|F| = 1 の曲面、色は arg F）");
+    assert!(!m.curve() && !m.indices().is_empty());
+    let (p, c) = (m.positions(), m.complex_values());
+    assert_eq!(c.len(), p.len());
+    for q in p.chunks_exact(3) {
+        let (x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64);
+        let r = ((x.cos() - y).powi(2) + (x.sin() - z).powi(2)).sqrt();
+        assert!((r - 1.0).abs() < 0.05, "{q:?} {r}");
+    }
+    // Re F = 0 の曲面: y = cos x。色の値の 1 つ目（Re F / |F|）はほぼ 0
+    let m = run_mode(src, false, 2);
+    assert_eq!(m.kind(), "複素数の陰関数（Re F = 0 の曲面、色は F）");
+    for (q, v) in m.positions().chunks_exact(3).zip(m.complex_values().chunks_exact(3)) {
+        assert!(((q[0] as f64).cos() - q[1] as f64).abs() < 0.02, "{q:?}");
+        assert!(v[0].abs() < 0.2 || v[2] < -3.0, "{v:?}");
     }
 }

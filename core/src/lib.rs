@@ -575,9 +575,10 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
             if hidden.is_empty() {
                 return build(plot, ctx);
             }
-            // 座標ごとの値の数（全部の組み合わせが上限を超えないように減らす）
+            // 座標ごとの値の数（全部の組み合わせが上限を超えないように減らす。範囲が 1 点の座標は動かないので数えない）
+            let moving = hidden.iter().filter(|&&k| range_of(k).0 < range_of(k).1).count().max(1);
             let mut per = count.max(2);
-            while per > 2 && per.pow(hidden.len() as u32) > MAX_HIDDEN_LAYERS {
+            while per > 2 && per.pow(moving as u32) > MAX_HIDDEN_LAYERS {
                 per -= 1;
             }
             let values: Vec<Vec<f64>> = hidden
@@ -960,11 +961,25 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.local = Some((local, lp.used_params().to_vec()));
         }
         // 複素数の陰関数（値が複素数の F = 0）: Re F = Im F = 0 の線として、連立方程式の交わる線と同じ道で描く
+        // 複素数の色分けをするなら、曲面（|F| = 1・Re F = 0・Im F = 0）を作って、頂点の F の値で色を付ける（陽関数の色分けと同じ色）
         P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
-            b.curve = true;
-            b.kind = "複素数の陰関数（Re F = Im F = 0 の曲線）".into();
-            let (re, im) = (prog.part(functions::Func::Re), prog.part(functions::Func::Im));
-            b.inner = system::intersection_curve(&re, &im, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            use functions::Func;
+            let surface = match ctx.complex_mode {
+                mesh::ComplexMode::Abs | mesh::ComplexMode::Arg => Some((prog.level_of(Func::Abs, 1.0), "|F| = 1 の曲面、色は arg F")),
+                mesh::ComplexMode::Re => Some((prog.level_of(Func::Re, 0.0), "Re F = 0 の曲面、色は F")),
+                mesh::ComplexMode::Im => Some((prog.level_of(Func::Im, 0.0), "Im F = 0 の曲面、色は F")),
+                _ => None,
+            };
+            if let Some((g, label)) = surface {
+                b.kind = format!("複素数の陰関数（{label}）");
+                b.inner = mesh::implicit_solid_opt(&g, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
+                mesh::color_by_complex(&mut b.inner, prog);
+            } else {
+                b.curve = true;
+                b.kind = "複素数の陰関数（Re F = Im F = 0 の曲線）".into();
+                let (re, im) = (prog.part(Func::Re), prog.part(Func::Im));
+                b.inner = system::intersection_curve(&re, &im, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            }
         }
         // 面にならず、線・点だけになる式（A² + B² = 0 は A = B = 0 の線）: 交わる線・点として描く
         P::Implicit { prog, .. } if prog.common_zero_sets().is_some() => {

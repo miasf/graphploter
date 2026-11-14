@@ -8,7 +8,7 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
-import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
+import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -1205,6 +1205,7 @@ export class Viewer {
       if (old.kind === 'curve') {
         old.line.geometry.dispose()
         old.line.geometry = this.curveGeometry(mesh.positions)
+        this.setCurveValues(old.line, mesh)
         // 点の数が変わるので、点の球は作り直す（材質はそのまま使う）
         const mat = old.dots.material as THREE.MeshStandardMaterial
         const scale = old.dots.userData.scale
@@ -1226,8 +1227,11 @@ export class Viewer {
       }
     } else {
       this.removePlot(id)
-      if (mesh.curve) this.setCurve(id, mesh.positions)
-      else this.setSurface(id, mesh)
+      if (mesh.curve) {
+        this.setCurve(id, mesh.positions)
+        const p = this.plots.get(id)
+        if (p?.kind === 'curve') this.setCurveValues(p.line, mesh)
+      } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
     this.setStyle(id, style)
@@ -1644,6 +1648,43 @@ export class Viewer {
     this.scene.add(line)
   }
 
+  /**
+   * 曲線の値の色付け（表示していない座標の値。等値面を何枚も重ねた曲線）。点ごとの値と範囲を覚えておき、色は [`colorCurve`] で塗る。
+   * 値が無ければ、式の色 1 色
+   */
+  private setCurveValues(line: LineSegments2, mesh: MeshData) {
+    const vr = mesh.valueRange
+    line.userData.values = vr && mesh.complexValues.length === mesh.positions.length ? { pts: mesh.positions, v: mesh.complexValues, range: vr } : null
+  }
+
+  /** 値で色を付ける曲線なら、線分の両端の色を塗る（色の対応表・式の色が変わったときも塗り直す） */
+  private colorCurve(line: LineSegments2, style: PlotStyle): boolean {
+    const d = line.userData.values as { pts: Float32Array; v: Float32Array; range: [number, number] } | null
+    const m = line.material as LineMaterial
+    if (!d) {
+      m.vertexColors = false
+      return false
+    }
+    const { pts, v, range } = d
+    const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
+    const span = range[1] - range[0]
+    const base = new THREE.Color(style.color)
+    const tmp = new THREE.Color()
+    const cols: number[] = []
+    // curveGeometry と同じ順に、点 k と k + 1 を結ぶ線分ごとに両端の色を並べる
+    for (let k = 0; k + 5 < pts.length; k += 3) {
+      if (!(ok(k) && ok(k + 3))) continue
+      for (const q of [k, k + 3]) {
+        colormapColor(span > 0 ? (v[q] - range[0]) / span : 0.5, style.hidden?.colormap ?? 'viridis', base, tmp)
+        cols.push(tmp.r, tmp.g, tmp.b)
+      }
+    }
+    ;(line.geometry as LineSegmentsGeometry).setColors(cols)
+    m.vertexColors = true
+    m.needsUpdate = true
+    return true
+  }
+
   /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
   private styles = new Map<number, PlotStyle>()
 
@@ -1658,7 +1699,8 @@ export class Viewer {
     if (p.kind === 'curve') {
       p.line.visible = style.visible
       const m = p.line.material as LineMaterial
-      m.color.copy(c)
+      // 値で色を付ける曲線は、頂点の色をそのまま出す（材質の色は白にして掛け合わせない）
+      m.color.copy(this.colorCurve(p.line, style) ? new THREE.Color(1, 1, 1) : c)
       m.linewidth = style.lineWidth
       ;(p.dots.material as THREE.MeshStandardMaterial).color.copy(c)
       // 線の太さ 3 で 1 倍。細くしても小さくなりすぎないように

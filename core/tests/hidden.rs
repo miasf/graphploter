@@ -119,3 +119,25 @@ fn stacked_by_own_range() {
     let m = run("w = x^2 + y^2 + z^2", 4, &style(4.0, 5.0, 4, &[(3, 1.0, 1.0)])).unwrap();
     assert_eq!(m.kind(), "陰関数");
 }
+
+#[test]
+fn fixed_coordinates_do_not_reduce_layers() {
+    // 6 次元: z だけ動かし、w₂・w₃ は範囲が 1 点（固定）。枚数は z の 7 枚のまま
+    let mut st = style(1.0, 7.0, 6, &[(2, -1.5, 1.5), (4, 0.0, 0.0), (5, 0.0, 0.0)]);
+    st.truncate(2 + 12);
+    let m = {
+        let rd = equation::rot_dims(6);
+        hidden_style(st);
+        plot(
+            "(x + i w)^2 + (y + i w_2)^2 + (z + i w_3)^2 = 1", &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 48, 40, "", &[], "", &[], "", 6,
+            &[0, 3, 1], &[0.0; 6], &[f64::NAN; 12], "", &[], 16, &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, false, 1,
+            false, 0,
+        )
+        .ok()
+        .unwrap()
+    };
+    assert!(m.kind().ends_with("（z の値ごとに 7 枚）"), "{}", m.kind());
+    assert!(m.curve());
+    // 曲線をまとめても、頂点ごとの値の数は頂点の数と同じ（区切りの点の分も入る）
+    assert_eq!(m.complex_values().len(), m.positions().len());
+}

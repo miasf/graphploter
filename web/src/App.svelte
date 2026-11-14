@@ -1018,10 +1018,18 @@
   /** 見せ方が断面でないとき、式が使っている表示していない座標の範囲の入力欄を用意する（断面のスライダーの範囲）。用意したら true */
   function ensureHiddenRanges(item: PlotItem): boolean {
     let added = false
+    // 1 つ目の座標だけ断面のスライダーの範囲にし、ほかは今の断面の値に固定する（両端が同じ）。全部を動かすと、組み合わせの数だけ
+    // 図形が増えて重く、見たい形も分からなくなる（6 次元の (x + iw)² + (y + iw₂)² + (z + iw₃)² = 1 で z・w₂・w₃ の 64 通り）
+    let first = !Object.keys(item.ranges).some((n) => {
+      const k = Array.from({ length: space.dims }, (_, j) => j).find((j) => coordName(j) === n)
+      return k !== undefined && !space.axes.includes(k)
+    })
     for (let k = 0; k < space.dims; k++) {
       const name = coordName(k)
       if (space.axes.includes(k) || !item.usedParams.includes(name) || name in item.ranges) continue
-      item.ranges[name] = [String(space.sliceMin), String(space.sliceMax)]
+      if (first) item.ranges[name] = [String(space.sliceMin), String(space.sliceMax)]
+      else item.ranges[name] = [String(space.slice[k] ?? 0), String(space.slice[k] ?? 0)]
+      first = false
       added = true
     }
     return added
