@@ -38,6 +38,11 @@ export interface VolumeUniforms {
   uWidth: { value: number }
   /** 1 なら、値の勾配を面の法線とみなして光を当てる（重ね塗りのとき） */
   uLit: { value: number }
+  /**
+   * 1 なら値が複素数（テクスチャの r, g が実部・虚部）。色は偏角（陽関数の複素数の色分けと同じ色）、不透明度の形は |f| で決める
+   * （値の範囲は [0, q]。何枚かの値の所だけ濃い形は、|f| が 2 のべき乗の所）
+   */
+  uComplex: { value: number }
 }
 
 const VERTEX = /* glsl */ `
@@ -70,6 +75,7 @@ uniform float uClamp;
 uniform float uN;
 uniform float uWidth;
 uniform float uLit;
+uniform float uComplex;
 varying vec3 vWorld;
 ${COLORMAP_GLSL}
 
@@ -88,13 +94,37 @@ float shape(float t) {
   return 4.0 * exp(-0.5 * d * d);
 }
 
+// 濃さの形。値が複素数で「何枚かの値の所だけ濃い」なら、|f| = 2^k の所（色の明るさの縞と同じ所）を濃くする
+float shapeAt(float s, float v) {
+  if (uComplex > 0.5 && uShape > 2.5 && uShape < 3.5) {
+    float f = fract(log2(max(v, 1e-30)) + 0.5) - 0.5;
+    return 4.0 * exp(-f * f / (2.0 * 0.07 * 0.07));
+  }
+  return shape(s);
+}
+
+// 複素数の色: 色相 = 偏角（0 で赤、π/2 で黄緑、π で水色、−π/2 で紫）、|z| が 2 倍になるごとに明るさが少しずつ変わる縞
+// （surfaceMaterial の陽関数の複素数の色分けと同じ）
+vec3 argColor(vec2 z) {
+  float hue = atan(z.y, z.x) / 6.28318530718;
+  vec3 rgb = clamp(abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  rgb = mix(vec3(1.0), rgb, 0.85);
+  return rgb * (0.72 + 0.28 * fract(log2(max(length(z), 1e-30))));
+}
+
+// 点 q での値（複素数なら |f|。実部・虚部を補間してから大きさにする。偏角や |f| を補間すると、偏角が ±π をまたぐ所や 0 の近くで崩れる）
+float valueAt(vec3 q) {
+  vec4 t = texture(uTex, q);
+  return uComplex > 0.5 ? length(t.rg) : t.r;
+}
+
 // 値の勾配（表示範囲の座標あたり）。格子の 1 マスの幅の中心差分
 vec3 gradAt(vec3 q, vec3 size) {
   float h = 1.0 / uN;
   return vec3(
-    texture(uTex, q + vec3(h, 0.0, 0.0)).r - texture(uTex, q - vec3(h, 0.0, 0.0)).r,
-    texture(uTex, q + vec3(0.0, h, 0.0)).r - texture(uTex, q - vec3(0.0, h, 0.0)).r,
-    texture(uTex, q + vec3(0.0, 0.0, h)).r - texture(uTex, q - vec3(0.0, 0.0, h)).r) / (2.0 * h * size);
+    valueAt(q + vec3(h, 0.0, 0.0)) - valueAt(q - vec3(h, 0.0, 0.0)),
+    valueAt(q + vec3(0.0, h, 0.0)) - valueAt(q - vec3(0.0, h, 0.0)),
+    valueAt(q + vec3(0.0, 0.0, h)) - valueAt(q - vec3(0.0, 0.0, h))) / (2.0 * h * size);
 }
 
 // 値 0 の近くだけ濃い形（重ね塗りのとき）: 0 の面からの距離を |v| / |∇v| で見積もり、格子の uWidth マスの幅のぼやけた面にする
@@ -167,26 +197,34 @@ void main() {
   float best = uBlend < 1.5 ? -1e30 : 1e30;
   float sum = 0.0;
   float cnt = 0.0;
+  // 複素数: まとめた値をとった点の値（最大値・最小値）と、値の和（平均値）。色はこの偏角
+  vec2 bestZ = vec2(0.0);
+  vec2 sumZ = vec2(0.0);
   for (int i = 0; i < MAX_STEPS; i++) {
     if (float(i) >= steps) break;
     float t = tn + (float(i) + jitter) * dt;
     vec3 p = cameraPosition + dir * t;
     vec3 q = (p - uBoxMin) / size;
-    float v = texture(uTex, q).r;
+    vec2 z = texture(uTex, q).rg;
+    float v = uComplex > 0.5 ? length(z) : z.x;
     if (!(v == v)) continue;
     float s = span > 0.0 ? (v - uRange.x) / span : 0.5;
-    if (uClamp > 0.5) s = clamp(s, 0.0, 1.0);
+    // 複素数の |f| は範囲 [0, q] の外（q より大きい値）も端として描く（q は分布から決めた目安なので）
+    if (uClamp > 0.5 || uComplex > 0.5) s = clamp(s, 0.0, 1.0);
     if (s < 0.0 || s > 1.0) continue;
     if (uBlend > 0.5) {
-      if (uBlend < 1.5) best = max(best, s);
-      else if (uBlend < 2.5) best = min(best, s);
+      if (uBlend < 1.5 ? s > best : uBlend < 2.5 ? s < best : false) {
+        best = s;
+        bestZ = z;
+      }
       sum += s;
+      sumZ += z;
       cnt += 1.0;
       continue;
     }
     bool sh = uShape > 3.5;
-    float a = 1.0 - exp(-k * (sh ? shell(v, q, size) : shape(s)) * dt);
-    vec3 c = colormap(s, uColormap, uBase);
+    float a = 1.0 - exp(-k * (sh ? shell(v, q, size) : shapeAt(s, v)) * dt);
+    vec3 c = uComplex > 0.5 ? argColor(z) : colormap(s, uColormap, uBase);
     if (uLit > 0.5) {
       // ほとんど透明な点は光の計算を省く（勾配に 6 回テクスチャを読むので重い）
       if (a > 0.002) c = lit(c, sh ? gGrad : gradAt(q, size), dir, size, span, sh ? 1.0 : 0.0);
@@ -205,8 +243,9 @@ void main() {
     // 不透明度は、まとめた値での濃さの形を最大 1 にそろえて 1.5 乗したもの × 濃さの 2 倍（濃さ 50% で、形の最大の所が不透明）。
     // 最大値は視線ごとに大きめの値になりやすいので、急に上げないと中くらいの値まで濃くなり、箱全体が塗りつぶされる
     float peak = uShape < 0.5 ? 1.0 : uShape < 2.5 ? 2.0 : 4.0;
-    float a = min(1.0, 2.0 * uDensity * pow(shape(s) / peak, 1.5));
-    acc = vec4(colormap(s, uColormap, uBase) * a, a);
+    vec2 z = uBlend > 2.5 ? sumZ / cnt : bestZ;
+    float a = min(1.0, 2.0 * uDensity * pow(shapeAt(s, length(z)) / peak, 1.5));
+    acc = vec4((uComplex > 0.5 ? argColor(z) : colormap(s, uColormap, uBase)) * a, a);
   }
   acc.a *= uOpacity;
   if (acc.a < 0.003) discard;
@@ -215,12 +254,15 @@ void main() {
 }
 `
 
-/** 値の格子（1 辺 n 点。x が最も速く変わる）から 3 次元のテクスチャを作る。定義されない所は NaN のまま（描かない） */
+/**
+ * 値の格子（1 辺 n 点。x が最も速く変わる）から 3 次元のテクスチャを作る。定義されない所は NaN のまま（描かない）。
+ * 長さが 2n³ なら複素数（実部・虚部の組）として、2 チャンネル（r, g）にする
+ */
 export function volumeTexture(values: Float32Array, n: number): THREE.Data3DTexture {
   const half = new Uint16Array(values.length)
   for (let i = 0; i < values.length; i++) half[i] = THREE.DataUtils.toHalfFloat(values[i])
   const tex = new THREE.Data3DTexture(half, n, n, n)
-  tex.format = THREE.RedFormat
+  tex.format = values.length === 2 * n * n * n ? THREE.RGFormat : THREE.RedFormat
   tex.type = THREE.HalfFloatType
   tex.minFilter = THREE.LinearFilter
   tex.magFilter = THREE.LinearFilter
@@ -261,6 +303,7 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
     uN: { value: 64 },
     uWidth: { value: 2 },
     uLit: { value: 1 },
+    uComplex: { value: 0 },
   }
 }
 

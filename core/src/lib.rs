@@ -678,6 +678,16 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
                 })
             } else {
                 let n = ctx.implicit_resolution.clamp(24, 96);
+                // 値が複素数になる式（w = (x + i y)² + z など）は、実部・虚部の組で返し、色を偏角にする
+                if system::is_complex_valued(&f, dom) {
+                    let (vals, q) = complex_volume(&f, dom, n);
+                    return Ok(Built {
+                        kind: format!("{name} の値の伝達関数（複素数。色は偏角、{n}³）"),
+                        value_range: Some((0.0, q)),
+                        volume: Some((vals, n)),
+                        ..Default::default()
+                    });
+                }
                 let vals = grid_values(&f, dom, n);
                 Ok(Built {
                     kind: format!("{name} の値の伝達関数（{n}³）"),
@@ -694,12 +704,19 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
             // 表示していない座標は断面の値（次元の設定の「範囲で重ねる」より優先。重ねた立体の G ではなく F を見たいので）
             let compiled = equation::compile_with(source, params, &own)?;
             let equation::Plot::Implicit { prog, .. } = &compiled else {
-                return Err("F の値の伝達関数は、陰関数 F(x, y, z) = 0（実数の値）のときだけ使えます".into());
+                return Err("F の値の伝達関数は、陰関数 F(x, y, z) = 0 のときだけ使えます".into());
             };
-            if system::is_complex_valued(prog, dom) {
-                return Err("F の値の伝達関数は、値が実数の陰関数のときだけ使えます".into());
-            }
             let n = ctx.implicit_resolution.clamp(24, 128);
+            // 値が複素数の陰関数: 実部・虚部の組で返し、色を偏角、不透明度を |F| で決める（|F| の範囲は [0, q]）
+            if system::is_complex_valued(prog, dom) {
+                let (vals, q) = complex_volume(prog, dom, n);
+                return Ok(Built {
+                    kind: format!("複素数の陰関数の F の値の伝達関数（色は偏角、{n}³）"),
+                    value_range: Some((0.0, q)),
+                    volume: Some((vals, n)),
+                    ..Default::default()
+                });
+            }
             let vals = grid_values(prog, dom, n);
             let mut mags: Vec<f32> = vals.iter().filter(|v| v.is_finite()).map(|v| v.abs()).collect();
             let q = if mags.is_empty() {
@@ -720,8 +737,28 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
     }
 }
 
+/// 表示範囲の格子での `f` の値を、実部・虚部の組（長さ 2n³。描画側はこの長さで複素数と見分ける）と、
+/// |f| の 9 割の点が入る値 q（不透明度の目安。値の大きさは式によって桁が違うので、分布から決める）にする
+fn complex_volume(f: &eval::Program, dom: mesh::Domain, n: usize) -> (Vec<f32>, f64) {
+    let vals = grid_complex(f, dom, n);
+    let mut mags: Vec<f64> = vals.iter().filter(|v| v.re.is_finite() && v.im.is_finite()).map(|v| v.norm()).collect();
+    let q = if mags.is_empty() {
+        1.0
+    } else {
+        let i = (mags.len() * 9 / 10).min(mags.len() - 1);
+        let (_, q, _) = mags.select_nth_unstable_by(i, |a, b| a.total_cmp(b));
+        if *q > 0.0 { *q } else { 1.0 }
+    };
+    (vals.into_iter().flat_map(|v| [v.re as f32, v.im as f32]).collect(), q)
+}
+
 /// 表示範囲の格子（1 辺 `n` 点。x が最も速く変わる）での `f` の値（実部）
 fn grid_values(f: &eval::Program, dom: mesh::Domain, n: usize) -> Vec<f32> {
+    grid_complex(f, dom, n).into_iter().map(|v| eval::as_real(v) as f32).collect()
+}
+
+/// 表示範囲の格子（1 辺 `n` 点。x が最も速く変わる）での `f` の値
+fn grid_complex(f: &eval::Program, dom: mesh::Domain, n: usize) -> Vec<num_complex::Complex64> {
     let at = |a: usize, i: usize| dom.lo[a] + (dom.hi[a] - dom.lo[a]) * i as f64 / (n - 1) as f64;
     let mut cols: [Vec<f64>; 3] = Default::default();
     for z in 0..n {
@@ -735,7 +772,7 @@ fn grid_values(f: &eval::Program, dom: mesh::Domain, n: usize) -> Vec<f32> {
     }
     let mut out = vec![num_complex::Complex64::new(0.0, 0.0); n * n * n];
     f.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
-    out.into_iter().map(|v| eval::as_real(v) as f32).collect()
+    out
 }
 
 /// 平面「`axis` 番目の座標 = `pos`」を `n × n` マスに分け、頂点ごとの式 `f` の値を complex の 1 つ目に入れて `m` に足す。

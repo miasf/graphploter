@@ -245,8 +245,10 @@
     { blend: 'min', label: '視線上の最小値' },
     { blend: 'mean', label: '視線上の平均値' },
   ]
-  /** 陰関数 F(x, y, z) = 0（値が実数。不等式で切り取ったものは除く）。F の値を伝達関数で描ける */
-  const canField = $derived(/^陰関数(?!（不等式)/.test(item.kind ?? '') && !isCurve)
+  /** 陰関数 F(x, y, z) = 0（値が複素数のものも含む。不等式で切り取ったものは除く）。F の値を伝達関数で描ける */
+  const canField = $derived(/^(複素数の)?陰関数(?!（不等式)/.test(item.kind ?? ''))
+  /** 伝達関数で描いている値が複素数（色は偏角。色の対応表は使わない） */
+  const complexVolume = $derived(/の伝達関数（.*色は偏角/.test(item.kind ?? ''))
   /** 選べる見せ方。表示していない座標を使わない陰関数は、曲面か F の値の伝達関数か */
   const hiddenModes = $derived(
     hiddenCoords.length > 0
@@ -611,7 +613,7 @@
               {/each}
             {/if}
             {#if hidden.mode !== 'slice'}
-              {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (isVolume && (hidden.opacity === 'bands' || hidden.opacity === 'zero'))}
+              {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (isVolume && ((hidden.opacity === 'bands' && !complexVolume) || hidden.opacity === 'zero'))}
                 <div class="sliders">
                   <span class="label">{hidden.mode === 'layers' ? '枚数' : hidden.mode === 'planes' ? '各軸の枚数' : hidden.opacity === 'zero' ? '面の幅' : '濃い所の数'}</span>
                   <input
@@ -626,7 +628,7 @@
                   <span class="value">{hidden.count}</span>
                 </div>
               {/if}
-              {#if hidden.mode !== 'stack'}
+              {#if hidden.mode !== 'stack' && !(isVolume && complexVolume)}
               <div class="complex-mode">
                 <span class="label">色</span>
                 <select value={hidden.colormap} onchange={(e) => onHidden({ colormap: e.currentTarget.value as HiddenStyle['colormap'] })}>
@@ -680,6 +682,10 @@
                   範囲で動かしたときに図形が通る領域を、立体で描いています（範囲は式の下の欄。何等分して調べるかは右上の ⚙ の「範囲で重ねる枚数」）。
                 {:else if hidden.mode === 'planes'}
                   表示範囲の中の平面（各軸に等間隔）を、{prettyName(hiddenCoords[0])} = f の値で塗っています（{prettyName(hiddenCoords[0])} = f(x, y, z) の形の式だけ）。
+                {:else if isVolume && complexVolume}
+                  値が複素数なので、色は偏角（赤: 正の実数、水色: 負の実数、黄緑: +i の向き、紫: −i の向き。|f| が 2 倍になるごとに明るさの縞が 1 本）、
+                  不透明度の形は |f| で決めます（|f| の範囲は 0 〜 表示範囲の中の |f| の 9 割が入る値。「何枚かの値の所だけ濃い」は |f| = 2ᵏ の所、
+                  「0 の近くだけ濃い」は f = 0 の所。3 次元では f = 0 はふつう線なので、線のまわりの管になります）。
                 {:else if hidden.mode === 'field'}
                   陰関数 F(x, y, z) = 0 の F（左辺 − 右辺）の値に色と不透明度を割り当て、表示範囲の箱の中を光線で重ね塗りしています。
                   色の範囲は、表示範囲の中の |F| の 9 割が入る値 q での −q 〜 q（外の値は端の色）。「0 の近くだけ濃い」は、F = 0 の面からの距離

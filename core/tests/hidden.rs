@@ -187,3 +187,31 @@ fn implicit_field_values() {
     let c = -R + 2.0 * R * i as f64 / (n - 1) as f64;
     assert!(((v[(i * n + i) * n + i] as f64).abs() - (3.0 * c * c - 4.0).abs()).abs() < 1e-3);
 }
+
+/// 値が複素数の伝達関数: 実部・虚部の組（長さ 2n³）と、|f| の範囲 [0, q]
+#[test]
+fn complex_volume_values() {
+    // 複素数の陰関数の F の値
+    let mut m = run("(x + i y)^2 - z = 0", 3, &style(5.0, 4.0, 3, &[])).unwrap();
+    let n = m.volume_n() as usize;
+    assert!(m.kind().starts_with("複素数の陰関数の F の値の伝達関数（色は偏角"), "{}", m.kind());
+    let vr = m.value_range();
+    assert!(vr[0] == 0.0 && vr[1] > 0.0, "{vr:?}");
+    let v = m.take_volume();
+    assert_eq!(v.len(), 2 * n * n * n);
+    let at = |i: usize| -R + 2.0 * R * i as f64 / (n - 1) as f64;
+    for (x, y, z) in [(0, 0, 0), (5, 17, 39), (30, 8, 20)] {
+        let (a, b, c) = (at(x), at(y), at(z));
+        // (a + i b)² − c の実部・虚部（符号は左辺 − 右辺か逆かによらず、大きさを比べる）
+        let (re, im) = (a * a - b * b - c, 2.0 * a * b);
+        let k = 2 * ((z * n + y) * n + x);
+        let got = ((v[k] as f64).powi(2) + (v[k + 1] as f64).powi(2)).sqrt();
+        assert!((got - (re * re + im * im).sqrt()).abs() < 1e-3, "{x} {y} {z}");
+    }
+    // w = f(x, y, z) で f が複素数
+    let mut m = run("w = (x + i y)^2 + z", 4, &style(3.0, 5.0, 4, &[(3, -1.0, 1.0)])).unwrap();
+    assert!(m.kind().contains("複素数。色は偏角"), "{}", m.kind());
+    let n = m.volume_n() as usize;
+    assert_eq!(m.take_volume().len(), 2 * n * n * n);
+    assert_eq!(m.value_range()[0], 0.0);
+}
