@@ -169,6 +169,7 @@
         complexMode: it.complexMode,
         hidden: it.hidden && it.hidden.mode !== 'slice' ? it.hidden : undefined,
         complexCoords: it.complexCoords || undefined,
+        slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
         walls: it.walls,
         layers: it.layers,
         edges: it.edges || undefined,
@@ -651,7 +652,7 @@
       used.ires,
       ranges,
       currentParams(),
-      { ...space, ranges: spaceRanges, ...rotationOf(item) },
+      { ...space, slice: sliceFor(item), ranges: spaceRanges, ...rotationOf(item) },
       currentStacks(),
       cutRequest(),
       item.complexMode ?? 'off',
@@ -1012,6 +1013,20 @@
     const recompute = next.mode !== prev.mode || (next.count !== prev.count && next.mode !== 'volume')
     if (recompute) schedule(item, next.mode === prev.mode ? 150 : 0)
     else viewer?.setStyle(item.id, item)
+  }
+
+  /** この式の断面の値（式だけの値があればそれ、無ければ次元の設定の値） */
+  function sliceFor(item: PlotItem): number[] {
+    return space.slice.map((v, k) => item.slice?.[coordName(k)] ?? v)
+  }
+
+  /** この式だけの断面の値を決める（null なら、次元の設定の値に戻す） */
+  function setItemSlice(item: PlotItem, name: string, v: number | null) {
+    const next = { ...(item.slice ?? {}) }
+    if (v === null) delete next[name]
+    else next[name] = v
+    item.slice = next
+    schedule(item, v === null ? 0 : 30)
   }
 
   /** 座標を複素数にする・やめる。する場合、次元が 6 未満なら 6 にする（虚部に w, w₂, w₃ を使う） */
@@ -1638,6 +1653,10 @@
             onComplexMode={(m) => setComplexMode(item, m)}
             onHidden={(patch) => setHidden(item, patch)}
             onComplexCoords={(on) => setComplexCoords(item, on)}
+            globalSlice={space.slice}
+            sliceMin={space.sliceMin}
+            sliceMax={space.sliceMax}
+            onSlice={(name, v) => setItemSlice(item, name, v)}
             onWalls={(on) => setWalls(item, on)}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}

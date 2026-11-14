@@ -20,6 +20,8 @@ export interface SavedItem {
   hidden?: HiddenStyle
   /** 座標を複素数にするか（古い保存データには無い） */
   complexCoords?: boolean
+  /** この式だけの断面の値（古い保存データには無い） */
+  slice?: Record<string, number>
   walls?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転。ただし rotOwn の無い古い保存データでは全体の回転） */
   rotGroup?: number

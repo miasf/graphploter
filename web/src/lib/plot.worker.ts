@@ -198,7 +198,8 @@ function makeCap(source: CapSource, cut: CutRequest, resolution: number, t?: Tal
 }
 
 function capTransfer(cap: CapData | null): ArrayBuffer[] {
-  return cap ? [cap.positions.buffer, cap.normals.buffer, cap.indices.buffer] as ArrayBuffer[] : []
+  if (!cap) return []
+  return [cap.positions.buffer, cap.normals.buffer, cap.indices.buffer, ...(cap.complexValues ? [cap.complexValues.buffer] : [])] as ArrayBuffer[]
 }
 
 /**
@@ -461,7 +462,15 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       indices: g.take_indices(),
       lodIndices: g.take_lod_indices(),
       lod: g.has_lod_mesh
-        ? { positions: g.take_lod_positions(), normals: g.take_lod_normals(), indices: g.take_lod_mesh_indices() }
+        ? (() => {
+            const cv = g.take_lod_complex_values()
+            return {
+              positions: g.take_lod_positions(),
+              normals: g.take_lod_normals(),
+              indices: g.take_lod_mesh_indices(),
+              ...(cv.length > 0 ? { complexValues: cv } : {}),
+            }
+          })()
         : null,
       gridCoords: g.take_grid_coords(),
       complexValues: g.take_complex_values(),

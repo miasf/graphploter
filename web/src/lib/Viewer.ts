@@ -1452,14 +1452,16 @@ export class Viewer {
     // 複素数の色分けをしないときも、シェーダーが読む属性は用意しておく（使わないので位置で代用）
     geo.setAttribute('complexValue', mesh.complexValues.length > 0 ? new THREE.BufferAttribute(mesh.complexValues, 3) : pos)
     geo.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
-    // 粗い版（陰関数）: 自分の頂点を持つ。格子線用の座標・複素数の値は位置で代用する（陰関数はもともとそう）
+    // 粗い版（陰関数）: 自分の頂点を持つ。格子線用の座標は位置で代用する（陰関数はもともとそう）。色分けの値があれば使う
+    // （等値面を重ねたもの・複素数の陰関数の色分け。無いと、動かしている間だけ位置で色が付いてしまう）
     if (mesh.lod && mesh.lod.indices.length > 0) {
       const lod = new THREE.BufferGeometry()
       const lp = new THREE.BufferAttribute(mesh.lod.positions, 3)
       lod.setAttribute('position', lp)
       lod.setAttribute('normal', new THREE.BufferAttribute(mesh.lod.normals, 3))
       lod.setAttribute('gridCoord', lp)
-      lod.setAttribute('complexValue', lp)
+      const cv = mesh.lod.complexValues
+      lod.setAttribute('complexValue', cv && cv.length === mesh.lod.positions.length ? new THREE.BufferAttribute(cv, 3) : lp)
       lod.setIndex(new THREE.BufferAttribute(mesh.lod.indices, 1))
       geo.userData.lod = lod
     }

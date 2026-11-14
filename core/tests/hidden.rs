@@ -141,3 +141,21 @@ fn fixed_coordinates_do_not_reduce_layers() {
     // 曲線をまとめても、頂点ごとの値の数は頂点の数と同じ（区切りの点の分も入る）
     assert_eq!(m.complex_values().len(), m.positions().len());
 }
+
+#[test]
+fn coarse_version_keeps_values() {
+    // サンプル「w = sin x + sin y + sin z の等値面」: 動かしている間に描く粗い版（自分の頂点を持つ）にも、同じ値が付く
+    // （付かないと、描画側が位置を値の代わりに使い、動かすと x の向きに色が変わっていた）
+    let rd = equation::rot_dims(4);
+    hidden_style(style(1.0, 5.0, 4, &[(3, -2.0, 2.0)]));
+    let mut m = plot(
+        "w = sin x + sin y + sin z", &[-10.0, 10.0, -10.0, 10.0, -6.0, 6.0], 64, 80, "", &[], "", &[], "", 4, &[0, 1, 2], &[0.0; 4],
+        &[f64::NAN; 8], "", &[], 16, &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, false, 1, false, 0,
+    )
+    .ok()
+    .unwrap();
+    assert!(m.has_lod_mesh(), "粗い版がある");
+    let (lc, lp) = (m.take_lod_complex_values(), m.take_lod_positions());
+    assert_eq!(lc.len(), lp.len());
+    assert!(lc.chunks_exact(3).all(|v| [-2.0, -1.0, 0.0, 1.0, 2.0].contains(&v[0])), "粗い版の値は w の値のどれか");
+}
