@@ -748,10 +748,29 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
-        // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）
-        P::System { eqs, cuts, .. } if eqs.len() == 2 && cuts.is_empty() => {
+        // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
+        // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
+        P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
+            let inner = build(base, ctx)?.settle();
+            let mut m = match &inner.shape {
+                Some(sh) => mesh::project(sh, &ctx.view, dom),
+                None => inner.inner,
+            };
+            for g in cuts {
+                system::trim_mesh(&mut m, &mut system::values_of(g), 8);
+            }
+            b.inner = m;
+            b.curve = inner.curve;
+            b.kind = if cuts.is_empty() { inner.kind } else { format!("{}（不等式で切り取り）", inner.kind) };
+        }
+        // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）。
+        // 不等式があれば、線分を切る
+        P::System { eqs, cuts, .. } if eqs.len() == 2 => {
             b.curve = true;
             b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, ctx.implicit_resolution, ctx.implicit_refine);
+            for g in cuts {
+                system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
+            }
         }
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
     }

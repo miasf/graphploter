@@ -591,7 +591,11 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         }
     }
     let base = match eq_rows.as_slice() {
-        [(l, r)] => Some(Box::new(compile_pair(l.clone(), r.clone(), params, space)?)),
+        // 回す前の形（Plot::Implicit の local）は使わない（切り取った面は、回転が変わるたびに作り直す）
+        [(l, r)] => Some(Box::new(match compile_pair(l.clone(), r.clone(), params, space)? {
+            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None },
+            p => p,
+        })),
         _ => None,
     };
     Ok(Plot::System { base, eqs, cuts, strict })

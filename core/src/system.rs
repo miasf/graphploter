@@ -267,6 +267,189 @@ pub fn common_zero_sets(sets: &[Vec<Program>], dom: Domain, n: usize, refine: Re
     (mesh::merge(meshes, true), format!("陰関数（{what}だけの解）"))
 }
 
+/// 式 `prog`（変数は 3 つの座標）を、点の列での値の関数にする（[`trim_mesh`]・[`clip_segments`] の条件）
+pub fn values_of(prog: &Program) -> impl FnMut(&[[f64; 3]]) -> Vec<f64> + '_ {
+    move |pts: &[[f64; 3]]| {
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| pts.iter().map(|p| p[c]).collect());
+        values_at(prog, &cols)
+    }
+}
+
+/// 辺 a → b（a が中、b が外）の上の境目の比 s（a から b へ）を、まとめて求める。
+/// 両端の値がどちらも有限なら、はさみうち法（イリノイ法。残った側の値を半分にして、片側だけが動き続けるのを防ぐ）、
+/// 外の端が NaN なら二分。全部の辺を 1 回ずつまとめて計算するのを `rounds` 回くり返し、中の側の端を返す
+fn edge_cuts(
+    ends: &[([f64; 3], [f64; 3], f64, f64)],
+    value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>,
+    rounds: usize,
+) -> Vec<f64> {
+    let mut lo = vec![0.0; ends.len()];
+    let mut hi = vec![1.0; ends.len()];
+    let mut glo: Vec<f64> = ends.iter().map(|e| e.2).collect();
+    let mut ghi: Vec<f64> = ends.iter().map(|e| e.3).collect();
+    // 前の回で動いた側（-1: 中の側, 1: 外の側, 0: まだ）
+    let mut side = vec![0i8; ends.len()];
+    for _ in 0..rounds {
+        let ts: Vec<f64> = (0..ends.len())
+            .map(|k| {
+                let (a, b) = (glo[k], ghi[k]);
+                if a.is_finite() && b.is_finite() && b > a {
+                    let t = lo[k] + (hi[k] - lo[k]) * a / (a - b);
+                    // 端にくっつきすぎないよう、区間の内側に収める
+                    let w = 1e-3 * (hi[k] - lo[k]);
+                    t.clamp(lo[k] + w, hi[k] - w)
+                } else {
+                    0.5 * (lo[k] + hi[k])
+                }
+            })
+            .collect();
+        let pts: Vec<[f64; 3]> =
+            ends.iter().zip(&ts).map(|(&(a, b, _, _), &t)| [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c]))).collect();
+        let g = value(&pts);
+        for k in 0..ends.len() {
+            if g[k] <= 0.0 {
+                lo[k] = ts[k];
+                glo[k] = g[k];
+                if side[k] == -1 {
+                    ghi[k] *= 0.5;
+                }
+                side[k] = -1;
+            } else {
+                hi[k] = ts[k];
+                ghi[k] = g[k];
+                if side[k] == 1 {
+                    glo[k] *= 0.5;
+                }
+                side[k] = 1;
+            }
+        }
+    }
+    lo
+}
+
+/// メッシュのうち、`value`（点の列での G。NaN は外）が 0 以下の所だけを残す。
+/// 中と外が混ざる三角形は、中の側の多角形（三角形か四角形）にする。境目の点は辺ごとに 1 つ（隣の三角形と共有する）で、
+/// 位置は辺の上の二分（`rounds` 回）で求める。新しい頂点の法線・`grid_coords`・`complex` は、辺の両端から同じ比で補間する。
+/// 番号だけの粗い版（`lod`）は空にし（後で作り直す）、陰関数の粗い版（`lod_mesh`）は同じ条件で切る
+pub fn trim_mesh(mesh: &mut Mesh, value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>, rounds: usize) {
+    if let Some(l) = mesh.lod_mesh.as_deref_mut() {
+        trim_mesh(l, value, rounds);
+    }
+    let count = mesh.positions.len() / 3;
+    if count == 0 || mesh.indices.is_empty() {
+        return;
+    }
+    let pos: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let g = value(&pos);
+    let inside: Vec<bool> = g.iter().map(|v| *v <= 0.0).collect();
+    if inside.iter().all(|&b| b) {
+        return;
+    }
+    // 中と外を結ぶ辺（中の頂点, 外の頂点）
+    let mut edge_id: crate::adaptive::HashMap<(u32, u32), usize> = Default::default();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    for t in mesh.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if inside[a as usize] != inside[b as usize] {
+                let key = if inside[a as usize] { (a, b) } else { (b, a) };
+                edge_id.entry(key).or_insert_with(|| {
+                    edges.push(key);
+                    edges.len() - 1
+                });
+            }
+        }
+    }
+    let ends: Vec<_> = edges.iter().map(|&(a, b)| (pos[a as usize], pos[b as usize], g[a as usize], g[b as usize])).collect();
+    let ts = edge_cuts(&ends, value, rounds);
+    // 残す頂点に新しい番号を付け、境目の点を足す
+    let mut out = Mesh { keep_full: mesh.keep_full, note: mesh.note.clone(), stats: mesh.stats, ..Default::default() };
+    let has_n = mesh.normals.len() == mesh.positions.len();
+    let has_g = mesh.grid_coords.len() == mesh.positions.len();
+    let has_c = mesh.complex.len() == mesh.positions.len();
+    let mut map = vec![u32::MAX; count];
+    let push_mix = |out: &mut Mesh, a: usize, b: usize, t: f64| -> u32 {
+        let mix = |v: &[f32]| -> [f32; 3] { [0, 1, 2].map(|c| v[3 * a + c] + (t as f32) * (v[3 * b + c] - v[3 * a + c])) };
+        out.positions.extend_from_slice(&mix(&mesh.positions));
+        if has_n {
+            let n = mix(&mesh.normals);
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            out.normals.extend(n.iter().map(|v| if len > 0.0 { v / len } else { *v }));
+        }
+        if has_g {
+            out.grid_coords.extend_from_slice(&mix(&mesh.grid_coords));
+        }
+        if has_c {
+            out.complex.extend_from_slice(&mix(&mesh.complex));
+        }
+        (out.positions.len() / 3 - 1) as u32
+    };
+    let keep = |out: &mut Mesh, map: &mut Vec<u32>, v: usize| -> u32 {
+        if map[v] == u32::MAX {
+            map[v] = push_mix(out, v, v, 0.0);
+        }
+        map[v]
+    };
+    let mut cut_at = vec![u32::MAX; edges.len()];
+    for t in mesh.indices.chunks_exact(3) {
+        let n_in = t.iter().filter(|&&v| inside[v as usize]).count();
+        if n_in == 0 {
+            continue;
+        }
+        let mut poly: Vec<u32> = Vec::with_capacity(4);
+        for k in 0..3 {
+            let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
+            if inside[a] {
+                poly.push(keep(&mut out, &mut map, a));
+            }
+            if inside[a] != inside[b] {
+                let key = if inside[a] { (a as u32, b as u32) } else { (b as u32, a as u32) };
+                let e = edge_id[&key];
+                if cut_at[e] == u32::MAX {
+                    cut_at[e] = push_mix(&mut out, key.0 as usize, key.1 as usize, ts[e]);
+                }
+                poly.push(cut_at[e]);
+            }
+        }
+        for k in 1..poly.len() - 1 {
+            out.indices.extend_from_slice(&[poly[0], poly[k], poly[k + 1]]);
+        }
+    }
+    out.lod_mesh = mesh.lod_mesh.take();
+    *mesh = out;
+}
+
+/// 曲線のメッシュ（線分ごとに 2 点と NaN）を、`value` が 0 以下の所だけにする。両端とも中なら残し、両端とも外なら捨て、
+/// 混ざる線分は二分（`rounds` 回）で境目を求めて、中の側だけ残す。長さの無い線分（点）は、中ならそのまま残す
+pub fn clip_segments(positions: &mut Vec<f32>, value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>, rounds: usize) {
+    let segs: Vec<([f64; 3], [f64; 3])> = positions
+        .chunks_exact(9)
+        .filter(|s| s[..6].iter().all(|v| v.is_finite()))
+        .map(|s| ([s[0] as f64, s[1] as f64, s[2] as f64], [s[3] as f64, s[4] as f64, s[5] as f64]))
+        .collect();
+    let pts: Vec<[f64; 3]> = segs.iter().flat_map(|&(a, b)| [a, b]).collect();
+    let g = value(&pts);
+    let mut mixed = Vec::new();
+    let mut out: Vec<f32> = Vec::with_capacity(positions.len());
+    let emit = |out: &mut Vec<f32>, a: [f64; 3], b: [f64; 3]| {
+        out.extend(a.iter().chain(&b).map(|v| *v as f32));
+        out.extend_from_slice(&[f32::NAN; 3]);
+    };
+    for (k, &(a, b)) in segs.iter().enumerate() {
+        let (ia, ib) = (g[2 * k] <= 0.0, g[2 * k + 1] <= 0.0);
+        match (ia, ib) {
+            (true, true) => emit(&mut out, a, b),
+            (false, false) => {}
+            (true, false) => mixed.push((a, b, g[2 * k], g[2 * k + 1])),
+            (false, true) => mixed.push((b, a, g[2 * k + 1], g[2 * k])),
+        }
+    }
+    let ts = edge_cuts(&mixed, value, rounds);
+    for (&(a, b, _, _), t) in mixed.iter().zip(ts) {
+        emit(&mut out, a, [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c])));
+    }
+    *positions = out;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

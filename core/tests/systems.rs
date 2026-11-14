@@ -9,11 +9,17 @@ fn run(src: &str, dims: u32, xw: f64) -> MeshResult {
 
 /// 表示範囲 ±r、陰関数の細かさ `ires`。4 次元以上なら、表示していない座標の断面の値は `w`、座標 0 と 3 の組を `xw` だけ回す
 fn run_with(src: &str, r: f64, ires: u32, dims: u32, w: f64, xw: f64) -> MeshResult {
+    let rot = [(2, xw)];
+    run_full(src, r, ires, dims, w, if dims > 3 { &rot } else { &[] }, 0)
+}
+
+/// [`run_with`] で、回転を (座標の組の番号, 角度) で決め（組は (0,1), (0,2), (0,3), … の順）、複素数の色分け `complex` を付ける版
+fn run_full(src: &str, r: f64, ires: u32, dims: u32, w: f64, rot: &[(usize, f64)], complex: u32) -> MeshResult {
     let n = dims as usize;
     let rd = equation::rot_dims(n);
     let mut rotation = vec![0.0; rd * (rd - 1) / 2];
-    if n > 3 {
-        rotation[2] = xw;
+    for &(k, a) in rot {
+        rotation[k] = a;
     }
     let mut slice = vec![0.0; n];
     for v in slice.iter_mut().skip(3) {
@@ -21,7 +27,7 @@ fn run_with(src: &str, r: f64, ires: u32, dims: u32, w: f64, xw: f64) -> MeshRes
     }
     plot(
         src, &[-r, r, -r, r, -r, r], 64, ires, "", &[], "", &[], "", dims, &[0, 1, 2], &slice,
-        &vec![f64::NAN; 2 * n], "", &[], 16, &rotation, &vec![0.0; rd], 0.0, 0, false, false, 1, false, 0,
+        &vec![f64::NAN; 2 * n], "", &[], 16, &rotation, &vec![0.0; rd], 0.0, complex, false, false, 1, false, 0,
     )
     .unwrap_or_else(|e| panic!("{src} が計算できない: {:?}", e))
 }
@@ -362,4 +368,129 @@ fn systems_in_four_dimensions_and_lists() {
     let m = run_with("y = [1, 2] x, z = 0", R, N, 3, 0.0, 0.0);
     assert_eq!(m.kind(), "連立方程式の曲線 × 2");
     assert!(m.curve());
+}
+
+
+// ---- 切り取り（計画 S30） ----
+
+/// 辺ごとの三角形の数
+fn edge_counts(idx: &[u32]) -> std::collections::HashMap<(u32, u32), usize> {
+    let mut out: std::collections::HashMap<(u32, u32), usize> = Default::default();
+    for t in idx.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *out.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    out
+}
+
+fn vert(p: &[f32], i: u32) -> [f64; 3] {
+    let i = i as usize;
+    [p[3 * i] as f64, p[3 * i + 1] as f64, p[3 * i + 2] as f64]
+}
+
+fn area(p: &[f32], idx: &[u32]) -> f64 {
+    idx.chunks_exact(3)
+        .map(|t| {
+            let (a, b, c) = (vert(p, t[0]), vert(p, t[1]), vert(p, t[2]));
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let x = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            0.5 * (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
+        })
+        .sum()
+}
+
+/// 縁の辺（三角形が 1 つだけの辺）の頂点
+fn border_vertices(idx: &[u32]) -> Vec<u32> {
+    let mut v: Vec<u32> = edge_counts(idx).into_iter().filter(|(_, n)| *n == 1).flat_map(|((a, b), _)| [a, b]).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+#[test]
+fn hemisphere_is_cut_at_the_plane() {
+    let m = run_with("x^2 + y^2 + z^2 = 4, z ≥ 0", R, N, 3, 0.0, 0.0);
+    assert_eq!(m.kind(), "陰関数（不等式で切り取り）");
+    let (p, idx) = (m.positions(), m.indices());
+    assert!(p.chunks_exact(3).all(|q| q[2] >= -1e-3));
+    let border = border_vertices(&idx);
+    assert!(!border.is_empty());
+    for v in border {
+        let q = vert(&p, v);
+        assert!(q[2].abs() <= 1e-3 && ((q[0] * q[0] + q[1] * q[1]).sqrt() - 2.0).abs() <= 0.02, "{q:?}");
+    }
+    let a = area(&p, &idx);
+    assert!((a / (8.0 * std::f64::consts::PI) - 1.0).abs() <= 0.01, "{a}");
+    assert!(edge_counts(&idx).values().all(|&n| n <= 2));
+}
+
+#[test]
+fn explicit_surface_is_trimmed() {
+    let m = run_with("z = x^2 + y^2, z ≤ 4", R, N, 3, 0.0, 0.0);
+    assert_eq!(m.kind(), "z = f(x, y)（不等式で切り取り）");
+    let p = m.positions();
+    assert!(p.chunks_exact(3).filter(|q| q.iter().all(|v| v.abs() <= R as f32)).all(|q| q[2] <= 4.0 + 1e-3));
+    assert_eq!(m.normals().len(), p.len());
+    let g = m.grid_coords();
+    assert!(g.is_empty() || g.len() == p.len());
+    // 複素数の色分け（高さ |f|）
+    let m = run_full("z = (x + i y)^2 / 10, x ≥ 0", R, N, 3, 0.0, &[], 1);
+    let p = m.positions();
+    assert_eq!(m.complex_values().len(), p.len());
+    assert!(p.chunks_exact(3).all(|q| q[0] >= -1e-3));
+}
+
+#[test]
+fn trim_is_conforming() {
+    let m = run_with("x^2 + y^2 + z^2 = 9, x + y + z ≤ 1, x ≥ -1", R, N, 3, 0.0, 0.0);
+    let (p, idx) = (m.positions(), m.indices());
+    let border = border_vertices(&idx);
+    assert!(!border.is_empty());
+    let s3 = 3f64.sqrt();
+    for v in border {
+        let q = vert(&p, v);
+        let d1 = ((q[0] + q[1] + q[2] - 1.0) / s3).abs();
+        let d2 = (q[0] + 1.0).abs();
+        assert!(d1.min(d2) <= 1e-3, "{q:?}");
+    }
+}
+
+#[test]
+fn line_segment_by_inequalities() {
+    let m = run_with("y = x, z = 0, 0 ≤ x ≤ 1", R, N, 3, 0.0, 0.0);
+    assert_eq!(m.kind(), "連立方程式の曲線（不等式で切り取り）");
+    let c = curve_metrics(&m.positions(), &[]);
+    assert!((c.length - 2f64.sqrt()).abs() <= 1e-3, "{c:?}");
+    let xs: Vec<f32> = m.positions().chunks_exact(3).filter(|q| q[0].is_finite()).map(|q| q[0]).collect();
+    let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    assert!(lo >= -1e-3 && hi <= 1.0 + 1e-3 && lo <= 1e-3 && hi >= 1.0 - 1e-3, "{lo} {hi}");
+}
+
+#[test]
+fn rotated_explicit_is_trimmed() {
+    // xy に 0.5 rad 回した z = x^2, y ≥ 0。回した後の座標 q で、元の y = −sin(0.5) q_x + cos(0.5) q_y ≥ 0
+    let mut m = run_full("z = x^2, y ≥ 0", R, N, 3, 0.0, &[(0, 0.5)], 0);
+    let p = m.positions();
+    assert!(!p.is_empty());
+    for q in p.chunks_exact(3) {
+        let (qx, qy) = (q[0] as f64, q[1] as f64);
+        let y = -(0.5f64).sin() * qx + (0.5f64).cos() * qy;
+        assert!(y >= -1e-3, "{q:?}");
+    }
+    assert!(m.take_shape().is_none());
+}
+
+#[test]
+#[ignore]
+fn trim_time() {
+    for src in ["x^2 + y^2 + z^2 = 4", "x^2 + y^2 + z^2 = 4, z ≥ 0"] {
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            run_with(src, R, N, 3, 0.0, 0.0);
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("{src}\t{best:.1} ms");
+    }
 }
