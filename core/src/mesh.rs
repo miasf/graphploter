@@ -238,6 +238,22 @@ pub fn explicit_surface_with(prog: &Program, dom: Domain, n: usize, axis: usize,
     explicit_surface_full(prog, dom, n, axis, mode, false)
 }
 
+/// メッシュの頂点ごとに、式 `prog`（変数は 3 つの座標）の複素数の値で色分けの値（[`complex_attr`]）を付ける。
+/// 値が有限でない頂点は (0, 0, 0)
+pub fn color_by_complex(mesh: &mut Mesh, prog: &Program) {
+    let count = mesh.positions.len() / 3;
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| mesh.positions.chunks_exact(3).map(|p| p[c] as f64).collect());
+    let mut out = vec![C::new(0.0, 0.0); count];
+    prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    mesh.complex = out
+        .into_iter()
+        .flat_map(|z| if z.re.is_finite() && z.im.is_finite() { complex_attr(z) } else { [0.0; 3] })
+        .collect();
+    if let Some(l) = mesh.lod_mesh.as_deref_mut() {
+        color_by_complex(l, prog);
+    }
+}
+
 /// 複素数の色分けで頂点に持たせる値 (Re z/|z|, Im z/|z|, log₂|z|)（色相は偏角、明るさの縞は |z|）
 fn complex_attr(z: C) -> [f32; 3] {
     let r = z.norm();
@@ -7605,6 +7621,13 @@ fn merge_inner(meshes: Vec<Mesh>, curve: bool) -> Mesh {
     for m in meshes {
         if curve && !out.positions.is_empty() {
             out.positions.extend_from_slice(&[f32::NAN; 3]);
+            // 区切りの点の分も、格子線用の座標・複素数の値を足して、頂点の数とそろえる
+            if grid {
+                out.grid_coords.extend_from_slice(&[f32::NAN; 3]);
+            }
+            if complex {
+                out.complex.extend_from_slice(&[0.0; 3]);
+            }
         }
         let base = (out.positions.len() / 3) as u32;
         let count = m.positions.len() / 3;

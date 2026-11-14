@@ -88,10 +88,11 @@ void main() {
   if (tf <= tn) discard;
   vec3 size = uBoxMax - uBoxMin;
   float diag = length(size);
-  const int STEPS = 192;
+  const int STEPS = 256;
   float dt = (tf - tn) / float(STEPS);
-  // 縞が出ないよう、画素ごとに出発点を少しずらす
-  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  // 縞が出ないよう、画素ごとに出発点を少しずらす。白色の乱数だとザラつきが目立つので、隣の画素どうしで値が散らばる模様
+  // （Interleaved Gradient Noise）にする
+  float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
   float k = 24.0 * uDensity * uDensity / diag;
   vec4 acc = vec4(0.0);
   float span = uRange.y - uRange.x;

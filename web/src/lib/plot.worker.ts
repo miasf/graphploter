@@ -9,6 +9,7 @@ import init, {
   field_mode_plan,
   field_mode_reset,
   hidden_style,
+  complex_coords,
   last_used_params,
   plot,
   take_field_values,
@@ -94,7 +95,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -139,7 +140,7 @@ function looksLikeDefinition(source: string): boolean {
 function costOf(kind: string, curve: boolean, flat: boolean): Cost {
   // 陰関数の線・点だけの解（`陰関数（線だけの解）`）は曲線だが、陰関数の面を作ってから線を取り出すので、時間は細かさの 3 乗
   // 連立方程式・不等式も、陰関数の面を作ってから線を取り出す・切り取るので 3 乗
-  if (!flat && /^(連立方程式|不等式の領域)/.test(kind)) return 'volume'
+  if (!flat && /^(連立方程式|不等式の領域|複素数の陰関数)/.test(kind)) return 'volume'
   // 伝達関数は格子の点の数（細かさの 3 乗）
   if (!flat && /の伝達関数/.test(kind)) return 'volume'
   if (!flat && (/^陰関数/.test(kind) || (!curve && /^範囲で重ねた立体/.test(kind)))) return 'volume'
@@ -264,6 +265,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         : new Float64Array(0)
     const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
       hidden_style(hiddenStyle)
+      complex_coords(req.complexCoords)
       return plot(
         source,
         domainArr,

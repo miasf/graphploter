@@ -62,6 +62,7 @@ export function requestPlot(
   flatSlice = false,
   flags = 0,
   hidden: { mode: number; count: number } | null = null,
+  complexCoords = false,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -93,6 +94,7 @@ export function requestPlot(
     flatSlice,
     flags,
     hidden: hidden && { ...hidden },
+    complexCoords,
   }
   return planned(req)
 }

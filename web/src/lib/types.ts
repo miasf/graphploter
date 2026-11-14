@@ -197,6 +197,8 @@ export interface PlotItem extends PlotStyle {
   complexMode?: ComplexMode
   /** 表示していない座標（w 以降）の見せ方（無ければ断面）。範囲は ranges に座標の名前（w, w2, …）で入れる */
   hidden?: HiddenStyle
+  /** 座標を複素数にする（x, y, z を x + i w, y + i w₂, z + i w₃ に置き換える。6 次元以上） */
+  complexCoords?: boolean
   /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
   walls?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転 rotation, center、0 なら全体の回転を使う） */
@@ -311,6 +313,8 @@ export interface PlotRequest {
   complexMode: ComplexMode
   /** 表示していない座標の見せ方（番号は HIDDEN_MODE_ORDER。0 か null なら断面） */
   hidden: { mode: number; count: number } | null
+  /** 座標を複素数にする */
+  complexCoords: boolean
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
   /** 2D 表示の描き方。true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影 */

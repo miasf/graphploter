@@ -365,6 +365,7 @@ pub fn plot(
     let start = timing::now_ms();
     timing::reset();
     let hidden = HIDDEN_STYLE.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    let complex_coords = COMPLEX_COORDS.with(|c| c.replace(false));
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -412,6 +413,7 @@ pub fn plot(
         lift_param: complex_mode == mesh::ComplexMode::Param,
         complex_params: split(complex_params),
         flat_slice: flat && flat_slice,
+        complex_coords,
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
@@ -529,6 +531,18 @@ pub fn hidden_style(values: Vec<f64>) {
     HIDDEN_STYLE.with(|h| *h.borrow_mut() = values);
 }
 
+thread_local! {
+    /// 次の [`plot`] だけに効く「座標を複素数にする」（[`complex_coords`]）
+    static COMPLEX_COORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 次の [`plot`] で、座標を複素数にする（その 1 回だけ）: 式の x, y, z を x + i w, y + i w₂, z + i w₃ に置き換えて描く。
+/// 6 次元以上で使う。実数の座標 x, y, z と虚部 w, w₂, w₃ の 6 つから 3 つを表示し、残りは断面（や w の見せ方）で決める
+#[wasm_bindgen]
+pub fn complex_coords(on: bool) {
+    COMPLEX_COORDS.with(|c| c.set(on));
+}
+
 /// 等値面を何枚も重ねるときの、図形の数の上限
 const MAX_HIDDEN_LAYERS: usize = 64;
 
@@ -575,9 +589,10 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
             if hidden.is_empty() {
                 return build(plot, ctx);
             }
-            // 座標ごとの値の数（全部の組み合わせが上限を超えないように減らす）
+            // 座標ごとの値の数（全部の組み合わせが上限を超えないように減らす。範囲が 1 点の座標は動かないので数えない）
+            let moving = hidden.iter().filter(|&&k| range_of(k).0 < range_of(k).1).count().max(1);
             let mut per = count.max(2);
-            while per > 2 && per.pow(hidden.len() as u32) > MAX_HIDDEN_LAYERS {
+            while per > 2 && per.pow(moving as u32) > MAX_HIDDEN_LAYERS {
                 per -= 1;
             }
             let values: Vec<Vec<f64>> = hidden
@@ -959,6 +974,27 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
             b.local = Some((local, lp.used_params().to_vec()));
         }
+        // 複素数の陰関数（値が複素数の F = 0）: Re F = Im F = 0 の線として、連立方程式の交わる線と同じ道で描く
+        // 複素数の色分けをするなら、曲面（|F| = 1・Re F = 0・Im F = 0）を作って、頂点の F の値で色を付ける（陽関数の色分けと同じ色）
+        P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
+            use functions::Func;
+            let surface = match ctx.complex_mode {
+                mesh::ComplexMode::Abs | mesh::ComplexMode::Arg => Some((prog.level_of(Func::Abs, 1.0), "|F| = 1 の曲面、色は arg F")),
+                mesh::ComplexMode::Re => Some((prog.level_of(Func::Re, 0.0), "Re F = 0 の曲面、色は F")),
+                mesh::ComplexMode::Im => Some((prog.level_of(Func::Im, 0.0), "Im F = 0 の曲面、色は F")),
+                _ => None,
+            };
+            if let Some((g, label)) = surface {
+                b.kind = format!("複素数の陰関数（{label}）");
+                b.inner = mesh::implicit_solid_opt(&g, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
+                mesh::color_by_complex(&mut b.inner, prog);
+            } else {
+                b.curve = true;
+                b.kind = "複素数の陰関数（Re F = Im F = 0 の曲線）".into();
+                let (re, im) = (prog.part(Func::Re), prog.part(Func::Im));
+                b.inner = system::intersection_curve(&re, &im, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            }
+        }
         // 面にならず、線・点だけになる式（A² + B² = 0 は A = B = 0 の線）: 交わる線・点として描く
         P::Implicit { prog, .. } if prog.common_zero_sets().is_some() => {
             let sets = prog.common_zero_sets().unwrap_or_default();
@@ -1146,6 +1182,14 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let other = if *axis == 0 { &names[1] } else { &names[0] };
             b.kind = format!("{} = f({})", names[*axis], other);
             b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
+        }
+        // 複素数の陰関数の 2D 表示: Re F = Im F = 0 の交点
+        P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
+            let (re, im) = (prog.part(functions::Func::Re), prog.part(functions::Func::Im));
+            let pts = system::flat_points(&re, &im, dom, res2);
+            b.curve = true;
+            b.kind = format!("複素数の陰関数（Re F = Im F = 0 の点、{} 個）", pts.len());
+            b.inner = system::points_mesh(&pts);
         }
         P::Implicit { prog, from, .. } => {
             b.curve = true;

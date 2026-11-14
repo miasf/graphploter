@@ -95,6 +95,39 @@ vec3 colormap(float t, float which, vec3 base) {
 }
 `
 
+/** COLORMAP_GLSL の colormap と同じ色（JS 版。曲線の頂点の色に使う）。返す色は線形の色空間 */
+export function colormapColor(t: number, which: 'viridis' | 'turbo' | 'shade', base: THREE.Color, out: THREE.Color): THREE.Color {
+  t = Math.min(1, Math.max(0, t))
+  if (which === 'shade') {
+    const dark = base.clone().multiplyScalar(0.2)
+    const light = base.clone().lerp(new THREE.Color(1, 1, 1), 0.7)
+    return out.copy(dark).lerp(light, t)
+  }
+  let r: number, g: number, b: number
+  if (which === 'turbo') {
+    const v4 = [1, t, t * t, t * t * t]
+    const v2 = [v4[2] * v4[2], v4[3] * v4[2]]
+    const dot4 = (k: number[]) => k[0] * v4[0] + k[1] * v4[1] + k[2] * v4[2] + k[3] * v4[3]
+    r = dot4([0.13572138, 4.6153926, -42.66032258, 132.13108234]) + -152.94239396 * v2[0] + 59.28637943 * v2[1]
+    g = dot4([0.09140261, 2.19418839, 4.84296658, -14.18503333]) + 4.27729857 * v2[0] + 2.82956604 * v2[1]
+    b = dot4([0.1066733, 12.64194608, -60.58204836, 110.36276771]) + -89.90310912 * v2[0] + 27.34824973 * v2[1]
+  } else {
+    const c = [
+      [0.2777273272234177, 0.005407344544966578, 0.3340998053353061],
+      [0.1050930431085774, 1.404613529898575, 1.384590162594685],
+      [-0.3308618287255563, 0.214847559468213, 0.09509516302823659],
+      [-4.634230498983486, -5.799100973351585, -19.33244095627987],
+      [6.228269936347081, 14.17993336680509, 56.69055260068105],
+      [4.776384997670288, -13.74514537774601, -65.35303263337234],
+      [-5.435455855934631, 4.645852612178535, 26.3124352495832],
+    ]
+    const ch = (k: number) => c.reduceRight((acc, row) => row[k] + t * acc, 0)
+    ;[r, g, b] = [ch(0), ch(1), ch(2)]
+  }
+  const lin = (v: number) => Math.pow(Math.min(1, Math.max(0, v)), 2.2)
+  return out.setRGB(lin(r), lin(g), lin(b))
+}
+
 const FRAGMENT_HEADER = /* glsl */ `
 uniform float uValue;
 uniform vec2 uValueRange;

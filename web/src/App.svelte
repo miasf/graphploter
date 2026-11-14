@@ -168,6 +168,7 @@
         lineWidth: it.lineWidth,
         complexMode: it.complexMode,
         hidden: it.hidden && it.hidden.mode !== 'slice' ? it.hidden : undefined,
+        complexCoords: it.complexCoords || undefined,
         walls: it.walls,
         layers: it.layers,
         edges: it.edges || undefined,
@@ -660,6 +661,7 @@
       flatSlice,
       (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
       hiddenRequest(item),
+      item.complexCoords ?? false,
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1002,20 +1004,41 @@
     const next = { ...prev, ...patch }
     item.hidden = next
     if (next.mode !== 'slice') ensureHiddenRanges(item)
-    // 等値面を何枚も重ねるときは、最初は半透明にする（重なった面が見えるように）
-    if (next.mode === 'layers' && prev.mode !== 'layers' && item.opacity === 1) item.opacity = 0.35
+    // 見せ方を切り替えたら、面の濃さをその見せ方の既定値にする（自分で動かした値は変えない）。
+    // 等値面・塗り分けは重なった面が見えるように薄く、伝達関数は面の濃さを全体の不透明度に掛けるので 100%
+    if (next.mode !== prev.mode && (item.opacity === 1 || item.opacity === HIDDEN_OPACITY[prev.mode])) {
+      item.opacity = HIDDEN_OPACITY[next.mode]
+    }
     const recompute = next.mode !== prev.mode || (next.count !== prev.count && next.mode !== 'volume')
     if (recompute) schedule(item, next.mode === prev.mode ? 150 : 0)
     else viewer?.setStyle(item.id, item)
   }
 
+  /** 座標を複素数にする・やめる。する場合、次元が 6 未満なら 6 にする（虚部に w, w₂, w₃ を使う） */
+  function setComplexCoords(item: PlotItem, on: boolean) {
+    item.complexCoords = on
+    if (on && space.dims < 6) setLayout(resizeSpace(space, 6))
+    schedule(item, 0)
+  }
+
+  /** 見せ方ごとの面の濃さの既定値 */
+  const HIDDEN_OPACITY: Record<HiddenStyle['mode'], number> = { slice: 1, layers: 0.35, planes: 0.6, volume: 1, stack: 0.45 }
+
   /** 見せ方が断面でないとき、式が使っている表示していない座標の範囲の入力欄を用意する（断面のスライダーの範囲）。用意したら true */
   function ensureHiddenRanges(item: PlotItem): boolean {
     let added = false
+    // 1 つ目の座標だけ断面のスライダーの範囲にし、ほかは今の断面の値に固定する（両端が同じ）。全部を動かすと、組み合わせの数だけ
+    // 図形が増えて重く、見たい形も分からなくなる（6 次元の (x + iw)² + (y + iw₂)² + (z + iw₃)² = 1 で z・w₂・w₃ の 64 通り）
+    let first = !Object.keys(item.ranges).some((n) => {
+      const k = Array.from({ length: space.dims }, (_, j) => j).find((j) => coordName(j) === n)
+      return k !== undefined && !space.axes.includes(k)
+    })
     for (let k = 0; k < space.dims; k++) {
       const name = coordName(k)
       if (space.axes.includes(k) || !item.usedParams.includes(name) || name in item.ranges) continue
-      item.ranges[name] = [String(space.sliceMin), String(space.sliceMax)]
+      if (first) item.ranges[name] = [String(space.sliceMin), String(space.sliceMax)]
+      else item.ranges[name] = [String(space.slice[k] ?? 0), String(space.slice[k] ?? 0)]
+      first = false
       added = true
     }
     return added
@@ -1614,6 +1637,7 @@
             onOpacity={(o) => setOpacity(item, o)}
             onComplexMode={(m) => setComplexMode(item, m)}
             onHidden={(patch) => setHidden(item, patch)}
+            onComplexCoords={(on) => setComplexCoords(item, on)}
             onWalls={(on) => setWalls(item, on)}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}

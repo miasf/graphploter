@@ -25,6 +25,8 @@
     onComplexMode: (mode: ComplexMode) => void
     /** 表示していない座標の見せ方を変えたとき（変えた所だけ） */
     onHidden: (patch: Partial<HiddenStyle>) => void
+    /** 座標を複素数にする・やめる */
+    onComplexCoords: (on: boolean) => void
     onWalls: (on: boolean) => void
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
@@ -87,6 +89,7 @@
     onOpacity,
     onComplexMode,
     onHidden,
+    onComplexCoords,
     onWalls,
     onLayers,
     onEdges,
@@ -188,6 +191,15 @@
   // 色分けをしている間は、計算できなかったときも選べるようにしておく（元に戻せるように）
   /** 複素平面の図形（e^{it} など。横 Re f・奥 Im f）。縦の軸に描くものを選べる */
   const isComplexPlane = $derived(/^複素平面/.test(item.kind ?? ''))
+  /** 複素数の陰関数（値が複素数の F = 0）。曲線か、色分けした曲面かを選べる */
+  const isComplexImplicit = $derived(/^複素数の陰関数/.test(item.kind ?? ''))
+  /** 複素数の陰関数の描き方（色分けの選択肢を、陰関数の意味で読み替える） */
+  const IMPLICIT_COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
+    { mode: 'off', label: 'しない（Re F = Im F = 0 の曲線）' },
+    { mode: 'abs', label: '|F| = 1 の曲面（色は arg F）' },
+    { mode: 're', label: 'Re F = 0 の曲面（色は F）' },
+    { mode: 'im', label: 'Im F = 0 の曲面（色は F）' },
+  ]
   /** 式が使っている、表示していない座標の名前（w, w2, …）。媒介変数表示には使わない（成分が座標そのもの） */
   const hiddenCoords = $derived(
     item.params.length > 0 || item.param
@@ -520,6 +532,18 @@
               値が飛ぶ所（floor の段差など）に壁を描く
             </label>
           {/if}
+          {#if (item.params.length === 0 && !item.param) || item.complexCoords}
+            <label class="check">
+              <input type="checkbox" checked={item.complexCoords ?? false} onchange={(e) => onComplexCoords(e.currentTarget.checked)} />
+              座標を複素数にする（x → x + i w、y → y + i w₂、z → z + i w₃。6 次元で見る）
+            </label>
+            {#if item.complexCoords}
+              <p class="hint">
+                x, y, z の虚部を w, w₂, w₃ に割り当てています。表示する座標を (x, w, y) のように実部と虚部を混ぜて選ぶと、
+                実数でない所の形が見えます（x, y, z のままなら実数の部分）。式が複素数になる断面は、Re = Im = 0 の線で描きます
+              </p>
+            {/if}
+          {/if}
           {#if hiddenCoords.length > 0}
             <div class="complex-mode">
               <span class="label">{hiddenCoords.map(prettyName).join('・')} の見せ方</span>
@@ -591,7 +615,24 @@
               </p>
             {/if}
           {/if}
-          {#if isExplicit}
+          {#if isComplexImplicit}
+            <div class="complex-mode">
+              <span class="label">複素数の色分け</span>
+              <select value={item.complexMode ?? 'off'} onchange={(e) => onComplexMode(e.currentTarget.value as ComplexMode)}>
+                {#each IMPLICIT_COMPLEX_MODES as { mode, label } (mode)}
+                  <option value={mode}>{label}</option>
+                {/each}
+              </select>
+            </div>
+            <p class="hint">
+              {#if (item.complexMode ?? 'off') === 'off'}
+                値が複素数の F = 0 は、Re F = 0 と Im F = 0 の交わる線になります（複素数の等式 1 本 = 実数の等式 2 本）。
+              {:else}
+                色は偏角 arg F（赤: 正の実数、水色: 負の実数、黄緑: +i の向き、紫: −i の向き）。|F| が 2 倍になるごとに明るさの縞が1本。
+                Re F = Im F = 0 の線は、縞が集まる所に見えます
+              {/if}
+            </p>
+          {:else if isExplicit}
             <div class="complex-mode">
               <span class="label">複素数の色分け</span>
               <select
