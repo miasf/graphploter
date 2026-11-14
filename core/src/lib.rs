@@ -198,6 +198,10 @@ impl MeshResult {
     pub fn has_lod_mesh(&self) -> bool {
         self.inner.lod_mesh.is_some()
     }
+    /// 自分の頂点を持つ粗い版の、頂点ごとの色分けの値（complex）を取り出す（無い・色分けしないなら空）
+    pub fn take_lod_complex_values(&mut self) -> Vec<f32> {
+        self.inner.lod_mesh.as_mut().map(|m| std::mem::take(&mut m.complex)).unwrap_or_default()
+    }
     /// 自分の頂点を持つ粗い版の頂点座標を取り出す（無ければ空）
     pub fn take_lod_positions(&mut self) -> Vec<f32> {
         self.inner.lod_mesh.as_mut().map(|m| std::mem::take(&mut m.positions)).unwrap_or_default()
@@ -634,6 +638,10 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
                 };
                 let verts = m.positions.len() / 3;
                 m.complex = (0..verts).flat_map(|_| [first as f32, 0.0, 0.0]).collect();
+                // 自分の頂点を持つ粗い版（陰関数。動かしている間に描く）にも同じ値を付ける（付けないと、動かすと色が変わる）
+                if let Some(l) = m.lod_mesh.as_deref_mut() {
+                    l.complex = (0..l.positions.len() / 3).flat_map(|_| [first as f32, 0.0, 0.0]).collect();
+                }
                 meshes.push(m);
             }
             let curve = curve.unwrap_or(false);

@@ -27,6 +27,12 @@
     onHidden: (patch: Partial<HiddenStyle>) => void
     /** 座標を複素数にする・やめる */
     onComplexCoords: (on: boolean) => void
+    /** 次元の設定の断面の値（座標の番号順）と、スライダーの範囲 */
+    globalSlice: number[]
+    sliceMin: number
+    sliceMax: number
+    /** この式だけの断面の値を決める（null なら全体の値に戻す） */
+    onSlice: (name: string, value: number | null) => void
     onWalls: (on: boolean) => void
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
@@ -90,6 +96,10 @@
     onComplexMode,
     onHidden,
     onComplexCoords,
+    globalSlice,
+    sliceMin,
+    sliceMax,
+    onSlice,
     onWalls,
     onLayers,
     onEdges,
@@ -359,7 +369,25 @@
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
       {/if}
     {/if}
-    {#if hidden.mode !== 'slice'}
+    {#if hidden.mode === 'slice'}
+      <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
+      {#each hiddenCoords.filter((n) => item.slice && n in item.slice) as name (name)}
+        <div class="own-slice">
+          <span>{prettyName(name)} =</span>
+          <input
+            type="range"
+            min={Math.min(sliceMin, item.slice![name])}
+            max={Math.max(sliceMax, item.slice![name])}
+            step={(sliceMax - sliceMin) / 200}
+            value={item.slice![name]}
+            aria-label="この式の {name} の値"
+            oninput={(e) => onSlice(name, e.currentTarget.valueAsNumber)}
+          />
+          <EditableValue chars={6} value={item.slice![name]} label="この式の {name} の値" onChange={(v) => onSlice(name, v)} />
+          <button class="link" title="次元の設定の値に戻す" aria-label="{name} を全体の値に戻す" onclick={() => onSlice(name, null)}>×</button>
+        </div>
+      {/each}
+    {:else}
       {#each hiddenCoords.filter((n) => n in item.ranges) as name (name)}
         <div class="param-range">
           <MathInput small value={item.ranges[name][0]} label="{name} の最小値" onInput={(v) => onRange(name, 0, v)} />
@@ -553,6 +581,15 @@
                 {/each}
               </select>
             </div>
+            {#if hidden.mode === 'slice'}
+              {#each hiddenCoords.filter((n) => !(item.slice && n in item.slice)) as name (name)}
+                <button
+                  class="link"
+                  onclick={() => onSlice(name, globalSlice[Array.from({ length: dims }, (_, k) => k).find((k) => coordName(k) === name) ?? 0] ?? 0)}
+                  >{prettyName(name)} の値をこの式だけで決める</button
+                >
+              {/each}
+            {/if}
             {#if hidden.mode !== 'slice'}
               {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (hidden.mode === 'volume' && hidden.opacity === 'bands')}
                 <div class="sliders">
@@ -1039,6 +1076,18 @@
     display: flex;
     flex-wrap: wrap;
     gap: 2px 14px;
+  }
+  .own-slice span {
+    white-space: nowrap;
+  }
+  .own-slice {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font: 13px var(--mono);
+    color: var(--muted);
   }
   .param-range {
     display: grid;

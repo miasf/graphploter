@@ -7596,6 +7596,8 @@ pub fn merge(mut meshes: Vec<Mesh>, curve: bool) -> Mesh {
                     positions: m.positions.clone(),
                     normals: m.normals.clone(),
                     indices: if m.lod.is_empty() { m.indices.clone() } else { m.lod.clone() },
+                    // 色分けの値も持たせる（粗い版でも同じ色に見えるように）
+                    complex: m.complex.clone(),
                     ..Default::default()
                 },
             })

@@ -199,6 +199,8 @@ export interface PlotItem extends PlotStyle {
   hidden?: HiddenStyle
   /** 座標を複素数にする（x, y, z を x + i w, y + i w₂, z + i w₃ に置き換える。6 次元以上） */
   complexCoords?: boolean
+  /** この式だけの断面の値（座標の名前 → 値）。無い座標は次元の設定の断面の値を使う */
+  slice?: Record<string, number>
   /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
   walls?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転 rotation, center、0 なら全体の回転を使う） */
@@ -235,6 +237,8 @@ export interface CapData {
   positions: Float32Array
   normals: Float32Array
   indices: Uint32Array
+  /** 頂点ごとの色分けの値（粗い版で、本体が値で色を付けるとき。無ければ省略） */
+  complexValues?: Float32Array
 }
 
 /** Rust 側で作ったメッシュ */
