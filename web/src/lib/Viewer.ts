@@ -1215,7 +1215,7 @@ export class Viewer {
         this.applyLod(old)
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
         old.solid = mesh.solid
-        old.grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
+        this.applyValueRange(old.grid, mesh)
         old.grid.uHeat.value = mesh.heat ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = old.geo
         this.setOutlines(old, mesh)
@@ -1471,7 +1471,7 @@ export class Viewer {
     const geo = this.surfaceGeometry(mesh)
     group.add(new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes)))
     const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
-    grid.uComplex.value = mesh.complexValues.length > 0 ? 1 : 0
+    this.applyValueRange(grid, mesh)
     grid.uHeat.value = mesh.heat ? 1 : 0
     grid.uNoBackShade.value = this.flat ? 1 : 0
     if (this.domain) grid.uHeatRange.value.set(this.domain.zmin, this.domain.zmax)
@@ -1490,6 +1490,14 @@ export class Viewer {
     this.applyLod(this.plots.get(id)!)
     this.setOutlines(this.plots.get(id)!, mesh)
     this.scene.add(group)
+  }
+
+  /** 頂点の値の色付け: 表示していない座標の値（valueRange があるとき）か、複素数の偏角 */
+  private applyValueRange(grid: GridUniforms, mesh: MeshData) {
+    const vr = mesh.valueRange
+    grid.uValue.value = vr ? 1 : 0
+    if (vr) grid.uValueRange.value.set(vr[0], vr[1])
+    grid.uComplex.value = !vr && mesh.complexValues.length > 0 ? 1 : 0
   }
 
   /** 面の式の境目の線（2D 表示の不等式の領域）を作り直す。`<`・`>` の分は点線 */
@@ -1613,6 +1621,7 @@ export class Viewer {
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
+    p.grid.uColormap.value = ['viridis', 'turbo', 'shade'].indexOf(style.hidden?.colormap ?? 'viridis')
     // 境目の線は、面の不透明度によらず式の色のまま
     for (const l of p.outlines) (l.material as LineMaterial).color.copy(c)
     // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）

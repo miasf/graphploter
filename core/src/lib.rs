@@ -677,6 +677,10 @@ fn plane_by_value(m: &mut mesh::Mesh, f: &eval::Program, dom: mesh::Domain, axis
     nrm[axis] = 1.0;
     for k in 0..w * w {
         m.positions.extend([cols[0][k] as f32, cols[1][k] as f32, cols[2][k] as f32]);
+        // 平面に垂直な向きの格子線は引かない（平面が格子線の位置にあると、面全体が点々の線になる）
+        let mut g = [cols[0][k] as f32, cols[1][k] as f32, cols[2][k] as f32];
+        g[axis] = mesh::NO_GRID;
+        m.grid_coords.extend(g);
         m.normals.extend(nrm);
         m.complex.extend([vals[k] as f32, 0.0, 0.0]);
     }
@@ -1159,7 +1163,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // 傾いた座標系の陽関数は、上の投影の道で作る
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
-        P::System { base: Some(base), eqs, .. } if eqs.is_empty() && base.param_vars().len() > 0 => {
+        P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
             let inner = build(plot, &ctx3)?.settle();
             b.kind = inner.kind;

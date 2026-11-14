@@ -61,6 +61,7 @@ export function requestPlot(
   layers = 1,
   flatSlice = false,
   flags = 0,
+  hidden: { mode: number; count: number } | null = null,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -91,6 +92,7 @@ export function requestPlot(
     layers,
     flatSlice,
     flags,
+    hidden: hidden && { ...hidden },
   }
   return planned(req)
 }

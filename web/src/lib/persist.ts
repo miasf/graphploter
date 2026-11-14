@@ -2,7 +2,7 @@
 // - ブラウザ（localStorage）に自動で保存し、次に開いたときに元に戻す
 // - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）
 
-import type { ComplexMode, CutStyle, Domain, Folder, GridStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
+import type { ComplexMode, CutStyle, Domain, Folder, GridStyle, HiddenStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
 export interface SavedItem {
@@ -16,6 +16,8 @@ export interface SavedItem {
   vertical: boolean
   slider: SliderStyle
   complexMode?: ComplexMode
+  /** 表示していない座標の見せ方（古い保存データには無い。無ければ断面） */
+  hidden?: HiddenStyle
   walls?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転。ただし rotOwn の無い古い保存データでは全体の回転） */
   rotGroup?: number
