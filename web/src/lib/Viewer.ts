@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
+import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
@@ -142,6 +143,10 @@ export class Viewer {
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
+  /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
+  private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
+  /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
+  private morphValues = new Map<number, number>()
   /** 表示範囲の外を切り落とす6枚の平面 */
   private boxPlanes: THREE.Plane[] = []
   /** 切り口の平面（切らないなら null） */
@@ -1194,7 +1199,66 @@ export class Viewer {
   }
 
   /** 式 id の曲面・曲線を設定（作り直し） */
+  /**
+   * 式の形を描く。座標系を使う式（mesh.target がある）は、計算エンジンが返した形を覚えておき、
+   * 移行のスライダーの値（[`setMorph`]）で位置を混ぜた形を描く
+   */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
+    if (mesh.target && mesh.target.length === mesh.positions.length) {
+      const m = { mesh, weld: null }
+      this.morphSources.set(id, m)
+      mesh = this.morphed(id, m)
+    } else this.morphSources.delete(id)
+    this.applyPlot(id, mesh, style)
+  }
+
+  /**
+   * 座標系を使う式の、移行のスライダーの値 s（0〜1）を変える。位置を (1 − s) q + s T(q) に書き換えて、形だけを差し替える
+   * （式は計算し直さない）。座標系を使わない式では、値を覚えるだけ
+   */
+  setMorph(id: number, s: number) {
+    const v = Math.min(1, Math.max(0, s))
+    if (this.morphValues.get(id) === v) return
+    this.morphValues.set(id, v)
+    const m = this.morphSources.get(id)
+    const style = this.styles.get(id)
+    if (m && style) this.applyPlot(id, this.morphed(id, m), style)
+  }
+
+  /** 移行のスライダーの値で位置を混ぜた形。s = 0 なら、計算エンジンが返した位置と法線をそのまま使う */
+  private morphed(id: number, m: { mesh: MeshData; weld: Int32Array | null }): MeshData {
+    const { mesh } = m
+    const s = this.morphValues.get(id) ?? 0
+    const target = mesh.target!
+    const positions = mixPositions(mesh.positions, target, s)
+    const surface = !mesh.curve && mesh.indices.length > 0
+    let normals = mesh.normals
+    if (surface && s > 0) {
+      normals = vertexNormals(positions, mesh.indices)
+      // s = 1 では、周期のある座標の継ぎ目（φ = 0 と 2π）で同じ点になる頂点の法線をそろえる
+      if (s >= 1) weldNormals(normals, (m.weld ??= weldGroups(target, mesh.indices)))
+    }
+    const lod =
+      mesh.lod && mesh.lod.target && mesh.lod.target.length === mesh.lod.positions.length && s > 0
+        ? (() => {
+            const lp = mixPositions(mesh.lod.positions, mesh.lod.target, s)
+            return { ...mesh.lod, positions: lp, normals: vertexNormals(lp, mesh.lod.indices) }
+          })()
+        : mesh.lod
+    const mix = (q?: Float32Array, t?: Float32Array) => (q && t ? mixPositions(q, t, s) : q)
+    return {
+      ...mesh,
+      positions,
+      normals,
+      // 格子線は座標の値に沿って引く（座標系の格子に沿った線になる）
+      gridCoords: mesh.gridCoords.length > 0 || !surface ? mesh.gridCoords : mesh.positions,
+      lod,
+      outline: mix(mesh.outline, mesh.outlineTarget),
+      outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
+    }
+  }
+
+  private applyPlot(id: number, mesh: MeshData, style: PlotStyle) {
     this.sceneChanged = true
     this.notMotion = true
     const old = this.plots.get(id)
@@ -1814,6 +1878,7 @@ export class Viewer {
     }
     this.plots.delete(id)
     this.styles.delete(id)
+    this.morphSources.delete(id)
   }
 }
 

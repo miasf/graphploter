@@ -11,12 +11,15 @@
   import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
+  import CoordPanel from './lib/CoordPanel.svelte'
+  import { COORD_PRESETS } from './lib/coords'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestPlot } from './lib/plotClient'
   import { lastBreakdown, recordBreakdown } from './lib/timings'
   import { Budget } from './lib/budget'
   import type {
     ComplexMode,
+    CoordSystem,
     CutRequest,
     CutStyle,
     Domain,
@@ -181,8 +184,10 @@
         rotation: it.rotGroup === undefined ? it.rotation : undefined,
         center: it.rotGroup === undefined ? it.center : undefined,
         folder: it.folder,
+        coordSys: coordOf(it) ? it.coordSys : undefined,
       })),
       groups,
+      coordSystems: coordSystems.length > 0 ? coordSystems : undefined,
       folders,
       domain,
       resolution,
@@ -232,6 +237,9 @@
     normalizeFolders()
     if (s.controlMode) controlMode = s.controlMode
     nextGroupId = Math.max(0, ...groups.map((g) => g.id)) + 1
+    coordSystems = (s.coordSystems ?? []).map((c) => ({ ...c, morph: Math.min(1, Math.max(0, Number(c.morph) || 0)) }))
+    nextCoordId = Math.max(0, ...coordSystems.map((c) => c.id)) + 1
+    playingMorph = []
   }
 
   // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
@@ -363,10 +371,11 @@
 
   // ---- 設定（ボタンで項目の一覧を出し、選んだ項目だけを表示する）----
 
-  type SettingsCat = 'dims' | 'rotate' | 'range' | 'detail' | 'look' | 'control' | 'cut' | 'save' | 'help'
+  type SettingsCat = 'dims' | 'rotate' | 'coords' | 'range' | 'detail' | 'look' | 'control' | 'cut' | 'save' | 'help'
   const SETTINGS_CATS: { id: SettingsCat; icon: string; label: string; desc: string }[] = [
     { id: 'rotate', icon: '⟳', label: '回転', desc: '全体・グループごとの回転と再生' },
     { id: 'dims', icon: '⧉', label: '次元', desc: '4次元以上、表示する座標と断面' },
+    { id: 'coords', icon: '◍', label: '座標系', desc: '極座標・球座標・自作の座標系と、直交座標からの移行' },
     { id: 'range', icon: '⬚', label: '表示範囲', desc: 'x, y, z の最小値・最大値' },
     { id: 'detail', icon: '▦', label: '細かさ', desc: '曲面・陰関数の細かさ、重ねる枚数' },
     { id: 'look', icon: '◎', label: '見え方', desc: '動かしている間の画質、遠近感、視点のリセット、背景' },
@@ -621,6 +630,7 @@
     let source: string
     let ranges: ParamRanges
     let spaceRanges: Space['ranges']
+    let coord: ReturnType<typeof coordRequest>
     try {
       source = latexToText(item.latex)
       ranges = Object.fromEntries(
@@ -628,6 +638,7 @@
       )
       // 座標の「範囲で重ねる」範囲（0 〜 a など）も同じように変換する
       spaceRanges = space.ranges.map((r) => (r ? [latexToText(r[0]), latexToText(r[1])] : null))
+      coord = coordRequest(item)
     } catch (e) {
       viewer.removePlot(item.id)
       item.error = e instanceof Error ? e.message : String(e)
@@ -664,6 +675,7 @@
       (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
       hiddenRequest(item),
       item.complexCoords ?? false,
+      coord,
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -741,6 +753,7 @@
     if (item.hidden && usesHiddenRanges(item.hidden.mode) && ensureHiddenRanges(item)) schedule(item, 0)
     const s0 = performance.now()
     // 回す前の形で作った陰関数で、回転だけが変わった: 形はそのままで、3D オブジェクトの向きだけを変える
+    viewer.setMorph(item.id, coordOf(item)?.morph ?? 0)
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
     viewer.setPlotTransform(item.id, res.mesh.transform)
     viewer.setCap(item.id, res.cap, item)
@@ -1268,6 +1281,136 @@
   /** グラフを描く式（パラメータの行でないもの） */
   const plotItems = $derived(items.filter((it) => !it.param))
 
+  // ---- 座標系（計画 9 章の S37） ----
+
+  let coordSystems = $state<CoordSystem[]>([])
+  let nextCoordId = 1
+  /** 座標系の設定で表示している座標系の番号 */
+  let coordTab = $state(0)
+  /** 移行を再生している座標系の番号 */
+  let playingMorph = $state<number[]>([])
+  /** 再生中の移行の向き（+1 で 1 へ、−1 で 0 へ） */
+  const morphDir = new Map<number, number>()
+
+  /** 式が使う座標系（選んでいない・消えていれば undefined） */
+  function coordOf(item: PlotItem): CoordSystem | undefined {
+    return item.coordSys === undefined ? undefined : coordSystems.find((c) => c.id === item.coordSys)
+  }
+
+  /** 計算担当に渡す座標系（計算エンジン用の式に変換する。LaTeX の誤りは投げる） */
+  function coordRequest(item: PlotItem): { map: string; ranges: [string, string][] } | null {
+    const c = coordOf(item)
+    if (!c) return null
+    const text = (latex: string, what: string) => {
+      const t = latexToText(latex)
+      if (t.trim() === '') throw new Error(`座標系「${c.name}」の${what}が空です`)
+      return t
+    }
+    return {
+      map: `(${c.map.map((m, k) => text(m, ` ${'XYZ'[k]} の式`)).join(', ')})`,
+      ranges: c.ranges.map(([a, b], k) => [text(a, ` ${'xyz'[k]} の範囲`), text(b, ` ${'xyz'[k]} の範囲`)] as [string, string]),
+    }
+  }
+
+  /** 座標系を作る（用意した座標系から。名前は重ならないようにする）。番号を返す */
+  function createCoord(preset: CoordSystem['preset']): number {
+    const p = COORD_PRESETS[preset]
+    const used = new Set(coordSystems.map((c) => c.name))
+    let name = p.name
+    for (let k = 2; used.has(name); k++) name = `${p.name} ${k}`
+    const c: CoordSystem = {
+      id: nextCoordId++,
+      name,
+      preset,
+      map: [...p.map],
+      ranges: p.ranges.map((r) => [...r]) as CoordSystem['ranges'],
+      morph: 1,
+    }
+    coordSystems.push(c)
+    return c.id
+  }
+
+  /** 座標系の式・範囲を変えた: その座標系の式を計算し直す */
+  function setCoordShape(cid: number, map: CoordSystem['map'], ranges: CoordSystem['ranges']) {
+    const c = coordSystems.find((x) => x.id === cid)
+    if (!c) return
+    c.map = map
+    c.ranges = ranges
+    for (const it of items) if (it.coordSys === cid) schedule(it)
+  }
+
+  /** 移行のスライダー: 位置を混ぜ直すだけ（計算し直さない） */
+  function setMorph(cid: number, s: number) {
+    const c = coordSystems.find((x) => x.id === cid)
+    if (!c) return
+    c.morph = Math.min(1, Math.max(0, s))
+    for (const it of items) if (it.coordSys === cid) viewer?.setMorph(it.id, c.morph)
+  }
+
+  function renameCoord(cid: number, name: string) {
+    const c = coordSystems.find((x) => x.id === cid)
+    if (c && name.trim() !== '') c.name = name.trim()
+  }
+
+  /** 座標系を消す: 使っていた式は直交座標に戻す */
+  function removeCoord(cid: number) {
+    coordSystems = coordSystems.filter((c) => c.id !== cid)
+    playingMorph = playingMorph.filter((x) => x !== cid)
+    for (const it of items) {
+      if (it.coordSys !== cid) continue
+      it.coordSys = undefined
+      schedule(it, 0)
+    }
+  }
+
+  /** 式の座標系を選ぶ（undefined なら直交座標。'new' なら球座標を作って選ぶ） */
+  function setItemCoord(item: PlotItem, cid: number | 'new' | undefined) {
+    const id = cid === 'new' ? createCoord('sphere') : cid
+    if (item.coordSys === id) return
+    item.coordSys = id
+    schedule(item, 0)
+  }
+
+  /** 式の ⚙ の「座標系」から、その座標系の設定を開く */
+  function openCoord(cid: number | undefined) {
+    if (cid !== undefined) coordTab = cid
+    settingsCat = 'coords'
+    settingsOpen = true
+  }
+
+  /** 移行の再生: 0 → 1 → 0 と往復する（片道 PARAM_PLAY_SECONDS 秒）。計算し直さないので、操作中の粗い計算にはしない */
+  function togglePlayMorph(cid: number) {
+    if (playingMorph.includes(cid)) {
+      playingMorph = playingMorph.filter((x) => x !== cid)
+      return
+    }
+    const c = coordSystems.find((x) => x.id === cid)
+    morphDir.set(cid, c && c.morph >= 1 ? -1 : 1)
+    playingMorph = [...playingMorph, cid]
+    if (playingMorph.length === 1) {
+      let last = performance.now()
+      const frame = (now: number) => {
+        if (playingMorph.length === 0) return
+        const dt = Math.min(0.1, (now - last) / 1000)
+        last = now
+        for (const id of playingMorph) {
+          const c = coordSystems.find((x) => x.id === id)
+          if (!c) continue
+          let dir = morphDir.get(id) ?? 1
+          let v = c.morph + (dir * dt) / PARAM_PLAY_SECONDS
+          if (v >= 1 || v <= 0) {
+            v = Math.min(1, Math.max(0, v))
+            dir = -dir
+            morphDir.set(id, dir)
+          }
+          setMorph(id, v)
+        }
+        requestAnimationFrame(frame)
+      }
+      requestAnimationFrame(frame)
+    }
+  }
+
   // ---- 回転の再生（角度を自動で動かす）----
 
   /** 再生中の回転（グループの番号 → 回転角の番号） */
@@ -1472,9 +1615,26 @@
     const adding = sample.items.filter((si) => !(si.param && defined.has(si.param))) // 同じ名前のパラメータがすでにあれば足さない
     // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
     const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4).id : undefined
+    // 座標系で描く例: 用意した座標系（式・範囲が初期値のまま）があれば使い回し、無ければ作る
+    let coordSys: number | undefined
+    if (sample.coord) {
+      const { preset, morph, play, flat: toFlat } = sample.coord
+      const p = COORD_PRESETS[preset]
+      const ranges = sample.coord.ranges ?? p.ranges
+      const same = coordSystems.find(
+        (c) => c.preset === preset && JSON.stringify([c.map, c.ranges]) === JSON.stringify([p.map, ranges]),
+      )
+      coordSys = same?.id ?? createCoord(preset)
+      const made = coordSystems.find((c) => c.id === coordSys)
+      if (made && !same) made.ranges = ranges.map((r) => [...r]) as CoordSystem['ranges']
+      playingMorph = playingMorph.filter((x) => x !== coordSys)
+      setMorph(coordSys, morph)
+      if (play) togglePlayMorph(coordSys)
+      if (toFlat && !flat) setFlat(true)
+    }
     for (const si of adding) {
       // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
-      items.push(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}) }))
+      items.push(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))
       if (!view) schedule(items[items.length - 1], 0)
     }
     if (view) applyView(view)
@@ -1704,6 +1864,9 @@
             onPlayRot={(k) => togglePlay(groupIdOf(item), k)}
             onStopRot={(ks) => stopPlay(groupIdOf(item), ks)}
             onGroup={(g) => setItemGroup(item, g)}
+            {coordSystems}
+            onCoord={(c) => setItemCoord(item, c)}
+            onOpenCoord={() => openCoord(item.coordSys)}
             onOpenRotation={() => openRotation(groupIdOf(item))}
             {folders}
             onFolder={(fid) => setItemFolder(item, fid)}
@@ -1844,6 +2007,52 @@
               onPlay={(k) => togglePlay(rotTab, k)}
               onStop={(ks) => stopPlay(rotTab, ks)}
             />
+          {:else if settingsCat === 'coords'}
+            <div class="group-tabs" role="tablist" aria-label="座標系">
+              {#each coordSystems as c (c.id)}
+                <button role="tab" class="chip" class:selected={coordTab === c.id} aria-selected={coordTab === c.id}
+                  onclick={() => (coordTab = c.id)}>{c.name}</button>
+              {/each}
+              <button class="chip" onclick={() => (coordTab = createCoord('cylinder'))} title="円柱座標（2D 表示では極座標）を足す">＋ 円柱座標</button>
+              <button class="chip" onclick={() => (coordTab = createCoord('sphere'))} title="球座標を足す">＋ 球座標</button>
+              <button class="chip" onclick={() => (coordTab = createCoord('custom'))} title="3 つの式を自分で書く">＋ 自作</button>
+            </div>
+            {@const tabCoord = coordSystems.find((c) => c.id === coordTab) ?? coordSystems[0]}
+            {#if tabCoord}
+              <div class="group-head">
+                <input class="group-name" value={tabCoord.name} aria-label="座標系の名前"
+                  onchange={(e) => renameCoord(tabCoord.id, e.currentTarget.value)} />
+                <button class="secondary small" onclick={() => removeCoord(tabCoord.id)}>削除</button>
+              </div>
+              <p class="note">チェックした式を、この座標系で描きます（式の ⚙ →「座標系」でも選べます）。</p>
+              <div class="members">
+                {#each plotItems as it (it.id)}
+                  {@const k = items.indexOf(it)}
+                  {@const other = coordOf(it)}
+                  <label class="member">
+                    <input type="checkbox" checked={it.coordSys === tabCoord.id}
+                      onchange={(e) => setItemCoord(it, e.currentTarget.checked ? tabCoord.id : undefined)} />
+                    <span class="dot" style:background={it.color}></span>
+                    <span class="member-name">式 {k + 1}</span>
+                    {#if other && other.id !== tabCoord.id}
+                      <span class="member-group">（{other.name}）</span>
+                    {/if}
+                  </label>
+                {/each}
+              </div>
+              <CoordPanel
+                sys={tabCoord}
+                onShape={(m, r) => setCoordShape(tabCoord.id, m, r)}
+                onMorph={(v) => setMorph(tabCoord.id, v)}
+                playing={playingMorph.includes(tabCoord.id)}
+                onPlay={() => togglePlayMorph(tabCoord.id)}
+              />
+            {:else}
+              <p class="note">
+                式を極座標・球座標・自作の座標系で描きます。式は x, y, z で書き、それを座標の値（球座標なら半径・z 軸からの角・xy 平面での角）として読みます。
+                「移行」のスライダーで、直交座標の見え方となめらかに行き来できます。上のボタンで座標系を足してください。
+              </p>
+            {/if}
           {:else if settingsCat === 'range'}
             <div class="ranges">
               {#each axes as a (a)}
