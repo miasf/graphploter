@@ -57,10 +57,26 @@ pub struct MeshResult {
     flat_slice: bool,
     /// 2D 表示の不等式の領域の境目の線（実線・点線。線分ごとに 2 点と NaN、または点の列）。ふつうは空
     outline: (Vec<f32>, Vec<f32>),
+    /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
+    value_range: Option<(f64, f64)>,
+    /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）
+    volume: Option<(Vec<f32>, usize)>,
 }
 
 #[wasm_bindgen]
 impl MeshResult {
+    /// 表示していない座標の値で色を付けるなら [最小, 最大]（値は complex_values の 1 つ目）。付けないなら空
+    pub fn value_range(&self) -> Vec<f64> {
+        self.value_range.map_or(Vec::new(), |(a, b)| vec![a, b])
+    }
+    /// 伝達関数の格子の 1 辺の点の数（伝達関数でなければ 0）
+    pub fn volume_n(&self) -> u32 {
+        self.volume.as_ref().map_or(0, |v| v.1 as u32)
+    }
+    /// 伝達関数の格子での値（Float32Array。x が最も速く変わり、次に y、z。定義されない所は NaN）
+    pub fn take_volume(&mut self) -> Vec<f32> {
+        self.volume.as_mut().map_or(Vec::new(), |v| std::mem::take(&mut v.0))
+    }
     /// 2D 表示の不等式の領域の境目の線のうち、実線（`≤`・`≥`）の分を取り出す（Float32Array。無ければ空）
     pub fn take_outline(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline.0)
@@ -348,6 +364,7 @@ pub fn plot(
 ) -> Result<MeshResult, JsError> {
     let start = timing::now_ms();
     timing::reset();
+    let hidden = HIDDEN_STYLE.with(|h| std::mem::take(&mut *h.borrow_mut()));
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -441,7 +458,14 @@ pub fn plot(
         range: &range,
         view: space.view(perspective),
     };
-    let built = build(&plot, &ctx).map_err(|e| JsError::new(&e))?;
+    // 表示していない座標の見せ方（2D 表示では、今までどおり断面）
+    let hidden_on = !flat && hidden.first().is_some_and(|&m| m >= 1.0);
+    let built = if hidden_on {
+        build_hidden(&hidden, source, &consts, &plot, &ctx)
+    } else {
+        build(&plot, &ctx)
+    }
+    .map_err(|e| JsError::new(&e))?;
     let mut inner = match &built.shape {
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
@@ -466,6 +490,8 @@ pub fn plot(
         flat,
         flat_slice: ctx.flat_slice,
         outline: built.outline,
+        value_range: built.value_range,
+        volume: built.volume,
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
         shape: built.shape,
         local: built.local,
@@ -481,8 +507,188 @@ pub fn plot(
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
             _ => None,
         },
-        local_available: !flat && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        local_available: !flat && !hidden_on && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
     })
+}
+
+// ---- 表示していない座標（w 以降）の見せ方 ----
+
+thread_local! {
+    /// 次の [`plot`] だけに効く、表示していない座標の見せ方（[`hidden_style`]）
+    static HIDDEN_STYLE: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 次の [`plot`] で、表示していない座標（w 以降）を使う式をどう見せるかを決める（その 1 回だけ。呼ばなければ断面）。
+/// `values` = [見せ方, 枚数, 座標 0 の範囲の最小, 最大, 座標 1 の …]（範囲は全部の座標の分。表示していない座標の分だけ使う。
+/// NaN なら断面の値だけ）。見せ方は 0: 断面（今まで）、1: 等値面を何枚も（範囲を `枚数` 等分した値ごとの図形を重ね、値で色を付ける）、
+/// 2: 断面の塗り分け（各軸に `枚数` 枚の平面を、値で塗る）、3: 伝達関数（格子での値を返す。描画側で光線を進めて塗る）。
+/// 2・3 は「表示していない座標 = 式」の形のときだけ
+#[wasm_bindgen]
+pub fn hidden_style(values: Vec<f64>) {
+    HIDDEN_STYLE.with(|h| *h.borrow_mut() = values);
+}
+
+/// 等値面を何枚も重ねるときの、図形の数の上限
+const MAX_HIDDEN_LAYERS: usize = 64;
+
+/// [`hidden_style`] の見せ方で図形を作る
+fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
+    let space = ctx.space;
+    let mode = h[0] as u32;
+    let count = (h.get(1).copied().unwrap_or(5.0) as usize).clamp(1, 16);
+    // 座標 k の範囲（指定が無ければ断面の値だけ）
+    let range_of = |k: usize| match (h.get(2 + 2 * k), h.get(3 + 2 * k)) {
+        (Some(&a), Some(&b)) if a.is_finite() && b.is_finite() => (a.min(b), a.max(b)),
+        _ => {
+            let v = space.slice.get(k).copied().unwrap_or(0.0);
+            (v, v)
+        }
+    };
+    let dom = ctx.dom;
+    match mode {
+        1 => {
+            // 式が使っている、表示していない座標
+            let used = plot.used_params();
+            let hidden: Vec<usize> =
+                (0..space.dims).filter(|k| !space.axes.contains(k) && used.contains(&equation::coord_name(*k))).collect();
+            if hidden.is_empty() {
+                return build(plot, ctx);
+            }
+            // 座標ごとの値の数（全部の組み合わせが上限を超えないように減らす）
+            let mut per = count.max(2);
+            while per > 2 && per.pow(hidden.len() as u32) > MAX_HIDDEN_LAYERS {
+                per -= 1;
+            }
+            let values: Vec<Vec<f64>> = hidden
+                .iter()
+                .map(|&k| {
+                    let (a, b) = range_of(k);
+                    if a == b {
+                        vec![a]
+                    } else {
+                        (0..per).map(|i| a + (b - a) * i as f64 / (per - 1) as f64).collect()
+                    }
+                })
+                .collect();
+            let total: usize = values.iter().map(Vec::len).product();
+            if total > MAX_HIDDEN_LAYERS {
+                return Err(format!("等値面が多すぎます（{MAX_HIDDEN_LAYERS} 枚まで）"));
+            }
+            let mut meshes = Vec::with_capacity(total);
+            let mut curve = None;
+            let mut kind = String::new();
+            for idx in 0..total {
+                let mut sp = space.clone();
+                let mut rest = idx;
+                for (j, &k) in hidden.iter().enumerate() {
+                    sp.slice[k] = values[j][rest % values[j].len()];
+                    rest /= values[j].len();
+                }
+                let first = sp.slice[hidden[0]];
+                let p = equation::compile_with(source, params, &sp)?;
+                let ctx2 = Ctx { space: &sp, ..ctx.clone() };
+                let b = build(&p, &ctx2)?.settle();
+                if *curve.get_or_insert(b.curve) != b.curve {
+                    return Err("等値面を何枚も重ねると、曲線と曲面が混ざります".into());
+                }
+                kind = b.kind.clone();
+                let mut m = match &b.shape {
+                    Some(sh) => mesh::project(sh, &ctx.view, dom),
+                    None => b.inner,
+                };
+                let verts = m.positions.len() / 3;
+                m.complex = (0..verts).flat_map(|_| [first as f32, 0.0, 0.0]).collect();
+                meshes.push(m);
+            }
+            let curve = curve.unwrap_or(false);
+            let name = equation::coord_name(hidden[0]);
+            Ok(Built {
+                inner: mesh::merge(meshes, curve),
+                curve,
+                kind: format!("{kind}（{name} の値ごとに {total} 枚）"),
+                value_range: Some(range_of(hidden[0])),
+                ..Default::default()
+            })
+        }
+        2 | 3 => {
+            let (f, k) = equation::hidden_field(source, params, space)?;
+            let name = equation::coord_name(k);
+            if mode == 2 {
+                let n = ctx.resolution.clamp(8, 200);
+                let mut m = mesh::Mesh::default();
+                for axis in 0..3 {
+                    let (ua, va) = equation::others(axis);
+                    for i in 0..count {
+                        let pos = dom.lo[axis] + (dom.hi[axis] - dom.lo[axis]) * (i + 1) as f64 / (count + 1) as f64;
+                        plane_by_value(&mut m, &f, dom, axis, ua, va, pos, n);
+                    }
+                }
+                Ok(Built {
+                    inner: m,
+                    kind: format!("{name} の値で断面を塗り分け（{} 枚）", 3 * count),
+                    value_range: Some(range_of(k)),
+                    ..Default::default()
+                })
+            } else {
+                let n = ctx.implicit_resolution.clamp(24, 96);
+                let at = |a: usize, i: usize| dom.lo[a] + (dom.hi[a] - dom.lo[a]) * i as f64 / (n - 1) as f64;
+                let mut cols: [Vec<f64>; 3] = Default::default();
+                for z in 0..n {
+                    for y in 0..n {
+                        for x in 0..n {
+                            cols[0].push(at(0, x));
+                            cols[1].push(at(1, y));
+                            cols[2].push(at(2, z));
+                        }
+                    }
+                }
+                let mut out = vec![num_complex::Complex64::new(0.0, 0.0); n * n * n];
+                f.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+                let vals = out.into_iter().map(|v| eval::as_real(v) as f32).collect();
+                Ok(Built {
+                    kind: format!("{name} の値の伝達関数（{n}³）"),
+                    value_range: Some(range_of(k)),
+                    volume: Some((vals, n)),
+                    ..Default::default()
+                })
+            }
+        }
+        _ => build(plot, ctx),
+    }
+}
+
+/// 平面「`axis` 番目の座標 = `pos`」を `n × n` マスに分け、頂点ごとの式 `f` の値を complex の 1 つ目に入れて `m` に足す。
+/// 値が有限でない頂点のあるマスは描かない
+#[allow(clippy::too_many_arguments)]
+fn plane_by_value(m: &mut mesh::Mesh, f: &eval::Program, dom: mesh::Domain, axis: usize, ua: usize, va: usize, pos: f64, n: usize) {
+    let w = n + 1;
+    let mut cols: [Vec<f64>; 3] = [vec![pos; w * w], vec![pos; w * w], vec![pos; w * w]];
+    for j in 0..w {
+        for i in 0..w {
+            cols[ua][j * w + i] = dom.lo[ua] + (dom.hi[ua] - dom.lo[ua]) * i as f64 / n as f64;
+            cols[va][j * w + i] = dom.lo[va] + (dom.hi[va] - dom.lo[va]) * j as f64 / n as f64;
+        }
+    }
+    let mut out = vec![num_complex::Complex64::new(0.0, 0.0); w * w];
+    f.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    let vals: Vec<f64> = out.into_iter().map(eval::as_real).collect();
+    let base = (m.positions.len() / 3) as u32;
+    let mut nrm = [0.0f32; 3];
+    nrm[axis] = 1.0;
+    for k in 0..w * w {
+        m.positions.extend([cols[0][k] as f32, cols[1][k] as f32, cols[2][k] as f32]);
+        m.normals.extend(nrm);
+        m.complex.extend([vals[k] as f32, 0.0, 0.0]);
+    }
+    for j in 0..n {
+        for i in 0..n {
+            let (a, b, c, d) = (j * w + i, j * w + i + 1, (j + 1) * w + i, (j + 1) * w + i + 1);
+            if [a, b, c, d].iter().all(|&q| vals[q].is_finite()) {
+                let id = |q: usize| base + q as u32;
+                m.indices.extend([id(a), id(b), id(d), id(a), id(d), id(c)]);
+            }
+        }
+    }
 }
 
 // ---- 重い陰関数の F の計算を、いくつかの Worker に分ける ----
@@ -583,6 +789,10 @@ struct Built {
     local: Option<(mesh::LocalMesh, Vec<String>)>,
     /// 2D 表示の不等式の領域の境目の線（実線, 点線）
     outline: (Vec<f32>, Vec<f32>),
+    /// 表示していない座標の値で色を付けるなら、その範囲
+    value_range: Option<(f64, f64)>,
+    /// 伝達関数の格子の値と、1 辺の点の数
+    volume: Option<(Vec<f32>, usize)>,
 }
 
 impl Built {
@@ -1110,6 +1320,8 @@ impl Shape {
             flat: self.flat,
             flat_slice: self.flat_slice,
             outline: Default::default(),
+            value_range: None,
+            volume: None,
             solid,
             field,
             shape: None,
@@ -1213,6 +1425,8 @@ impl CapSource {
             flat: false,
             flat_slice: false,
             outline: Default::default(),
+            value_range: None,
+            volume: None,
         })
     }
 }
