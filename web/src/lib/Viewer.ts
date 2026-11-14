@@ -7,7 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
-import { MotionQuality, pickLod, type MotionMode } from './motionQuality'
+import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -642,7 +642,7 @@ export class Viewer {
    * （粗い版にしないのと同じ理由）
    */
   private applyQuality() {
-    const ratio = this.camMoving ? this.quality.stage.ratio : this.basePixelRatio
+    const ratio = this.camMoving ? this.motionStage().ratio : this.basePixelRatio
     if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio)
     this.applyLineScale(ratio / this.basePixelRatio)
     for (const p of this.plots.values()) this.applyLod(p)
@@ -703,7 +703,9 @@ export class Viewer {
   private applyLod(p: PlotObject) {
     if (p.kind !== 'surface') return
     const lod = p.geo.userData.lod as THREE.BufferGeometry | undefined
-    const geo = this.camMoving && this.quality.stage.lod && lod && this.lodPlots.has(p) ? lod : p.geo
+    // ベンチマークで描き方を決めているときは、粗い版のある面を全部粗くする（三角形と画素のどちらが重いかを見るため）
+    const heavy = this.benchStage ? true : this.lodPlots.has(p)
+    const geo = this.camMoving && this.motionStage().lod && lod && heavy ? lod : p.geo
     const main = p.group.children[0] as THREE.Mesh
     if (main.geometry !== geo) main.geometry = geo
   }
@@ -793,16 +795,159 @@ export class Viewer {
     this.updateClipRange()
     this.updateLabelSizes()
     this.updateStencilSides()
+    const renderedBefore = this.renderedLastTick
     this.renderedLastTick = true
     this.notMotionLastTick = this.notMotion
     this.notMotion = false
-    this.renderer.render(this.scene, this.camera)
+    if (this.frameLog) this.renderMeasured(renderedBefore ? dt : null)
+    else this.renderer.render(this.scene, this.camera)
   }
   private renderedLastTick = false
   /** 前に描いてから今までに、形の差し替え・視点の跳びがあったか（そのコマの時間は quality に数えない） */
   private notMotion = false
   /** 前の回に描いたコマが、形の差し替え・視点の跳びを含んでいたか */
   private notMotionLastTick = false
+
+  // ---- ベンチマーク（?bench=1）用。ふつうに開いたときは使わない ----
+
+  /** 動かしている間の描き方（ベンチマークで決めていればそれ、なければ quality が選んだ段階） */
+  private motionStage(): Stage {
+    return this.benchStage ?? this.quality.stage
+  }
+  /** ベンチマークで決めた、動かしている間の描き方（null なら quality に任せる） */
+  private benchStage: Stage | null = null
+  /** 描いたコマごとの時間（frameStats 用）。null なら測らない */
+  private frameLog: { interval: number; cpu: number }[] | null = null
+  private gpuLog: number[] = []
+  private timerExt: { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number } | null = null
+  private pendingQueries: WebGLQuery[] = []
+  /** ベンチマークで回す前のカメラの位置（見る点からの差） */
+  private orbitStart: THREE.Vector3 | null = null
+
+  /** ふつうのときの画素密度 */
+  get baseRatio(): number {
+    return this.basePixelRatio
+  }
+
+  /**
+   * コマの時間を測り始める（frameStats で読む）。stage を渡すと、動かしている間の描き方をそれに決める
+   * （null なら quality が選ぶ。ふつうの動き）
+   */
+  benchMeasure(stage: Stage | null) {
+    this.benchStage = stage
+    this.frameLog = []
+    this.gpuLog = []
+    if (!this.timerExt) {
+      const gl = this.renderer.getContext() as WebGL2RenderingContext
+      this.timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2')
+    }
+    this.applyQuality()
+  }
+
+  /** 測るのをやめ、カメラを回す前の位置に戻す */
+  benchEnd() {
+    this.benchStage = null
+    this.frameLog = null
+    if (this.orbitStart) this.camera.position.copy(this.controls.target).add(this.orbitStart)
+    this.orbitStart = null
+    this.controls.update()
+    this.applyQuality()
+  }
+
+  /** カメラを、見る点の周りに（縦の軸の周りで）回す。angle は回し始めからの角度 */
+  benchOrbitTo(angle: number) {
+    const target = this.controls.target
+    if (!this.orbitStart) this.orbitStart = this.camera.position.clone().sub(target)
+    const up = this.camera.up.clone().normalize()
+    this.camera.position.copy(target).add(this.orbitStart.clone().applyAxisAngle(up, angle))
+    this.camera.lookAt(target)
+    this.dirty = true
+  }
+
+  /** 1 コマを描き、画面側の時間（render の呼び出し）と、使えれば GPU の時間を記録する */
+  private renderMeasured(interval: number | null) {
+    const gl = this.renderer.getContext() as WebGL2RenderingContext
+    const ext = this.timerExt
+    // 前に頼んだ GPU の時間で、結果が出たものを読む
+    while (ext && this.pendingQueries.length > 0) {
+      const q = this.pendingQueries[0]
+      if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break
+      this.pendingQueries.shift()
+      if (!gl.getParameter(ext.GPU_DISJOINT_EXT)) this.gpuLog.push(gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6)
+      gl.deleteQuery(q)
+    }
+    const q = ext && this.pendingQueries.length < 8 ? gl.createQuery() : null
+    if (q) gl.beginQuery(ext!.TIME_ELAPSED_EXT, q)
+    const t0 = performance.now()
+    this.renderer.render(this.scene, this.camera)
+    const cpu = performance.now() - t0
+    if (q) {
+      gl.endQuery(ext!.TIME_ELAPSED_EXT)
+      this.pendingQueries.push(q)
+    }
+    // 前の回も描いていたときだけ、間隔を 1 コマの時間として数える
+    if (interval !== null) this.frameLog!.push({ interval, cpu })
+    if (this.frameLog!.length > 120) this.frameLog!.shift()
+    if (this.gpuLog.length > 120) this.gpuLog.shift()
+  }
+
+  /**
+   * 直近 120 コマの時間（中央値と 95% 点。ms）、描いた三角形の数、今の画素密度、粗い版を描いているか。
+   * interval はコマの間隔（画面の更新間隔で刻まれる）、cpu は render の呼び出しの時間、gpu は GPU の時間（測れなければ null）
+   */
+  frameStats() {
+    const log = this.frameLog ?? []
+    const q = (xs: number[], p: number) => {
+      if (xs.length === 0) return null
+      const s = [...xs].sort((a, b) => a - b)
+      return s[Math.min(s.length - 1, Math.floor(p * s.length))]
+    }
+    const interval = log.map((f) => f.interval)
+    const cpu = log.map((f) => f.cpu)
+    let lod = false
+    for (const p of this.plots.values()) {
+      if (p.kind === 'surface' && (p.group.children[0] as THREE.Mesh).geometry !== p.geo) lod = true
+    }
+    return {
+      frames: log.length,
+      median: q(interval, 0.5),
+      p95: q(interval, 0.95),
+      cpuMedian: q(cpu, 0.5),
+      cpuP95: q(cpu, 0.95),
+      gpuMedian: this.timerExt ? q(this.gpuLog, 0.5) : null,
+      gpuP95: this.timerExt ? q(this.gpuLog, 0.95) : null,
+      triangles: this.renderer.info.render.triangles,
+      pixelRatio: this.renderer.getPixelRatio(),
+      lod,
+    }
+  }
+
+  /**
+   * 今の視点で 1 コマをすぐ描き、画面の絵を w × h（CSS ピクセル）に縮めて返す。
+   * stage が null なら止まっているときの絵、そうでなければ動かしている間にその描き方で描いた絵
+   */
+  benchCapture(stage: Stage | null, w: number, h: number): Uint8ClampedArray {
+    const saved = { stage: this.benchStage, moving: this.camMoving }
+    this.benchStage = stage
+    this.camMoving = stage !== null
+    this.applyQuality()
+    this.controls.update()
+    this.updateClipRange()
+    this.updateLabelSizes()
+    this.updateStencilSides()
+    this.renderer.render(this.scene, this.camera)
+    // 描いた直後（同じ処理の中）なら、preserveDrawingBuffer なしでも絵を読める
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d', { willReadFrequently: true })!
+    ctx.drawImage(this.renderer.domElement, 0, 0, w, h)
+    const data = ctx.getImageData(0, 0, w, h).data
+    this.benchStage = saved.stage
+    this.camMoving = saved.moving
+    this.applyQuality()
+    return data
+  }
 
   /**
    * 文字の画面上の大きさを、CSS ピクセルで一定にする。
