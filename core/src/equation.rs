@@ -321,6 +321,7 @@ impl Plot {
             Plot::System { base, eqs, cuts, .. } => {
                 let cut = if cuts.is_empty() { "" } else { "（不等式で切り取り）" };
                 match (eqs.len(), base) {
+                    (0, Some(b)) => format!("{}{cut}", b.kind_label()),
                     (0, _) if cuts.len() > 1 => format!("不等式の領域（{} 本）", cuts.len()),
                     (0, _) => "不等式の領域".into(),
                     (1, Some(b)) => format!("{}{cut}", b.kind_label()),
@@ -343,6 +344,7 @@ impl Plot {
             // 点（媒介変数を使わない）なら、範囲の欄を出さない
             Plot::ComplexPlane { label, .. } if label.starts_with("複素平面の点") => Vec::new(),
             Plot::ComplexPlane { inner, .. } => inner.param_vars(),
+            Plot::System { base: Some(b), .. } => b.param_vars(),
             _ => Vec::new(),
         }
     }
@@ -510,13 +512,19 @@ const MAX_INEQUALITIES: usize = 8;
 fn system(chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
     let mut rels: Vec<(Expr, Rel, Expr)> = Vec::new();
+    // 形の行（媒介変数表示の組）。不等式で切り取る
+    let mut shape: Option<Vec<Expr>> = None;
     for chain in chains {
         if chain.rels.is_empty() {
-            return Err(if matches!(chain.exprs[0], Expr::Tuple(_)) {
-                "媒介変数表示と不等式の組み合わせは、まだ使えません".into()
-            } else {
-                "連立の式は、行ごとに = か不等号を付けてください".into()
-            });
+            match &chain.exprs[0] {
+                Expr::Tuple(items) if shape.is_none() => {
+                    check_dims(&chain.exprs[0], space)?;
+                    shape = Some(items.clone());
+                    continue;
+                }
+                Expr::Tuple(_) => return Err("媒介変数表示は 1 行だけにしてください".into()),
+                _ => return Err("連立の式は、行ごとに = か不等号を付けてください".into()),
+            }
         }
         for e in &chain.exprs {
             check_dims(e, space)?;
@@ -529,6 +537,9 @@ fn system(chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> 
         }
     }
     let m = rels.iter().filter(|(_, r, _)| *r == Rel::Eq).count();
+    if shape.is_some() && m > 0 {
+        return Err("媒介変数表示と等式は、一緒に使えません（不等式で切り取ることはできます）".into());
+    }
     if m > MAX_EQUATIONS {
         return Err(format!("等式が多すぎます（{MAX_EQUATIONS} 本まで）"));
     }
@@ -547,8 +558,19 @@ fn system(chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> 
             return Err("連立方程式・不等式では、範囲で重ねられません（断面にしてください）".into());
         }
     }
-    // リストがあれば、組み合わせごとの連立にする
     let sides: Vec<Expr> = rels.iter().flat_map(|(l, _, r)| [l.clone(), r.clone()]).collect();
+    // 媒介変数表示を不等式で切り取る: 不等式は、射影した後の表示中の座標の式
+    if let Some(items) = shape {
+        if sides.iter().any(|e| first_list(e).is_some()) {
+            return Err("媒介変数表示を切り取る不等式には、リストは使えません".into());
+        }
+        let mut sys = system_of(rels, params, space)?;
+        if let Plot::System { base, .. } = &mut sys {
+            *base = Some(Box::new(parametric(items, params, space)?));
+        }
+        return Ok(sys);
+    }
+    // リストがあれば、組み合わせごとの連立にする
     if sides.iter().any(|e| first_list(e).is_some()) {
         let plots = expand_lists(&sides)?
             .into_iter()

@@ -860,3 +860,50 @@ fn clipped_lines_have_no_dots() {
         }
     }
 }
+
+// ---- 媒介変数表示の切り取り（計画 S33） ----
+
+/// 媒介変数の範囲（"t,u" と [t0, t1, u0, u1, …]）を付けて、3 次元・回転なし・表示範囲 ±5 で描く
+fn run_param(src: &str, names: &str, ranges: &[f64]) -> MeshResult {
+    let rd = equation::rot_dims(3);
+    plot(
+        src, &[-R, R, -R, R, -R, R], 64, N, names, ranges, "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+        &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, false, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が計算できない"))
+}
+
+#[test]
+fn parametric_curve_is_clipped() {
+    use std::f64::consts::PI;
+    let r = [-2.0 * PI, 2.0 * PI];
+    let mut whole = run_param("(cos t, sin t, t/4)", "t", &r);
+    assert!(whole.take_shape().is_some());
+    let mut cut = run_param("(cos t, sin t, t/4), z ≥ 0", "t", &r);
+    assert_eq!(cut.kind(), "媒介変数表示の曲線（不等式で切り取り）");
+    assert!(cut.take_shape().is_none());
+    assert!(cut.positions().chunks_exact(3).filter(|q| q[2].is_finite()).all(|q| q[2] >= -1e-3));
+    // 曲線の点は線分の列ではなく点の列（NaN で切れ目）なので、つながった点どうしの長さを足す
+    let len = |m: &MeshResult| {
+        let p = m.positions();
+        p.chunks_exact(3)
+            .zip(p.chunks_exact(3).skip(1))
+            .filter(|(a, b)| a.iter().chain(b.iter()).all(|v| v.is_finite()))
+            .map(|(a, b)| (0..3).map(|k| ((a[k] - b[k]) as f64).powi(2)).sum::<f64>().sqrt())
+            .sum::<f64>()
+    };
+    let (lw, lc) = (len(&whole), len(&cut));
+    assert!((lc / (lw / 2.0) - 1.0).abs() <= 0.01, "{lw} {lc}");
+}
+
+#[test]
+fn parametric_surface_is_trimmed() {
+    use std::f64::consts::PI;
+    let m = run_param("((3 + cos v) cos u, (3 + cos v) sin u, sin v), x ≥ 0", "u,v", &[0.0, 2.0 * PI, 0.0, 2.0 * PI]);
+    assert_eq!(m.kind(), "媒介変数表示の曲面（不等式で切り取り）");
+    let p = m.positions();
+    assert!(p.chunks_exact(3).all(|q| q[0] >= -1e-3));
+    let a = area(&p, &m.indices());
+    assert!((a / (6.0 * PI * PI) - 1.0).abs() <= 0.01, "{a}");
+    assert_eq!(m.grid_coords().len(), p.len());
+}

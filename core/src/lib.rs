@@ -781,6 +781,24 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = system::points_mesh(&pts);
         }
         // 不等式の領域: 面 G_i = 0 ごとに作り、ほかの不等式で切り取る。切り口と表示範囲の端には、ふたをする
+        // 媒介変数表示を不等式で切り取る: 射影してから、曲面なら三角形を、曲線なら線分を切る（回転が変わるたびに計算し直す）
+        P::System { base: Some(base), eqs, cuts, .. } if eqs.is_empty() => {
+            let inner = build(base, ctx)?.settle();
+            let mut m = match &inner.shape {
+                Some(sh) => mesh::project(sh, &ctx.view, dom),
+                None => inner.inner,
+            };
+            for g in cuts {
+                if inner.curve {
+                    system::clip_segments(&mut m.positions, &mut system::values_of(g), 12);
+                } else {
+                    system::trim_mesh(&mut m, &mut system::values_of(g), 8);
+                }
+            }
+            b.inner = m;
+            b.curve = inner.curve;
+            b.kind = format!("{}（不等式で切り取り）", inner.kind);
+        }
         P::System { eqs, cuts, .. } if eqs.is_empty() => {
             b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);
             b.fields.push(mesh::Field::region(cuts));
@@ -913,6 +931,14 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } => {}
+        // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
+        P::System { base: Some(base), eqs, .. } if eqs.is_empty() && base.param_vars().len() > 0 => {
+            let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
+            let inner = build(plot, &ctx3)?.settle();
+            b.kind = inner.kind;
+            b.curve = inner.curve || ctx.flat_slice;
+            b.inner = flat_finish(inner.inner, inner.curve, ctx.flat_slice);
+        }
         // 縦の座標 = 0 の 2 次元の問題として描く（切り口、または縦の座標を使わない式）
         P::System { eqs, cuts, .. } => match eqs.len() {
             0 => {

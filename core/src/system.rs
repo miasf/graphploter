@@ -483,38 +483,81 @@ pub fn trim_mesh(mesh: &mut Mesh, value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>
     *mesh = out;
 }
 
-/// 曲線のメッシュ（線分ごとに 2 点と NaN）を、`value` が 0 以下の所だけにする。両端とも中なら残し、両端とも外なら捨て、
-/// 混ざる線分は二分（`rounds` 回）で境目を求めて、中の側だけ残す。長さの無い線分（点）は、中ならそのまま残す
+/// 曲線のメッシュ（点の列。NaN で切れ目。交わる線のような「線分ごとに 2 点と NaN」も、長さ 2 の列として同じに扱う）を、
+/// `value` が 0 以下の所だけにする。中と外にまたがる線分は、境目を辺の上で求めて（`rounds` 回）、中の側だけ残す。
+/// 長さの無い列（点）は、中ならそのまま残す。切った後に、ほとんど長さの無い列が残ったら捨てる（描画側が点とみなして丸を付けるため）
 pub fn clip_segments(positions: &mut Vec<f32>, value: &mut dyn FnMut(&[[f64; 3]]) -> Vec<f64>, rounds: usize) {
-    let segs: Vec<([f64; 3], [f64; 3])> = positions
-        .chunks_exact(9)
-        .filter(|s| s[..6].iter().all(|v| v.is_finite()))
-        .map(|s| ([s[0] as f64, s[1] as f64, s[2] as f64], [s[3] as f64, s[4] as f64, s[5] as f64]))
+    let pts: Vec<Option<[f64; 3]>> = positions
+        .chunks_exact(3)
+        .map(|q| q.iter().all(|v| v.is_finite()).then(|| [q[0] as f64, q[1] as f64, q[2] as f64]))
         .collect();
-    let pts: Vec<[f64; 3]> = segs.iter().flat_map(|&(a, b)| [a, b]).collect();
-    let g = value(&pts);
-    let mut mixed = Vec::new();
-    let mut out: Vec<f32> = Vec::with_capacity(positions.len());
-    let emit = |out: &mut Vec<f32>, a: [f64; 3], b: [f64; 3]| {
-        out.extend(a.iter().chain(&b).map(|v| *v as f32));
-        out.extend_from_slice(&[f32::NAN; 3]);
-    };
-    for (k, &(a, b)) in segs.iter().enumerate() {
-        let (ia, ib) = (g[2 * k] <= 0.0, g[2 * k + 1] <= 0.0);
-        match (ia, ib) {
-            (true, true) => emit(&mut out, a, b),
-            (false, false) => {}
-            (true, false) => mixed.push((a, b, g[2 * k], g[2 * k + 1])),
-            (false, true) => mixed.push((b, a, g[2 * k + 1], g[2 * k])),
+    let finite: Vec<[f64; 3]> = pts.iter().flatten().copied().collect();
+    let gf = value(&finite);
+    let mut g = vec![f64::NAN; pts.len()];
+    let mut k = 0;
+    for (i, p) in pts.iter().enumerate() {
+        if p.is_some() {
+            g[i] = gf[k];
+            k += 1;
         }
     }
-    let ts = edge_cuts(&mixed, value, rounds);
-    for (&(a, b, _, _), t) in mixed.iter().zip(ts) {
-        // 残る部分がほとんど無い線分は捨てる（長さの無い線は、描画側が点とみなして丸を付ける）
-        if t <= 1e-6 {
+    let inside = |i: usize| g[i] <= 0.0;
+    // 中と外にまたがる線分 (i, i + 1) の境目
+    let mut mixed = Vec::new();
+    let mut ends = Vec::new();
+    for i in 0..pts.len().saturating_sub(1) {
+        if let (Some(a), Some(b)) = (pts[i], pts[i + 1]) {
+            if inside(i) != inside(i + 1) {
+                mixed.push(i);
+                ends.push(if inside(i) { (a, b, g[i], g[i + 1]) } else { (b, a, g[i + 1], g[i]) });
+            }
+        }
+    }
+    let ts = edge_cuts(&ends, value, rounds);
+    let mut cut_at: std::collections::HashMap<usize, [f64; 3]> = Default::default();
+    for (k, &i) in mixed.iter().enumerate() {
+        let (a, b, _, _) = ends[k];
+        cut_at.insert(i, [0, 1, 2].map(|c| a[c] + ts[k] * (b[c] - a[c])));
+    }
+    // 列ごとに組み立てる（列と、境目で切った列か）
+    let mut runs: Vec<(Vec<[f64; 3]>, bool)> = Vec::new();
+    let mut cur: (Vec<[f64; 3]>, bool) = (Vec::new(), false);
+    for (i, p) in pts.iter().enumerate() {
+        let Some(p) = *p else {
+            runs.push(std::mem::take(&mut cur));
+            continue;
+        };
+        if inside(i) {
+            cur.0.push(p);
+        }
+        if let Some(q) = cut_at.get(&i) {
+            if inside(i) {
+                // 出ていく: 境目で列を終える
+                cur.0.push(*q);
+                cur.1 = true;
+                runs.push(std::mem::take(&mut cur));
+            } else {
+                // 入ってくる: 境目から新しい列を始める
+                runs.push(std::mem::take(&mut cur));
+                cur = (vec![*q], true);
+            }
+        } else if !inside(i) {
+            runs.push(std::mem::take(&mut cur));
+        }
+    }
+    runs.push(cur);
+    let mut out: Vec<f32> = Vec::with_capacity(positions.len());
+    for (run, cut) in runs.into_iter().filter(|r| !r.0.is_empty()) {
+        // 切って長さがほとんど無くなった列は捨てる（元から点の列は残す）
+        let span = run.iter().map(|q| (0..3).map(|c| (q[c] - run[0][c]).abs()).sum::<f64>()).fold(0.0, f64::max);
+        let scale = 1.0 + run[0].iter().map(|v| v.abs()).sum::<f64>();
+        if cut && span <= 1e-6 * scale {
             continue;
         }
-        emit(&mut out, a, [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c])));
+        for q in &run {
+            out.extend(q.iter().map(|v| *v as f32));
+        }
+        out.extend_from_slice(&[f32::NAN; 3]);
     }
     *positions = out;
 }
