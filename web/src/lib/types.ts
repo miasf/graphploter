@@ -65,6 +65,8 @@ export interface HiddenStyle {
   density: number
   /** 伝達関数の重ね方（古い保存データには無い。無ければ over） */
   blend?: VolumeBlend
+  /** 伝達関数で、値の勾配を面の法線とみなして光を当てるか（重ね塗りのとき。無ければ当てる） */
+  lit?: boolean
 }
 export const DEFAULT_HIDDEN: HiddenStyle = { mode: 'slice', count: 5, colormap: 'viridis', opacity: 'flat', density: 0.5 }
 

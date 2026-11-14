@@ -36,6 +36,8 @@ export interface VolumeUniforms {
   uN: { value: number }
   /** ぼやけた面（形 4）の幅。格子の 1 マスの何倍か */
   uWidth: { value: number }
+  /** 1 なら、値の勾配を面の法線とみなして光を当てる（重ね塗りのとき） */
+  uLit: { value: number }
 }
 
 const VERTEX = /* glsl */ `
@@ -67,6 +69,7 @@ uniform float uBlend;
 uniform float uClamp;
 uniform float uN;
 uniform float uWidth;
+uniform float uLit;
 varying vec3 vWorld;
 ${COLORMAP_GLSL}
 
@@ -85,21 +88,46 @@ float shape(float t) {
   return 4.0 * exp(-0.5 * d * d);
 }
 
-// 値 0 の近くだけ濃い形（重ね塗りのとき）: 0 の面からの距離を |v| / |∇v| で見積もり、格子の uWidth マスの幅のぼやけた面にする
-// （値の大きさで幅を決めると、勾配の大きい所は薄く、小さい所は厚くなる）。勾配の向き（面の法線）を gNormal に入れる
-vec3 gNormal;
-float shell(float v, vec3 q, vec3 size) {
+// 値の勾配（表示範囲の座標あたり）。格子の 1 マスの幅の中心差分
+vec3 gradAt(vec3 q, vec3 size) {
   float h = 1.0 / uN;
-  vec3 g = vec3(
+  return vec3(
     texture(uTex, q + vec3(h, 0.0, 0.0)).r - texture(uTex, q - vec3(h, 0.0, 0.0)).r,
     texture(uTex, q + vec3(0.0, h, 0.0)).r - texture(uTex, q - vec3(0.0, h, 0.0)).r,
     texture(uTex, q + vec3(0.0, 0.0, h)).r - texture(uTex, q - vec3(0.0, 0.0, h)).r) / (2.0 * h * size);
-  float gl = length(g);
+}
+
+// 値 0 の近くだけ濃い形（重ね塗りのとき）: 0 の面からの距離を |v| / |∇v| で見積もり、格子の uWidth マスの幅のぼやけた面にする
+// （値の大きさで幅を決めると、勾配の大きい所は薄く、小さい所は厚くなる）。勾配を gGrad に入れる（光を当てるときに使い回す）
+vec3 gGrad;
+float shell(float v, vec3 q, vec3 size) {
+  gGrad = gradAt(q, size);
+  float gl = length(gGrad);
   if (!(gl > 0.0)) return 0.0;
-  gNormal = g / gl;
   float w = uWidth * max(max(size.x, size.y), size.z) / uN;
   float d = v / gl / w;
   return 4.0 * exp(-0.5 * d * d);
+}
+
+// 勾配 g を法線とみなした光の当たり方を、色 c に掛ける。光は視点の少し右上から（真正面からだと、面の傾きの差が出にくい）。
+// 裏表は区別しない（法線を視点の側に向ける）。勾配が値の範囲に比べて小さい所（ほぼ平らな所）は法線があてにならないので、
+// 光を弱めて元の色に近づける（全部に当てると、なめらかな霧に細かいムラが出る）。always が 1 なら勾配の大きさによらず当てる
+vec3 lit(vec3 c, vec3 g, vec3 dir, vec3 size, float span, float always) {
+  float gl = length(g);
+  if (!(gl > 0.0)) return c;
+  vec3 n = g / gl;
+  if (dot(n, dir) > 0.0) n = -n;
+  vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+  vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+  vec3 L = normalize(-dir + 0.45 * up + 0.3 * right);
+  float diff = max(dot(n, L), 0.0);
+  float spec = pow(max(dot(n, normalize(L - dir)), 0.0), 60.0);
+  // 暗い側の下限を高めにし、光に向いた所は元の色より少し明るくする（下限を低くすると、重なった面の多くが横向きなので全体が暗くくすむ）
+  vec3 shaded = min(c * (0.55 + 0.6 * diff), vec3(1.0)) + 0.3 * spec;
+  // 格子の 1 マスで値の位置（0〜1）がどれだけ変わるか
+  float perCell = gl * max(max(size.x, size.y), size.z) / uN / max(span, 1e-30);
+  float m = always > 0.5 ? 1.0 : smoothstep(0.002, 0.02, perCell);
+  return mix(c, shaded, m);
 }
 
 void main() {
@@ -159,8 +187,14 @@ void main() {
     bool sh = uShape > 3.5;
     float a = 1.0 - exp(-k * (sh ? shell(v, q, size) : shape(s)) * dt);
     vec3 c = colormap(s, uColormap, uBase);
-    // ぼやけた面には、視線の向きからの光で陰を付ける（光を当てないと、面の向きが分からず円盤のように見える。裏表は区別しない）
-    if (sh) c *= 0.3 + 0.7 * abs(dot(gNormal, dir));
+    if (uLit > 0.5) {
+      // ほとんど透明な点は光の計算を省く（勾配に 6 回テクスチャを読むので重い）
+      if (a > 0.002) c = lit(c, sh ? gGrad : gradAt(q, size), dir, size, span, sh ? 1.0 : 0.0);
+    } else if (sh) {
+      // 光を当てない設定でも、ぼやけた面には視線の向きからの光で陰を付ける（付けないと、面の向きが分からず円盤のように見える）
+      float gl = length(gGrad);
+      if (gl > 0.0) c *= 0.3 + 0.7 * abs(dot(gGrad / gl, dir));
+    }
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
     if (acc.a > 0.98) break;
@@ -226,6 +260,7 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
     uClamp: { value: 0 },
     uN: { value: 64 },
     uWidth: { value: 2 },
+    uLit: { value: 1 },
   }
 }
 
@@ -239,6 +274,7 @@ export function applyVolumeStyle(u: VolumeUniforms, h: HiddenStyle | undefined, 
   u.uClamp.value = h?.mode === 'field' ? 1 : 0
   // ぼやけた面の幅: 枚数の欄の 1 目盛りで 0.5 マス
   u.uWidth.value = 0.5 * Math.max(1, h?.count ?? 4)
+  u.uLit.value = h?.lit === false ? 0 : 1
   u.uBase.value.copy(color)
   u.uOpacity.value = Math.max(0, Math.min(1, opacity))
 }

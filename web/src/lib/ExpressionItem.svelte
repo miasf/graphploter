@@ -645,6 +645,12 @@
                     {/each}
                   </select>
                 </div>
+                {#if (hidden.blend ?? 'over') === 'over'}
+                  <label class="check">
+                    <input type="checkbox" checked={hidden.lit ?? true} onchange={(e) => onHidden({ lit: e.currentTarget.checked })} />
+                    勾配で陰影を付ける（値の変わる向きを面の向きとみなして光を当てる）
+                  </label>
+                {/if}
                 <div class="complex-mode">
                   <span class="label">不透明度</span>
                   <select value={hidden.opacity} onchange={(e) => onHidden({ opacity: e.currentTarget.value as HiddenStyle['opacity'] })}>
