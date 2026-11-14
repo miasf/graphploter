@@ -166,6 +166,12 @@ fn named_tokens() -> Vec<(&'static str, Tok)> {
     v.push(("π", Tok::Const(Constant::Pi)));
     v.push(("e", Tok::Const(Constant::E)));
     v.push(("i", Tok::Const(Constant::I)));
+    // 座標の名前に使うギリシャ文字（計画 9 章の S38）: 1 つの変数として読む（"theta" を t·h·e·t·a にしない）
+    for (names, var) in [(&["theta", "θ", "ϑ"][..], "theta"), (&["phi", "φ", "ϕ"][..], "phi"), (&["rho", "ρ"][..], "rho")] {
+        for n in names {
+            v.push((n, Tok::Var(var.into())));
+        }
+    }
     // 長い名前から順に試す（"sinh" を "sin" + "h" と誤認しないため）
     v.sort_by_key(|t| std::cmp::Reverse(t.0.chars().count()));
     v

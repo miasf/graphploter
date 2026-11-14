@@ -8,7 +8,7 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { coordName, missingParam, neededDims, prettyName } from './params'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -78,6 +78,12 @@
     onStopRot: (ks: number[]) => void
     /** グループを変える（'new' ならこの式だけの新しいグループ） */
     onGroup: (gid: number | 'new') => void
+    /** 座標系の一覧（計画 9 章） */
+    coordSystems: CoordSystem[]
+    /** この式の座標系を選ぶ（undefined なら直交座標、'new' なら球座標を作って選ぶ） */
+    onCoord: (cid: number | 'new' | undefined) => void
+    /** 座標系の設定を開く */
+    onOpenCoord: () => void
     /** 設定の「回転」でグループを開く */
     onOpenRotation: () => void
     /** フォルダの一覧と、この式をフォルダに入れる・出す（0 なら外へ、'new' なら新しいフォルダへ） */
@@ -130,6 +136,9 @@
     onPlayRot,
     onStopRot,
     onGroup,
+    coordSystems,
+    onCoord,
+    onOpenCoord,
     onOpenRotation,
     folders,
     onFolder,
@@ -310,14 +319,17 @@
     z: domain.zmax - domain.zmin,
   })
 
+  /** この式の座標系（選んでいない・消えていれば undefined） */
+  const coordSys = $derived(item.coordSys === undefined ? undefined : coordSystems.find((c) => c.id === item.coordSys))
   /** 設定欄のタブ */
-  type Tab = 'look' | 'grid' | 'rotate'
+  type Tab = 'look' | 'grid' | 'rotate' | 'coord'
   let tab = $state<Tab>('look')
   const tabs = $derived(
     [
       { id: 'look' as const, label: '見た目' },
       ...(isCurve ? [] : [{ id: 'grid' as const, label: '格子線' }]),
       { id: 'rotate' as const, label: groupId > 0 ? '回転 ●' : '回転' },
+      ...(item.param ? [] : [{ id: 'coord' as const, label: coordSys ? '座標系 ●' : '座標系' }]),
     ],
   )
   // 曲線になって格子線のタブが無くなったら、見た目のタブに戻す
@@ -901,6 +913,30 @@
             <button class="link" onclick={onOpenRotation}>まとめて設定</button>
           </p>
           <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} onStop={onStopRot} />
+        {:else if tab === 'coord'}
+          <div class="group-row">
+            <span class="label">座標系</span>
+            <select
+              value={coordSys ? String(coordSys.id) : ''}
+              aria-label="この式の座標系"
+              onchange={(e) => {
+                const v = e.currentTarget.value
+                onCoord(v === '' ? undefined : v === 'new' ? 'new' : Number(v))
+              }}
+            >
+              <option value="">直交座標</option>
+              {#each coordSystems as c (c.id)}
+                <option value={String(c.id)}>{c.name}</option>
+              {/each}
+              <option value="new">＋ 球座標を作る</option>
+            </select>
+          </div>
+          <p class="hint">
+            {coordSys
+              ? `式の x, y, z を「${coordSys.name}」の座標の値として読み、移した形を描きます（移行 ${coordSys.morph.toFixed(2)}）。`
+              : '式の x, y, z を、そのまま直交座標として描いています。'}
+            <button class="link" onclick={onOpenCoord}>座標系の設定・移行のスライダー</button>
+          </p>
         {/if}
       </div>
     {/if}

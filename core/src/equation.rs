@@ -61,6 +61,9 @@ pub struct Space {
     pub flat_slice: bool,
     /// 座標を複素数にする: 式の x, y, z を x + i w, y + i w₂, z + i w₃ に置き換える（6 次元以上で使う。[`complexify_coords`]）
     pub complex_coords: bool,
+    /// 座標系の座標の名前（計画 9 章の S38。例: r, theta, phi）。式の中のこの名前を、表示中の 3 つの座標に置き換える（[`rename_coords`]）。
+    /// 同じ名前のパラメータより優先する
+    pub coord_names: Option<[String; 3]>,
 }
 
 impl Space {
@@ -85,6 +88,7 @@ impl Space {
             complex_params: Vec::new(),
             flat_slice: false,
             complex_coords: false,
+            coord_names: None,
         }
     }
 
@@ -438,6 +442,11 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     let shown = space.shown();
 
     let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    for chain in &mut chains {
+        for e in &mut chain.exprs {
+            *e = rename_coords(e, space);
+        }
+    }
     if space.complex_coords {
         for chain in &mut chains {
             for e in &mut chain.exprs {
@@ -534,12 +543,87 @@ pub fn complexify_coords(e: &Expr, space: &Space) -> Result<Expr, String> {
     }))
 }
 
+/// 座標系の座標の名前（[`Space::coord_names`]）を、表示中の 3 つの座標に置き換える。名前が無ければそのまま
+pub fn rename_coords(e: &Expr, space: &Space) -> Expr {
+    let Some(names) = &space.coord_names else { return e.clone() };
+    let shown = space.shown();
+    e.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| Expr::Var(shown[k].clone())))
+}
+
+/// 式の種類の説明（`x = f(y, z)` など）の、表示中の座標の名前を座標系の名前にする（`r = f(θ, φ)`）。名前が無ければそのまま
+pub fn rename_kind(kind: &str, space: &Space) -> String {
+    let Some(names) = &space.coord_names else { return kind.to_string() };
+    let shown = space.shown();
+    let pretty = |n: &str| match n {
+        "theta" => "θ".to_string(),
+        "phi" => "φ".to_string(),
+        "rho" => "ρ".to_string(),
+        _ => n.to_string(),
+    };
+    // 英数字の並びごとに、表示中の座標の名前と同じなら置き換える
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        match shown.iter().position(|s| s == word) {
+            Some(k) => out.push_str(&pretty(&names[k])),
+            None => out.push_str(word),
+        }
+        word.clear();
+    };
+    for c in kind.chars() {
+        if c.is_ascii_alphanumeric() {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// 座標系の式（計画 9 章の S36）。組 `(X, Y, Z)` の 3 つの成分を、表示中の 3 つの座標の式としてコンパイルする。
+/// 定数はパラメータ（表示していない座標は使えない）。成分が 3 つでない・ほかの変数を使うときはエラー
+pub fn compile_coord_map(source: &str, params: &Params, space: &Space) -> Result<crate::coords::CoordMap, String> {
+    const MSG: &str = "座標系の式は、x, y, z の式を 3 つ書いてください";
+    let shown = space.shown();
+    let shown_refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+    let msg = || {
+        if shown == ["x", "y", "z"] {
+            MSG.to_string()
+        } else {
+            format!("座標系の式は、{} の式を 3 つ書いてください", shown.join(", "))
+        }
+    };
+    let e = rename_coords(&crate::parser::parse(source).map_err(|e| e.to_string())?, space);
+    let Expr::Tuple(items) = e else { return Err(msg()) };
+    if items.len() != 3 {
+        return Err(msg());
+    }
+    let mut progs = Vec::with_capacity(3);
+    for item in &items {
+        let mut vars = Vec::new();
+        item.collect_vars(&mut vars);
+        if vars.iter().any(|v| !shown.contains(v) && !params.contains_key(v)) || matches!(item, Expr::Tuple(_) | Expr::List(_)) {
+            return Err(msg());
+        }
+        progs.push(Program::compile_with(item, &shown_refs, params)?);
+    }
+    let [a, b, c]: [Program; 3] = progs.try_into().map_err(|_| msg())?;
+    Ok(crate::coords::CoordMap::new([a, b, c]))
+}
+
 /// 「表示していない座標 h = h を使わない式 f」の形の式なら、(f, h の座標の番号)。f の変数は表示中の 3 つの座標
 /// （ほかの表示していない座標は断面の値、回転は代入済み）。断面の塗り分け・伝達関数（[`crate::plot`] の `hidden`）に使う。
 /// この形でない式・h が絡む回転をしている式はエラー
 pub fn hidden_field(source: &str, params: &Params, space: &Space) -> Result<(Program, usize), String> {
     let shape_err = || "断面の塗り分け・伝達関数は、w = f(x, y, z) の形（表示していない座標 = 式）で使えます".to_string();
-    let chains = parse_system(source).map_err(|e| e.to_string())?;
+    let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    for chain in &mut chains {
+        for e in &mut chain.exprs {
+            *e = rename_coords(e, space);
+        }
+    }
     let [chain] = chains.as_slice() else { return Err(shape_err()) };
     if chain.rels != [Rel::Eq] {
         return Err(shape_err());

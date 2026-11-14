@@ -4,6 +4,8 @@ import type {
   FieldStageResponse,
   CapRequest,
   CapResponse,
+  CoordGridRequest,
+  CoordGridResponse,
   ComplexMode,
   CutRequest,
   Domain,
@@ -63,6 +65,7 @@ export function requestPlot(
   flags = 0,
   hidden: { mode: number; count: number } | null = null,
   complexCoords = false,
+  coord: PlotRequest['coord'] = null,
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -95,6 +98,7 @@ export function requestPlot(
     flags,
     hidden: hidden && { ...hidden },
     complexCoords,
+    coord: coord && { map: coord.map, ranges: coord.ranges.map(([a, b]) => [a, b] as [string, string]), names: coord.names },
   }
   return planned(req)
 }
@@ -205,6 +209,16 @@ async function splitPlot(req: PlotRequest, owner: number): Promise<PlotResponse 
  * 切り口の位置だけが変わったときに、陰関数・範囲で重ねた立体の切り口のふただけを作り直す。
  * その式をまだ計算していなければ null が返る
  */
+/** 座標系の格子（計画 S39）を頼む。どの式の担当でもないので、1 つ目の Worker に頼む */
+export function requestCoordGrid(req: Omit<CoordGridRequest, 'type' | 'requestId'>): Promise<CoordGridResponse> {
+  const requestId = nextId++
+  const full: CoordGridRequest = { ...req, type: 'grid', requestId }
+  return new Promise((resolve) => {
+    pending.set(requestId, resolve)
+    workers[0].postMessage(full)
+  })
+}
+
 export function requestCap(itemId: number, cut: CutRequest, resolution: number): Promise<CapResponse> {
   const requestId = nextId++
   const req: CapRequest = { type: 'cap', requestId, itemId, cut: cut && { ...cut }, resolution }

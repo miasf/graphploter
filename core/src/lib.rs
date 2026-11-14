@@ -11,6 +11,7 @@
 //! このファイルは、JavaScript から呼び出す関数（WASM の入口）だけを置く。
 
 pub mod adaptive;
+pub mod coords;
 pub mod equation;
 pub mod eval;
 pub mod functions;
@@ -62,6 +63,10 @@ pub struct MeshResult {
     /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）。
     /// value_range が無ければ、不等式の領域の霧（値は G = max G_i。G ≤ 0 が中身）
     volume: Option<(Vec<f32>, usize)>,
+    /// 座標系（[`coord_system`]）。回転だけ変わったときの射影し直し（[`Shape::project`]）でも同じ写像をかける
+    coord: Option<coords::CoordMap>,
+    /// 座標系があるとき、`outline` の 2 本の線を移した先
+    outline_target: (Vec<f32>, Vec<f32>),
 }
 
 #[wasm_bindgen]
@@ -83,6 +88,22 @@ impl MeshResult {
         std::mem::take(&mut self.outline.0)
     }
     /// 同じく、点線（`<`・`>`）の分
+    /// 座標系で移した先 T(q)（頂点ごとに 3 つ。Float32Array）を取り出す。座標系が無ければ空
+    pub fn take_target(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.inner.target)
+    }
+    /// 自分の頂点を持つ粗い版の、座標系で移した先を取り出す（無ければ空）
+    pub fn take_lod_target(&mut self) -> Vec<f32> {
+        self.inner.lod_mesh.as_mut().map(|m| std::mem::take(&mut m.target)).unwrap_or_default()
+    }
+    /// 2D 表示の不等式の領域の境目の線（実線）を、座標系で移した先（座標系が無ければ空）
+    pub fn take_outline_target(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline_target.0)
+    }
+    /// 同じく点線の分
+    pub fn take_outline_dashed_target(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline_target.1)
+    }
     pub fn take_outline_dashed(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline.1)
     }
@@ -164,6 +185,7 @@ impl MeshResult {
             params: self.params.clone(),
             curve: self.shape_curve,
             used_params: self.used_params.clone(),
+            coord: self.coord.clone(),
         })
     }
     /// 媒介変数表示の立体（閉じた面で、外向きにそろっている）なら true
@@ -257,6 +279,61 @@ fn record_stats(mesh: &mut mesh::Mesh, start: f64, lod_start: f64, end: f64) {
     let (eval_ms, points) = timing::take();
     let phases = mesh.stats.phases;
     mesh.stats = mesh::Stats { eval_ms, mesh_ms: (lod_start - start - eval_ms).max(0.0), lod_ms: end - lod_start, points, phases };
+}
+
+/// 座標系の格子（座標曲線。計画 9 章の S39）。`map`・`names` は [`coord_system`] と同じ、`ranges` は作る範囲
+/// [x の最小, 最大, y …, z …]、`param_names`・`param_values` は [`plot`] と同じパラメータ。`lines` は範囲を何等分した所に線を引くか、
+/// `faces` は線を引く面（ビット a: 座標 a が範囲の最小の面）、`flat` は 2D 表示（縦の座標 0 の平面に引く）。
+/// 結果は曲線: `take_positions` が元の位置（座標の値）、`take_target` が座標系で移した先。描画側が移行の値で混ぜる
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn coord_grid(
+    map: &str,
+    names: &str,
+    ranges: &[f64],
+    param_names: &str,
+    param_values: &[f64],
+    lines: u32,
+    faces: u32,
+    flat: bool,
+) -> Result<MeshResult, JsError> {
+    let names_v: Vec<String> = names.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let pn: Vec<&str> = param_names.split(',').filter(|s| !s.is_empty()).collect();
+    if ranges.len() != 6 || param_values.len() != 2 * pn.len() {
+        return Err(JsError::new("内部エラー: 座標系の格子の指定が合っていません"));
+    }
+    let consts: eval::Params =
+        pn.iter().enumerate().map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1]))).collect();
+    let mut space = equation::Space::standard();
+    space.coord_names = <[String; 3]>::try_from(names_v).ok();
+    let c = equation::compile_coord_map(map, &consts, &space).map_err(|e| JsError::new(&e))?;
+    let dom = mesh::Domain { lo: [ranges[0], ranges[2], ranges[4]], hi: [ranges[1], ranges[3], ranges[5]] };
+    let mut positions = coords::grid_lines(dom, lines as usize, faces, flat);
+    let target = c.apply_line(&mut positions, flat);
+    let inner = mesh::Mesh { positions, target, ..Default::default() };
+    Ok(MeshResult {
+        inner,
+        kind: String::new(),
+        params: Vec::new(),
+        curve: true,
+        shape_curve: true,
+        used_params: Vec::new(),
+        param: None,
+        local_available: false,
+        shape: None,
+        explicit_used: None,
+        local: None,
+        transform: None,
+        field: None,
+        solid: false,
+        flat,
+        flat_slice: false,
+        outline: Default::default(),
+        outline_target: Default::default(),
+        coord: None,
+        value_range: None,
+        volume: None,
+    })
 }
 
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
@@ -371,6 +448,7 @@ pub fn plot(
     timing::reset();
     let hidden = HIDDEN_STYLE.with(|h| std::mem::take(&mut *h.borrow_mut()));
     let complex_coords = COMPLEX_COORDS.with(|c| c.replace(false));
+    let (coord_src, coord_names) = COORD_MAP.with(|c| std::mem::take(&mut *c.borrow_mut()));
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -419,12 +497,23 @@ pub fn plot(
         complex_params: split(complex_params),
         flat_slice: flat && flat_slice,
         complex_coords,
+        coord_names: None,
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
     }
+    let mut space = space;
+    let names: Vec<String> = coord_names.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if let Ok(names) = <[String; 3]>::try_from(names) {
+        space.coord_names = Some(names);
+    }
 
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
+    let coord = if coord_src.trim().is_empty() {
+        None
+    } else {
+        Some(equation::compile_coord_map(&coord_src, &consts, &space).map_err(|e| JsError::new(&e))?)
+    };
     // 「縦を媒介変数にする」は複素平面の図形だけの設定。陽関数では色分けしない
     if complex_mode == mesh::ComplexMode::Param {
         complex_mode = mesh::ComplexMode::Off;
@@ -468,6 +557,9 @@ pub fn plot(
     };
     // 表示していない座標の見せ方（2D 表示では、今までどおり断面）
     let hidden_on = !flat && hidden.first().is_some_and(|&m| m >= 1.0);
+    if coord.is_some() && hidden_on && hidden.first().is_some_and(|&m| m == 3.0 || m == 5.0 || m == 6.0) {
+        return Err(err("座標系を使う式では、伝達関数・霧の見せ方は使えません"));
+    }
     let built = if hidden_on {
         build_hidden(&hidden, source, &consts, &plot, &ctx)
     } else {
@@ -486,6 +578,17 @@ pub fn plot(
     };
     // 2D の切り口で、射影してから線にした媒介変数表示の曲面
     let curve = built.curve || (ctx.flat_slice && built.shape.is_some());
+    let mut outline = built.outline;
+    let mut outline_target = (Vec::new(), Vec::new());
+    if let Some(c) = &coord {
+        // 作る範囲からはみ出した所を落とす（媒介変数表示は、範囲が媒介変数で決まるので切らない）
+        let parametric = built.shape.is_some() && !built.rotated_explicit;
+        if !parametric {
+            coords::trim_to_domain(&mut inner, dom, curve, flat);
+        }
+        c.apply(&mut inner, curve, flat);
+        outline_target = (c.apply_line(&mut outline.0, flat), c.apply_line(&mut outline.1, flat));
+    }
     let lod_start = timing::now_ms();
     if !curve {
         mesh::add_cluster_lod(&mut inner);
@@ -497,16 +600,18 @@ pub fn plot(
         inner,
         flat,
         flat_slice: ctx.flat_slice,
-        outline: built.outline,
+        outline,
+        outline_target,
         value_range: built.value_range,
         volume: built.volume,
-        solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
+        // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
+        solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
         shape: built.shape,
-        local: built.local,
+        local: if coord.is_some() { None } else { built.local },
         transform: None,
-        field: (!built.fields.is_empty()).then_some((built.fields, dom)),
+        field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
-        kind: built.kind,
+        kind: equation::rename_kind(&built.kind, &space),
         params: plot.param_vars(),
         curve,
         shape_curve: built.curve,
@@ -515,8 +620,26 @@ pub fn plot(
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
             _ => None,
         },
-        local_available: !flat && !hidden_on && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        coord,
     })
+}
+
+thread_local! {
+    /// 次の [`plot`] だけに効く、座標系の式（[`coord_system`]）
+    static COORD_MAP: std::cell::RefCell<(String, String)> = const { std::cell::RefCell::new((String::new(), String::new())) };
+}
+
+/// 次の [`plot`] で使う座標系（計画 9 章の S36。その 1 回だけ。呼ばなければ直交座標）。
+/// `map` は組 `(X, Y, Z)` の形の式で、変数は表示中の 3 つの座標（例: 球座標 `(x sin(y) cos(z), x sin(y) sin(z), x cos(y))`）、
+/// 定数は [`plot`] のパラメータ。空なら座標系なし。
+/// 座標系があると、`plot` の `domain` は「作る範囲」（座標の値の範囲）として使い、結果の `take_target` に頂点ごとの T(q) が入る。
+/// 陽関数・陰関数・連立の図形は作る範囲の箱で切る（媒介変数表示は切らない）。切り口のふたの元・立体の印は返さない
+/// `names` は座標の名前 3 つ（カンマ区切り。例 `r,theta,phi`。計画 S38）。式と座標系の式の中のこの名前を、表示中の 3 つの座標として読む
+/// （同じ名前のパラメータより優先する）。空なら名前なし。ギリシャ文字は解析器が `theta`・`phi`・`rho` と読む
+#[wasm_bindgen]
+pub fn coord_system(map: &str, names: &str) {
+    COORD_MAP.with(|c| *c.borrow_mut() = (map.to_string(), names.to_string()));
 }
 
 // ---- 表示していない座標（w 以降）の見せ方 ----
@@ -1441,6 +1564,8 @@ pub struct Shape {
     params: Vec<String>,
     curve: bool,
     used_params: Vec<String>,
+    /// 座標系（[`coord_system`]）。射影し直した後に同じ写像をかける
+    coord: Option<coords::CoordMap>,
 }
 
 #[wasm_bindgen]
@@ -1484,6 +1609,17 @@ impl Shape {
         if self.flat {
             inner = flat_finish(inner, self.curve, self.flat_slice);
         }
+        let curve = self.curve || self.flat_slice;
+        let (field, solid) = if let Some(c) = &self.coord {
+            // 回した陽関数は作る範囲からはみ出して作るので切る（媒介変数表示は切らない。[`plot`] と同じ）
+            if self.explicit_used.is_some() {
+                coords::trim_to_domain(&mut inner, dom, curve, self.flat);
+            }
+            c.apply(&mut inner, curve, self.flat);
+            (None, false)
+        } else {
+            (field, solid)
+        };
         let end = timing::now_ms();
         record_stats(&mut inner, start, end, end);
         Ok(self.result(inner, field, solid && !self.flat, None))
@@ -1493,12 +1629,12 @@ impl Shape {
     /// [`Shape::local_mesh`] のメッシュに [`Shape::transform`] の 1 次式を掛けて描ける
     #[wasm_bindgen(getter)]
     pub fn rigid(&self) -> bool {
-        self.local.is_some() && !self.flat
+        self.local.is_some() && !self.flat && self.coord.is_none()
     }
 
     /// 回す前の形のメッシュ（[`Shape::rigid`] のときだけ）
     pub fn local_mesh(&self) -> Option<MeshResult> {
-        let l = self.local.as_ref().filter(|_| !self.flat)?;
+        let l = self.local.as_ref().filter(|_| !self.flat && self.coord.is_none())?;
         let space = equation::Space::basic(l.dims, l.axes, vec![0.0; l.dims]);
         Some(self.result(l.project(&space.view(0.0)), None, false, None))
     }
@@ -1508,7 +1644,7 @@ impl Shape {
     pub fn transform(&self, domain: &[f64], dims: u32, axes: &[u32], rotation: &[f64], center: &[f64]) -> Result<MeshResult, JsError> {
         let start = timing::now_ms();
         timing::reset();
-        let Some(l) = self.local.as_ref().filter(|_| !self.flat) else {
+        let Some(l) = self.local.as_ref().filter(|_| !self.flat && self.coord.is_none()) else {
             return Err(JsError::new("RECOMPUTE"));
         };
         let (view, dom) = self.view_for(domain, dims, axes, rotation, center, 0.0)?;
@@ -1533,6 +1669,8 @@ impl Shape {
             flat: self.flat,
             flat_slice: self.flat_slice,
             outline: Default::default(),
+            outline_target: Default::default(),
+            coord: None,
             value_range: None,
             volume: None,
             solid,
@@ -1638,6 +1776,8 @@ impl CapSource {
             flat: false,
             flat_slice: false,
             outline: Default::default(),
+            outline_target: Default::default(),
+            coord: None,
             value_range: None,
             volume: None,
         })

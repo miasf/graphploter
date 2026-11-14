@@ -22,6 +22,12 @@ const SYMBOLS: Record<string, string> = {
   pi: ' pi ',
   Gamma: ' gamma ',
   zeta: ' zeta ',
+  // 座標の名前（座標系。計画 S38）。計算エンジンは theta・phi・rho を 1 つの変数として読む
+  theta: ' theta ',
+  vartheta: ' theta ',
+  phi: ' phi ',
+  varphi: ' phi ',
+  rho: ' rho ',
   psi: ' psi ',
   exponentialE: 'e',
   imaginaryI: 'i',

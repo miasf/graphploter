@@ -11,6 +11,9 @@ function check(name: string, got: unknown, want: unknown) {
 
 // LaTeX → 計算エンジン用の式
 const cases: [string, string][] = [
+  // 座標の名前（座標系。計画 S38）
+  ['r=\\cos\\left(2\\theta\\right)', 'r= cos (2 theta )'],
+  ['\\rho\\sin\\varphi+\\vartheta', 'rho sin phi + theta'],
   ['\\frac{x^{2}+1}{y}', '((x^(2)+1)/(y))'],
   ['\\sin\\left(x\\right)\\cdot y', 'sin (x)*y'],
   ['\\operatorname{nCr}\\left(5,2\\right)', 'nCr (5,2)'],

@@ -193,7 +193,10 @@ fn curve_points(f1: &Program, f2: &Program, dom: Domain, n: usize, refine: Refin
     let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| pos.iter().map(|p| p[c]).collect());
     let values = values_at(f2, &cols);
     let (points, segs) = contour_on_mesh(&pos, &surf.indices, &values);
-    let moved = newton_onto(&[f1, f2], &points, cell(dom, n));
+    let h = cell(dom, n);
+    // 線が自分と交わる点（X の字）: 三角形の上の等高線では、鞍点の X が向かい合う 2 本の弧に分かれるので、先に交点を求めておく
+    let crossings = crossing_points(f1, f2, &points, &segs, h);
+    let moved = newton_onto(&[f1, f2], &points, h);
     let mut keep = Vec::new();
     let mut at = vec![usize::MAX; points.len()];
     let mut out_segs = Vec::new();
@@ -207,7 +210,217 @@ fn curve_points(f1: &Program, f2: &Program, dom: Domain, n: usize, refine: Refin
         }
         out_segs.push([at[a], at[b]]);
     }
+    for c in crossings {
+        join_at_crossing(f1, f2, &mut keep, &mut out_segs, c, h);
+    }
     (keep, out_segs)
+}
+
+/// 交点の周りで線を切る半径（格子の何マス分か）。等高線の弧が交点から離れて丸まるのは半マスほどなので、その外から結び直す
+const CROSS_RADIUS: f64 = 1.5;
+
+/// $F_1 = F_2 = 0$ の線が自分と交わる点（X の字の真ん中）。
+///
+/// 三角形の上の等高線（区分的に 1 次）は、$F_1 = 0$ の面の上での $F_2$ の鞍点を通る X を、必ず向かい合う 2 本の弧に分ける
+/// （ヴィヴィアーニの曲線の $(2, 0, 0)$ では、球と円柱が接していて、球の上で $F_2 \approx (y^2 - z^2)/2$）。
+/// 1. 等高線の点のうち、空間では $1.5h$ より近いのに、線分を 6 本たどっても行けない 2 点を探す（弧どうしが近づいている所）
+/// 2. その真ん中から、面の上での $F_2$ の停留点（$F_1 = 0$ かつ $\nabla F_2$ の面に沿った成分が 0）をガウス・ニュートン法で求める
+/// 3. そこで $|F_2| \le 10^{-4} h |\nabla F_2|$ なら交点（[`newton_onto`] の「寄った」と同じ基準）。0 でなければ、交わらずに近づいているだけ
+///    （双曲線の 2 本の枝・小さな輪の真ん中）なので使わない
+fn crossing_points(f1: &Program, f2: &Program, points: &[[f64; 3]], segs: &[[usize; 2]], h: f64) -> Vec<[f64; 3]> {
+    const NEAR: f64 = 1.5;
+    const HOPS: usize = 6;
+    if points.len() < 4 {
+        return Vec::new();
+    }
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); points.len()];
+    for &[a, b] in segs {
+        adj[a].push(b);
+        adj[b].push(a);
+    }
+    let r = NEAR * h;
+    let key = |p: &[f64; 3]| p.map(|v| (v / r).floor() as i64);
+    let mut grid: crate::adaptive::HashMap<[i64; 3], Vec<usize>> = Default::default();
+    for (i, p) in points.iter().enumerate() {
+        grid.entry(key(p)).or_default().push(i);
+    }
+    let dist = |a: &[f64; 3], b: &[f64; 3]| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f64>().sqrt();
+    let mut seeds: Vec<[f64; 3]> = Vec::new();
+    let mut seen = vec![usize::MAX; points.len()];
+    for i in 0..points.len() {
+        if adj[i].is_empty() {
+            continue;
+        }
+        // i から線分を HOPS 本までたどって行ける点
+        let mut frontier = vec![i];
+        seen[i] = i;
+        for _ in 0..HOPS {
+            let mut next = Vec::new();
+            for &u in &frontier {
+                for &v in &adj[u] {
+                    if seen[v] != i {
+                        seen[v] = i;
+                        next.push(v);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        let k = key(&points[i]);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(list) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else { continue };
+                    for &j in list {
+                        if j <= i || seen[j] == i || adj[j].is_empty() || dist(&points[i], &points[j]) >= r {
+                            continue;
+                        }
+                        let m = [0, 1, 2].map(|c| 0.5 * (points[i][c] + points[j][c]));
+                        if seeds.iter().all(|s| dist(s, &m) > h) {
+                            seeds.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out: Vec<[f64; 3]> = Vec::new();
+    for s in seeds {
+        if let Some(p) = saddle_on_surface(f1, f2, s, h) {
+            if out.iter().all(|q| dist(q, &p) > h) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// 点 `p` での値と勾配（中心差分。幅は $10^{-5} h$）。値か勾配が有限でなければ None
+fn value_grad(prog: &Program, p: [f64; 3], h: f64) -> Option<(f64, [f64; 3])> {
+    let d = 1e-5 * h;
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for s in 0..7 {
+        for (c, col) in cols.iter_mut().enumerate() {
+            let off = if s > 0 && (s - 1) / 2 == c { if s % 2 == 1 { d } else { -d } } else { 0.0 };
+            col.push(p[c] + off);
+        }
+    }
+    let v = values_at(prog, &cols);
+    let g = [0, 1, 2].map(|c| (v[1 + 2 * c] - v[2 + 2 * c]) / (2.0 * d));
+    (v.iter().all(|x| x.is_finite())).then_some((v[0], g))
+}
+
+/// `seed` の近くで、$F_1 = 0$ の面の上での $F_2$ の停留点を求め、そこで $F_2 \approx 0$ なら返す（[`crossing_points`] の 2・3）。
+/// 残差は $(F_1 / |\nabla F_1|,\ h\,(\nabla F_2 - (\nabla F_2 \cdot \mathbf n)\mathbf n) / |\nabla F_2|)$（$\mathbf n$ は $F_1$ の面の単位法線。長さの単位にそろえる）。
+/// ヤコビ行列は残差の中心差分（幅 $10^{-3} h$）。1 歩は $0.5 h$ まで、`seed` から $1.5 h$ より離れたらやめる
+fn saddle_on_surface(f1: &Program, f2: &Program, seed: [f64; 3], h: f64) -> Option<[f64; 3]> {
+    let (_, g10) = value_grad(f1, seed, h)?;
+    let (_, g20) = value_grad(f2, seed, h)?;
+    let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let (s1, s2) = (norm(g10), norm(g20));
+    if !(s1 > 0.0 && s2 > 0.0) {
+        return None;
+    }
+    let residual = |p: [f64; 3]| -> Option<[f64; 4]> {
+        let (v1, g1) = value_grad(f1, p, h)?;
+        let (_, g2) = value_grad(f2, p, h)?;
+        let l = norm(g1);
+        if l == 0.0 {
+            return None;
+        }
+        let n = g1.map(|v| v / l);
+        let dn = g2[0] * n[0] + g2[1] * n[1] + g2[2] * n[2];
+        let t = [0, 1, 2].map(|c| h * (g2[c] - dn * n[c]) / s2);
+        Some([v1 / s1, t[0], t[1], t[2]])
+    };
+    let e = 1e-3 * h;
+    let mut p = seed;
+    for _ in 0..20 {
+        let r = residual(p)?;
+        let mut jac = [[0.0; 3]; 4];
+        for c in 0..3 {
+            let (mut a, mut b) = (p, p);
+            a[c] += e;
+            b[c] -= e;
+            let (ra, rb) = (residual(a)?, residual(b)?);
+            for k in 0..4 {
+                jac[k][c] = (ra[k] - rb[k]) / (2.0 * e);
+            }
+        }
+        // 正規方程式 JᵀJ δ = −Jᵀ r（少しだけ減衰を足す）
+        let mut a = vec![vec![0.0; 3]; 3];
+        let mut b = vec![0.0; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                a[i][j] = (0..4).map(|k| jac[k][i] * jac[k][j]).sum();
+            }
+            b[i] = -(0..4).map(|k| jac[k][i] * r[k]).sum::<f64>();
+        }
+        let tr = a[0][0] + a[1][1] + a[2][2];
+        for (i, row) in a.iter_mut().enumerate() {
+            row[i] += 1e-10 * tr;
+        }
+        let delta = solve(a, b)?;
+        let len = norm([delta[0], delta[1], delta[2]]);
+        let scale = if len > 0.5 * h { 0.5 * h / len } else { 1.0 };
+        for c in 0..3 {
+            p[c] += delta[c] * scale;
+        }
+        if norm([0, 1, 2].map(|c| p[c] - seed[c])) > 1.5 * h {
+            return None;
+        }
+        if len < 1e-7 * h {
+            break;
+        }
+    }
+    let r = residual(p)?;
+    let (v2, g2) = value_grad(f2, p, h)?;
+    let ok = r[0].abs() <= 1e-6 * h && norm([r[1], r[2], r[3]]) <= 1e-4 * h && v2.abs() <= 1e-4 * h * norm(g2);
+    ok.then_some(p)
+}
+
+/// 交点 `c` の周り（半径 [`CROSS_RADIUS`] マス）の線分を捨て、切れた線の端を `c` へつなぎ直す（X の字にする）。
+/// つなぐ線は $0.25 h$ ごとに区切り、間の点は [`newton_onto`] で 2 つの面の上へ寄せる（寄らなければ直線のまま）
+fn join_at_crossing(f1: &Program, f2: &Program, points: &mut Vec<[f64; 3]>, segs: &mut Vec<[usize; 2]>, c: [f64; 3], h: f64) {
+    let rho = CROSS_RADIUS * h;
+    let dist = |p: &[f64; 3]| (0..3).map(|k| (p[k] - c[k]).powi(2)).sum::<f64>().sqrt();
+    let inside: Vec<bool> = points.iter().map(|p| dist(p) < rho).collect();
+    let mut ends: Vec<usize> = Vec::new();
+    let mut kept = Vec::with_capacity(segs.len());
+    for &[a, b] in segs.iter() {
+        match (inside[a], inside[b]) {
+            (false, false) => kept.push([a, b]),
+            (true, false) => ends.push(b),
+            (false, true) => ends.push(a),
+            (true, true) => {}
+        }
+    }
+    ends.sort_unstable();
+    ends.dedup();
+    // 端が 2 つより少なければ、交点ではなかった（線の端・途切れ）。何もしない
+    if ends.len() < 2 {
+        return;
+    }
+    *segs = kept;
+    let center = points.len();
+    points.push(c);
+    for e in ends {
+        let p = points[e];
+        let pieces = (dist(&p) / (0.25 * h)).ceil().max(1.0) as usize;
+        let mids: Vec<[f64; 3]> = (1..pieces).map(|k| {
+            let t = k as f64 / pieces as f64;
+            [0, 1, 2].map(|i| p[i] + t * (c[i] - p[i]))
+        }).collect();
+        let moved = newton_onto(&[f1, f2], &mids, h);
+        let mut prev = e;
+        for (m, mv) in mids.iter().zip(moved) {
+            points.push(mv.unwrap_or(*m));
+            let id = points.len() - 1;
+            segs.push([prev, id]);
+            prev = id;
+        }
+        segs.push([prev, center]);
+    }
 }
 
 /// $F_1 = F_2 = 0$ の交わる線（曲線のメッシュ。線分ごとに 2 点と NaN）

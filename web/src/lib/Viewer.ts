@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
+import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
@@ -142,6 +143,12 @@ export class Viewer {
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
+  /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
+  private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
+  /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
+  private morphValues = new Map<number, number>()
+  /** 座標系の格子（計画 S39。座標系の番号 → 線と、元の位置・移した先・移行の値） */
+  private coordGrids = new Map<number, { line: THREE.LineSegments; q: Float32Array; target: Float32Array; s: number }>()
   /** 表示範囲の外を切り落とす6枚の平面 */
   private boxPlanes: THREE.Plane[] = []
   /** 切り口の平面（切らないなら null） */
@@ -1010,6 +1017,7 @@ export class Viewer {
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
     if (this.domain) this.buildFrame(this.domain)
+    for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
   }
 
   /** 表示範囲を設定し、軸・目盛り・枠を作り直す */
@@ -1194,7 +1202,109 @@ export class Viewer {
   }
 
   /** 式 id の曲面・曲線を設定（作り直し） */
+  /**
+   * 式の形を描く。座標系を使う式（mesh.target がある）は、計算エンジンが返した形を覚えておき、
+   * 移行のスライダーの値（[`setMorph`]）で位置を混ぜた形を描く
+   */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
+    if (mesh.target && mesh.target.length === mesh.positions.length) {
+      const m = { mesh, weld: null }
+      this.morphSources.set(id, m)
+      mesh = this.morphed(id, m)
+    } else this.morphSources.delete(id)
+    this.applyPlot(id, mesh, style)
+  }
+
+  /**
+   * 座標系を使う式の、移行のスライダーの値 s（0〜1）を変える。位置を (1 − s) q + s T(q) に書き換えて、形だけを差し替える
+   * （式は計算し直さない）。座標系を使わない式では、値を覚えるだけ
+   */
+  setMorph(id: number, s: number) {
+    const v = Math.min(1, Math.max(0, s))
+    if (this.morphValues.get(id) === v) return
+    this.morphValues.set(id, v)
+    const m = this.morphSources.get(id)
+    const style = this.styles.get(id)
+    if (m && style) this.applyPlot(id, this.morphed(id, m), style)
+  }
+
+  /**
+   * 座標系の格子（座標曲線。計画 S39）を描く・消す（`q` が null なら消す）。`q` は元の位置（座標の値）、`target` は移した先
+   * （点の列。線の間は NaN）。移行の値 `s` で混ぜて描く。枠・方眼より少し濃い色の細い線で、表示範囲・切り口で切る
+   */
+  setCoordGrid(cid: number, q: Float32Array | null, target: Float32Array | null, s: number) {
+    const old = this.coordGrids.get(cid)
+    if (old) {
+      old.line.geometry.dispose()
+      ;(old.line.material as THREE.Material).dispose()
+      this.scene.remove(old.line)
+      this.coordGrids.delete(cid)
+    }
+    this.dirty = true
+    if (!q || !target || q.length !== target.length) return
+    const mat = new THREE.LineBasicMaterial({ color: this.theme.box, transparent: true, opacity: 0.55, clippingPlanes: this.clipPlanes })
+    const line = new THREE.LineSegments(new THREE.BufferGeometry(), mat)
+    line.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
+    line.frustumCulled = false
+    this.scene.add(line)
+    const g = { line, q, target, s: -1 }
+    this.coordGrids.set(cid, g)
+    this.setCoordGridMorph(cid, s)
+  }
+
+  /** 座標系の格子の移行の値を変える（形だけを差し替える） */
+  setCoordGridMorph(cid: number, s: number) {
+    const g = this.coordGrids.get(cid)
+    if (!g || g.s === s) return
+    g.s = s
+    const pts = mixPositions(g.q, g.target, Math.min(1, Math.max(0, s)))
+    // 点の列を、隣り合う 2 点ずつの線分にする（NaN の所は線を切る）
+    const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
+    const seg: number[] = []
+    for (let k = 0; k + 5 < pts.length; k += 3) {
+      if (ok(k) && ok(k + 3)) for (let j = 0; j < 6; j++) seg.push(pts[k + j])
+    }
+    g.line.geometry.dispose()
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3))
+    g.line.geometry = geo
+    this.dirty = true
+  }
+
+  /** 移行のスライダーの値で位置を混ぜた形。s = 0 なら、計算エンジンが返した位置と法線をそのまま使う */
+  private morphed(id: number, m: { mesh: MeshData; weld: Int32Array | null }): MeshData {
+    const { mesh } = m
+    const s = this.morphValues.get(id) ?? 0
+    const target = mesh.target!
+    const positions = mixPositions(mesh.positions, target, s)
+    const surface = !mesh.curve && mesh.indices.length > 0
+    let normals = mesh.normals
+    if (surface && s > 0) {
+      normals = vertexNormals(positions, mesh.indices)
+      // s = 1 では、周期のある座標の継ぎ目（φ = 0 と 2π）で同じ点になる頂点の法線をそろえる
+      if (s >= 1) weldNormals(normals, (m.weld ??= weldGroups(target, mesh.indices)))
+    }
+    const lod =
+      mesh.lod && mesh.lod.target && mesh.lod.target.length === mesh.lod.positions.length && s > 0
+        ? (() => {
+            const lp = mixPositions(mesh.lod.positions, mesh.lod.target, s)
+            return { ...mesh.lod, positions: lp, normals: vertexNormals(lp, mesh.lod.indices) }
+          })()
+        : mesh.lod
+    const mix = (q?: Float32Array, t?: Float32Array) => (q && t ? mixPositions(q, t, s) : q)
+    return {
+      ...mesh,
+      positions,
+      normals,
+      // 格子線は座標の値に沿って引く（座標系の格子に沿った線になる）
+      gridCoords: mesh.gridCoords.length > 0 || !surface ? mesh.gridCoords : mesh.positions,
+      lod,
+      outline: mix(mesh.outline, mesh.outlineTarget),
+      outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
+    }
+  }
+
+  private applyPlot(id: number, mesh: MeshData, style: PlotStyle) {
     this.sceneChanged = true
     this.notMotion = true
     const old = this.plots.get(id)
@@ -1283,6 +1393,7 @@ export class Viewer {
       }
     }
     for (const id of this.plots.keys()) this.updateStencil(id)
+    for (const g of this.coordGrids.values()) (g.line.material as THREE.Material).clippingPlanes = this.clipPlanes
     this.dirty = true
   }
 
@@ -1814,6 +1925,7 @@ export class Viewer {
     }
     this.plots.delete(id)
     this.styles.delete(id)
+    this.morphSources.delete(id)
   }
 }
 

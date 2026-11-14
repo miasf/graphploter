@@ -26,6 +26,10 @@ export const SHORTCUTS: Record<string, string> = {
     ].map((f) => [f, `\\operatorname{${f}}`]),
   ),
   pi: '\\pi',
+  // 座標の名前（座標系。計画 S38）
+  theta: '\\theta',
+  phi: '\\varphi',
+  rho: '\\rho',
   '<=': '\\le',
   '>=': '\\ge',
   sqrt: '\\sqrt{#?}',

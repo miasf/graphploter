@@ -136,6 +136,33 @@ export interface RotationGroup {
   center: number[]
 }
 
+/**
+ * 座標系（計画 9 章）。座標の値 q（式の x, y, z）を、空間の点 T(q) へ移す。式ごとに選ぶ（選ばなければ直交座標）。
+ * 移行のスライダー morph = s で、(1 − s) q + s T(q) を描く（s = 0 は今の絵、s = 1 は座標系で移した絵）
+ */
+export interface CoordSystem {
+  id: number
+  name: string
+  /** 用意した座標系か、自作か（式・範囲の初期値を決めるだけ。描くときは map と ranges を使う） */
+  preset: 'cylinder' | 'sphere' | 'custom'
+  /** T の 3 つの成分（LaTeX。変数は x, y, z。パラメータも使える） */
+  map: [string, string, string]
+  /**
+   * 座標の名前（計画 S38。計算エンジンの名前: r, theta, phi など。無い古い保存データは x, y, z）。
+   * 座標系を選んだ式と、この座標系の式・範囲では、この名前で 3 つの座標を書ける
+   */
+  names?: [string, string, string]
+  /** 作る範囲（座標の値の範囲。LaTeX。2\pi なども書ける）。x, y, z の順 */
+  ranges: [[string, string], [string, string], [string, string]]
+  /** 移行のスライダー（0〜1） */
+  morph: number
+  /**
+   * 座標系の格子（座標曲線。計画 S39）。on なら、この座標系を使う式があるときに描く（無い古い保存データは on）。
+   * faces は線を引く面（ビット a: 座標 a が範囲の最小の面。既定は 4 = 3 つ目の座標の面）
+   */
+  grid?: { on: boolean; faces: number }
+}
+
 /** フォルダ: 式をまとめて、一覧で折りたためるようにする（Desmos のフォルダと同じ） */
 export interface Folder {
   id: number
@@ -231,6 +258,8 @@ export interface PlotItem extends PlotStyle {
   folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
+  /** 座標系の番号（CoordSystem.id。無ければ直交座標） */
+  coordSys?: number
 }
 
 /** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */
@@ -253,6 +282,8 @@ export interface CapData {
   indices: Uint32Array
   /** 頂点ごとの色分けの値（粗い版で、本体が値で色を付けるとき。無ければ省略） */
   complexValues?: Float32Array
+  /** 座標系で移した先 T(q)（頂点ごとに 3 つ。粗い版で、座標系を使うとき。無ければ省略） */
+  target?: Float32Array
 }
 
 /** Rust 側で作ったメッシュ */
@@ -293,6 +324,11 @@ export interface MeshData {
   outline?: Float32Array
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
   outlineDashed?: Float32Array
+  /** 座標系で移した先 T(q)（頂点ごとに 3 つ。座標系を使う式だけ。無ければ省略）。描画側が移行のスライダーで positions と混ぜる */
+  target?: Float32Array
+  /** outline・outlineDashed を座標系で移した先 */
+  outlineTarget?: Float32Array
+  outlineDashedTarget?: Float32Array
 }
 
 // ---- Web Worker とのやりとり ----
@@ -333,6 +369,12 @@ export interface PlotRequest {
   hidden: { mode: number; count: number } | null
   /** 座標を複素数にする */
   complexCoords: boolean
+  /**
+   * 座標系（計算エンジン用の式。無ければ直交座標）。map は組 (X, Y, Z) の式、ranges は作る範囲 [最小, 最大] × 3（式）、
+   * names は座標の名前 3 つ（カンマ区切り。r,theta,phi など。空なら x, y, z だけ）。
+   * 座標系があると、domain の代わりに作る範囲で図形を作る（画面の箱は domain のまま）
+   */
+  coord: { map: string; ranges: [string, string][]; names: string } | null
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
   /** 2D 表示の描き方。true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影 */
@@ -383,6 +425,26 @@ export interface CapRequest {
 }
 
 export type CapResponse = { requestId: number; cap: CapData | null }
+
+/** 座標系の格子（座標曲線。計画 S39）の依頼。map・ranges・names は PlotRequest.coord と同じ（計算エンジン用の式） */
+export interface CoordGridRequest {
+  type: 'grid'
+  requestId: number
+  map: string
+  ranges: [string, string][]
+  names: string
+  params: Record<string, ParamValue>
+  /** 範囲を何等分した所に線を引くか */
+  lines: number
+  /** 線を引く面（ビット a: 座標 a が範囲の最小の面） */
+  faces: number
+  flat: boolean
+}
+
+/** 座標系の格子: 元の位置（座標の値）と移した先（点の列。線の間は NaN）。式に誤りがあれば error */
+export type CoordGridResponse =
+  | { requestId: number; ok: true; positions: Float32Array; target: Float32Array }
+  | { requestId: number; ok: false; error: string }
 
 export type PlotResponse =
   | {

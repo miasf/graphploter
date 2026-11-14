@@ -2,7 +2,7 @@
 // - ブラウザ（localStorage）に自動で保存し、次に開いたときに元に戻す
 // - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）
 
-import type { ComplexMode, CutStyle, Domain, Folder, GridStyle, HiddenStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
+import type { ComplexMode, CoordSystem, CutStyle, Domain, Folder, GridStyle, HiddenStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
 export interface SavedItem {
@@ -34,6 +34,8 @@ export interface SavedItem {
   edges?: boolean
   /** 入っているフォルダの番号（古い保存データには無い） */
   folder?: number
+  /** 座標系の番号（古い保存データには無い。無ければ直交座標） */
+  coordSys?: number
 }
 
 /** 保存する状態全体 */
@@ -55,6 +57,8 @@ export interface SavedState {
   flat?: boolean
   /** 回転のグループ（古い保存データには無い） */
   groups?: RotationGroup[]
+  /** 座標系（古い保存データには無い） */
+  coordSystems?: CoordSystem[]
   /** 2D 表示を切り口で描くか（古い保存データには無い。無ければ投影） */
   flatSlice?: boolean
   /** フォルダ（古い保存データには無い） */

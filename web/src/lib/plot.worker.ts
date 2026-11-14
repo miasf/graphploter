@@ -10,6 +10,8 @@ import init, {
   field_mode_reset,
   hidden_style,
   complex_coords,
+  coord_system,
+  coord_grid,
   last_used_params,
   plot,
   take_field_values,
@@ -19,7 +21,7 @@ import init, {
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
-import type { CapData, CapRequest, CapResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
+import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
 import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
@@ -95,7 +97,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -199,7 +201,13 @@ function makeCap(source: CapSource, cut: CutRequest, resolution: number, t?: Tal
 
 function capTransfer(cap: CapData | null): ArrayBuffer[] {
   if (!cap) return []
-  return [cap.positions.buffer, cap.normals.buffer, cap.indices.buffer, ...(cap.complexValues ? [cap.complexValues.buffer] : [])] as ArrayBuffer[]
+  return [
+    cap.positions.buffer,
+    cap.normals.buffer,
+    cap.indices.buffer,
+    ...(cap.complexValues ? [cap.complexValues.buffer] : []),
+    ...(cap.target ? [cap.target.buffer] : []),
+  ] as ArrayBuffer[]
 }
 
 /**
@@ -215,7 +223,37 @@ function reusable(cached: NonNullable<ReturnType<typeof shapes.get>>, key: strin
   return cached.ires === req.implicitResolution && cached.thorough === ((req.flags & PLOT_THOROUGH) !== 0)
 }
 
-self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
+self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridRequest>) => {
+  if ('type' in ev.data && ev.data.type === 'grid') {
+    // 座標系の格子（計画 S39）
+    const g = ev.data
+    await ready
+    let res: CoordGridResponse
+    try {
+      const used = new Set<string>()
+      const names = ['x', 'y', 'z']
+      const ranges = g.ranges.flatMap((r, k) => {
+        const [a, b] = range(`座標系の ${names[k]}`, r, g.params, used)
+        return [a, a < b ? b : a + 1]
+      })
+      const m = coord_grid(
+        g.map,
+        g.names,
+        new Float64Array(ranges),
+        Object.keys(g.params).join(','),
+        new Float64Array(Object.values(g.params).flatMap((p) => [p.re, p.im])),
+        g.lines,
+        g.faces,
+        g.flat,
+      )
+      res = { requestId: g.requestId, ok: true, positions: m.take_positions(), target: m.take_target() }
+      m.free()
+    } catch (e) {
+      res = { requestId: g.requestId, ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+    self.postMessage(res, { transfer: res.ok ? [res.positions.buffer as ArrayBuffer, res.target.buffer as ArrayBuffer] : [] })
+    return
+  }
   if ('type' in ev.data) {
     const { requestId, itemId, cut, resolution } = ev.data
     await ready
@@ -235,10 +273,22 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
   const t0 = performance.now()
   const tally: Tally = { eval: 0, mesh: 0, lod: 0, copy: 0 }
   let localDelay = 0 // 回す前の形を作り始めるまでの待ち（ms）
-  const domainArr = new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax])
+  let domainArr = new Float64Array([d.xmin, d.xmax, d.ymin, d.ymax, d.zmin, d.zmax])
   try {
     const rangeNames = Object.keys(ranges)
     const rangeUsed = new Set<string>()
+    // 座標系: 図形は作る範囲（座標の値の範囲）で作る（画面の箱は表示範囲のまま）
+    if (req.coord) {
+      const names = ['x', 'y', 'z']
+      domainArr = new Float64Array(
+        req.coord.ranges.flatMap((r, k) => {
+          const [a, b] = range(`座標系の ${names[k]}`, r, params, rangeUsed)
+          // 2D 表示では縦の座標の範囲を使わない（長さ 0 でもよい）。ほかの座標は長さが要る
+          if (!(a < b) && !(req.flat && k === 2)) throw new Error(`座標系の ${names[k]} の範囲: 左の値を右の値より小さくしてください`)
+          return [a, a < b ? b : a + 1]
+        }),
+      )
+    }
     const rangeValues = rangeNames.map((n) => range(n, ranges[n], params, rangeUsed))
     // 座標の範囲（0 〜 a など）が計算できなくても、パラメータの定義（a = 1）は計算する
     // （そうしないと、範囲で使う a を定義する行まで同じエラーになり、a がいつまでも定義されない）
@@ -267,6 +317,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
       hidden_style(hiddenStyle)
       complex_coords(req.complexCoords)
+      coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
       return plot(
         source,
         domainArr,
@@ -452,11 +503,17 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     const volume = volumeN > 0 ? { n: volumeN, values: r.take_volume() } : undefined
     const outline = r.take_outline()
     const outlineDashed = r.take_outline_dashed()
+    const target = g.take_target()
+    const outlineTarget = r.take_outline_target()
+    const outlineDashedTarget = r.take_outline_dashed_target()
     const mesh = {
       valueRange: vr.length === 2 ? ([vr[0], vr[1]] as [number, number]) : null,
       ...(volume ? { volume } : {}),
       ...(outline.length > 0 ? { outline } : {}),
       ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
+      ...(target.length > 0 ? { target } : {}),
+      ...(outlineTarget.length > 0 ? { outlineTarget } : {}),
+      ...(outlineDashedTarget.length > 0 ? { outlineDashedTarget } : {}),
       positions: g.take_positions(),
       normals: g.take_normals(),
       indices: g.take_indices(),
@@ -464,7 +521,9 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       lod: g.has_lod_mesh
         ? (() => {
             const cv = g.take_lod_complex_values()
+            const lt = g.take_lod_target()
             return {
+              ...(lt.length > 0 ? { target: lt } : {}),
               positions: g.take_lod_positions(),
               normals: g.take_lod_normals(),
               indices: g.take_lod_mesh_indices(),
@@ -516,6 +575,9 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         ...(res.mesh.volume ? [res.mesh.volume.values.buffer] : []),
         ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
         ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),
+        ...(res.mesh.target ? [res.mesh.target.buffer] : []),
+        ...(res.mesh.outlineTarget ? [res.mesh.outlineTarget.buffer] : []),
+        ...(res.mesh.outlineDashedTarget ? [res.mesh.outlineDashedTarget.buffer] : []),
         ...capTransfer(res.mesh.lod),
         ...capTransfer(res.cap),
       ]

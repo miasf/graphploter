@@ -20,6 +20,11 @@ export interface Sample {
   view?: SampleView
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
   play?: string
+  /**
+   * 座標系で描く例（計画 9 章）。追加する式を、この座標系（用意した座標系。同じものがあれば使い回す）で描く。
+   * morph は移行のスライダーの値、play なら移行を再生する、flat なら 2D 表示にする
+   */
+  coord?: { preset: 'cylinder' | 'sphere'; morph: number; play?: boolean; flat?: boolean; ranges?: [[string, string], [string, string], [string, string]] }
 }
 
 /** サンプルと一緒に設定する見え方 */
@@ -203,6 +208,32 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           { latex: 'y=x,z=0,0\\le x\\le1', options: { color: '#c74440', lineWidth: 5 } },
           { latex: 'x=y=z=1', options: { color: '#2d70b3', lineWidth: 6 } },
         ],
+      },
+    ],
+  },
+  {
+    title: '座標系',
+    samples: [
+      {
+        label: '球座標の (t, t, t)（まっすぐな線がらせんに）',
+        items: [{ latex: '\\left(t,t,t\\right)', options: { color: '#c74440', lineWidth: 4, ranges: { t: ['0', '5'] } } }],
+        coord: { preset: 'sphere', morph: 0, play: true },
+      },
+      {
+        label: '球座標の x = 2（平面が球に）',
+        items: [{ latex: 'x=2', options: { color: '#2d70b3' } }],
+        coord: { preset: 'sphere', morph: 1 },
+      },
+      {
+        label: '円柱座標の x = 1 + cos 3y',
+        items: [{ latex: 'x=1+\\cos\\left(3y\\right)', options: { color: '#388c46' } }],
+        coord: { preset: 'cylinder', morph: 1 },
+      },
+      {
+        label: '極座標のバラ曲線 x = cos 2y（2D 表示）',
+        items: [{ latex: 'x=\\cos\\left(2y\\right)', options: { color: '#6042a6', lineWidth: 4 } }],
+        // 半径の負の側も描く（r < 0 の所が残りの 2 枚の花びら）
+        coord: { preset: 'cylinder', morph: 0, play: true, flat: true, ranges: [['-5', '5'], ['0', '2\\pi'], ['-5', '5']] },
       },
     ],
   },
