@@ -67,6 +67,19 @@ for (const input of ['x_{a}', '2_{1}', '\\alpha', '\\frac{1}']) {
   check(`${input} はエラー`, threw, true)
 }
 
+// 連立方程式・不等式（実際の出力の空白は、計算エンジンの読み方に影響しない）
+const squash = (t: string) => t.replace(/\s+/g, '')
+for (const [input, want] of [
+  ['x\\le y\\le z', 'x<=y<=z'],
+  ['x^2+y^2+z^2<4', 'x^(2)+y^(2)+z^(2)<4'],
+  ['y=x,z=0', 'y=x,z=0'],
+  ['\\left(\\cos t,\\sin t,t\\right),z\\ge0', '(cost,sint,t),z>=0'],
+  ['0\\leq z\\lt\\sin x', '0<=z<sinx'],
+  ['x\\gt y\\geqslant 1', 'x>y>=1'],
+]) {
+  check(input, squash(latexToText(input)), want)
+}
+
 // 組の分割・結合
 check('split', splitTuple('\\left(\\cos t,\\sin t,\\frac{t}{4}\\right)'), ['\\cos t', '\\sin t', '\\frac{t}{4}'])
 check('split 括弧の掛け算は組ではない', splitTuple('\\left(x+1\\right)\\left(y+1\\right)'), null)

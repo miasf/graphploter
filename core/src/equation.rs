@@ -25,7 +25,7 @@
 //! q = R (p − c) + c に動かしてから、断面・射影をとる。式は p = c + Rᵀ (q − c) を代入して q の式にする。
 
 use crate::eval::{Params, Program};
-use crate::parser::{parse, BinOp, Expr, ParseError};
+use crate::parser::{parse, parse_system, BinOp, Expr, ParseError, Rel};
 use num_complex::Complex64 as C;
 
 /// 座標空間の設定
@@ -285,6 +285,18 @@ pub enum Plot {
     Multi(Vec<Plot>),
     /// 複素平面の図形（[`complex_plane`]）。中身は媒介変数表示 (Re f, Im f, 縦の値) で、`label` は画面に出す説明
     ComplexPlane { inner: Box<Plot>, label: String },
+    /// 連立方程式・不等式（[`system`]）: 等式 F_i = 0 と不等式 G_j ≤ 0 を全部満たす所。
+    /// 3 次元では、等式の数 m が 0 なら領域、1 なら曲面、2 なら曲線、3 なら点
+    System {
+        /// 等式が 1 本のとき: その行を今までの道でコンパイルしたもの（陽関数・回した陽関数・陰関数）
+        base: Option<Box<Plot>>,
+        /// 等式 F_i = 0（変数は表示中の 3 つの座標）
+        eqs: Vec<Program>,
+        /// 不等式 G_j ≤ 0（変数は表示中の 3 つの座標）
+        cuts: Vec<Program>,
+        /// 不等式ごとに、厳密（`<`・`>`）か
+        strict: Vec<bool>,
+    },
 }
 
 impl Plot {
@@ -306,6 +318,16 @@ impl Plot {
             Plot::Param { .. } => "パラメータ".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
             Plot::ComplexPlane { label, .. } => label.clone(),
+            Plot::System { base, eqs, cuts, .. } => {
+                let cut = if cuts.is_empty() { "" } else { "（不等式で切り取り）" };
+                match (eqs.len(), base) {
+                    (0, _) => "不等式の領域".into(),
+                    (1, Some(b)) => format!("{}{cut}", b.kind_label()),
+                    (1, None) => format!("陰関数{cut}"),
+                    (2, _) => format!("連立方程式の曲線{cut}"),
+                    _ => "連立方程式の点".into(),
+                }
+            }
         }
     }
 
@@ -341,6 +363,15 @@ impl Plot {
             | Plot::Sheets { sets, .. } => sets.iter().flatten().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
             Plot::ComplexPlane { inner, .. } => return inner.used_params(),
+            Plot::System { base, eqs, cuts, .. } => {
+                let mut out: Vec<String> = base.as_ref().map_or(Vec::new(), |b| b.used_params());
+                for n in eqs.iter().chain(cuts).flat_map(|p| p.used_params()) {
+                    if !out.contains(n) {
+                        out.push(n.clone());
+                    }
+                }
+                return out;
+            }
             Plot::Multi(ps) => {
                 let mut out: Vec<String> = Vec::new();
                 for n in ps.iter().flat_map(|p| p.used_params()) {
@@ -400,10 +431,16 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
 
-    let parts: Vec<&str> = source.split('=').collect();
-    let (l, r) = match parts.as_slice() {
-        [rhs] => {
-            let e = parse_at(rhs, 0)?;
+    let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
+    let single = chains.len() == 1 && (chains[0].rels.is_empty() || chains[0].rels == [Rel::Eq]);
+    if !single {
+        return system(chains, params, space);
+    }
+    let chain = chains.remove(0);
+    let (l, r) = match chain.exprs.len() {
+        1 => {
+            let e = chain.exprs.into_iter().next().unwrap_or(Expr::Num(0.0));
             check_dims(&e, space)?;
             if let Expr::Tuple(items) = e {
                 return parametric(items, params, space);
@@ -420,9 +457,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
             }
             (Expr::Var(shown[2].clone()), e)
         }
-        [lhs, rhs] => {
-            let l = parse_at(lhs, 0)?;
-            let r = parse_at(rhs, lhs.chars().count() + 1)?;
+        _ => {
+            let mut it = chain.exprs.into_iter();
+            let (l, r) = (it.next().unwrap_or(Expr::Num(0.0)), it.next().unwrap_or(Expr::Num(0.0)));
             check_dims(&l, space)?;
             check_dims(&r, space)?;
             if matches!(l, Expr::Tuple(_)) || matches!(r, Expr::Tuple(_)) {
@@ -445,7 +482,6 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
             }
             (l, r)
         }
-        _ => return Err("= は1つだけにしてください".into()),
     };
 
     // リストがあれば、要素ごと（組み合わせの数だけ）の式にして、それぞれを描く
@@ -462,6 +498,103 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         return Ok(Plot::Multi(plots));
     }
     compile_pair(l, r, params, space)
+}
+
+/// 等式の上限（表示中の座標は 3 つなので、4 本以上は一般に空）
+const MAX_EQUATIONS: usize = 3;
+/// 不等式の上限
+const MAX_INEQUALITIES: usize = 8;
+
+/// 連立方程式・不等式（[`Plot::System`]）。行ごとの関係の連鎖を、隣どうしの関係 (左, 関係, 右) に分けてコンパイルする
+fn system(chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
+    let shown = space.shown();
+    let mut rels: Vec<(Expr, Rel, Expr)> = Vec::new();
+    for chain in chains {
+        if chain.rels.is_empty() {
+            return Err(if matches!(chain.exprs[0], Expr::Tuple(_)) {
+                "媒介変数表示と不等式の組み合わせは、まだ使えません".into()
+            } else {
+                "連立の式は、行ごとに = か不等号を付けてください".into()
+            });
+        }
+        for e in &chain.exprs {
+            check_dims(e, space)?;
+            if matches!(e, Expr::Tuple(_)) {
+                return Err("媒介変数表示は = を付けずに (x(t), y(t), z(t)) の形で書いてください".into());
+            }
+        }
+        for (k, rel) in chain.rels.iter().enumerate() {
+            rels.push((chain.exprs[k].clone(), *rel, chain.exprs[k + 1].clone()));
+        }
+    }
+    let m = rels.iter().filter(|(_, r, _)| *r == Rel::Eq).count();
+    if m > MAX_EQUATIONS {
+        return Err(format!("等式が多すぎます（{MAX_EQUATIONS} 本まで）"));
+    }
+    if rels.len() - m > MAX_INEQUALITIES {
+        return Err(format!("不等式は {MAX_INEQUALITIES} 本までにしてください"));
+    }
+    let ranged = space.ranged();
+    for (l, _, r) in &rels {
+        if !shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
+            return Err(match l {
+                Expr::Var(name) if coord_index(name).is_none() => "パラメータの定義は、1 行に 1 つだけ書いてください".into(),
+                _ => format!("表示中の座標（{}）のどれかを使った式にしてください", shown.join(", ")),
+            });
+        }
+        if ranged.iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
+            return Err("連立方程式・不等式では、範囲で重ねられません（断面にしてください）".into());
+        }
+    }
+    // リストがあれば、組み合わせごとの連立にする
+    let sides: Vec<Expr> = rels.iter().flat_map(|(l, _, r)| [l.clone(), r.clone()]).collect();
+    if sides.iter().any(|e| first_list(e).is_some()) {
+        let plots = expand_lists(&sides)?
+            .into_iter()
+            .map(|v| {
+                let rs = rels.iter().zip(v.chunks(2)).map(|((_, rel, _), lr)| (lr[0].clone(), *rel, lr[1].clone())).collect();
+                system_of(rs, params, space)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Plot::Multi(plots));
+    }
+    system_of(rels, params, space)
+}
+
+/// 関係の列（リストを含まない）を [`Plot::System`] にする
+fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Result<Plot, String> {
+    let shown = space.shown();
+    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+    let consts = space.with_hidden(params);
+    let rot = space.rotation_matrix();
+    // 左辺 − 右辺（回転していれば、座標を回した後の座標の式に置き換えてから引く）
+    let diff = |a: &Expr, b: &Expr| -> Result<Program, String> {
+        let (a, b) = match &rot {
+            Some(m) => (rotate_coords(a, m, space), rotate_coords(b, m, space)),
+            None => (a.clone(), b.clone()),
+        };
+        Program::compile_with(&Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b)), &shown_refs, &consts)
+    };
+    let (mut eqs, mut cuts, mut strict) = (Vec::new(), Vec::new(), Vec::new());
+    let mut eq_rows = Vec::new();
+    for (l, rel, r) in &rels {
+        match rel {
+            Rel::Eq => {
+                eqs.push(diff(l, r)?);
+                eq_rows.push((l.clone(), r.clone()));
+            }
+            Rel::Le | Rel::Lt => cuts.push(diff(l, r)?),
+            Rel::Ge | Rel::Gt => cuts.push(diff(r, l)?),
+        }
+        if *rel != Rel::Eq {
+            strict.push(matches!(rel, Rel::Lt | Rel::Gt));
+        }
+    }
+    let base = match eq_rows.as_slice() {
+        [(l, r)] => Some(Box::new(compile_pair(l.clone(), r.clone(), params, space)?)),
+        _ => None,
+    };
+    Ok(Plot::System { base, eqs, cuts, strict })
 }
 
 /// 左辺 = 右辺（リストを含まない）の式をコンパイルする（陽関数・陰関数・範囲で重ねた立体）
@@ -1042,6 +1175,87 @@ mod tests {
         Space::basic(4, axes, vec![0.0, 0.0, 0.0, w])
     }
 
+    /// 関係が「= 1 つだけ」か「無し」の式は、連立の文法を入れる前と同じ種類になる
+    #[test]
+    fn single_relation_is_unchanged() {
+        for (src, want) in [
+            ("z = x^2", "z = f(x, y)"),
+            ("x^2 + y^2 = z", "z = f(x, y)"),
+            ("y = x z", "y = f(x, z)"),
+            ("x = cos(y)", "x = f(y, z)"),
+            ("x^2 + y^2 + z^2 = 1", "陰関数"),
+            ("z = z^2 + x", "陰関数"),
+            ("sin(x) y", "z = f(x, y)"),
+            ("a = 1", "パラメータ"),
+            ("z = [1, 2] x", "z = f(x, y) × 2"),
+            ("(cos t, sin t, t)", "媒介変数表示の曲線"),
+            ("e^(i t)", "複素平面の曲線（横 Re f, 奥 Im f）"),
+            ("mod(x, y) = 1", "陰関数"),
+        ] {
+            assert_eq!(kind(src), want, "{src}");
+        }
+    }
+
+    /// 連立方程式・不等式の種類
+    #[test]
+    fn systems_are_classified() {
+        for (src, want) in [
+            ("y = x, z = 0", "連立方程式の曲線"),
+            ("y = x = z", "連立方程式の曲線"),
+            ("x = y = z = 1", "連立方程式の点"),
+            ("x ≤ y", "不等式の領域"),
+            ("x^2 + y^2 + z^2 < 4", "不等式の領域"),
+            ("x ≤ y ≤ z", "不等式の領域"),
+            ("0 ≤ z ≤ sin(x) cos(y)", "不等式の領域"),
+            ("x^2 + y^2 + z^2 = 4, z ≥ 0", "陰関数（不等式で切り取り）"),
+            ("z = x^2 + y^2, z ≤ 4", "z = f(x, y)（不等式で切り取り）"),
+            ("y = [1, 2] x, z = 0", "連立方程式の曲線 × 2"),
+        ] {
+            assert_eq!(kind(src), want, "{src}");
+        }
+        let Ok(Plot::System { eqs, cuts, strict, .. }) = compile("y = x, 0 ≤ x ≤ 1") else { panic!() };
+        assert_eq!((eqs.len(), cuts.len(), strict), (1, 2, vec![false, false]));
+    }
+
+    /// 不等号の書き方は、どれも同じ G ≤ 0 になる（`<` は厳密の印だけが違う）
+    #[test]
+    fn relations_are_equivalent() {
+        let g = |src: &str| match compile(src) {
+            Ok(Plot::System { cuts, strict, .. }) => (cuts.into_iter().next().unwrap(), strict[0]),
+            _ => panic!("{src}"),
+        };
+        let pts: Vec<[f64; 3]> =
+            (0..100).map(|k| [(k as f64 * 0.37).sin() * 3.0, (k as f64 * 0.71).cos() * 3.0, k as f64 * 0.05]).collect();
+        let vals = |p: &Program| {
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| pts.iter().map(|q| q[c]).collect());
+            let mut out = vec![C::new(0.0, 0.0); pts.len()];
+            p.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+            out
+        };
+        let (base, _) = g("x <= y");
+        for src in ["x ≤ y", "x ≦ y", "y >= x", "y ≥ x", "x＜=y", "x < y"] {
+            let (p, strict) = g(src);
+            assert_eq!(vals(&p), vals(&base), "{src}");
+            assert_eq!(strict, src == "x < y", "{src}");
+        }
+    }
+
+    #[test]
+    fn system_errors() {
+        for src in ["(x = y)", "x <", "x = y,", ", x = y", "a = 1, b = 2", "x, y = 1", "sin(x ≤ 1)"] {
+            assert!(kind(src).starts_with("error"), "{src}: {}", kind(src));
+        }
+        assert_eq!(kind("(x = y)"), "error: =・≤ などは、括弧の外に書いてください（4文字目）");
+        assert!(kind("x = y,").contains("`,` の前後に式を書いてください"));
+        assert!(kind("a = 1, b = 2").contains("パラメータの定義は、1 行に 1 つだけ"));
+        let four = Space::basic(4, [0, 1, 2], vec![0.0; 4]);
+        let e = compile_with("x = y = z = w = 1", &Params::new(), &four).err().unwrap();
+        assert!(e.contains("等式が多すぎます"), "{e}");
+        // エラーの位置は、式全体での位置
+        let e = kind("y = x, z = (");
+        assert!(e.ends_with("（13文字目）"), "{e}");
+    }
+
     #[test]
     fn classify() {
         assert_eq!(kind("sin(x) y"), "z = f(x, y)");
@@ -1051,7 +1265,7 @@ mod tests {
         assert_eq!(kind("x = cos(y)"), "x = f(y, z)");
         assert_eq!(kind("x^2 + y^2 + z^2 = 1"), "陰関数");
         assert_eq!(kind("z = z^2 + x"), "陰関数");
-        assert!(kind("x = y = z").starts_with("error"));
+        assert_eq!(kind("x = y = z"), "連立方程式の曲線");
         assert!(kind("x + z").starts_with("error"));
         assert_eq!(kind("(cos t, sin t, t)"), "媒介変数表示の曲線");
         assert_eq!(kind("(cos t, sin t)"), "媒介変数表示の曲線");
