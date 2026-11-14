@@ -36,24 +36,38 @@ export interface GridStyle {
 /**
  * 表示していない座標（w 以降）を使う式の見せ方。slice: 断面（スライダーの値 1 つ）、layers: 等値面を何枚も（範囲を等分した値ごとの図形を重ね、値で色を付ける）、
  * planes: 断面の塗り分け（表示範囲の中の平面を w = f の値で塗る）、volume: 伝達関数（値に色と不透明度を割り当てて重ね塗りする）、
- * stack: 範囲で重ねる（範囲で動かしたとき通る領域を立体で描く。次元の設定の「範囲で重ねる」を、この式だけの範囲で使う）。
+ * stack: 範囲で重ねる（範囲で動かしたとき通る領域を立体で描く。次元の設定の「範囲で重ねる」を、この式だけの範囲で使う）、
+ * field: 陰関数の F の値の伝達関数（F(x, y, z) = 0 の F の値を、volume と同じ描き方で塗る。表示していない座標は断面の値）、
+ * fog: 霧（不等式の領域の中身を、境目の面とふたではなく霧で塗る。表示していない座標は断面の値）。
  * slice 以外では、次元の設定の「範囲で重ねる」より、式の設定を優先する
  */
-export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume' | 'stack'
+export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume' | 'stack' | 'field' | 'fog'
 /** 計算エンジンに渡す HiddenMode の番号の順 */
-export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume', 'stack']
+export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume', 'stack', 'field', 'fog']
 /** 値の色の対応表。shade は式の色の明暗 */
 export type ColorMap = 'viridis' | 'turbo' | 'shade'
-/** 伝達関数の不透明度の形。flat: 一様、high: 値が大きいほど濃い、low: 小さいほど濃い、bands: 何枚かの値の所だけ濃い（等値面風） */
-export type OpacityShape = 'flat' | 'high' | 'low' | 'bands'
+/**
+ * 伝達関数の不透明度の形。flat: 一様、high: 値が大きいほど濃い、low: 小さいほど濃い、bands: 何枚かの値の所だけ濃い（等値面風）、
+ * zero: 値 0 の近くだけ濃い（ぼやけた面。幅は 0 の面からの距離 |v| / |∇v| で決めるので、式の大きさによらず一定の厚み）
+ */
+export type OpacityShape = 'flat' | 'high' | 'low' | 'bands' | 'zero'
+/**
+ * 伝達関数の重ね方。over: 手前から重ね塗り、max: 視線上の最大値（最大値投影）、min: 最小値、mean: 平均値。
+ * max・min・mean では、視線ごとに 1 つの値の色を出し、不透明度はその値で決める
+ */
+export type VolumeBlend = 'over' | 'max' | 'min' | 'mean'
 export interface HiddenStyle {
   mode: HiddenMode
-  /** 等値面の枚数（layers）・各軸の平面の枚数（planes）・濃い所の数（volume の bands） */
+  /** 等値面の枚数（layers）・各軸の平面の枚数（planes）・濃い所の数（volume の bands）・ぼやけた面の幅（zero。格子の 0.5 マス単位） */
   count: number
   colormap: ColorMap
   opacity: OpacityShape
   /** 伝達関数の濃さ（0〜1） */
   density: number
+  /** 伝達関数の重ね方（古い保存データには無い。無ければ over） */
+  blend?: VolumeBlend
+  /** 伝達関数で、値の勾配を面の法線とみなして光を当てるか（重ね塗りのとき。無ければ当てる） */
+  lit?: boolean
 }
 export const DEFAULT_HIDDEN: HiddenStyle = { mode: 'slice', count: 5, colormap: 'viridis', opacity: 'flat', density: 0.5 }
 

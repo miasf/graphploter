@@ -237,7 +237,44 @@
     { shape: 'high', label: '値が大きいほど濃い' },
     { shape: 'low', label: '値が小さいほど濃い' },
     { shape: 'bands', label: '何枚かの値の所だけ濃い（等値面風）' },
+    { shape: 'zero', label: '0 の近くだけ濃い（ぼやけた面）' },
   ]
+  const BLENDS: { blend: NonNullable<HiddenStyle['blend']>; label: string }[] = [
+    { blend: 'over', label: '手前から重ね塗り' },
+    { blend: 'max', label: '視線上の最大値' },
+    { blend: 'min', label: '視線上の最小値' },
+    { blend: 'mean', label: '視線上の平均値' },
+  ]
+  /** 陰関数 F(x, y, z) = 0（値が複素数のものも含む。不等式で切り取ったものは除く）。F の値を伝達関数で描ける */
+  const canField = $derived(/^(複素数の)?陰関数(?!（不等式)/.test(item.kind ?? ''))
+  /** 伝達関数で描いている値が複素数（色は偏角。色の対応表は使わない） */
+  const complexVolume = $derived(/の伝達関数（.*色は偏角/.test(item.kind ?? ''))
+  /** 3D の不等式の領域（標準は境目の面とふた。⚙ で霧に切り替えられる） */
+  const isRegion = $derived(/^不等式の領域(?!（2D）)/.test(item.kind ?? '') && !/の投影/.test(item.kind ?? ''))
+  /** 不等式の領域を霧で描いている */
+  const regionFog = $derived(isRegion && /霧/.test(item.kind ?? ''))
+  /** 選べる見せ方。表示していない座標を使わない陰関数は、曲面か F の値の伝達関数か。不等式の領域は、霧か境目の面か */
+  const hiddenModes = $derived(
+    isRegion || hidden.mode === 'fog'
+      ? hiddenCoords.length > 0
+        ? [
+            { mode: 'slice' as const, label: '断面（境目の面とふた）' },
+            { mode: 'fog' as const, label: '断面（霧。重い）' },
+            ...HIDDEN_MODES.filter((m) => m.mode !== 'slice'),
+          ]
+        : [
+            { mode: 'slice' as const, label: '境目の面とふた' },
+            { mode: 'fog' as const, label: '霧（中身を薄く塗る。回すと重い）' },
+          ]
+      : hiddenCoords.length > 0
+        ? [...HIDDEN_MODES, ...(canField || hidden.mode === 'field' ? [{ mode: 'field' as const, label: '陰関数の F の値を伝達関数で' }] : [])]
+        : [
+            { mode: 'slice' as const, label: '曲面（F = 0）' },
+            { mode: 'field' as const, label: 'F の値を伝達関数で（色と透明度）' },
+          ],
+  )
+  /** 伝達関数で描く見せ方か */
+  const isVolume = $derived(hidden.mode === 'volume' || hidden.mode === 'field')
   const isExplicit = $derived(
     !isComplexPlane && (/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off'),
   )
@@ -369,7 +406,7 @@
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
       {/if}
     {/if}
-    {#if hidden.mode === 'slice'}
+    {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
       <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
       {#each hiddenCoords.filter((n) => item.slice && n in item.slice) as name (name)}
         <div class="own-slice">
@@ -572,16 +609,16 @@
               </p>
             {/if}
           {/if}
-          {#if hiddenCoords.length > 0}
+          {#if hiddenCoords.length > 0 || canField || hidden.mode === 'field' || isRegion || hidden.mode === 'fog'}
             <div class="complex-mode">
-              <span class="label">{hiddenCoords.map(prettyName).join('・')} の見せ方</span>
+              <span class="label">{hiddenCoords.length > 0 ? `${hiddenCoords.map(prettyName).join('・')} の見せ方` : '描き方'}</span>
               <select value={hidden.mode} onchange={(e) => onHidden({ mode: e.currentTarget.value as HiddenStyle['mode'] })}>
-                {#each HIDDEN_MODES as { mode, label } (mode)}
+                {#each hiddenModes as { mode, label } (mode)}
                   <option value={mode}>{label}</option>
                 {/each}
               </select>
             </div>
-            {#if hidden.mode === 'slice'}
+            {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
               {#each hiddenCoords.filter((n) => !(item.slice && n in item.slice)) as name (name)}
                 <button
                   class="link"
@@ -590,10 +627,33 @@
                 >
               {/each}
             {/if}
-            {#if hidden.mode !== 'slice'}
-              {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (hidden.mode === 'volume' && hidden.opacity === 'bands')}
+            {#if regionFog}
+              <label class="check">
+                <input type="checkbox" checked={hidden.lit ?? true} onchange={(e) => onHidden({ lit: e.currentTarget.checked })} />
+                境目に陰影を付ける
+              </label>
+              <div class="sliders">
+                <span class="label">濃さ</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={hidden.density}
+                  aria-label="霧の濃さ"
+                  oninput={(e) => onHidden({ density: e.currentTarget.valueAsNumber })}
+                />
+                <span class="value">{Math.round(hidden.density * 100)}%</span>
+              </div>
+              <p class="hint">
+                領域の中身を式の色の霧で薄く塗り、境目を濃くしています（表示範囲の箱の中を光線で重ね塗り）。
+                光線を表示範囲の箱の中で何百歩も進めるので、回している間は境目の面よりかなり重くなります。
+              </p>
+            {/if}
+            {#if hidden.mode !== 'slice' && hidden.mode !== 'fog'}
+              {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (isVolume && ((hidden.opacity === 'bands' && !complexVolume) || hidden.opacity === 'zero'))}
                 <div class="sliders">
-                  <span class="label">{hidden.mode === 'layers' ? '枚数' : hidden.mode === 'planes' ? '各軸の枚数' : '濃い所の数'}</span>
+                  <span class="label">{hidden.mode === 'layers' ? '枚数' : hidden.mode === 'planes' ? '各軸の枚数' : hidden.opacity === 'zero' ? '面の幅' : '濃い所の数'}</span>
                   <input
                     type="range"
                     min={hidden.mode === 'layers' ? 2 : 1}
@@ -606,7 +666,7 @@
                   <span class="value">{hidden.count}</span>
                 </div>
               {/if}
-              {#if hidden.mode !== 'stack'}
+              {#if hidden.mode !== 'stack' && !(isVolume && complexVolume)}
               <div class="complex-mode">
                 <span class="label">色</span>
                 <select value={hidden.colormap} onchange={(e) => onHidden({ colormap: e.currentTarget.value as HiddenStyle['colormap'] })}>
@@ -616,7 +676,21 @@
                 </select>
               </div>
               {/if}
-              {#if hidden.mode === 'volume'}
+              {#if isVolume}
+                <div class="complex-mode">
+                  <span class="label">重ね方</span>
+                  <select value={hidden.blend ?? 'over'} onchange={(e) => onHidden({ blend: e.currentTarget.value as HiddenStyle['blend'] })}>
+                    {#each BLENDS as { blend, label } (blend)}
+                      <option value={blend}>{label}</option>
+                    {/each}
+                  </select>
+                </div>
+                {#if (hidden.blend ?? 'over') === 'over'}
+                  <label class="check">
+                    <input type="checkbox" checked={hidden.lit ?? true} onchange={(e) => onHidden({ lit: e.currentTarget.checked })} />
+                    勾配で陰影を付ける（値の変わる向きを面の向きとみなして光を当てる）
+                  </label>
+                {/if}
                 <div class="complex-mode">
                   <span class="label">不透明度</span>
                   <select value={hidden.opacity} onchange={(e) => onHidden({ opacity: e.currentTarget.value as HiddenStyle['opacity'] })}>
@@ -646,6 +720,14 @@
                   範囲で動かしたときに図形が通る領域を、立体で描いています（範囲は式の下の欄。何等分して調べるかは右上の ⚙ の「範囲で重ねる枚数」）。
                 {:else if hidden.mode === 'planes'}
                   表示範囲の中の平面（各軸に等間隔）を、{prettyName(hiddenCoords[0])} = f の値で塗っています（{prettyName(hiddenCoords[0])} = f(x, y, z) の形の式だけ）。
+                {:else if isVolume && complexVolume}
+                  値が複素数なので、色は偏角（赤: 正の実数、水色: 負の実数、黄緑: +i の向き、紫: −i の向き。|f| が 2 倍になるごとに明るさの縞が 1 本）、
+                  不透明度の形は |f| で決めます（|f| の範囲は 0 〜 表示範囲の中の |f| の 9 割が入る値。「何枚かの値の所だけ濃い」は |f| = 2ᵏ の所、
+                  「0 の近くだけ濃い」は f = 0 の所。3 次元では f = 0 はふつう線なので、線のまわりの管になります）。
+                {:else if hidden.mode === 'field'}
+                  陰関数 F(x, y, z) = 0 の F（左辺 − 右辺）の値に色と不透明度を割り当て、表示範囲の箱の中を光線で重ね塗りしています。
+                  色の範囲は、表示範囲の中の |F| の 9 割が入る値 q での −q 〜 q（外の値は端の色）。「0 の近くだけ濃い」は、F = 0 の面からの距離
+                  |F| / |∇F| でぼかすので、式の大きさによらず同じ厚みになります。{hiddenCoords.length > 0 ? '表示していない座標は断面の値です。' : ''}
                 {:else}
                   {prettyName(hiddenCoords[0])} の値に色と不透明度を割り当て、表示範囲の箱の中を光線で重ね塗りしています（{prettyName(hiddenCoords[0])} = f(x, y, z) の形の式だけ。範囲の外の値は描きません）。
                 {/if}
