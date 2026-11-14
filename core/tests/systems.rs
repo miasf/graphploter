@@ -907,3 +907,22 @@ fn parametric_surface_is_trimmed() {
     assert!((a / (6.0 * PI * PI) - 1.0).abs() <= 0.01, "{a}");
     assert_eq!(m.grid_coords().len(), p.len());
 }
+
+// ---- 2D の領域の境目の線（計画 S34） ----
+
+#[test]
+fn flat_region_outline() {
+    let mut m = run_flat("y < x^2, y ≥ -3", true);
+    let (solid, dashed) = (m.take_outline(), m.take_outline_dashed());
+    let pts = |v: &[f32]| -> Vec<[f32; 3]> { v.chunks_exact(3).filter(|q| q[0].is_finite()).map(|q| [q[0], q[1], q[2]]).collect() };
+    let (s, d) = (pts(&solid), pts(&dashed));
+    assert!(!s.is_empty() && !d.is_empty());
+    assert!(d.iter().all(|q| (q[1] - q[0] * q[0]).abs() <= 1e-2 && q[1] >= -3.0 - 1e-3), "点線");
+    assert!(s.iter().all(|q| (q[1] + 3.0).abs() <= 1e-2), "実線");
+    // y = −3 の線は全体が残る（x が −5 〜 5）
+    let (lo, hi) = s.iter().fold((f32::MAX, f32::MIN), |(a, b), q| (a.min(q[0]), b.max(q[0])));
+    assert!(lo <= -4.9 && hi >= 4.9, "{lo} {hi}");
+    // 不等式でない式には線が無い
+    let mut m = run_flat("x^2 + y^2 = 4", true);
+    assert!(m.take_outline().is_empty() && m.take_outline_dashed().is_empty());
+}

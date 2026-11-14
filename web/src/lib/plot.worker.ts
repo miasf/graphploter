@@ -427,7 +427,11 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     // 配列は取り出して渡す（getter だと Rust 側の clone と JavaScript への写しで2回コピーになる）
     const g = geom ?? r
     const transform = transformOnly ? new Float64Array(r.transform) : localTransform
+    const outline = r.take_outline()
+    const outlineDashed = r.take_outline_dashed()
     const mesh = {
+      ...(outline.length > 0 ? { outline } : {}),
+      ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
       positions: g.take_positions(),
       normals: g.take_normals(),
       indices: g.take_indices(),
@@ -476,6 +480,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
+        ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
+        ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),
         ...capTransfer(res.mesh.lod),
         ...capTransfer(res.cap),
       ]

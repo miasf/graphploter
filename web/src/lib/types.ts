@@ -237,6 +237,10 @@ export interface MeshData {
   transform: Float64Array | null
   /** true なら形は前と同じで、transform だけが新しい（メッシュの配列は空） */
   transformOnly: boolean
+  /** 2D 表示の不等式の領域の境目の線（実線。点の列で、途切れる所に NaN）。無ければ省略 */
+  outline?: Float32Array
+  /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
+  outlineDashed?: Float32Array
 }
 
 // ---- Web Worker とのやりとり ----

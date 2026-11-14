@@ -55,10 +55,20 @@ pub struct MeshResult {
     flat: bool,
     /// 2D 表示の切り口（射影し直すときも、平面との交わりの線にする）
     flat_slice: bool,
+    /// 2D 表示の不等式の領域の境目の線（実線・点線。線分ごとに 2 点と NaN、または点の列）。ふつうは空
+    outline: (Vec<f32>, Vec<f32>),
 }
 
 #[wasm_bindgen]
 impl MeshResult {
+    /// 2D 表示の不等式の領域の境目の線のうち、実線（`≤`・`≥`）の分を取り出す（Float32Array。無ければ空）
+    pub fn take_outline(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline.0)
+    }
+    /// 同じく、点線（`<`・`>`）の分
+    pub fn take_outline_dashed(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline.1)
+    }
     /// 頂点座標（Float32Array）
     #[wasm_bindgen(getter)]
     pub fn positions(&self) -> Vec<f32> {
@@ -455,6 +465,7 @@ pub fn plot(
         inner,
         flat,
         flat_slice: ctx.flat_slice,
+        outline: built.outline,
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat,
         shape: built.shape,
         local: built.local,
@@ -570,6 +581,8 @@ struct Built {
     rotated_explicit: bool,
     /// 回す前の形で作った陰関数と、式が使っている名前（[`mesh::LocalMesh`]）
     local: Option<(mesh::LocalMesh, Vec<String>)>,
+    /// 2D 表示の不等式の領域の境目の線（実線, 点線）
+    outline: (Vec<f32>, Vec<f32>),
 }
 
 impl Built {
@@ -602,13 +615,17 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         let rotated_explicit = parts.iter().any(|b| b.rotated_explicit);
         let parts_curve_raw = parts.first().is_some_and(|b| b.curve);
         let fields = parts.iter().flat_map(|b| b.fields.iter().cloned()).collect();
+        let outline = (
+            parts.iter().flat_map(|b| b.outline.0.iter().copied()).collect(),
+            parts.iter().flat_map(|b| b.outline.1.iter().copied()).collect(),
+        );
         // 全部が n 次元の点なら、点のままつなげる（回転だけ変わったとき使い回せる）
         if parts.iter().all(|b| b.shape.is_some()) {
             let shapes: Vec<mesh::NdShape> = parts.into_iter().filter_map(|b| b.shape).collect();
             if let Some(shape) = mesh::merge_shapes(shapes.clone()) {
                 // 切り口の線にするのは射影した後（plot・Shape::project）なので、ここでは元の種類のままにする
                 let curve = parts_curve_raw;
-                return Ok(Built { shape: Some(shape), fields, curve, kind, rotated_explicit, ..Default::default() });
+                return Ok(Built { shape: Some(shape), fields, curve, kind, rotated_explicit, outline, ..Default::default() });
             }
             // つなげられない（点の並べ方が違う）ときは、射影してからつなげる
             let meshes = shapes
@@ -622,7 +639,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                     }
                 })
                 .collect();
-            return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
+            return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
         }
         let meshes = parts
             .into_iter()
@@ -638,7 +655,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 None => b.inner,
             })
             .collect();
-        return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, ..Default::default() });
+        return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
     }
     if ctx.flat {
         return build_2d(plot, ctx);
@@ -940,10 +957,20 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = flat_finish(inner.inner, inner.curve, ctx.flat_slice);
         }
         // 縦の座標 = 0 の 2 次元の問題として描く（切り口、または縦の座標を使わない式）
-        P::System { eqs, cuts, .. } => match eqs.len() {
+        P::System { eqs, cuts, strict, .. } => match eqs.len() {
             0 => {
                 b.kind = "不等式の領域（2D）".into();
                 b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
+                // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線
+                for (i, g) in cuts.iter().enumerate() {
+                    let mut line = mesh::implicit_curve_2d(g, dom, res2).positions;
+                    for (j, other) in cuts.iter().enumerate() {
+                        if j != i {
+                            system::clip_segments(&mut line, &mut system::values_of(other), 12);
+                        }
+                    }
+                    if strict[i] { &mut b.outline.1 } else { &mut b.outline.0 }.extend(line);
+                }
             }
             1 => {
                 b.curve = true;
@@ -1082,6 +1109,7 @@ impl Shape {
             inner,
             flat: self.flat,
             flat_slice: self.flat_slice,
+            outline: Default::default(),
             solid,
             field,
             shape: None,
@@ -1184,6 +1212,7 @@ impl CapSource {
             solid: false,
             flat: false,
             flat_slice: false,
+            outline: Default::default(),
         })
     }
 }
