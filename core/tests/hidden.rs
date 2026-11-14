@@ -159,3 +159,31 @@ fn coarse_version_keeps_values() {
     assert_eq!(lc.len(), lp.len());
     assert!(lc.chunks_exact(3).all(|v| [-2.0, -1.0, 0.0, 1.0, 2.0].contains(&v[0])), "粗い版の値は w の値のどれか");
 }
+
+/// 陰関数の F の値の伝達関数（見せ方 5）: F の値の格子と、|F| の分布から決めた色の範囲 [−q, q]
+#[test]
+fn implicit_field_values() {
+    let mut m = run("x^2 + y^2 + z^2 = 4", 3, &style(5.0, 4.0, 3, &[])).unwrap();
+    let n = m.volume_n() as usize;
+    assert_eq!(n, 40);
+    assert_eq!(m.kind(), "陰関数の F の値の伝達関数（40³）");
+    let vr = m.value_range();
+    assert!(vr[0] < 0.0 && (vr[0] + vr[1]).abs() < 1e-9, "{vr:?}");
+    let v = m.take_volume();
+    let at = |i: usize| -R + 2.0 * R * i as f64 / (n - 1) as f64;
+    for (x, y, z) in [(0, 0, 0), (5, 17, 39), (20, 20, 20)] {
+        let f = at(x).powi(2) + at(y).powi(2) + at(z).powi(2) - 4.0;
+        assert!(((v[(z * n + y) * n + x] as f64).abs() - f.abs()).abs() < 1e-3, "{x} {y} {z}");
+    }
+    // 表示していない座標は断面の値（次元の設定の「範囲で重ねる」より優先）
+    let mut ranges = vec![f64::NAN; 8];
+    ranges[6] = -1.0;
+    ranges[7] = 1.0;
+    let mut m = run_stacked("x^2 + y^2 + z^2 + w = 4", 4, &style(5.0, 4.0, 4, &[]), &ranges).unwrap();
+    assert!(m.kind().starts_with("陰関数の F"), "{}", m.kind());
+    let n = m.volume_n() as usize;
+    let v = m.take_volume();
+    let i = n / 2;
+    let c = -R + 2.0 * R * i as f64 / (n - 1) as f64;
+    assert!(((v[(i * n + i) * n + i] as f64).abs() - (3.0 * c * c - 4.0).abs()).abs() < 1e-3);
+}

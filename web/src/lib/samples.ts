@@ -320,6 +320,31 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         ],
       },
       {
+        label: 'w = sin x sin y sin z + cos(2x + y)/3 の最大値投影',
+        view: { dims: 4, half: 3 },
+        items: [
+          {
+            latex: 'w=\\sin x\\sin y\\sin z+\\frac{1}{3}\\cos(2x+y)',
+            options: {
+              hidden: { mode: 'volume', count: 4, colormap: 'turbo', opacity: 'high', density: 0.5, blend: 'max' },
+              ranges: { w: ['-1.3', '1.3'] },
+            },
+          },
+        ],
+      },
+      {
+        label: 'ジャイロイドの F をぼやけた面で（陰関数の F の値の伝達関数）',
+        view: { dims: 3, half: 3 },
+        items: [
+          {
+            latex: '\\sin x\\cos y+\\sin y\\cos z+\\sin z\\cos x=0',
+            options: {
+              hidden: { mode: 'field', count: 3, colormap: 'shade', opacity: 'zero', density: 0.6 },
+            },
+          },
+        ],
+      },
+      {
         label: 'w = sin x + cos y + z の断面の塗り分け',
         view: { dims: 4, half: 3 },
         items: [

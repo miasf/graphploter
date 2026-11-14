@@ -13,7 +13,7 @@ export interface VolumeUniforms {
   /** 色を付ける値の範囲（外の値は描かない） */
   uRange: { value: THREE.Vector2 }
   uColormap: { value: number }
-  /** 不透明度の形（0: 一様, 1: 値が大きいほど濃い, 2: 小さいほど濃い, 3: 何枚かの値の所だけ濃い） */
+  /** 不透明度の形（0: 一様, 1: 値が大きいほど濃い, 2: 小さいほど濃い, 3: 何枚かの値の所だけ濃い, 4: 値 0 の近くだけ濃い） */
   uShape: { value: number }
   /** 濃さ（0〜1） */
   uDensity: { value: number }
@@ -28,6 +28,14 @@ export interface VolumeUniforms {
   uOpacity: { value: number }
   /** 視線を進める歩数（格子の 1 辺の点の数の 1.5 倍。64〜192） */
   uSteps: { value: number }
+  /** 重ね方（0: 手前から重ね塗り, 1: 最大値, 2: 最小値, 3: 平均値） */
+  uBlend: { value: number }
+  /** 1 なら範囲の外の値も端の色で描く（陰関数の F の値。範囲は |F| の分布から決めた目安なので） */
+  uClamp: { value: number }
+  /** 格子の 1 辺の点の数（勾配を求める差分の幅に使う） */
+  uN: { value: number }
+  /** ぼやけた面（形 4）の幅。格子の 1 マスの何倍か */
+  uWidth: { value: number }
 }
 
 const VERTEX = /* glsl */ `
@@ -55,17 +63,43 @@ uniform vec4 uCut;
 uniform float uCutOn;
 uniform float uOpacity;
 uniform float uSteps;
+uniform float uBlend;
+uniform float uClamp;
+uniform float uN;
+uniform float uWidth;
 varying vec3 vWorld;
 ${COLORMAP_GLSL}
 
-// 値の位置 t（0〜1）での、単位の長さあたりの濃さの形
+// 値の位置 t（0〜1）での、単位の長さあたりの濃さの形。値 0 の近く（形 4）は、ここでは値の位置での近さ（重ね方が最大値などのとき）
 float shape(float t) {
   if (uShape < 0.5) return 1.0;
   // 2 乗にして、端の値と中くらいの値の差をはっきりさせる（1 乗だと中くらいの値も濃く、霧のようになる）
   if (uShape < 1.5) return 2.0 * t * t;
   if (uShape < 2.5) return 2.0 * (1.0 - t) * (1.0 - t);
-  float f = fract(t * uBands) - 0.5;
-  return 4.0 * exp(-f * f / (2.0 * 0.07 * 0.07));
+  if (uShape < 3.5) {
+    float f = fract(t * uBands) - 0.5;
+    return 4.0 * exp(-f * f / (2.0 * 0.07 * 0.07));
+  }
+  float t0 = uRange.y > uRange.x ? -uRange.x / (uRange.y - uRange.x) : 0.5;
+  float d = (t - t0) / (0.02 * uWidth);
+  return 4.0 * exp(-0.5 * d * d);
+}
+
+// 値 0 の近くだけ濃い形（重ね塗りのとき）: 0 の面からの距離を |v| / |∇v| で見積もり、格子の uWidth マスの幅のぼやけた面にする
+// （値の大きさで幅を決めると、勾配の大きい所は薄く、小さい所は厚くなる）。勾配の向き（面の法線）を gNormal に入れる
+vec3 gNormal;
+float shell(float v, vec3 q, vec3 size) {
+  float h = 1.0 / uN;
+  vec3 g = vec3(
+    texture(uTex, q + vec3(h, 0.0, 0.0)).r - texture(uTex, q - vec3(h, 0.0, 0.0)).r,
+    texture(uTex, q + vec3(0.0, h, 0.0)).r - texture(uTex, q - vec3(0.0, h, 0.0)).r,
+    texture(uTex, q + vec3(0.0, 0.0, h)).r - texture(uTex, q - vec3(0.0, 0.0, h)).r) / (2.0 * h * size);
+  float gl = length(g);
+  if (!(gl > 0.0)) return 0.0;
+  gNormal = g / gl;
+  float w = uWidth * max(max(size.x, size.y), size.z) / uN;
+  float d = v / gl / w;
+  return 4.0 * exp(-0.5 * d * d);
 }
 
 void main() {
@@ -101,19 +135,44 @@ void main() {
   float k = 24.0 * uDensity * uDensity / diag;
   vec4 acc = vec4(0.0);
   float span = uRange.y - uRange.x;
+  // 最大値・最小値・平均値: 視線上の値を 1 つにまとめる
+  float best = uBlend < 1.5 ? -1e30 : 1e30;
+  float sum = 0.0;
+  float cnt = 0.0;
   for (int i = 0; i < MAX_STEPS; i++) {
     if (float(i) >= steps) break;
     float t = tn + (float(i) + jitter) * dt;
     vec3 p = cameraPosition + dir * t;
-    float v = texture(uTex, (p - uBoxMin) / size).r;
+    vec3 q = (p - uBoxMin) / size;
+    float v = texture(uTex, q).r;
     if (!(v == v)) continue;
     float s = span > 0.0 ? (v - uRange.x) / span : 0.5;
+    if (uClamp > 0.5) s = clamp(s, 0.0, 1.0);
     if (s < 0.0 || s > 1.0) continue;
-    float a = 1.0 - exp(-k * shape(s) * dt);
+    if (uBlend > 0.5) {
+      if (uBlend < 1.5) best = max(best, s);
+      else if (uBlend < 2.5) best = min(best, s);
+      sum += s;
+      cnt += 1.0;
+      continue;
+    }
+    bool sh = uShape > 3.5;
+    float a = 1.0 - exp(-k * (sh ? shell(v, q, size) : shape(s)) * dt);
     vec3 c = colormap(s, uColormap, uBase);
+    // ぼやけた面には、視線の向きからの光で陰を付ける（光を当てないと、面の向きが分からず円盤のように見える。裏表は区別しない）
+    if (sh) c *= 0.3 + 0.7 * abs(dot(gNormal, dir));
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
     if (acc.a > 0.98) break;
+  }
+  if (uBlend > 0.5) {
+    if (cnt < 0.5) discard;
+    float s = uBlend > 2.5 ? sum / cnt : best;
+    // 不透明度は、まとめた値での濃さの形を最大 1 にそろえて 1.5 乗したもの × 濃さの 2 倍（濃さ 50% で、形の最大の所が不透明）。
+    // 最大値は視線ごとに大きめの値になりやすいので、急に上げないと中くらいの値まで濃くなり、箱全体が塗りつぶされる
+    float peak = uShape < 0.5 ? 1.0 : uShape < 2.5 ? 2.0 : 4.0;
+    float a = min(1.0, 2.0 * uDensity * pow(shape(s) / peak, 1.5));
+    acc = vec4(colormap(s, uColormap, uBase) * a, a);
   }
   acc.a *= uOpacity;
   if (acc.a < 0.003) discard;
@@ -163,15 +222,23 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
     uCutOn: { value: 0 },
     uOpacity: { value: 1 },
     uSteps: { value: 120 },
+    uBlend: { value: 0 },
+    uClamp: { value: 0 },
+    uN: { value: 64 },
+    uWidth: { value: 2 },
   }
 }
 
 /** 見せ方の設定を、材質の値にする */
 export function applyVolumeStyle(u: VolumeUniforms, h: HiddenStyle | undefined, color: THREE.Color, opacity: number) {
   u.uColormap.value = ['viridis', 'turbo', 'shade'].indexOf(h?.colormap ?? 'viridis')
-  u.uShape.value = ['flat', 'high', 'low', 'bands'].indexOf(h?.opacity ?? 'flat')
+  u.uShape.value = Math.max(0, ['flat', 'high', 'low', 'bands', 'zero'].indexOf(h?.opacity ?? 'flat'))
   u.uDensity.value = h?.density ?? 0.5
   u.uBands.value = Math.max(1, h?.count ?? 5)
+  u.uBlend.value = Math.max(0, ['over', 'max', 'min', 'mean'].indexOf(h?.blend ?? 'over'))
+  u.uClamp.value = h?.mode === 'field' ? 1 : 0
+  // ぼやけた面の幅: 枚数の欄の 1 目盛りで 0.5 マス
+  u.uWidth.value = 0.5 * Math.max(1, h?.count ?? 4)
   u.uBase.value.copy(color)
   u.uOpacity.value = Math.max(0, Math.min(1, opacity))
 }

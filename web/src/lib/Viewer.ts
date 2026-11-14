@@ -1531,6 +1531,7 @@ export class Viewer {
     u.uBoxMax.value.set(d.xmax, d.ymax, d.zmax)
     if (mesh.valueRange) u.uRange.value.set(mesh.valueRange[0], mesh.valueRange[1])
     u.uSteps.value = Math.min(192, Math.max(64, Math.round(1.5 * v.n)))
+    u.uN.value = v.n
     const geo = new THREE.BoxGeometry(d.xmax - d.xmin, d.ymax - d.ymin, d.zmax - d.zmin)
     geo.translate((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
     const box = new THREE.Mesh(geo, createVolumeMaterial(u))

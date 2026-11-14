@@ -529,6 +529,7 @@ thread_local! {
 /// NaN なら断面の値だけ）。見せ方は 0: 断面（今まで）、1: 等値面を何枚も（範囲を `枚数` 等分した値ごとの図形を重ね、値で色を付ける）、
 /// 2: 断面の塗り分け（各軸に `枚数` 枚の平面を、値で塗る）、3: 伝達関数（格子での値を返す。描画側で光線を進めて塗る）。
 /// 4: 範囲で重ねる（式ごとの範囲で、通る領域を描く）。2・3 は「表示していない座標 = 式」の形のときだけ。
+/// 5: 陰関数の F の値の伝達関数（陰関数 F(x, y, z) = 0 の F の値を格子で返す。表示していない座標を使わない式にも使える）。
 /// 断面以外では、式が使っている表示していない座標について、次元の設定の「範囲で重ねる」より、この見せ方を優先する
 #[wasm_bindgen]
 pub fn hidden_style(values: Vec<f64>) {
@@ -677,20 +678,7 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
                 })
             } else {
                 let n = ctx.implicit_resolution.clamp(24, 96);
-                let at = |a: usize, i: usize| dom.lo[a] + (dom.hi[a] - dom.lo[a]) * i as f64 / (n - 1) as f64;
-                let mut cols: [Vec<f64>; 3] = Default::default();
-                for z in 0..n {
-                    for y in 0..n {
-                        for x in 0..n {
-                            cols[0].push(at(0, x));
-                            cols[1].push(at(1, y));
-                            cols[2].push(at(2, z));
-                        }
-                    }
-                }
-                let mut out = vec![num_complex::Complex64::new(0.0, 0.0); n * n * n];
-                f.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
-                let vals = out.into_iter().map(|v| eval::as_real(v) as f32).collect();
+                let vals = grid_values(&f, dom, n);
                 Ok(Built {
                     kind: format!("{name} の値の伝達関数（{n}³）"),
                     value_range: Some(range_of(k)),
@@ -699,8 +687,55 @@ fn build_hidden(h: &[f64], source: &str, params: &eval::Params, plot: &equation:
                 })
             }
         }
+        // 陰関数の F の値の伝達関数: F(x, y, z) = 0 の F（左辺 − 右辺）の値を格子で返す。表示していない座標は断面の値。
+        // 色の範囲は |F| の 9 割の点が入る値 q での [−q, q]（F の大きさは式によって桁が違うので、表示範囲の中の分布から決める。
+        // 最大にすると、遠くの大きな値に引っぱられて 0 の近くが 1 色になる）
+        5 => {
+            // 表示していない座標は断面の値（次元の設定の「範囲で重ねる」より優先。重ねた立体の G ではなく F を見たいので）
+            let compiled = equation::compile_with(source, params, &own)?;
+            let equation::Plot::Implicit { prog, .. } = &compiled else {
+                return Err("F の値の伝達関数は、陰関数 F(x, y, z) = 0（実数の値）のときだけ使えます".into());
+            };
+            if system::is_complex_valued(prog, dom) {
+                return Err("F の値の伝達関数は、値が実数の陰関数のときだけ使えます".into());
+            }
+            let n = ctx.implicit_resolution.clamp(24, 128);
+            let vals = grid_values(prog, dom, n);
+            let mut mags: Vec<f32> = vals.iter().filter(|v| v.is_finite()).map(|v| v.abs()).collect();
+            let q = if mags.is_empty() {
+                1.0
+            } else {
+                let i = (mags.len() * 9 / 10).min(mags.len() - 1);
+                let (_, q, _) = mags.select_nth_unstable_by(i, |a, b| a.total_cmp(b));
+                if *q > 0.0 { *q as f64 } else { 1.0 }
+            };
+            Ok(Built {
+                kind: format!("陰関数の F の値の伝達関数（{n}³）"),
+                value_range: Some((-q, q)),
+                volume: Some((vals, n)),
+                ..Default::default()
+            })
+        }
         _ => build(plot, ctx),
     }
+}
+
+/// 表示範囲の格子（1 辺 `n` 点。x が最も速く変わる）での `f` の値（実部）
+fn grid_values(f: &eval::Program, dom: mesh::Domain, n: usize) -> Vec<f32> {
+    let at = |a: usize, i: usize| dom.lo[a] + (dom.hi[a] - dom.lo[a]) * i as f64 / (n - 1) as f64;
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for z in 0..n {
+        for y in 0..n {
+            for x in 0..n {
+                cols[0].push(at(0, x));
+                cols[1].push(at(1, y));
+                cols[2].push(at(2, z));
+            }
+        }
+    }
+    let mut out = vec![num_complex::Complex64::new(0.0, 0.0); n * n * n];
+    f.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    out.into_iter().map(|v| eval::as_real(v) as f32).collect()
 }
 
 /// 平面「`axis` 番目の座標 = `pos`」を `n × n` マスに分け、頂点ごとの式 `f` の値を complex の 1 つ目に入れて `m` に足す。
