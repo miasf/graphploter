@@ -136,6 +136,9 @@ export interface RotationGroup {
   center: number[]
 }
 
+/** 用意した座標系の種類（coords.ts の COORD_PRESETS。式・範囲・名前の初期値を決めるだけ） */
+export type CoordPreset = 'cylinder' | 'sphere' | 'ellipticCylinder' | 'parabolicCylinder' | 'bipolar' | 'logPolar' | 'parabolic' | 'prolate' | 'oblate' | 'toroidal' | 'twist' | 'custom'
+
 /**
  * 座標系（計画 9 章）。座標の値 q（式の x, y, z）を、空間の点 T(q) へ移す。式ごとに選ぶ（選ばなければ直交座標）。
  * 移行のスライダー morph = s で、(1 − s) q + s T(q) を描く（s = 0 は今の絵、s = 1 は座標系で移した絵）
@@ -144,7 +147,7 @@ export interface CoordSystem {
   id: number
   name: string
   /** 用意した座標系か、自作か（式・範囲の初期値を決めるだけ。描くときは map と ranges を使う） */
-  preset: 'cylinder' | 'sphere' | 'custom'
+  preset: CoordPreset
   /** T の 3 つの成分（LaTeX。変数は x, y, z。パラメータも使える） */
   map: [string, string, string]
   /**

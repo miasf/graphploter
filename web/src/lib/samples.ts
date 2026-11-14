@@ -1,6 +1,6 @@
 // サンプル（タップすると式が一覧に追加される例）
 
-import type { PlotItem } from './types'
+import type { CoordPreset, PlotItem } from './types'
 
 export interface SampleItem {
   /** 数式欄の LaTeX */
@@ -24,7 +24,7 @@ export interface Sample {
    * 座標系で描く例（計画 9 章）。追加する式を、この座標系（用意した座標系。同じものがあれば使い回す）で描く。
    * morph は移行のスライダーの値、play なら移行を再生する、flat なら 2D 表示にする
    */
-  coord?: { preset: 'cylinder' | 'sphere'; morph: number; play?: boolean; flat?: boolean; ranges?: [[string, string], [string, string], [string, string]] }
+  coord?: { preset: CoordPreset; morph: number; play?: boolean; flat?: boolean; ranges?: [[string, string], [string, string], [string, string]] }
 }
 
 /** サンプルと一緒に設定する見え方 */
@@ -234,6 +234,16 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         items: [{ latex: 'x=\\cos\\left(2y\\right)', options: { color: '#6042a6', lineWidth: 4 } }],
         // 半径の負の側も描く（r < 0 の所が残りの 2 枚の花びら）
         coord: { preset: 'cylinder', morph: 0, play: true, flat: true, ranges: [['-5', '5'], ['0', '2\\pi'], ['-5', '5']] },
+      },
+      {
+        label: 'トーラス座標の τ = 1（入れ子のトーラスの 1 枚）',
+        items: [{ latex: '\\tau=1', options: { color: '#fa7e19' } }],
+        coord: { preset: 'toroidal', morph: 0, play: true },
+      },
+      {
+        label: '楕円座標の μ = 1 と、曲がった方眼（2D 表示）',
+        items: [{ latex: '\\mu=1', options: { color: '#c74440', lineWidth: 4 } }],
+        coord: { preset: 'ellipticCylinder', morph: 0, play: true, flat: true },
       },
     ],
   },

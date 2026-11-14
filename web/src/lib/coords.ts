@@ -2,11 +2,11 @@
 // 計算エンジンは、図形を座標の値の空間で作り、頂点ごとに座標系で移した先 T(q) を別の配列で返す。
 // 画面側は s（0〜1）で (1 − s) q + s T(q) と混ぜる。s を動かしても式は計算し直さない。
 
-import type { CoordSystem } from './types'
+import type { CoordPreset, CoordSystem } from './types'
 
 /** 用意した座標系の、式（LaTeX。変数は x, y, z）と作る範囲 */
 export const COORD_PRESETS: Record<
-  'cylinder' | 'sphere' | 'custom',
+  CoordPreset,
   { name: string; map: CoordSystem['map']; ranges: CoordSystem['ranges']; names: [string, string, string]; note: string }
 > = {
   cylinder: {
@@ -23,6 +23,69 @@ export const COORD_PRESETS: Record<
     names: ['r', 'theta', 'phi'],
     note: '半径 r（x と書いてもよい）、z 軸からの角 θ（y）、xy 平面での角 φ（z）',
   },
+  ellipticCylinder: {
+    name: '楕円柱座標',
+    map: ['\\cosh\\mu\\cos\\nu', '\\sinh\\mu\\sin\\nu', 'z'],
+    ranges: [['0', '2'], ['0', '2\\pi'], ['-5', '5']],
+    names: ['mu', 'nu', 'z'],
+    note: 'μ = 一定は楕円、ν = 一定は双曲線（焦点はどちらも (±1, 0)）。2D 表示では楕円座標',
+  },
+  parabolicCylinder: {
+    name: '放物柱座標',
+    map: ['\\frac{\\sigma^2-\\tau^2}{2}', '\\sigma\\tau', 'z'],
+    ranges: [['-3', '3'], ['0', '3'], ['-5', '5']],
+    names: ['sigma', 'tau', 'z'],
+    note: 'σ = 一定・τ = 一定は、向かい合う放物線（焦点は原点）。2D 表示では放物線座標',
+  },
+  bipolar: {
+    name: '双極座標',
+    map: ['\\frac{\\sinh\\tau}{\\cosh\\tau-\\cos\\sigma}', '\\frac{\\sin\\sigma}{\\cosh\\tau-\\cos\\sigma}', 'z'],
+    ranges: [['0', '2\\pi'], ['-3', '3'], ['-5', '5']],
+    names: ['sigma', 'tau', 'z'],
+    note: 'τ = 一定は 2 つの焦点 (±1, 0) のどちらかを囲む円（アポロニウスの円）、σ = 一定は 2 つの焦点を通る円。σ = τ = 0 は無限遠に飛ぶ',
+  },
+  logPolar: {
+    name: '対数極座標',
+    map: ['e^{\\rho}\\cos\\theta', 'e^{\\rho}\\sin\\theta', 'z'],
+    ranges: [['-2', '1.5'], ['0', '2\\pi'], ['-5', '5']],
+    names: ['rho', 'theta', 'z'],
+    note: 'r = e^ρ。等間隔の ρ が、外へ行くほど広がる同心円になる（角度を保つ写像。らせん ρ = θ/5 は等角らせん）',
+  },
+  parabolic: {
+    name: '放物線座標',
+    map: ['\\sigma\\tau\\cos\\varphi', '\\sigma\\tau\\sin\\varphi', '\\frac{\\tau^2-\\sigma^2}{2}'],
+    ranges: [['0', '2.5'], ['0', '2.5'], ['0', '2\\pi']],
+    names: ['sigma', 'tau', 'phi'],
+    note: 'σ = 一定は下向き、τ = 一定は上向きの放物面（焦点は原点）。φ は z 軸の周りの角',
+  },
+  prolate: {
+    name: '長球座標',
+    map: ['\\sinh\\mu\\sin\\nu\\cos\\varphi', '\\sinh\\mu\\sin\\nu\\sin\\varphi', '\\cosh\\mu\\cos\\nu'],
+    ranges: [['0', '1.5'], ['0', '\\pi'], ['0', '2\\pi']],
+    names: ['mu', 'nu', 'phi'],
+    note: 'μ = 一定はラグビーボール形の回転楕円体、ν = 一定は 2 枚の双曲面（焦点は (0, 0, ±1)）',
+  },
+  oblate: {
+    name: '扁球座標',
+    map: ['\\cosh\\mu\\cos\\nu\\cos\\varphi', '\\cosh\\mu\\cos\\nu\\sin\\varphi', '\\sinh\\mu\\sin\\nu'],
+    ranges: [['0', '1.5'], ['-\\frac{\\pi}{2}', '\\frac{\\pi}{2}'], ['0', '2\\pi']],
+    names: ['mu', 'nu', 'phi'],
+    note: 'μ = 一定はみかん形につぶれた回転楕円体、ν = 一定は 1 枚の双曲面（焦点は半径 1 の円）',
+  },
+  toroidal: {
+    name: 'トーラス座標',
+    map: ['\\frac{\\sinh\\tau\\cos\\varphi}{\\cosh\\tau-\\cos\\sigma}', '\\frac{\\sinh\\tau\\sin\\varphi}{\\cosh\\tau-\\cos\\sigma}', '\\frac{\\sin\\sigma}{\\cosh\\tau-\\cos\\sigma}'],
+    ranges: [['-\\pi', '\\pi'], ['0.3', '3'], ['0', '2\\pi']],
+    names: ['sigma', 'tau', 'phi'],
+    note: 'τ = 一定は入れ子になったトーラス（τ が大きいほど細い。中心の円は半径 1）、σ = 一定は球の一部',
+  },
+  twist: {
+    name: 'ねじれ座標',
+    map: ['x\\cos\\frac{z}{2}-y\\sin\\frac{z}{2}', 'x\\sin\\frac{z}{2}+y\\cos\\frac{z}{2}', 'z'],
+    ranges: [['-3', '3'], ['-3', '3'], ['-5', '5']],
+    names: ['x', 'y', 'z'],
+    note: '高さ z に比例して xy 平面が回る（z が 1 増えると 1/2 ラジアン）。平面 x = 1 がねじれた面に、まっすぐな線がらせんになる',
+  },
   custom: {
     name: '自作の座標系',
     map: ['x', 'y', 'z'],
@@ -33,7 +96,7 @@ export const COORD_PRESETS: Record<
 }
 
 /**
- * 座標の名前を、計算エンジンの名前にする（θ・\theta → theta、φ・\varphi → phi、ρ → rho。前後の空白は取る）。
+ * 座標の名前を、計算エンジンの名前にする（θ・\theta → theta、φ・\varphi → phi、ρ → rho、σ・τ・μ・ν も同じ。前後の空白は取る）。
  * 空なら null（その座標は x, y, z のまま）
  */
 export function engineName(s: string): string | null {
@@ -41,13 +104,20 @@ export function engineName(s: string): string | null {
   if (t === '') return null
   if (['θ', 'ϑ', 'theta', 'vartheta'].includes(t)) return 'theta'
   if (['φ', 'ϕ', 'phi', 'varphi'].includes(t)) return 'phi'
-  if (['ρ', 'rho'].includes(t)) return 'rho'
+  if (['ρ', 'rho', 'varrho'].includes(t)) return 'rho'
+  if (['σ', 'sigma', 'varsigma'].includes(t)) return 'sigma'
+  if (['τ', 'tau'].includes(t)) return 'tau'
+  if (['μ', 'mu'].includes(t)) return 'mu'
+  if (['ν', 'nu'].includes(t)) return 'nu'
   return t
 }
 
+/** 1 つの名前として読むギリシャ文字（計算エンジンの名前 → 画面に出す文字） */
+export const GREEK_NAMES: Record<string, string> = { theta: 'θ', phi: 'φ', rho: 'ρ', sigma: 'σ', tau: 'τ', mu: 'μ', nu: 'ν' }
+
 /** 計算エンジンの名前を、画面に出す名前にする（theta → θ） */
 export function prettyCoordName(s: string): string {
-  return s === 'theta' ? 'θ' : s === 'phi' ? 'φ' : s === 'rho' ? 'ρ' : s
+  return GREEK_NAMES[s] ?? s
 }
 
 /**

@@ -558,6 +558,10 @@ pub fn rename_kind(kind: &str, space: &Space) -> String {
         "theta" => "θ".to_string(),
         "phi" => "φ".to_string(),
         "rho" => "ρ".to_string(),
+        "sigma" => "σ".to_string(),
+        "tau" => "τ".to_string(),
+        "mu" => "μ".to_string(),
+        "nu" => "ν".to_string(),
         _ => n.to_string(),
     };
     // 英数字の並びごとに、表示中の座標の名前と同じなら置き換える

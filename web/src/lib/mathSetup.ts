@@ -30,6 +30,8 @@ export const SHORTCUTS: Record<string, string> = {
   theta: '\\theta',
   phi: '\\varphi',
   rho: '\\rho',
+  sigma: '\\sigma',
+  tau: '\\tau',
   '<=': '\\le',
   '>=': '\\ge',
   sqrt: '\\sqrt{#?}',
