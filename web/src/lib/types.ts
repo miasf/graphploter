@@ -33,6 +33,30 @@ export interface GridStyle {
  * off: 色分けしない（実数にならない点は描かない）/ abs: 高さ |f| / re: 高さ Re f / im: 高さ Im f / arg: 高さ arg f。
  * 複素平面の図形（e^{it} など。横 Re f・奥 Im f）では、縦の軸に描くもの（off: 0 / param: 媒介変数 / abs: |f| / arg: arg f …）
  */
+/**
+ * 表示していない座標（w 以降）を使う式の見せ方。slice: 断面（スライダーの値 1 つ）、layers: 等値面を何枚も（範囲を等分した値ごとの図形を重ね、値で色を付ける）、
+ * planes: 断面の塗り分け（表示範囲の中の平面を w = f の値で塗る）、volume: 伝達関数（値に色と不透明度を割り当てて重ね塗りする）、
+ * stack: 範囲で重ねる（範囲で動かしたとき通る領域を立体で描く。次元の設定の「範囲で重ねる」を、この式だけの範囲で使う）。
+ * slice 以外では、次元の設定の「範囲で重ねる」より、式の設定を優先する
+ */
+export type HiddenMode = 'slice' | 'layers' | 'planes' | 'volume' | 'stack'
+/** 計算エンジンに渡す HiddenMode の番号の順 */
+export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'volume', 'stack']
+/** 値の色の対応表。shade は式の色の明暗 */
+export type ColorMap = 'viridis' | 'turbo' | 'shade'
+/** 伝達関数の不透明度の形。flat: 一様、high: 値が大きいほど濃い、low: 小さいほど濃い、bands: 何枚かの値の所だけ濃い（等値面風） */
+export type OpacityShape = 'flat' | 'high' | 'low' | 'bands'
+export interface HiddenStyle {
+  mode: HiddenMode
+  /** 等値面の枚数（layers）・各軸の平面の枚数（planes）・濃い所の数（volume の bands） */
+  count: number
+  colormap: ColorMap
+  opacity: OpacityShape
+  /** 伝達関数の濃さ（0〜1） */
+  density: number
+}
+export const DEFAULT_HIDDEN: HiddenStyle = { mode: 'slice', count: 5, colormap: 'viridis', opacity: 'flat', density: 0.5 }
+
 export type ComplexMode = 'off' | 'abs' | 're' | 'im' | 'arg' | 'param'
 /** 計算エンジンに渡す ComplexMode の番号の順 */
 export const COMPLEX_MODE_ORDER: ComplexMode[] = ['off', 'abs', 're', 'im', 'arg', 'param']
@@ -46,6 +70,8 @@ export interface PlotStyle {
   grid: GridStyle
   /** 曲線の太さ（画素） */
   lineWidth: number
+  /** 表示していない座標の見せ方（値の色の対応表・伝達関数の不透明度は、計算し直さずに変える） */
+  hidden?: HiddenStyle
 }
 
 /** 媒介変数の範囲。媒介変数の名前（t, u, v, t1, …）→ [最小, 最大]（入力欄の LaTeX のまま。2π などの式も書ける） */
@@ -169,6 +195,8 @@ export interface PlotItem extends PlotStyle {
   solidSeen?: boolean
   /** 複素数の色分け（陽関数だけ。古い保存データには無い） */
   complexMode?: ComplexMode
+  /** 表示していない座標（w 以降）の見せ方（無ければ断面）。範囲は ranges に座標の名前（w, w2, …）で入れる */
+  hidden?: HiddenStyle
   /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
   walls?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転 rotation, center、0 なら全体の回転を使う） */
@@ -237,6 +265,10 @@ export interface MeshData {
   transform: Float64Array | null
   /** true なら形は前と同じで、transform だけが新しい（メッシュの配列は空） */
   transformOnly: boolean
+  /** 表示していない座標の値で色を付けるなら [最小, 最大]（値は complexValues の 1 つ目）。付けないなら null */
+  valueRange: [number, number] | null
+  /** 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる）での値。無ければ省略 */
+  volume?: { n: number; values: Float32Array }
   /** 2D 表示の不等式の領域の境目の線（実線。点の列で、途切れる所に NaN）。無ければ省略 */
   outline?: Float32Array
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
@@ -277,6 +309,8 @@ export interface PlotRequest {
   cut: CutRequest
   /** 陽関数の複素数の色分け */
   complexMode: ComplexMode
+  /** 表示していない座標の見せ方（番号は HIDDEN_MODE_ORDER。0 か null なら断面） */
+  hidden: { mode: number; count: number } | null
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
   /** 2D 表示の描き方。true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影 */

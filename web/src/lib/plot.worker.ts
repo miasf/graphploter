@@ -8,6 +8,7 @@ import init, {
   field_mode_given,
   field_mode_plan,
   field_mode_reset,
+  hidden_style,
   last_used_params,
   plot,
   take_field_values,
@@ -93,7 +94,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -139,6 +140,8 @@ function costOf(kind: string, curve: boolean, flat: boolean): Cost {
   // 陰関数の線・点だけの解（`陰関数（線だけの解）`）は曲線だが、陰関数の面を作ってから線を取り出すので、時間は細かさの 3 乗
   // 連立方程式・不等式も、陰関数の面を作ってから線を取り出す・切り取るので 3 乗
   if (!flat && /^(連立方程式|不等式の領域)/.test(kind)) return 'volume'
+  // 伝達関数は格子の点の数（細かさの 3 乗）
+  if (!flat && /の伝達関数/.test(kind)) return 'volume'
   if (!flat && (/^陰関数/.test(kind) || (!curve && /^範囲で重ねた立体/.test(kind)))) return 'volume'
   if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
   return 'surface'
@@ -247,8 +250,21 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
       coord = { ranges: space.ranges.flatMap(() => [NaN, NaN]), slice: [...space.slice] }
     }
     // 回す前の形だけを作る印（PLOT_LOCAL）は、ふつうの呼び出しでは外す（回す前の形は、面を返した後に別に作る）
-    const callPlot = (flags = req.flags & ~PLOT_LOCAL) =>
-      plot(
+    // 表示していない座標の見せ方: [見せ方, 枚数, 座標ごとの範囲の最小, 最大, …]（範囲は式ごとの ranges に座標の名前で入っている）
+    const hiddenStyle =
+      req.hidden && req.hidden.mode > 0
+        ? new Float64Array([
+            req.hidden.mode,
+            req.hidden.count,
+            ...Array.from({ length: space.dims }, (_, k) => {
+              const i = rangeNames.indexOf(coordName(k))
+              return space.axes.includes(k) || i < 0 ? [NaN, NaN] : rangeValues[i]
+            }).flat(),
+          ])
+        : new Float64Array(0)
+    const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
+      hidden_style(hiddenStyle)
+      return plot(
         source,
         domainArr,
         resolution,
@@ -278,6 +294,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         req.flatSlice,
         flags,
       )
+    }
     const key = (view: boolean, rigid = false) => shapeKey(req, view, coord.slice, coord.ranges, rigid)
     // 回し始め（再生・ドラッグ中の依頼）で、同じ形の回す前の形を作る予約があれば、先に作る（この 1 コマは待つが、粗く作り直さない）
     if (pendingLocal && (req.flags & PLOT_NO_REFINE) !== 0 && pendingLocal.key === key(true, true)) pendingLocal.run()
@@ -427,9 +444,14 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
     // 配列は取り出して渡す（getter だと Rust 側の clone と JavaScript への写しで2回コピーになる）
     const g = geom ?? r
     const transform = transformOnly ? new Float64Array(r.transform) : localTransform
+    const vr = r.value_range()
+    const volumeN = r.volume_n()
+    const volume = volumeN > 0 ? { n: volumeN, values: r.take_volume() } : undefined
     const outline = r.take_outline()
     const outlineDashed = r.take_outline_dashed()
     const mesh = {
+      valueRange: vr.length === 2 ? ([vr[0], vr[1]] as [number, number]) : null,
+      ...(volume ? { volume } : {}),
       ...(outline.length > 0 ? { outline } : {}),
       ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
       positions: g.take_positions(),
@@ -480,6 +502,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
+        ...(res.mesh.volume ? [res.mesh.volume.values.buffer] : []),
         ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
         ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),
         ...capTransfer(res.mesh.lod),

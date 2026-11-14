@@ -8,7 +8,7 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { coordName, missingParam, neededDims, prettyName } from './params'
-  import { GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type Domain, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
     item: PlotItem
@@ -23,6 +23,8 @@
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
     onComplexMode: (mode: ComplexMode) => void
+    /** 表示していない座標の見せ方を変えたとき（変えた所だけ） */
+    onHidden: (patch: Partial<HiddenStyle>) => void
     onWalls: (on: boolean) => void
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
@@ -84,6 +86,7 @@
     onGrid,
     onOpacity,
     onComplexMode,
+    onHidden,
     onWalls,
     onLayers,
     onEdges,
@@ -185,6 +188,34 @@
   // 色分けをしている間は、計算できなかったときも選べるようにしておく（元に戻せるように）
   /** 複素平面の図形（e^{it} など。横 Re f・奥 Im f）。縦の軸に描くものを選べる */
   const isComplexPlane = $derived(/^複素平面/.test(item.kind ?? ''))
+  /** 式が使っている、表示していない座標の名前（w, w2, …）。媒介変数表示には使わない（成分が座標そのもの） */
+  const hiddenCoords = $derived(
+    item.params.length > 0 || item.param
+      ? []
+      : Array.from({ length: dims }, (_, k) => k)
+          .filter((k) => !viewAxes.includes(k))
+          .map(coordName)
+          .filter((n) => item.usedParams.includes(n)),
+  )
+  const hidden = $derived(item.hidden ?? DEFAULT_HIDDEN)
+  const HIDDEN_MODES: { mode: HiddenStyle['mode']; label: string }[] = [
+    { mode: 'slice', label: '断面（スライダーの値 1 つ）' },
+    { mode: 'layers', label: '等値面を何枚も' },
+    { mode: 'planes', label: '断面の塗り分け' },
+    { mode: 'volume', label: '伝達関数（色と透明度）' },
+    { mode: 'stack', label: '範囲で重ねる（通る領域）' },
+  ]
+  const COLORMAPS: { map: HiddenStyle['colormap']; label: string }[] = [
+    { map: 'viridis', label: 'viridis（紫 → 緑 → 黄）' },
+    { map: 'turbo', label: 'turbo（青 → 赤）' },
+    { map: 'shade', label: '式の色の明暗' },
+  ]
+  const OPACITY_SHAPES: { shape: HiddenStyle['opacity']; label: string }[] = [
+    { shape: 'flat', label: '一様' },
+    { shape: 'high', label: '値が大きいほど濃い' },
+    { shape: 'low', label: '値が小さいほど濃い' },
+    { shape: 'bands', label: '何枚かの値の所だけ濃い（等値面風）' },
+  ]
   const isExplicit = $derived(
     !isComplexPlane && (/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off'),
   )
@@ -315,6 +346,15 @@
       {#if parts && !item.vertical}
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
       {/if}
+    {/if}
+    {#if hidden.mode !== 'slice'}
+      {#each hiddenCoords.filter((n) => n in item.ranges) as name (name)}
+        <div class="param-range">
+          <MathInput small value={item.ranges[name][0]} label="{name} の最小値" onInput={(v) => onRange(name, 0, v)} />
+          <span>≤ {prettyName(name)} ≤</span>
+          <MathInput small value={item.ranges[name][1]} label="{name} の最大値" onInput={(v) => onRange(name, 1, v)} />
+        </div>
+      {/each}
     {/if}
     {#each paramNames as name (name)}
       <div class="param-range">
@@ -479,6 +519,77 @@
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
               値が飛ぶ所（floor の段差など）に壁を描く
             </label>
+          {/if}
+          {#if hiddenCoords.length > 0}
+            <div class="complex-mode">
+              <span class="label">{hiddenCoords.map(prettyName).join('・')} の見せ方</span>
+              <select value={hidden.mode} onchange={(e) => onHidden({ mode: e.currentTarget.value as HiddenStyle['mode'] })}>
+                {#each HIDDEN_MODES as { mode, label } (mode)}
+                  <option value={mode}>{label}</option>
+                {/each}
+              </select>
+            </div>
+            {#if hidden.mode !== 'slice'}
+              {#if hidden.mode === 'layers' || hidden.mode === 'planes' || (hidden.mode === 'volume' && hidden.opacity === 'bands')}
+                <div class="sliders">
+                  <span class="label">{hidden.mode === 'layers' ? '枚数' : hidden.mode === 'planes' ? '各軸の枚数' : '濃い所の数'}</span>
+                  <input
+                    type="range"
+                    min={hidden.mode === 'layers' ? 2 : 1}
+                    max="16"
+                    step="1"
+                    value={hidden.count}
+                    aria-label="枚数"
+                    oninput={(e) => onHidden({ count: e.currentTarget.valueAsNumber })}
+                  />
+                  <span class="value">{hidden.count}</span>
+                </div>
+              {/if}
+              {#if hidden.mode !== 'stack'}
+              <div class="complex-mode">
+                <span class="label">色</span>
+                <select value={hidden.colormap} onchange={(e) => onHidden({ colormap: e.currentTarget.value as HiddenStyle['colormap'] })}>
+                  {#each COLORMAPS as { map, label } (map)}
+                    <option value={map}>{label}</option>
+                  {/each}
+                </select>
+              </div>
+              {/if}
+              {#if hidden.mode === 'volume'}
+                <div class="complex-mode">
+                  <span class="label">不透明度</span>
+                  <select value={hidden.opacity} onchange={(e) => onHidden({ opacity: e.currentTarget.value as HiddenStyle['opacity'] })}>
+                    {#each OPACITY_SHAPES as { shape, label } (shape)}
+                      <option value={shape}>{label}</option>
+                    {/each}
+                  </select>
+                </div>
+                <div class="sliders">
+                  <span class="label">濃さ</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={hidden.density}
+                    aria-label="伝達関数の濃さ"
+                    oninput={(e) => onHidden({ density: e.currentTarget.valueAsNumber })}
+                  />
+                  <span class="value">{Math.round(hidden.density * 100)}%</span>
+                </div>
+              {/if}
+              <p class="hint">
+                {#if hidden.mode === 'layers'}
+                  範囲を等分した値ごとの図形を重ね、値で色を付けています（{hiddenCoords.length >= 2 ? '色は 1 つ目の座標の値。' : ''}範囲は式の下の欄）。
+                {:else if hidden.mode === 'stack'}
+                  範囲で動かしたときに図形が通る領域を、立体で描いています（範囲は式の下の欄。何等分して調べるかは右上の ⚙ の「範囲で重ねる枚数」）。
+                {:else if hidden.mode === 'planes'}
+                  表示範囲の中の平面（各軸に等間隔）を、{prettyName(hiddenCoords[0])} = f の値で塗っています（{prettyName(hiddenCoords[0])} = f(x, y, z) の形の式だけ）。
+                {:else}
+                  {prettyName(hiddenCoords[0])} の値に色と不透明度を割り当て、表示範囲の箱の中を光線で重ね塗りしています（{prettyName(hiddenCoords[0])} = f(x, y, z) の形の式だけ。範囲の外の値は描きません）。
+                {/if}
+              </p>
+            {/if}
           {/if}
           {#if isExplicit}
             <div class="complex-mode">
@@ -813,10 +924,17 @@
   }
   .complex-mode {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
+    gap: 4px 8px;
+  }
+  /* 見出しは折り返さない（選択欄の文字が長いと、見出しが 1 文字ずつ縦に並んでいた）。入りきらなければ選択欄が次の行へ */
+  .complex-mode .label {
+    white-space: nowrap;
   }
   .complex-mode select {
+    min-width: 0;
+    max-width: 100%;
     font: inherit;
     padding: 2px 4px;
     border: 1px solid var(--border-strong);
@@ -930,9 +1048,18 @@
     cursor: pointer;
     border-radius: 6px;
   }
-  .icon:hover,
-  .icon.active {
-    background: var(--hover);
-    color: var(--text);
+  /* カーソルを乗せたときの薄い色は、マウスのある端末だけ（スマホでは押した後も残り、開いているように見えるため） */
+  @media (hover: hover) {
+    .icon:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+  }
+  /* 開いているとき: 塗りつぶして、閉じているとき・乗せたときとはっきり見分けられるようにする */
+  .icon.active,
+  .icon.active:hover {
+    background: var(--accent);
+    color: var(--on-accent);
+    border-radius: 6px;
   }
 </style>

@@ -28,6 +28,11 @@ export interface GridUniforms {
   /** 1 なら 2D の塗り分け: 値 vGridPos.z が uHeatRange の範囲のどこにあるかで、色の濃さを変える */
   uHeat: { value: number }
   uHeatRange: { value: THREE.Vector2 }
+  /** 1 なら表示していない座標の値で色を付ける: 値 vComplex.x が uValueRange のどこにあるかを、色の対応表 uColormap で色にする */
+  uValue: { value: number }
+  uValueRange: { value: THREE.Vector2 }
+  /** 色の対応表（0: viridis, 1: turbo, 2: 式の色の明暗） */
+  uColormap: { value: number }
   /** 1 なら裏面を暗くしない（2D 表示では面の表裏に意味が無い） */
   uNoBackShade: { value: number }
   /**
@@ -48,12 +53,53 @@ export function createGridUniforms(pixelScale: { value: number } = { value: 1 })
     uComplex: { value: 0 },
     uHeat: { value: 0 },
     uHeatRange: { value: new THREE.Vector2(-1, 1) },
+    uValue: { value: 0 },
+    uValueRange: { value: new THREE.Vector2(0, 1) },
+    uColormap: { value: 0 },
     uNoBackShade: { value: 0 },
     uGridWorld: { value: 0 },
   }
 }
 
+/**
+ * 色の対応表（GLSL）。t は 0〜1、base は式の色。返す色は線形の色空間（three.js の diffuseColor と同じ）。
+ * viridis・turbo は多項式で近似したもの（matplotlib の viridis の近似と、Google の Turbo の近似）
+ */
+export const COLORMAP_GLSL = /* glsl */ `
+vec3 cmapViridis(float t) {
+  const vec3 c0 = vec3(0.2777273272234177, 0.005407344544966578, 0.3340998053353061);
+  const vec3 c1 = vec3(0.1050930431085774, 1.404613529898575, 1.384590162594685);
+  const vec3 c2 = vec3(-0.3308618287255563, 0.214847559468213, 0.09509516302823659);
+  const vec3 c3 = vec3(-4.634230498983486, -5.799100973351585, -19.33244095627987);
+  const vec3 c4 = vec3(6.228269936347081, 14.17993336680509, 56.69055260068105);
+  const vec3 c5 = vec3(4.776384997670288, -13.74514537774601, -65.35303263337234);
+  const vec3 c6 = vec3(-5.435455855934631, 4.645852612178535, 26.3124352495832);
+  return c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6)))));
+}
+vec3 cmapTurbo(float t) {
+  const vec4 kr = vec4(0.13572138, 4.61539260, -42.66032258, 132.13108234);
+  const vec4 kg = vec4(0.09140261, 2.19418839, 4.84296658, -14.18503333);
+  const vec4 kb = vec4(0.10667330, 12.64194608, -60.58204836, 110.36276771);
+  const vec2 kr2 = vec2(-152.94239396, 59.28637943);
+  const vec2 kg2 = vec2(4.27729857, 2.82956604);
+  const vec2 kb2 = vec2(-89.90310912, 27.34824973);
+  vec4 v4 = vec4(1.0, t, t * t, t * t * t);
+  vec2 v2 = v4.zw * v4.z;
+  return vec3(dot(v4, kr) + dot(v2, kr2), dot(v4, kg) + dot(v2, kg2), dot(v4, kb) + dot(v2, kb2));
+}
+vec3 colormap(float t, float which, vec3 base) {
+  t = clamp(t, 0.0, 1.0);
+  if (which > 1.5) return mix(base * 0.2, mix(base, vec3(1.0), 0.7), t);
+  vec3 srgb = clamp(which > 0.5 ? cmapTurbo(t) : cmapViridis(t), 0.0, 1.0);
+  return pow(srgb, vec3(2.2));
+}
+`
+
 const FRAGMENT_HEADER = /* glsl */ `
+uniform float uValue;
+uniform vec2 uValueRange;
+uniform float uColormap;
+${COLORMAP_GLSL}
 varying vec3 vGridPos;
 varying vec3 vComplex;
 uniform float uComplex;
@@ -88,7 +134,12 @@ float gridLine(float coord, float spacing) {
 
 const FRAGMENT_APPLY = /* glsl */ `
 {
-  if (uComplex > 0.5) {
+  if (uValue > 0.5) {
+    // 表示していない座標の値で色を付ける（範囲が 1 点なら真ん中の色）
+    float span = uValueRange.y - uValueRange.x;
+    float t = span > 0.0 ? (vComplex.x - uValueRange.x) / span : 0.5;
+    diffuseColor.rgb = colormap(t, uColormap, diffuseColor.rgb);
+  } else if (uComplex > 0.5) {
     // 複素数の色分け: 色相 = 偏角（0 で赤、π/2 で黄緑、π で水色、−π/2 で紫）、
     // |w| が 2 倍になるごとに明るさが少しずつ変わる縞（大きさの等高線の代わり）
     float hue = atan(vComplex.y, vComplex.x) / 6.28318530718;

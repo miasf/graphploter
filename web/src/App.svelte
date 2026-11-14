@@ -22,6 +22,7 @@
     Domain,
     Folder,
     GridStyle,
+    HiddenStyle,
     ParamRanges,
     ParamValue,
     PlotItem,
@@ -29,7 +30,7 @@
     SliderStyle,
     Space,
   } from './lib/types'
-  import { GLOBAL_GROUP, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
   import { Viewer } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
@@ -166,6 +167,7 @@
         grid: it.grid,
         lineWidth: it.lineWidth,
         complexMode: it.complexMode,
+        hidden: it.hidden && it.hidden.mode !== 'slice' ? it.hidden : undefined,
         walls: it.walls,
         layers: it.layers,
         edges: it.edges || undefined,
@@ -657,6 +659,7 @@
       item.layers ?? 1,
       flatSlice,
       (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
+      hiddenRequest(item),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -729,6 +732,8 @@
     for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
     item.kind = res.kind
+    // 見せ方が断面でない式で、新しく表示していない座標を使うようになったら、範囲を用意して計算し直す
+    if (item.hidden && item.hidden.mode !== 'slice' && ensureHiddenRanges(item)) schedule(item, 0)
     const s0 = performance.now()
     // 回す前の形で作った陰関数で、回転だけが変わった: 形はそのままで、3D オブジェクトの向きだけを変える
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
@@ -989,6 +994,38 @@
   function setWalls(item: PlotItem, on: boolean) {
     item.walls = on
     schedule(item, 0)
+  }
+
+  /** 表示していない座標の見せ方を変える。見せ方・枚数が変わったら計算し直し、色・不透明度だけなら描き方だけ変える */
+  function setHidden(item: PlotItem, patch: Partial<HiddenStyle>) {
+    const prev = item.hidden ?? DEFAULT_HIDDEN
+    const next = { ...prev, ...patch }
+    item.hidden = next
+    if (next.mode !== 'slice') ensureHiddenRanges(item)
+    // 等値面を何枚も重ねるときは、最初は半透明にする（重なった面が見えるように）
+    if (next.mode === 'layers' && prev.mode !== 'layers' && item.opacity === 1) item.opacity = 0.35
+    const recompute = next.mode !== prev.mode || (next.count !== prev.count && next.mode !== 'volume')
+    if (recompute) schedule(item, next.mode === prev.mode ? 150 : 0)
+    else viewer?.setStyle(item.id, item)
+  }
+
+  /** 見せ方が断面でないとき、式が使っている表示していない座標の範囲の入力欄を用意する（断面のスライダーの範囲）。用意したら true */
+  function ensureHiddenRanges(item: PlotItem): boolean {
+    let added = false
+    for (let k = 0; k < space.dims; k++) {
+      const name = coordName(k)
+      if (space.axes.includes(k) || !item.usedParams.includes(name) || name in item.ranges) continue
+      item.ranges[name] = [String(space.sliceMin), String(space.sliceMax)]
+      added = true
+    }
+    return added
+  }
+
+  /** 計算担当に渡す見せ方（断面なら null） */
+  function hiddenRequest(item: PlotItem): { mode: number; count: number } | null {
+    const h = item.hidden
+    if (!h || h.mode === 'slice') return null
+    return { mode: HIDDEN_MODE_ORDER.indexOf(h.mode), count: h.count }
   }
 
   function setComplexMode(item: PlotItem, mode: ComplexMode) {
@@ -1576,6 +1613,7 @@
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
             onComplexMode={(m) => setComplexMode(item, m)}
+            onHidden={(patch) => setHidden(item, patch)}
             onWalls={(on) => setWalls(item, on)}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}
@@ -2206,9 +2244,11 @@
     cursor: pointer;
     box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
   }
+  /* 開いているとき: 塗りつぶす（式の ⚙ と同じ見せ方） */
   .settings-toggle.on {
-    border-color: #2d70b3;
-    color: #2d70b3;
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
   }
   .settings-card {
     position: absolute;

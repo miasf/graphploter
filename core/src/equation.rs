@@ -503,6 +503,44 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     compile_pair(l, r, params, space)
 }
 
+/// 「表示していない座標 h = h を使わない式 f」の形の式なら、(f, h の座標の番号)。f の変数は表示中の 3 つの座標
+/// （ほかの表示していない座標は断面の値、回転は代入済み）。断面の塗り分け・伝達関数（[`crate::plot`] の `hidden`）に使う。
+/// この形でない式・h が絡む回転をしている式はエラー
+pub fn hidden_field(source: &str, params: &Params, space: &Space) -> Result<(Program, usize), String> {
+    let shape_err = || "断面の塗り分け・伝達関数は、w = f(x, y, z) の形（表示していない座標 = 式）で使えます".to_string();
+    let chains = parse_system(source).map_err(|e| e.to_string())?;
+    let [chain] = chains.as_slice() else { return Err(shape_err()) };
+    if chain.rels != [Rel::Eq] {
+        return Err(shape_err());
+    }
+    let hidden_of = |e: &Expr| match e {
+        Expr::Var(name) => coord_index(name).filter(|&k| k < space.dims && !space.axes.contains(&k)).map(|k| (k, name.clone())),
+        _ => None,
+    };
+    let (l, r) = (&chain.exprs[0], &chain.exprs[1]);
+    let ((k, name), f) = match (hidden_of(l), hidden_of(r)) {
+        (Some(h), _) if !r.uses_var(&h.1) => (h, r),
+        (_, Some(h)) if !l.uses_var(&h.1) => (h, l),
+        _ => return Err(shape_err()),
+    };
+    check_dims(f, space)?;
+    if first_list(f).is_some() {
+        return Err("断面の塗り分け・伝達関数では、リストは使えません".into());
+    }
+    let mut used = vec![name];
+    f.collect_vars(&mut used);
+    let f = match space.rotation_matrix() {
+        Some(_) if !space.rotation_keeps_shown(&used) => {
+            return Err("断面の塗り分け・伝達関数は、表示していない座標が絡む回転をしていないときだけ使えます".into())
+        }
+        Some(m) => rotate_coords(f, &m, space),
+        None => f.clone(),
+    };
+    let shown = space.shown();
+    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+    Ok((Program::compile_with(&f, &shown_refs, &space.with_hidden(params))?, k))
+}
+
 /// 等式の上限（表示中の座標は 3 つなので、4 本以上は一般に空）
 const MAX_EQUATIONS: usize = 3;
 /// 不等式の上限
