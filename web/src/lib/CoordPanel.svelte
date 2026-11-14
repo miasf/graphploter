@@ -15,7 +15,7 @@
     onNames: (names: [string, string, string]) => void
     /** 移行のスライダーを動かした（計算し直さない） */
     onMorph: (s: number) => void
-    /** 移行を再生しているか（0 → 1 → 0 と往復する） */
+    /** 移行を再生しているか（1 まで、1 にいるときは 0 まで動かして止まる） */
     playing: boolean
     onPlay: () => void
   }
@@ -69,7 +69,7 @@
       class:on={playing}
       onclick={onPlay}
       aria-label={playing ? '移行を止める' : '移行を再生する'}
-      title={playing ? '止める' : '0 → 1 → 0 と往復する'}>{playing ? '❚❚' : '▶'}</button
+      title={playing ? '止める' : sys.morph >= 1 ? '0 まで動かす' : '1 まで動かす'}>{playing ? '❚❚' : '▶'}</button
     >
   </div>
   <p class="hint">0 で直交座標（座標の値をそのまま x, y, z とみなした絵）、1 で座標系で移した絵です。動かしても計算し直しません。</p>

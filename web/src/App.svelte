@@ -1467,7 +1467,10 @@
     settingsOpen = true
   }
 
-  /** 移行の再生: 0 → 1 → 0 と往復する（片道 PARAM_PLAY_SECONDS 秒）。計算し直さないので、操作中の粗い計算にはしない */
+  /**
+   * 移行の再生: 1 まで動かして止まる（1 にいるときは 0 まで。端から端まで PARAM_PLAY_SECONDS 秒）。
+   * 計算し直さないので、操作中の粗い計算にはしない
+   */
   function togglePlayMorph(cid: number) {
     if (playingMorph.includes(cid)) {
       playingMorph = playingMorph.filter((x) => x !== cid)
@@ -1485,16 +1488,13 @@
         for (const id of playingMorph) {
           const c = coordSystems.find((x) => x.id === id)
           if (!c) continue
-          let dir = morphDir.get(id) ?? 1
-          let v = c.morph + (dir * dt) / PARAM_PLAY_SECONDS
-          if (v >= 1 || v <= 0) {
-            v = Math.min(1, Math.max(0, v))
-            dir = -dir
-            morphDir.set(id, dir)
-          }
+          const dir = morphDir.get(id) ?? 1
+          const v = Math.min(1, Math.max(0, c.morph + (dir * dt) / PARAM_PLAY_SECONDS))
           setMorph(id, v)
+          // 端（最大値・最小値）まで来たら止まる
+          if ((dir > 0 && v >= 1) || (dir < 0 && v <= 0)) playingMorph = playingMorph.filter((x) => x !== id)
         }
-        requestAnimationFrame(frame)
+        if (playingMorph.length > 0) requestAnimationFrame(frame)
       }
       requestAnimationFrame(frame)
     }
