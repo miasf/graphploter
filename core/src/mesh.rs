@@ -5711,6 +5711,16 @@ pub fn set_field_mode(mode: FieldMode) {
     FIELD_OUT.with(|o| *o.borrow_mut() = FieldOut::default());
 }
 
+/// F の計算を Worker に分ける依頼（計画・一部の計算・計算済みの値）の途中か
+pub fn field_mode_is_split() -> bool {
+    FIELD_MODE.with(|mode| !matches!(*mode.borrow(), FieldMode::Normal))
+}
+
+/// 分けられない式として答える（`field_chunks` が 0 を返す）
+pub fn mark_unsplittable() {
+    FIELD_OUT.with(|out| out.borrow_mut().calls += 2);
+}
+
 /// F の計算の仕方をふつうに戻して、結果を取り出す
 pub fn take_field_out() -> FieldOut {
     FIELD_MODE.with(|m| *m.borrow_mut() = FieldMode::Normal);
@@ -7689,7 +7699,7 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
 /// 2D の線分 a–b が、長さが無い・とても短い（大きさ `scale` の 10⁻⁶ 倍以下）か。
 /// 描画側は、ほぼ同じ点だけの線を「点」とみなして丸を付けるので、そうした線は描かない。
 /// 回した曲面の切り口では、格子点をちょうど通る所で、ちょうど同じではない（f32 の誤差ほど違う）点の組ができる
-fn too_short(a: [f32; 3], b: [f32; 3], scale: f32) -> bool {
+pub(crate) fn too_short(a: [f32; 3], b: [f32; 3], scale: f32) -> bool {
     let d: f32 = (0..3).map(|c| (a[c] - b[c]).abs()).sum();
     d <= 1e-6 * scale || a == b
 }
