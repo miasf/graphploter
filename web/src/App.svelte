@@ -168,6 +168,7 @@
         lineWidth: it.lineWidth,
         complexMode: it.complexMode,
         hidden: it.hidden && it.hidden.mode !== 'slice' ? it.hidden : undefined,
+        complexCoords: it.complexCoords || undefined,
         walls: it.walls,
         layers: it.layers,
         edges: it.edges || undefined,
@@ -660,6 +661,7 @@
       flatSlice,
       (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
       hiddenRequest(item),
+      item.complexCoords ?? false,
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1010,6 +1012,13 @@
     const recompute = next.mode !== prev.mode || (next.count !== prev.count && next.mode !== 'volume')
     if (recompute) schedule(item, next.mode === prev.mode ? 150 : 0)
     else viewer?.setStyle(item.id, item)
+  }
+
+  /** 座標を複素数にする・やめる。する場合、次元が 6 未満なら 6 にする（虚部に w, w₂, w₃ を使う） */
+  function setComplexCoords(item: PlotItem, on: boolean) {
+    item.complexCoords = on
+    if (on && space.dims < 6) setLayout(resizeSpace(space, 6))
+    schedule(item, 0)
   }
 
   /** 見せ方ごとの面の濃さの既定値 */
@@ -1628,6 +1637,7 @@
             onOpacity={(o) => setOpacity(item, o)}
             onComplexMode={(m) => setComplexMode(item, m)}
             onHidden={(patch) => setHidden(item, patch)}
+            onComplexCoords={(on) => setComplexCoords(item, on)}
             onWalls={(on) => setWalls(item, on)}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}

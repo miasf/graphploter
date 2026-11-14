@@ -99,3 +99,50 @@ fn colored_surfaces() {
         assert!(v[0].abs() < 0.2 || v[2] < -3.0, "{v:?}");
     }
 }
+
+#[test]
+fn complex_coordinates() {
+    use graph_core::complex_coords;
+    let rd = equation::rot_dims(6);
+    let run6 = |axes: [u32; 3]| {
+        complex_coords(true);
+        plot(
+            "x^2 + y^2 + z^2 = 1", &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 48, 40, "", &[], "", &[], "", 6, &axes, &[0.0; 6], &[f64::NAN; 12], "",
+            &[], 16, &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, false, 1, false, 0,
+        )
+        .ok()
+        .unwrap()
+    };
+    // x, y, z を表示（虚部は全部 0）: 実数の部分 = 球面
+    let m = run6([0, 1, 2]);
+    assert_eq!(m.kind(), "陰関数");
+    assert!(!m.curve());
+    // (x, w, y) を表示（z = w₂ = w₃ = 0）: (x + iw)² + y² = 1 → w = 0 の円 x² + y² = 1 と、x = 0 の双曲線 y² − w² = 1
+    let m = run6([0, 3, 1]);
+    assert_eq!(m.kind(), "複素数の陰関数（Re F = Im F = 0 の曲線）");
+    let p = pts(&m);
+    assert!(p.len() > 50);
+    for q in &p {
+        let (x, w, y) = (q[0], q[1], q[2]);
+        let circle = w.abs() < 1e-4 && (x * x + y * y - 1.0).abs() < 1e-3;
+        let hyperbola = x.abs() < 1e-4 && (y * y - w * w - 1.0).abs() < 1e-3;
+        assert!(circle || hyperbola, "{q:?}");
+    }
+    // 使っている名前に、虚部の座標が入る（w の見せ方の対象になる）
+    assert!(m.used_params().split(',').any(|n| n == "w2"), "{}", m.used_params());
+    // 次の plot では元に戻る（1 回だけ）
+    let m = plot(
+        "x^2 + y^2 + z^2 = 1", &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 48, 40, "", &[], "", &[], "", 6, &[0, 3, 1], &[0.0; 6], &[f64::NAN; 12], "",
+        &[], 16, &vec![0.0; rd * (rd - 1) / 2], &vec![0.0; rd], 0.0, 0, false, false, 1, false, 0,
+    )
+    .ok()
+    .unwrap();
+    assert_eq!(m.kind(), "陰関数");
+    // 次元が足りない・虚部の座標を使っている式はエラー
+    let mut sp = equation::Space::basic(4, [0, 1, 2], vec![0.0; 4]);
+    sp.complex_coords = true;
+    assert!(equation::compile_with("x^2 + y^2 = 1", &Default::default(), &sp).err().unwrap().contains("次元を 6 以上"));
+    let mut sp = equation::Space::basic(6, [0, 1, 2], vec![0.0; 6]);
+    sp.complex_coords = true;
+    assert!(equation::compile_with("x + w = 1", &Default::default(), &sp).is_err());
+}

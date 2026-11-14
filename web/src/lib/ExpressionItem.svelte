@@ -25,6 +25,8 @@
     onComplexMode: (mode: ComplexMode) => void
     /** 表示していない座標の見せ方を変えたとき（変えた所だけ） */
     onHidden: (patch: Partial<HiddenStyle>) => void
+    /** 座標を複素数にする・やめる */
+    onComplexCoords: (on: boolean) => void
     onWalls: (on: boolean) => void
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
@@ -87,6 +89,7 @@
     onOpacity,
     onComplexMode,
     onHidden,
+    onComplexCoords,
     onWalls,
     onLayers,
     onEdges,
@@ -528,6 +531,18 @@
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
               値が飛ぶ所（floor の段差など）に壁を描く
             </label>
+          {/if}
+          {#if (item.params.length === 0 && !item.param) || item.complexCoords}
+            <label class="check">
+              <input type="checkbox" checked={item.complexCoords ?? false} onchange={(e) => onComplexCoords(e.currentTarget.checked)} />
+              座標を複素数にする（x → x + i w、y → y + i w₂、z → z + i w₃。6 次元で見る）
+            </label>
+            {#if item.complexCoords}
+              <p class="hint">
+                x, y, z の虚部を w, w₂, w₃ に割り当てています。表示する座標を (x, w, y) のように実部と虚部を混ぜて選ぶと、
+                実数でない所の形が見えます（x, y, z のままなら実数の部分）。式が複素数になる断面は、Re = Im = 0 の線で描きます
+              </p>
+            {/if}
           {/if}
           {#if hiddenCoords.length > 0}
             <div class="complex-mode">

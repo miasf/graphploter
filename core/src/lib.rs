@@ -365,6 +365,7 @@ pub fn plot(
     let start = timing::now_ms();
     timing::reset();
     let hidden = HIDDEN_STYLE.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    let complex_coords = COMPLEX_COORDS.with(|c| c.replace(false));
     let err = |m: &str| JsError::new(m);
     let mut complex_mode = mesh::ComplexMode::from_u32(complex_mode);
     let n = dims as usize;
@@ -412,6 +413,7 @@ pub fn plot(
         lift_param: complex_mode == mesh::ComplexMode::Param,
         complex_params: split(complex_params),
         flat_slice: flat && flat_slice,
+        complex_coords,
     };
     if space.axes.iter().any(|&a| a >= space.dims) {
         return Err(err("内部エラー: 表示する座標の番号が次元を超えています"));
@@ -527,6 +529,18 @@ thread_local! {
 #[wasm_bindgen]
 pub fn hidden_style(values: Vec<f64>) {
     HIDDEN_STYLE.with(|h| *h.borrow_mut() = values);
+}
+
+thread_local! {
+    /// 次の [`plot`] だけに効く「座標を複素数にする」（[`complex_coords`]）
+    static COMPLEX_COORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 次の [`plot`] で、座標を複素数にする（その 1 回だけ）: 式の x, y, z を x + i w, y + i w₂, z + i w₃ に置き換えて描く。
+/// 6 次元以上で使う。実数の座標 x, y, z と虚部 w, w₂, w₃ の 6 つから 3 つを表示し、残りは断面（や w の見せ方）で決める
+#[wasm_bindgen]
+pub fn complex_coords(on: bool) {
+    COMPLEX_COORDS.with(|c| c.set(on));
 }
 
 /// 等値面を何枚も重ねるときの、図形の数の上限

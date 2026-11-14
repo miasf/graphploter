@@ -59,6 +59,8 @@ pub struct Space {
     /// 点を計算して回すのではなく、陰関数として計算し直す（式から直接、縦の座標 = 0 の曲線を求める。
     /// 0 に接するだけの所も見つけられ、格子点の誤差でできる余計な線も出ない）
     pub flat_slice: bool,
+    /// 座標を複素数にする: 式の x, y, z を x + i w, y + i w₂, z + i w₃ に置き換える（6 次元以上で使う。[`complexify_coords`]）
+    pub complex_coords: bool,
 }
 
 impl Space {
@@ -82,6 +84,7 @@ impl Space {
             lift_param: false,
             complex_params: Vec::new(),
             flat_slice: false,
+            complex_coords: false,
         }
     }
 
@@ -435,6 +438,13 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     let shown = space.shown();
 
     let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    if space.complex_coords {
+        for chain in &mut chains {
+            for e in &mut chain.exprs {
+                *e = complexify_coords(e, space)?;
+            }
+        }
+    }
     // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
     let single = chains.len() == 1 && (chains[0].rels.is_empty() || chains[0].rels == [Rel::Eq]);
     if !single {
@@ -501,6 +511,27 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         return Ok(Plot::Multi(plots));
     }
     compile_pair(l, r, params, space)
+}
+
+/// 座標を複素数にする（[`Space::complex_coords`]）: 式の x, y, z を、x + i w, y + i w₂, z + i w₃ に置き換える。
+/// 虚部の座標（w, w₂, w₃）を式の中で使っていたらエラー。媒介変数表示の組（成分が座標そのもの）は、そのまま
+pub fn complexify_coords(e: &Expr, space: &Space) -> Result<Expr, String> {
+    if matches!(e, Expr::Tuple(_)) {
+        return Ok(e.clone());
+    }
+    if space.dims < 6 {
+        return Err("座標を複素数にするには、次元を 6 以上にしてください（虚部に w, w₂, w₃ を使います）".into());
+    }
+    for k in 3..6 {
+        if e.uses_var(&coord_name(k)) || (k == 3 && e.uses_var("w1")) {
+            return Err("座標を複素数にしている間は、w・w₂・w₃ は使えません（x・y・z の虚部に使います）".into());
+        }
+    }
+    Ok(e.substitute(&|name: &str| {
+        let k = coord_index(name).filter(|&k| k < 3)?;
+        let imag = Expr::Bin(BinOp::Mul, Box::new(Expr::Const(crate::parser::Constant::I)), Box::new(Expr::Var(coord_name(k + 3))));
+        Some(Expr::Bin(BinOp::Add, Box::new(Expr::Var(name.to_string())), Box::new(imag)))
+    }))
 }
 
 /// 「表示していない座標 h = h を使わない式 f」の形の式なら、(f, h の座標の番号)。f の変数は表示中の 3 つの座標

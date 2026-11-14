@@ -18,6 +18,8 @@ export interface SavedItem {
   complexMode?: ComplexMode
   /** 表示していない座標の見せ方（古い保存データには無い。無ければ断面） */
   hidden?: HiddenStyle
+  /** 座標を複素数にするか（古い保存データには無い） */
+  complexCoords?: boolean
   walls?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転。ただし rotOwn の無い古い保存データでは全体の回転） */
   rotGroup?: number

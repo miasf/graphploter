@@ -9,6 +9,7 @@ import init, {
   field_mode_plan,
   field_mode_reset,
   hidden_style,
+  complex_coords,
   last_used_params,
   plot,
   take_field_values,
@@ -94,7 +95,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -264,6 +265,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest>) => {
         : new Float64Array(0)
     const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
       hidden_style(hiddenStyle)
+      complex_coords(req.complexCoords)
       return plot(
         source,
         domainArr,
