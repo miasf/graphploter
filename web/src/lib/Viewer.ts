@@ -9,6 +9,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
+import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
 /** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
@@ -109,6 +110,8 @@ type PlotObject =
       order: number
       /** 2D 表示の不等式の領域の境目の線（実線・点線。group の子） */
       outlines: LineSegments2[]
+      /** 伝達関数（表示範囲の箱。group の子）と、その材質の値 */
+      volume: { box: THREE.Mesh; u: VolumeUniforms } | null
     }
   | {
       kind: 'curve'
@@ -1219,6 +1222,7 @@ export class Viewer {
         old.grid.uHeat.value = mesh.heat ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = old.geo
         this.setOutlines(old, mesh)
+        this.setVolume(old, mesh)
       }
     } else {
       this.removePlot(id)
@@ -1267,6 +1271,7 @@ export class Viewer {
       // ふたは切り口の平面の上にあるので、切り口の平面では切らない
       if (p.cap) (p.cap.material as THREE.Material).clippingPlanes = this.boxPlanes
       for (const l of p.outlines) (l.material as THREE.Material).clippingPlanes = this.clipPlanes
+      this.applyVolumeCut(p)
       if (p.stencil) {
         ;(p.stencil.inc.material as THREE.Material).clippingPlanes = this.clipPlanes
         ;(p.stencil.dec.material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -1486,9 +1491,11 @@ export class Viewer {
       stencil: null,
       order: this.nextOrder++,
       outlines: [],
+      volume: null,
     })
     this.applyLod(this.plots.get(id)!)
     this.setOutlines(this.plots.get(id)!, mesh)
+    this.setVolume(this.plots.get(id)!, mesh)
     this.scene.add(group)
   }
 
@@ -1498,6 +1505,49 @@ export class Viewer {
     grid.uValue.value = vr ? 1 : 0
     if (vr) grid.uValueRange.value.set(vr[0], vr[1])
     grid.uComplex.value = !vr && mesh.complexValues.length > 0 ? 1 : 0
+  }
+
+  /** 伝達関数の箱を作り直す（格子の値が無ければ消す）。箱は計算したときの表示範囲 */
+  private setVolume(p: PlotObject, mesh: MeshData) {
+    if (p.kind !== 'surface') return
+    if (p.volume) {
+      p.volume.u.uTex.value.dispose()
+      p.volume.box.geometry.dispose()
+      ;(p.volume.box.material as THREE.Material).dispose()
+      p.group.remove(p.volume.box)
+      p.volume = null
+    }
+    const v = mesh.volume
+    const d = this.domain
+    if (!v || !d) return
+    const u = createVolumeUniforms(volumeTexture(v.values, v.n))
+    u.uBoxMin.value.set(d.xmin, d.ymin, d.zmin)
+    u.uBoxMax.value.set(d.xmax, d.ymax, d.zmax)
+    if (mesh.valueRange) u.uRange.value.set(mesh.valueRange[0], mesh.valueRange[1])
+    const geo = new THREE.BoxGeometry(d.xmax - d.xmin, d.ymax - d.ymin, d.zmax - d.zmin)
+    geo.translate((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, (d.zmin + d.zmax) / 2)
+    const box = new THREE.Mesh(geo, createVolumeMaterial(u))
+    box.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
+    box.renderOrder = 1 // 半透明の面より後に重ねる
+    p.volume = { box, u }
+    this.applyVolumeCut(p)
+    p.group.add(box)
+    const style = this.styles.get(this.idOf(p))
+    if (style) applyVolumeStyle(u, style.hidden, new THREE.Color(style.color), style.opacity)
+  }
+
+  /** 伝達関数の箱に、切り口の平面を渡す */
+  private applyVolumeCut(p: PlotObject) {
+    if (p.kind !== 'surface' || !p.volume) return
+    const c = this.cutPlane
+    p.volume.u.uCutOn.value = c ? 1 : 0
+    if (c) p.volume.u.uCut.value.set(c.normal.x, c.normal.y, c.normal.z, c.constant)
+  }
+
+  /** 描画物の式の番号 */
+  private idOf(p: PlotObject): number {
+    for (const [id, q] of this.plots) if (q === p) return id
+    return -1
   }
 
   /** 面の式の境目の線（2D 表示の不等式の領域）を作り直す。`<`・`>` の分は点線 */
@@ -1622,6 +1672,7 @@ export class Viewer {
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
     p.grid.uColormap.value = ['viridis', 'turbo', 'shade'].indexOf(style.hidden?.colormap ?? 'viridis')
+    if (p.volume) applyVolumeStyle(p.volume.u, style.hidden, c, style.opacity)
     // 境目の線は、面の不透明度によらず式の色のまま
     for (const l of p.outlines) (l.material as LineMaterial).color.copy(c)
     // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）
@@ -1693,6 +1744,7 @@ export class Viewer {
         if (!p.stencil || (o !== p.stencil.inc && o !== p.stencil.dec)) o.geometry.dispose()
         ;(o.material as THREE.Material).dispose()
       }
+      p.volume?.u.uTex.value.dispose()
       disposeGeometry(p.geo) // 粗い版を描いている最中でも、両方の版を捨てる
       this.scene.remove(p.group)
     }
