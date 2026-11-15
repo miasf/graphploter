@@ -115,6 +115,32 @@ pub enum Func {
     JacobiDN,
     // その他
     LambertW,
+    /// 場合分け（計画 `docs/plan-math-notation.md` の M2）。利用者は名前で呼べない（`@cases` を展開して作る）。
+    /// 引数は、場合ごとに [条件の数 k, 厳密な条件の印（ビット）, 余裕 m₁, …, m_k, 値] を並べたもの。
+    /// 余裕 m は 0 以上（厳密な条件は 0 より大きい）なら成り立つ。条件が全部成り立つ最初の場合の値を返す（[`piece_index`]）
+    Piece,
+}
+
+/// 場合分け [`Func::Piece`] の引数（`n` 個。`get(i)` は i 番目の引数の実部）のうち、選ばれた値の番号。どの場合も成り立たなければ None
+pub fn piece_index(n: usize, get: impl Fn(usize) -> f64) -> Option<usize> {
+    let mut pos = 0;
+    while pos + 2 < n {
+        let k = get(pos) as usize;
+        let strict = get(pos + 1) as u64;
+        let value = pos + 2 + k;
+        if value >= n {
+            return None;
+        }
+        let ok = (0..k).all(|j| {
+            let m = get(pos + 2 + j);
+            if strict >> j & 1 == 1 { m > 0.0 } else { m >= 0.0 }
+        });
+        if ok {
+            return Some(value);
+        }
+        pos = value + 1;
+    }
+    None
 }
 
 /// 関数・入力で使える名前（最初のものが代表名）・使える引数の個数
@@ -210,6 +236,7 @@ const TABLE: &[(Func, &[&str], &[usize])] = &[
     (Func::JacobiCN, &["jacobiCN"], &[2]),
     (Func::JacobiDN, &["jacobiDN"], &[2]),
     (Func::LambertW, &["lambertW", "productLog"], &[1, 2]),
+    (Func::Piece, &[], &[]),
 ];
 
 impl Func {
@@ -379,6 +406,10 @@ impl Func {
             (Func::JacobiCN, 2) => sp::jacobi_elliptic(x[0], x[1]).1,
             (Func::JacobiDN, 2) => sp::jacobi_elliptic(x[0], x[1]).2,
             (Func::LambertW, 1) => sp::lambert_w(0.0, x[0]),
+            (Func::Piece, n) => match piece_index(n, |i| x[i].re) {
+                Some(i) => x[i],
+                None => nan,
+            },
             (Func::LambertW, 2) => sp::lambert_w(x[0].re.round(), x[1]),
             _ => nan,
         }

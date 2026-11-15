@@ -25,10 +25,6 @@ fn as_num(e: &Expr) -> Option<f64> {
     }
 }
 
-fn is(e: &Expr, v: f64) -> bool {
-    as_num(e) == Some(v)
-}
-
 fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
     Expr::Bin(op, Box::new(a), Box::new(b))
 }
@@ -250,6 +246,21 @@ pub fn diff(e: &Expr, var: &str) -> Result<Expr, String> {
                     }
                 }
             }
+        }
+        // 場合分けは、値だけを微分する（条件はそのまま）
+        Expr::Call(Func::Piece, args) => {
+            let mut out = args.clone();
+            let mut pos = 0;
+            while pos + 2 < args.len() {
+                let k = as_num(&args[pos]).unwrap_or(0.0) as usize;
+                let v = pos + 2 + k;
+                if v >= args.len() {
+                    break;
+                }
+                out[v] = diff(&args[v], var)?;
+                pos = v + 1;
+            }
+            call(Func::Piece, out)
         }
         Expr::Call(f, args) => {
             match (f, args.as_slice()) {

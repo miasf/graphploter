@@ -7,6 +7,8 @@
 //! - 関数の定義 `f(x) = x^2` と、その呼び出し `f(2x)`・合成 `g(f(x))`・関数どうしの演算 `(f + g)(x)`・`(f ∘ g)(x)`（M1）
 //! - 総和 `@sum(n, 1, N) 項`・総積 `@prod(…)`、等差のリスト `[1, 3, …, 9]`、両方の符号 `±`・`∓`（M4）
 //! - 微分 `@diff(x) 項`・`@diff(x, 2) 項`、導関数 `f'(x)`（M3。記号微分は `diff.rs`）
+//! - 場合分け `@cases(値, 条件; 値, 条件; それ以外の値)`（M2。[`crate::functions::Func::Piece`] にする）
+//! - 定積分 `@int(t, a, b)(式)`（M5。ガウス・ルジャンドルの 16 点 × 2 区間の重み付きの和にする。端は式でも ∞ でもよい）
 //!
 //! 定義は、ほかの行（式の一覧）から [`Defs::parse`] で作り、[`install`] で入れておく（`lib.rs` が `plot` の間だけ入れる）。
 //! 計算エンジンの式の文法は `parser.rs` の先頭の説明。展開した後の式には、新しい節を残さない（残れば内部エラー）
@@ -248,6 +250,8 @@ fn apply_body(body: &Expr, args: &[Expr]) -> Expr {
 struct Expander<'a> {
     defs: &'a Defs,
     params: &'a Params,
+    /// 積分の入れ子の深さ（2 重まで）
+    int_depth: usize,
     /// 展開中の定義の名前（自分自身を使う定義を見つける）
     stack: Vec<String>,
 }
@@ -258,7 +262,7 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
         return Ok(e.clone());
     }
     let defs = current();
-    let mut x = Expander { defs: &defs, params, stack: Vec::new() };
+    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new() };
     let out = match x.val(e)? {
         Val::S(s) => s,
         Val::Fn { .. } => return Err(fn_as_value_error(e)),
@@ -421,8 +425,10 @@ impl Expander<'_> {
                     _ => return Err("内部エラー: ± の形".into()),
                 }
             }
+            Expr::Op { op, args } if op == "cases" => Val::S(self.cases(args)?),
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
+            Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "diff" => {
                 let k = match args.as_slice() {
                     [] => 1,
@@ -466,6 +472,128 @@ impl Expander<'_> {
             Expr::Index { name, .. } => return Err(format!("{name}_(…) の添字はまだ使えません")),
             Expr::Prime { name, order } => return Err(format!("{name}{} はまだ使えません", "'".repeat(*order as usize))),
         })
+    }
+
+    /// 場合分けを [`crate::functions::Func::Piece`] の呼び出しにする。条件 `L < R` の余裕は R − L（厳密）、
+    /// `L ≤ R` は R − L、`L = R` は −|L − R|。連鎖 `0 ≤ x < 1` と `,` で並べた条件は全部成り立つとき（かつ）
+    fn cases(&mut self, cases: &[Expr]) -> Result<Expr, String> {
+        use crate::functions::Func;
+        let mut out = Vec::new();
+        for (k, case) in cases.iter().enumerate() {
+            let Expr::Op { args, .. } = case else { return Err("内部エラー: 場合分けの形".into()) };
+            let value = self.scalar(&args[0])?;
+            let mut margins = Vec::new();
+            let mut strict: u64 = 0;
+            for chain in &args[1..] {
+                let Expr::Op { op, args: exprs } = chain else { return Err("内部エラー: 条件の形".into()) };
+                let rels: Vec<char> = op.trim_start_matches("rel:").chars().collect();
+                let exprs = exprs.iter().map(|e| self.scalar(e)).collect::<Result<Vec<_>, _>>()?;
+                for (j, r) in rels.iter().enumerate() {
+                    let (l, rr) = (exprs[j].clone(), exprs[j + 1].clone());
+                    let d = |a: Expr, b: Expr| Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b));
+                    let (m, s) = match r {
+                        '<' => (d(rr, l), true),
+                        '≤' => (d(rr, l), false),
+                        '>' => (d(l, rr), true),
+                        '≥' => (d(l, rr), false),
+                        _ => (Expr::Neg(Box::new(Expr::Call(Func::Abs, vec![d(l, rr)]))), false),
+                    };
+                    if margins.len() >= 50 {
+                        return Err("場合分けの条件が多すぎます".into());
+                    }
+                    if s {
+                        strict |= 1 << margins.len();
+                    }
+                    margins.push(m);
+                }
+            }
+            if margins.is_empty() && k + 1 != cases.len() {
+                return Err("条件の無い場合（それ以外）は、最後に書いてください".into());
+            }
+            out.push(Expr::Num(margins.len() as f64));
+            out.push(Expr::Num(strict as f64));
+            out.extend(margins);
+            out.push(value);
+        }
+        Ok(Expr::Call(Func::Piece, out))
+    }
+
+    /// 定積分 $\int_a^b g(t)\,dt$ を、区間を 2 つに分けたガウス・ルジャンドルの重み付きの和にする（2 重目は 8 点 × 2）。
+    /// 端 a, b は式のまま（x を使ってよい）。∞ の端は変数変換で有限の区間にする:
+    /// $[a, \infty)$ は $t = a + \frac{s}{1-s}$、$(-\infty, b]$ は $t = b - \frac{s}{1-s}$（$s \in [0, 1)$）、
+    /// $(-\infty, \infty)$ は $(-\infty, 0]$ と $[0, \infty)$ に分ける
+    fn integral(&mut self, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        let [lo, hi] = args else { return Err("積分の範囲を書いてください（∫_0^1 の形）".into()) };
+        if self.int_depth >= 2 {
+            return Err("積分の入れ子は 2 重までにしてください".into());
+        }
+        let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
+        let inf = |e: &Expr| match e {
+            Expr::Num(v) if v.is_infinite() => Some(v.signum()),
+            Expr::Neg(a) => match &**a {
+                Expr::Num(v) if v.is_infinite() => Some(-v.signum()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let num = Expr::Num;
+        let b = |op: BinOp, x: Expr, y: Expr| Expr::Bin(op, Box::new(x), Box::new(y));
+        let s = Expr::Var("#s".into());
+        let one_minus_s = b(BinOp::Sub, num(1.0), s.clone());
+        // 置き換え: t = φ(s)、dt = φ'(s) ds。s の範囲 [s0, s1]
+        let (phi, dphi, s0, s1) = match (inf(&lo), inf(&hi)) {
+            (None, None) => (s.clone(), num(1.0), lo.clone(), hi.clone()),
+            (None, Some(1.0)) | (Some(-1.0), None) => {
+                // [a, ∞) と (−∞, b]
+                let (base, dir) = if inf(&hi).is_some() { (lo.clone(), BinOp::Add) } else { (hi.clone(), BinOp::Sub) };
+                let u = b(BinOp::Div, s.clone(), one_minus_s.clone());
+                let jac = b(BinOp::Div, num(1.0), b(BinOp::Pow, one_minus_s.clone(), num(2.0)));
+                (b(dir, base, u), jac, num(0.0), num(1.0))
+            }
+            (Some(-1.0), Some(1.0)) => {
+                // (−∞, ∞) は (−∞, 0] と [0, ∞) に分ける（1 つの変換 t = s/(1−s²) より、ずっと誤差が小さい）
+                let neg_inf = Expr::Neg(Box::new(num(f64::INFINITY)));
+                let left = self.integral(var, &[neg_inf, num(0.0)], body)?;
+                let right = self.integral(var, &[num(0.0), num(f64::INFINITY)], body)?;
+                return Ok(b(BinOp::Add, left, right));
+            }
+            (Some(1.0), _) | (_, Some(-1.0)) => {
+                return Err("積分の端の ∞ の向きを確かめてください（下の端に ∞、上の端に −∞ は書けません）".into())
+            }
+            _ => return Err("積分の範囲を確かめてください".into()),
+        };
+        let (nodes, weights) = gauss_legendre(if self.int_depth == 0 { 16 } else { 8 });
+        // 区間 [s0, s1] を 2 つに分ける: 幅の半分 h、j 番目の中点 m_j
+        let h = b(BinOp::Div, b(BinOp::Sub, s1, s0.clone()), num(2.0));
+        let half_h = b(BinOp::Div, h.clone(), num(2.0));
+        self.int_depth += 1;
+        let mut terms = Vec::new();
+        let mut nodes_count = 0;
+        for j in 0..2 {
+            let mid = b(BinOp::Add, s0.clone(), b(BinOp::Mul, num(j as f64 + 0.5), h.clone()));
+            for (xi, w) in nodes.iter().zip(&weights) {
+                let sk = b(BinOp::Add, mid.clone(), b(BinOp::Mul, num(*xi), half_h.clone()));
+                let at_s = |e: &Expr| e.substitute(&|v: &str| (v == "#s").then(|| sk.clone()));
+                let t = at_s(&phi);
+                let g = body.substitute(&|v: &str| (v == var).then(|| t.clone()));
+                let g = match self.scalar(&g) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.int_depth -= 1;
+                        return Err(e);
+                    }
+                };
+                let term = b(BinOp::Mul, num(*w), b(BinOp::Mul, g, at_s(&dphi)));
+                nodes_count += term.node_count();
+                if nodes_count > MAX_NODES {
+                    self.int_depth -= 1;
+                    return Err("積分の式が大きくなりすぎます（入れ子を減らしてください）".into());
+                }
+                terms.push(term);
+            }
+        }
+        self.int_depth -= 1;
+        Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
     }
 
     /// 式の値（数）。`what` はエラーの文に入れる名前（「Σ の範囲」など）。座標・媒介変数を含めばエラー
@@ -588,6 +716,35 @@ impl Expander<'_> {
     }
 }
 
+/// ガウス・ルジャンドルの n 点の節点と重み（区間 [−1, 1]）。ルジャンドル多項式 $P_n$ の根をニュートン法で求める
+pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut xs = vec![0.0; n];
+    let mut ws = vec![0.0; n];
+    for i in 0..n {
+        // 根の初期値（チェビシェフの近似）
+        let mut x = (std::f64::consts::PI * (i as f64 + 0.75) / (n as f64 + 0.5)).cos();
+        let mut dp = 0.0;
+        for _ in 0..100 {
+            // P_n(x) と P_n'(x) を漸化式で
+            let (mut p0, mut p1) = (1.0, x);
+            for k in 2..=n {
+                let p2 = ((2 * k - 1) as f64 * x * p1 - (k - 1) as f64 * p0) / k as f64;
+                p0 = p1;
+                p1 = p2;
+            }
+            dp = n as f64 * (x * p1 - p0) / (x * x - 1.0);
+            let dx = p1 / dp;
+            x -= dx;
+            if dx.abs() < 1e-16 {
+                break;
+            }
+        }
+        xs[i] = x;
+        ws[i] = 2.0 / ((1.0 - x * x) * dp * dp);
+    }
+    (xs, ws)
+}
+
 fn is_ellipsis(e: &Expr) -> bool {
     matches!(e, Expr::Op { op, .. } if op == "ellipsis")
 }
@@ -649,7 +806,7 @@ pub fn definition_line(l: &Expr) -> Option<(String, usize, bool)> {
         _ => return None,
     };
     let params = Params::new();
-    let mut x = Expander { defs: &defs, params: &params, stack: Vec::new() };
+    let mut x = Expander { defs: &defs, params: &params, int_depth: 0, stack: Vec::new() };
     Some(match x.def_value(name) {
         Ok(Some(Val::Fn { arity, body })) => (name.clone(), arity, matches!(body, Expr::Tuple(_))),
         _ => (

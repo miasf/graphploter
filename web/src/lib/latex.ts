@@ -70,6 +70,7 @@ const SYMBOLS: Record<string, string> = {
   circ: '∘',
   // 微分（\frac{d}{dx} などの部品。単独では計算エンジンが読めない）とプライム
   partial: '∂',
+  infty: '∞',
   differentialD: 'd',
   prime: "'",
   doubleprime: "''",
@@ -324,6 +325,65 @@ class Converter {
         this.out += ` @${name}(${m[1]},${m[2].trim()},${hi.trim()}) `
         return
       }
+      case 'int':
+      case 'intop':
+      case 'smallint': {
+        // \int_{a}^{b} 中身 dt → @int(t,a,b)(中身)。中身は、同じ深さで最初に出てくる「d + 文字 1 つ」の手前まで
+        let lo: string | null = null
+        let hi: string | null = null
+        while (this.peek() === '_' || this.peek() === '^' || this.peek() === '\\limits' || this.peek() === '\\nolimits') {
+          const t2 = this.toks[this.i++]
+          if (t2 === '_') lo = this.arg()
+          else if (t2 === '^') hi = this.arg()
+        }
+        if (lo === null || hi === null || lo.trim() === '' || hi.trim() === '') throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
+        const start = this.i
+        let depth = 0
+        for (let p = this.i; p < this.toks.length; p++) {
+          const t2 = this.toks[p]
+          if (t2 === '{' || t2 === '\\left') depth++
+          else if (t2 === '}' || t2 === '\\right') {
+            if (depth === 0) break
+            depth--
+          }
+          if (depth !== 0) continue
+          // d・\differentialD・\mathrm{d}・\operatorname{d} の後に文字 1 つ
+          let len = 0
+          if ((t2 === 'd' || t2 === '\\differentialD') && /^[A-Za-z]$/.test(this.toks[p + 1] ?? '')) len = 1
+          else if (
+            (t2 === '\\mathrm' || t2 === '\\operatorname') &&
+            this.toks[p + 1] === '{' &&
+            this.toks[p + 2] === 'd' &&
+            this.toks[p + 3] === '}' &&
+            /^[A-Za-z]$/.test(this.toks[p + 4] ?? '')
+          )
+            len = 4
+          if (len === 0) continue
+          const v = this.toks[p + len]
+          const body = new Converter(this.toks.slice(start, p)).run()
+          if (body === '') throw new LatexError('積分する式を書いてください')
+          this.i = p + len + 1
+          this.out += ` @int(${v},${lo.trim()},${hi.trim()})(${body}) `
+          return
+        }
+        throw new LatexError('積分の変数を dt のように書いてください')
+      }
+      case 'begin': {
+        const env = this.rawGroup(true)
+        const rows = this.environment(env)
+        if (env === 'cases' || env === 'dcases' || env === 'rcases') {
+          // 場合分け: 行ごとに「値 & 条件」。条件が空・otherwise・それ以外 なら、それ以外の場合（最後に書く）
+          const parts = rows.map((cells) => {
+            const value = cells[0] ?? ''
+            const cond = (cells[1] ?? '').replace(/^\s*(if|when|もし)\b/, '').trim()
+            if (value === '') throw new LatexError('場合分けの値を書いてください')
+            return /^(|otherwise|else|それ以外|その他)$/.test(cond) ? value : `${value}, ${cond}`
+          })
+          this.out += ` @cases(${parts.join('; ')}) `
+          return
+        }
+        throw new LatexError(`${env} はまだ使えません`)
+      }
       case 'placeholder':
         this.rawGroup()
         if (this.peek() === '{') this.rawGroup()
@@ -333,6 +393,32 @@ class Converter {
         return
     }
     throw new LatexError(`${t} はまだ使えません`)
+  }
+
+  /**
+   * \\begin{env}{…} の中身を、\\end{env} まで読み、行（\\\\ で区切る）ごとの欄（& で区切る）を変換した文字列の表にする。
+   * 入れ子の \\begin … \\end の中の & と \\\\ は区切りにしない
+   */
+  private environment(env: string): string[][] {
+    const rows: Token[][][] = [[[]]]
+    let depth = 0
+    while (this.i < this.toks.length) {
+      const t = this.toks[this.i++]
+      if (t === '\\end' && depth === 0) {
+        this.rawGroup()
+        const out = rows
+          .map((cells) => cells.map((c) => (c.length ? new Converter(c).run() : '')))
+          .filter((cells) => cells.some((c) => c !== ''))
+        return out
+      }
+      if (t === '\\begin') depth++
+      if (t === '\\end') depth--
+      const row = rows[rows.length - 1]
+      if (depth === 0 && t === '&') row.push([])
+      else if (depth === 0 && t === '\\\\') rows.push([[]])
+      else row[row.length - 1].push(t)
+    }
+    throw new LatexError(`\\end{${env}} がありません`)
   }
 
   /** '{' を読んだ直後から、対応する '}' までを変換して返す */

@@ -226,6 +226,10 @@ fn latex_outputs_are_readable() {
     assert!(graph_core::equation::compile_with("y=± sqrt(x)", &ps, &sp).is_ok());
     assert!(graph_core::equation::compile_with("z=[1,3,…,9] x", &ps, &sp).is_ok());
     assert!((value("30*(pi/180)") - std::f64::consts::PI / 6.0).abs() < 1e-15);
+    assert!((value("@int(u,-∞,∞)(((1)/(1+u^(2))))") - std::f64::consts::PI).abs() < 1e-6);
+    assert!((value("@int(t,0,1)(t) +1") - 1.5).abs() < 1e-14);
+    assert!(run("f(x)= @cases(x^(2), x<0; x)", "f(x)= @cases(x^(2), x<0; x)", &[]).is_ok());
+    assert_eq!(value("@cases(1, 0<=0.5<1; 0, 0.5>=1; -1)"), 1.0);
 }
 
 // ---- M3: 記号微分 ----
@@ -258,4 +262,105 @@ fn derivative_values() {
     let (d, _) = graph_core::equation::eval_constant_with("@diff(s) zeta(s)", &ps).unwrap();
     assert!((d + 0.937_548_254_3).abs() < 1e-6, "{d}");
     assert!(error_of("z = h'(x, y)", "h(x, y) = x y").contains("∂"));
+}
+
+// ---- M2: 場合分け ----
+
+#[test]
+fn piecewise_values() {
+    let m = run("z = @cases(x^2, x < 0; x)", "", &[]).unwrap();
+    let p = m.positions();
+    let mut checked = 0;
+    for v in p.chunks_exact(3) {
+        let (x, z) = (v[0] as f64, v[2] as f64);
+        if !x.is_finite() || !z.is_finite() || x.abs() < 0.2 {
+            continue;
+        }
+        let want = if x < 0.0 { x * x } else { x };
+        if want.abs() <= 3.0 {
+            assert!((z - want).abs() < 1e-5, "x = {x}: {z} と {want}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 100);
+    // 選ばれなかった値が NaN でも、結果に影響しない
+    assert_eq!(value("@cases(sqrt(0 - 4), 1 < 0; 7)"), 7.0);
+    // どの場合も成り立たなければ描かない
+    assert!(graph_core::equation::eval_constant("@cases(1, 2 < 1)").is_err());
+    // 連鎖と、, で並べた条件（かつ）
+    assert_eq!(value("@cases(1, 0 ≤ 0.5 < 1; 2)"), 1.0);
+    assert_eq!(value("@cases(1, 0 ≤ 1 < 1; 2)"), 2.0);
+    assert_eq!(value("@cases(1, 0 < 1, 2 > 3; 2)"), 2.0);
+    assert_eq!(value("@cases(1, 2 = 2; 2)"), 1.0);
+}
+
+#[test]
+fn piecewise_in_functions_and_derivatives() {
+    // 定義の中の場合分けと、その微分（値だけを微分する）
+    assert!(max_diff("y = f'(x)", "y = @cases(2x, x < 0; 1)", "f(x) = @cases(x^2, x < 0; x)") < 1e-5);
+}
+
+#[test]
+fn piecewise_step_is_cut_like_sign() {
+    // 段差の位置は sign(x) と同じように切り分けられる: z = 1 の面の、x = 0 に最も近い頂点が、格子の 1/1000 以内
+    let nearest = |src: &str| {
+        let m = run(src, "", &[]).unwrap();
+        m.positions().chunks_exact(3).filter(|v| (v[2] - 1.0).abs() < 1e-6).map(|v| v[0] as f64).fold(f64::INFINITY, f64::min)
+    };
+    let h = 6.0 / 40.0;
+    let (c, s) = (nearest("z = @cases(1, x > 0; -1)"), nearest("z = sign(x)"));
+    assert!(c.abs() < h / 1000.0 + 1e-6, "場合分け {c}");
+    assert!((c - s).abs() < 1e-6, "場合分け {c}, sign {s}");
+}
+
+// ---- M5: 定積分 ----
+
+fn close(src: &str, want: f64, tol: f64) {
+    let v = value(src);
+    assert!((v - want).abs() <= tol, "{src} = {v}（{want} から {} 離れている）", (v - want).abs());
+}
+
+#[test]
+fn integral_values() {
+    close("@int(t,0,1)(t^2)", 1.0 / 3.0, 1e-14);
+    close("@int(t,0,pi)(sin(t))", 2.0, 1e-13);
+    close("@int(t,0,∞)(exp(-t))", 1.0, 1e-6);
+    close("@int(t,-∞,∞)(exp(-t^2))", std::f64::consts::PI.sqrt(), 1e-6);
+    close("@int(t,-∞,0)(exp(t))", 1.0, 1e-6);
+    // 入れ子
+    close("@int(s,0,1)(@int(t,0,s)(1))", 0.5, 1e-13);
+    // 中身は直後の項。+1 は積分の外
+    close("@int(t,0,1)(t) + 1", 1.5, 1e-14);
+    assert!(error_of("z = @int(a,0,1)(@int(b,0,1)(@int(c,0,1)(x)))", "").contains("2 重まで"));
+}
+
+#[test]
+fn integral_with_variable_end() {
+    // ∫₀ˣ e^{−t²} dt = (√π/2) erf(x)
+    let m = run("y = @int(t,0,x)(exp(-t^2))", "", &[]).unwrap();
+    let mut n = 0;
+    for v in m.positions().chunks_exact(3) {
+        let (x, y) = (v[0] as f64, v[1] as f64);
+        if x.is_finite() && y.is_finite() {
+            let want = std::f64::consts::PI.sqrt() / 2.0 * libm_erf(x);
+            assert!((y - want).abs() < 1e-5, "x = {x}: {y} と {want}");
+            n += 1;
+        }
+    }
+    assert!(n > 10);
+}
+
+/// erf（f32 の頂点と比べるので、計算エンジンの erf で十分）
+fn libm_erf(x: f64) -> f64 {
+    value(&format!("erf({x})"))
+}
+
+#[test]
+fn integral_against_bessel() {
+    // ∫₀^{2π} cos(x sin t − y t) dt = 2π J_y(x)（y が整数の所）
+    for (x, y) in [(1.5, 0.0), (2.5, 1.0), (0.7, 2.0)] {
+        let v = value(&format!("@int(t,0,2pi)(cos({x} sin(t) - {y} t))"));
+        let j = value(&format!("2 pi besselJ({y}, {x})"));
+        assert!((v - j).abs() < 1e-8, "x = {x}, y = {y}: {v} と {j}");
+    }
 }

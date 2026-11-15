@@ -258,6 +258,7 @@ pub enum OpKind {
 pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         "sum" | "prod" | "int" | "diff" => OpKind::Binder,
+        "cases" => OpKind::Func,
         _ => return None,
     })
 }
@@ -437,6 +438,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             '×' => Tok::Cross,
             '∘' => Tok::Compose,
             '…' => Tok::Ellipsis,
+            // 無限大（積分の端など）
+            '∞' => Tok::Num(f64::INFINITY),
             '±' => Tok::PlusMinus,
             '∓' => Tok::MinusPlus,
             '.' if chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'.') => {
@@ -689,8 +692,54 @@ impl Parser<'_> {
         Ok(args)
     }
 
+    /// 場合分け `@cases(値, 条件, 条件; 値, 条件; それ以外の値)`（`@cases(` は読んだ後）。
+    /// 場合ごとに `Expr::Op { op: "case", args: [値, 関係の連鎖, …] }`、関係の連鎖は `Expr::Op { op: "rel:<≤", args: [式, 式, 式] }`
+    /// （`rel:` の後に関係を 1 文字ずつ。`=` `<` `≤` `>` `≥`）
+    fn cases(&mut self) -> Result<Expr, ParseError> {
+        let mut cases = Vec::new();
+        loop {
+            let value = self.expr()?;
+            let mut args = vec![value];
+            while *self.peek() == Tok::Comma {
+                self.next();
+                let mut exprs = vec![self.expr()?];
+                let mut rels = String::new();
+                while let Tok::Rel(r) = *self.peek() {
+                    self.next();
+                    rels.push(match r {
+                        Rel::Eq => '=',
+                        Rel::Lt => '<',
+                        Rel::Le => '≤',
+                        Rel::Gt => '>',
+                        Rel::Ge => '≥',
+                    });
+                    exprs.push(self.expr()?);
+                }
+                if rels.is_empty() {
+                    return err("場合分けの条件には、x < 0 のように =・< などを書いてください", self.pos());
+                }
+                args.push(Expr::Op { op: format!("rel:{rels}"), args: exprs });
+            }
+            cases.push(Expr::Op { op: "case".into(), args });
+            match self.peek() {
+                Tok::Semi => {
+                    self.next();
+                }
+                Tok::RParen => {
+                    self.next();
+                    return Ok(Expr::Op { op: "cases".into(), args: cases });
+                }
+                _ => return err("場合分けは、場合を ; で区切り、) で閉じてください", self.pos()),
+            }
+        }
+    }
+
     /// `@名前` の演算子（[`op_kind`]）
     fn op(&mut self, name: String, pos: usize) -> Result<Expr, ParseError> {
+        if name == "cases" {
+            self.expect(Tok::LParen, "@cases の後の '('")?;
+            return self.cases();
+        }
         match op_kind(&name) {
             Some(OpKind::Binder) => {
                 self.expect(Tok::LParen, &format!("@{name} の後の '('"))?;

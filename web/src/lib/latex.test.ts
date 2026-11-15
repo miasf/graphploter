@@ -21,6 +21,14 @@ const cases: [string, string][] = [
   ['\\left(f\\circ g\\right)\\left(x\\right)', '(f∘g)(x)'],
   ['f\\colon x\\mapsto x^2', 'f(x)=x^(2)'],
   ['30^{\\circ}', '30*(pi/180)'],
+  // 場合分け（M2）
+  ['f\\left(x\\right)=\\begin{cases}x^2 & x<0\\\\ x & \\text{otherwise}\\end{cases}', 'f(x)= @cases(x^(2), x<0; x)'],
+  ['\\begin{cases}1 & \\text{if } 0\\le x<1\\\\ 0 & x\\ge1\\\\ -1\\end{cases}', '@cases(1, 0<=x<1; 0, x>=1; -1)'],
+  // 定積分（M5）
+  ['y=\\int_{0}^{x}e^{-t^{2}}\\,dt', 'y= @int(t,0,x)(e^(-t^(2)))'],
+  ['\\int_0^1t\\,dt+1', '@int(t,0,1)(t) +1'],
+  ['\\int_{0}^{\\infty}e^{-t}\\mathrm{d}t', '@int(t,0,∞)(e^(-t))'],
+  ['\\int_{-\\infty}^{\\infty}\\frac{1}{1+u^2}du', '@int(u,-∞,∞)(((1)/(1+u^(2))))'],
   // 微分（M3）
   ['\\frac{d}{dx}\\sin\\left(x\\right)', '@diff(x) sin (x)'],
   ['z=\\frac{\\partial}{\\partial x}\\sin\\left(xy\\right)', 'z= @diff(x) sin (xy)'],

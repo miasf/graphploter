@@ -209,7 +209,7 @@ impl Code {
             Op::Var(_) | Op::Neg(_) | Op::Bin(..) => true,
             Op::Call1(f, _) => real_fn1(*f),
             Op::Call2(f, _, _) => real_fn2(*f),
-            Op::CallN(..) => false,
+            Op::CallN(f, _) => *f == Func::Piece,
         });
         Code { ops: kept, outs: outs.into_iter().map(|o| at[o]).collect(), real }
     }
@@ -479,6 +479,12 @@ impl Code {
                     Func::Mod => map2!(*a, *b, |x: f64, y: f64| x - y * (x / y).floor()),
                     _ => return false,
                 },
+                Op::CallN(Func::Piece, args) => {
+                    for (j, d) in dst.iter_mut().enumerate() {
+                        let pick = crate::functions::piece_index(args.len(), |i| done[args[i] * CHUNK + j]);
+                        *d = pick.map_or(f64::NAN, |i| done[args[i] * CHUNK + j]);
+                    }
+                }
                 Op::CallN(..) => return false,
             }
             // 有限でない値（0 での割り算・桁あふれなど）が1つでもあれば、v·0 の和が NaN になる
