@@ -3,6 +3,7 @@
 import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
 import { coordName, latexName, prettyName } from './params'
 import { COMMON_SYMBOLS, SYMBOL_PAGES, type SymbolKey } from './keyboardSymbols'
+import { CALC_PAGES } from './calcKeys'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
 // 相対パスだとスクリプトの場所が基準になってしまうので、ページの URL を基準にした絶対 URL にする
@@ -34,6 +35,14 @@ export const SHORTCUTS: Record<string, string> = {
   tau: '\\tau',
   '<=': '\\le',
   '>=': '\\ge',
+  // 数学の記法（計画 docs/plan-math-notation.md）。"int" は e^{int}（フーリエ級数）を壊すので変換しない（∑∫∈ のタブから入れる）
+  '!=': '\\ne',
+  '=>': '\\Rightarrow',
+  sum: '\\sum_{n=1}^{#?}',
+  prod: '\\prod_{n=1}^{#?}',
+  nabla: '\\nabla',
+  xor: '\\oplus',
+  infty: '\\infty',
   sqrt: '\\sqrt{#?}',
   gamma: '\\Gamma',
   ...Object.fromEntries(
@@ -206,6 +215,26 @@ const SPECIAL_LAYOUT = {
   }),
 }
 
+const CALC_LAYOUT = {
+  label: '∑∫∈',
+  tooltip: '微積・ベクトル・集合と論理（◀ ▶ でページをめくる）',
+  layers: CALC_PAGES.map((page, k) => {
+    const n = CALC_PAGES.length
+    const id = (j: number) => `calc-${(j + n) % n}`
+    const rows: Partial<VirtualKeyboardKeycap>[][] = page.rows.map((r) => r.map((k) => ({ ...k })))
+    while (rows.length < 3) rows.push([])
+    rows.push([
+      { label: '◀', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k - 1)], tooltip: '前のページ' },
+      { label: `${page.title} ${k + 1}/${n}`, class: 'action small', width: 2, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
+      { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
+      { label: '[left]', width: 1 },
+      { label: '[right]', width: 1 },
+      { label: '[backspace]', width: 1 },
+    ])
+    return { id: id(k), rows }
+  }),
+}
+
 /** abc タブのキー（keyboardSymbols.ts の書き方 → MathLive のキー） */
 function symbolKey(k: SymbolKey): Partial<VirtualKeyboardKeycap> {
   if (typeof k === 'string') return { latex: k, tooltip: k }
@@ -274,7 +303,7 @@ const ABC_LAYOUT = (() => {
 // タブを押した瞬間に行き先を「そのタブで最後に開いていたページ」に書き換える
 
 /** ページのあるタブの層の id（abc-3、special-0 など） */
-const PAGED_LAYER = /^(abc|special)-/
+const PAGED_LAYER = /^(abc|special|calc)-/
 /** タブ → 最後に開いていたページの層の id */
 const lastPage = new Map<string, string>()
 
@@ -453,7 +482,7 @@ function variablesLayout(dims: number) {
         { latex: '(', tooltip: '左かっこ' },
         { latex: ')', tooltip: '右かっこ' },
         { latex: ',', tooltip: 'カンマ（成分の区切り）' },
-        { latex: '=', tooltip: '等号。長押しで < > ≤ ≥', variants: ['<', '>', '\\le', '\\ge'] },
+        { latex: '=', tooltip: '等号。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
         { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（文字の後ろに数字を打っても添字になる）' },
         { latex: '\\left[#0\\right]', label: '[ ]', tooltip: 'リスト（[−1, 1] など）' },
         '[separator-5]',
@@ -533,7 +562,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           '4',
           '5',
           '6',
-          { latex: '\\cdot', label: '×', tooltip: '掛け算' },
+          { latex: '\\cdot', label: '×', tooltip: '掛け算（長押しで外積 ×）', variants: ['\\times'] },
         ],
         [
           { latex: '#@^{2}', label: 'x²', tooltip: '2乗' },
@@ -541,7 +570,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           { latex: '\\sqrt{#0}', label: '√', tooltip: '平方根' },
           { latex: '\\left|#0\\right|', label: '|x|', tooltip: '絶対値' },
           { latex: '!', tooltip: '階乗' },
-          { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥', variants: ['<', '>', '\\le', '\\ge'] },
+          { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
           '[separator-5]',
           '1',
           '2',
@@ -596,6 +625,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
         ],
       ],
     },
+    CALC_LAYOUT,
     SPECIAL_LAYOUT,
     ABC_LAYOUT,
   ]

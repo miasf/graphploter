@@ -209,7 +209,7 @@ impl Code {
             Op::Var(_) | Op::Neg(_) | Op::Bin(..) => true,
             Op::Call1(f, _) => real_fn1(*f),
             Op::Call2(f, _, _) => real_fn2(*f),
-            Op::CallN(..) => false,
+            Op::CallN(f, _) => *f == Func::Piece,
         });
         Code { ops: kept, outs: outs.into_iter().map(|o| at[o]).collect(), real }
     }
@@ -378,6 +378,167 @@ impl Code {
         Some(regs[self.outs[0]])
     }
 
+    /// 飾り付きの区間演算（[`Program::eval_interval_dec`]）。今の区間演算の関数（`iv::*`）をそのまま使い、
+    /// 「分からない」になった理由（極・定義域・あふれ）で飾りを決める
+    fn interval_dec(&self, boxes: &[Interval]) -> crate::interval::DecInterval {
+        use crate::interval::{self as iv, dec_domain, dec_mod, dec_of, dec_step, Dec, DecInterval as D};
+        let mut regs: Vec<D> = Vec::with_capacity(self.ops.len());
+        for op in &self.ops {
+            let args: Vec<usize> = match op {
+                Op::Const(_) | Op::Var(_) => Vec::new(),
+                Op::Neg(a) | Op::Call1(_, a) => vec![*a],
+                Op::Bin(_, a, b) | Op::Call2(_, a, b) => vec![*a, *b],
+                Op::CallN(_, a) => a.clone(),
+            };
+            // 引数のどれかが空なら空。結果の飾りは、引数の飾りの弱い方以下
+            if args.iter().any(|&k| regs[k].is_empty()) {
+                regs.push(D::empty());
+                continue;
+            }
+            let inherit = args.iter().map(|&k| regs[k].dec).min().unwrap_or(Dec::Com);
+            // 引数に無限大の端があると、今の関数は答えない。そのときは全部の実数（連続かどうかは、引数の飾りのまま）
+            let unbounded = args.iter().any(|&k| !regs[k].bounded());
+            let r = |k: usize| regs[k].interval();
+            let v: D = match op {
+                Op::Const(c) => {
+                    if c.im != 0.0 || !c.re.is_finite() {
+                        D::entire(Dec::Trv)
+                    } else {
+                        D::new(Interval::point(c.re), Dec::Com)
+                    }
+                }
+                Op::Var(k) => D::new(boxes[*k], Dec::Com),
+                _ if unbounded => match op {
+                    // 割り算・tan などは、引数が有界でないと極を含むかもしれない
+                    Op::Bin(BinOp::Div | BinOp::Pow, ..) | Op::Call2(Func::Mod, ..) => D::entire(Dec::Trv),
+                    Op::Call1(Func::Tan | Func::Cot | Func::Sec | Func::Csc | Func::Ln | Func::Log10 | Func::Sqrt, _) => D::entire(Dec::Trv),
+                    Op::Call1(Func::Asin | Func::Acos | Func::Atanh | Func::Acosh, _) => D::entire(Dec::Trv),
+                    Op::Call1(Func::Floor | Func::Ceil | Func::Round | Func::Sign, _) | Op::CallN(..) => D::entire(Dec::Def),
+                    Op::Call1(Func::Sin | Func::Cos, _) => D::new(Interval::new(-1.0, 1.0), Dec::Com),
+                    Op::Call1(Func::Atan | Func::Tanh, _) => D::new(Interval::new(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2), Dec::Com),
+                    _ => D::entire(Dec::Dac),
+                },
+                Op::Neg(a) => dec_of(iv::neg(r(*a)), Dec::Com, Dec::Dac),
+                Op::Bin(BinOp::Add, a, b) => dec_of(iv::add(r(*a), r(*b)), Dec::Com, Dec::Dac),
+                Op::Bin(BinOp::Sub, a, b) => dec_of(iv::sub(r(*a), r(*b)), Dec::Com, Dec::Dac),
+                Op::Bin(BinOp::Mul, a, b) => dec_of(iv::mul(r(*a), r(*b)), Dec::Com, Dec::Dac),
+                Op::Bin(BinOp::Div, a, b) => {
+                    if r(*b).contains(0.0) {
+                        D::entire(Dec::Trv)
+                    } else {
+                        dec_of(iv::div(r(*a), r(*b)), Dec::Com, Dec::Dac)
+                    }
+                }
+                Op::Bin(BinOp::Pow, a, b) => {
+                    let (x, y) = (r(*a), r(*b));
+                    let int_exp = y.lo == y.hi && y.lo.fract() == 0.0 && y.lo.abs() <= 1024.0;
+                    if int_exp {
+                        // 負の整数乗は、底が 0 を含めば極
+                        if y.lo < 0.0 && x.contains(0.0) {
+                            D::entire(Dec::Trv)
+                        } else {
+                            dec_of(iv::pow(x, y), Dec::Com, Dec::Dac)
+                        }
+                    } else if y.lo == y.hi {
+                        // 実数乗: 定義域は 0 以上（指数が負なら 0 より大きい）
+                        let e = y.lo;
+                        if x.hi < 0.0 || (e < 0.0 && x.hi <= 0.0) {
+                            D::empty()
+                        } else if x.lo < 0.0 || (e < 0.0 && x.lo <= 0.0) {
+                            if e > 0.0 {
+                                dec_of(iv::pow(Interval::new(0.0, x.hi), y), Dec::Trv, Dec::Trv)
+                            } else {
+                                D::entire(Dec::Trv)
+                            }
+                        } else {
+                            dec_of(iv::pow(x, y), Dec::Com, Dec::Dac)
+                        }
+                    } else if x.hi <= 0.0 {
+                        D::empty()
+                    } else if x.lo <= 0.0 {
+                        D::entire(Dec::Trv)
+                    } else {
+                        dec_of(iv::pow(x, y), Dec::Com, Dec::Dac)
+                    }
+                }
+                Op::Call1(f, a) => {
+                    let x = r(*a);
+                    match f {
+                        Func::Sin => dec_of(iv::sin(x), Dec::Com, Dec::Com),
+                        Func::Cos => dec_of(iv::cos(x), Dec::Com, Dec::Com),
+                        Func::Tan => dec_of(iv::tan(x), Dec::Com, Dec::Trv),
+                        Func::Cot => dec_of(iv::cot(x), Dec::Com, Dec::Trv),
+                        Func::Sec => dec_of(iv::sec(x), Dec::Com, Dec::Trv),
+                        Func::Csc => dec_of(iv::csc(x), Dec::Com, Dec::Trv),
+                        Func::Atan => dec_of(iv::atan(x), Dec::Com, Dec::Dac),
+                        Func::Sinh => dec_of(iv::sinh(x), Dec::Com, Dec::Dac),
+                        Func::Cosh => dec_of(iv::cosh(x), Dec::Com, Dec::Dac),
+                        Func::Tanh => dec_of(iv::tanh(x), Dec::Com, Dec::Dac),
+                        Func::Asinh => dec_of(iv::asinh(x), Dec::Com, Dec::Dac),
+                        Func::Exp => dec_of(iv::exp(x), Dec::Com, Dec::Dac),
+                        Func::Abs => dec_of(iv::abs(x), Dec::Com, Dec::Dac),
+                        Func::Sinc => dec_of(iv::sinc(x), Dec::Com, Dec::Com),
+                        Func::Asin => dec_domain(x, -1.0, 1.0, iv::asin),
+                        Func::Acos => dec_domain(x, -1.0, 1.0, iv::acos),
+                        Func::Acosh => dec_domain(x, 1.0, f64::INFINITY, |i| iv::acosh(Interval::new(i.lo, i.hi.min(f64::MAX)))),
+                        Func::Atanh => {
+                            if x.hi <= -1.0 || x.lo >= 1.0 {
+                                D::empty()
+                            } else if x.lo <= -1.0 || x.hi >= 1.0 {
+                                D::entire(Dec::Trv)
+                            } else {
+                                dec_of(iv::atanh(x), Dec::Com, Dec::Dac)
+                            }
+                        }
+                        Func::Ln | Func::Log10 | Func::Sqrt => {
+                            let g = |i: Interval| match f {
+                                Func::Ln => iv::ln(i),
+                                Func::Log10 => iv::log10(i),
+                                _ => iv::sqrt(i),
+                            };
+                            // sqrt は 0 で定義される（丸めの分だけ負になった下の端は 0 とみなす。今の区間演算と同じ）
+                            let zero_ok = *f == Func::Sqrt;
+                            let tol = if zero_ok { 1e-9 * (x.hi.abs() + 1.0) } else { 0.0 };
+                            if x.hi < -tol || (!zero_ok && x.hi <= 0.0) {
+                                D::empty()
+                            } else if x.lo < -tol || (!zero_ok && x.lo <= 0.0) {
+                                // 定義域をはみ出す: 定義される所の値の範囲で、飾りは Trv
+                                if zero_ok {
+                                    dec_of(g(Interval::new(0.0, x.hi)), Dec::Trv, Dec::Trv)
+                                } else {
+                                    let top = g(Interval::new(x.hi, x.hi)).map_or(f64::INFINITY, |i| i.hi);
+                                    D::new(Interval::new(f64::NEG_INFINITY, top), Dec::Trv)
+                                }
+                            } else {
+                                dec_of(g(x), Dec::Com, Dec::Dac)
+                            }
+                        }
+                        Func::Floor => dec_step(x, f64::floor, iv::floor(x)),
+                        Func::Ceil => dec_step(x, f64::ceil, iv::ceil(x)),
+                        Func::Round => dec_step(x, f64::round, iv::round(x)),
+                        Func::Sign => {
+                            let cont = x.lo > 0.0 || x.hi < 0.0;
+                            dec_of(iv::sign(x), if cont { Dec::Com } else { Dec::Def }, Dec::Def)
+                        }
+                        Func::Re | Func::Conj => D::new(x, Dec::Com),
+                        Func::Im => D::new(Interval::point(0.0), Dec::Com),
+                        _ => D::entire(Dec::Trv),
+                    }
+                }
+                Op::Call2(f, a, b) => match f {
+                    Func::Min => dec_of(iv::min(r(*a), r(*b)), Dec::Com, Dec::Dac),
+                    Func::Max => dec_of(iv::max(r(*a), r(*b)), Dec::Com, Dec::Dac),
+                    Func::Mod => dec_mod(r(*a), r(*b)),
+                    _ => D::entire(Dec::Trv),
+                },
+                // 場合分けなど: 値の範囲は言えない
+                Op::CallN(..) => D::entire(Dec::Trv),
+            };
+            regs.push(v.weaken(inherit));
+        }
+        regs[self.outs[0]]
+    }
+
     fn chunk_real(&self, inputs: &[&[f64]], start: usize, len: usize, regs: &mut [f64]) -> bool {
         for (i, op) in self.ops.iter().enumerate() {
             let (done, rest) = regs.split_at_mut(i * CHUNK);
@@ -479,6 +640,12 @@ impl Code {
                     Func::Mod => map2!(*a, *b, |x: f64, y: f64| x - y * (x / y).floor()),
                     _ => return false,
                 },
+                Op::CallN(Func::Piece, args) => {
+                    for (j, d) in dst.iter_mut().enumerate() {
+                        let pick = crate::functions::piece_index(args.len(), |i| done[args[i] * CHUNK + j]);
+                        *d = pick.map_or(f64::NAN, |i| done[args[i] * CHUNK + j]);
+                    }
+                }
                 Op::CallN(..) => return false,
             }
             // 有限でない値（0 での割り算・桁あふれなど）が1つでもあれば、v·0 の和が NaN になる
@@ -709,6 +876,17 @@ impl Program {
 
     /// 区間演算: `boxes[k]`（k 番目の変数の区間）の上で、式の値が入る区間（[`crate::interval`] を参照）。
     /// 区間演算が使えない式は、すぐ `Unknown` を返す
+    /// 飾り付きの区間演算（計画 12 章の G1）: 箱の上の値の範囲と、「定義されていて連続か」などの飾り。
+    /// 区間演算が使えない式（複素数・特殊関数）は、全部の実数で飾り Trv。
+    /// [`Program::eval_interval`] が値の範囲を返す所では、同じ区間を返す（その上で、`mod` の箱・極の箱なども「何も言えない」以外の答えを返す）
+    pub fn eval_interval_dec(&self, boxes: &[Interval]) -> crate::interval::DecInterval {
+        assert_eq!(boxes.len(), self.vars.len());
+        if !self.code.real {
+            return crate::interval::DecInterval::entire(crate::interval::Dec::Trv);
+        }
+        self.code.interval_dec(boxes)
+    }
+
     pub fn eval_interval(&self, boxes: &[Interval]) -> Range {
         assert_eq!(boxes.len(), self.vars.len());
         if !self.code.real {
@@ -777,6 +955,9 @@ impl Compiler<'_> {
             Expr::Tuple(_) => return Err("組 (a, b, c) は式の中では使えません".into()),
             Expr::List(_) => {
                 return Err("リスト [a, b] は、今は媒介変数表示 ( … ) の中でだけ使えます".into())
+            }
+            Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => {
+                return Err("内部エラー: 展開されていない式があります".into())
             }
         })
     }

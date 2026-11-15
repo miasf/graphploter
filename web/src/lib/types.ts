@@ -263,6 +263,10 @@ export interface PlotItem extends PlotStyle {
   kind?: string
   /** 座標系の番号（CoordSystem.id。無ければ直交座標） */
   coordSys?: number
+  /** この行が定義の行（f(x) = … など）なら、その名前（計算エンジンの結果から決める。保存しなくてよい） */
+  def?: string
+  /** この式が使った定義の名前（定義の行が変わったら計算し直す。保存しなくてよい） */
+  usedDefs?: string[]
 }
 
 /** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */
@@ -378,6 +382,11 @@ export interface PlotRequest {
    * 座標系があると、domain の代わりに作る範囲で図形を作る（画面の箱は domain のまま）
    */
   coord: { map: string; ranges: [string, string][]; names: string } | null
+  /**
+   * ほかの行の定義（関数 f(x) = … など。計算エンジン用の式を改行でつないだもの。計画 docs/plan-math-notation.md の M0・M1）。
+   * 計算担当は、これに描く式そのものを足して計算エンジンに渡す
+   */
+  definitions: string
   /** 2D 表示（縦の座標を 0 にして平面に描く） */
   flat: boolean
   /** 2D 表示の描き方。true なら切り口（縦の座標 = 0 の平面との交わりの線）、false なら投影 */
@@ -457,6 +466,10 @@ export type PlotResponse =
       kind: string
       ms: number
       usedParams: string[]
+      /** この式が使った定義（関数）の名前 */
+      usedDefs: string[]
+      /** 定義の行（f(x) = …）だったときの名前 */
+      defName: string | null
       /** パラメータの定義だったときの名前と値 */
       param: ({ name: string } & ParamValue) | null
       /** 切り口のふた（陰関数・範囲で重ねた立体を切っているときだけ） */

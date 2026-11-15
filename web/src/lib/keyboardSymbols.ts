@@ -76,7 +76,7 @@ const NAMES: Record<string, string> = {
   '\\coloneq': '定義（:=）', '\\triangleq': '定義', '\\eqdef': '定義', '\\perp': '垂直', '\\parallel': '平行', '\\mid': '割り切る',
   '\\nmid': '割り切らない', '\\models': '充足する', '\\vdash': '証明できる',
   '\\pm': 'プラスマイナス', '\\mp': 'マイナスプラス', '\\times': '掛け算（×）', '\\div': '割り算（÷）', '\\cdot': '掛け算（・）',
-  '\\ast': 'アスタリスク', '\\star': '星', '\\circ': '合成（∘）', '\\bullet': '黒丸', '\\oplus': '直和', '\\otimes': 'テンソル積',
+  '\\ast': 'アスタリスク', '\\star': '星', '\\circ': '合成（∘）', '\\bullet': '黒丸', '\\oplus': '排他的論理和（XOR）・直和', '\\otimes': 'テンソル積',
   '\\odot': '丸の中の点', '\\ominus': '丸の中のマイナス', '\\cap': '共通部分', '\\cup': '和集合', '\\setminus': '差集合',
   '\\wedge': 'かつ・外積', '\\vee': 'または', '\\in': '属する', '\\notin': '属さない', '\\ni': '含む（元として）',
   '\\subset': '部分集合', '\\supset': '含む（集合として）', '\\subseteq': '部分集合（等しくてもよい）', '\\supseteq': '含む（等しくてもよい）',
@@ -89,6 +89,8 @@ const NAMES: Record<string, string> = {
   '\\wp': 'ワイエルシュトラスのペー', '\\imath': '点の無い i', '\\jmath': '点の無い j', '\\angle': '角', '\\degree': '度（°）',
   '\\prime': 'プライム', '\\ldots': '点々（下）', '\\cdots': '点々（中央）', '\\vdots': '点々（縦）', '\\ddots': '点々（斜め）',
   '\\complement': '補集合',
+  '\\veebar': '排他的論理和（XOR）', '\\barwedge': '否定論理積（NAND）', '\\uparrow': '否定論理積（NAND。シェファーの棒）',
+  '\\downarrow': '否定論理和（NOR。パースの矢印）', '\\triangle': '対称差（集合の XOR）',
 }
 
 /** キーにする（名前があれば、名前と LaTeX の命令を出す） */
@@ -172,7 +174,7 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
         \subseteqq \supseteqq \subsetneqq \supsetneqq \varsubsetneqq \varsupsetneqq \nsubset \nsupset \nsubseteq \nsupseteq
         \nsubseteqq \nsupseteqq \Subset \Supset \sqsubset \sqsupset \sqsubseteq \sqsupseteq`).map(named),
       ...['N', 'Z', 'Q', 'R', 'C'].map((c) => ({ latex: `\\mathbb{${c}}`, tooltip: `\\mathbb{${c}}` })),
-      ...list(String.raw`\emptyset \varnothing \complement`).map(named),
+      ...list(String.raw`\emptyset \varnothing \complement \triangle`).map(named),
       tpl('\\left\\{#0\\right\\}', '集合の括弧 \\{ … \\}', '{ }'),
       tpl('\\left\\{#0\\mid#?\\right\\}', '条件で書いた集合 \\{ … \\mid … \\}', '{|}'),
     ],
@@ -180,7 +182,7 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
   {
     title: '論理',
     section: '集合・論理',
-    keys: list(String.raw`\forall \exists \nexists \neg \lnot \land \lor \implies \impliedby \iff \Rightarrow \Leftarrow
+    keys: list(String.raw`\veebar \oplus \barwedge \uparrow \downarrow \forall \exists \nexists \neg \lnot \land \lor \implies \impliedby \iff \Rightarrow \Leftarrow
       \Leftrightarrow \biconditional \roundimplies \therefore \because \top \bot \lightning \checkmark \maltese \S`).map(named),
   },
   {
@@ -226,8 +228,9 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
       tpl('\\prod_{#?}^{#?}#?', '積 \\prod', '∏'),
       tpl('\\coprod_{#?}^{#?}#?', '余積 \\coprod', '∐'),
       tpl('\\int_{#?}^{#?}#?\\,d#?', '定積分 \\int', '∫'),
-      tpl('\\iint_{#?}#?', '2 重積分 \\iint', '∬'),
-      tpl('\\iiint_{#?}#?', '3 重積分 \\iiint', '∭'),
+      tpl('\\int #?\\,d#?', '不定積分 ∫ f dx（積分定数を省いた形）', '∫dx'),
+      tpl('\\iint_{\\left\\{\\left(x,y\\right)\\mid#?\\right\\}}#?\\,dA', '2 重積分（領域を {(x,y) | 0 ≤ x ≤ 1, 0 ≤ y ≤ x} の形で）', '∬'),
+      tpl('\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid#?\\right\\}}#?\\,dV', '3 重積分（領域を {(x,y,z) | …} の形で）', '∭'),
       tpl('\\oint_{#?}#?', '周回積分 \\oint', '∮'),
       tpl('\\oiint_{#?}#?', '閉曲面の積分 \\oiint', '∯'),
       tpl('\\oiiint_{#?}#?', '閉じた体積の積分 \\oiiint', '∰'),
@@ -249,10 +252,20 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
       tpl('\\inf_{#?}#?', '下限 \\inf', 'inf'),
       tpl('\\max_{#?}#?', '最大 \\max', 'max'),
       tpl('\\min_{#?}#?', '最小 \\min', 'min'),
+      tpl('\\Delta_{#?}#?', '前進差分 Δ_x f = f(x+h) − f(x)（幅を変えるなら Δ_{x, h}、2 階は Δ_x^2）', 'Δₓ'),
+      tpl('\\nabla_{#?}#?', '後退差分 ∇_x f = f(x) − f(x−h)', '∇ₓ'),
+      tpl('\\delta_{#?}#?', '中心差分 δ_x f = f(x+h/2) − f(x−h/2)', 'δₓ'),
       tpl('\\frac{d#?}{d#?}', '微分 d/dx', 'd/dx'),
       tpl('\\frac{\\partial#?}{\\partial#?}', '偏微分 ∂/∂x', '∂/∂x'),
       tpl('\\frac{d^{#?}#?}{d#?^{#?}}', '高階の微分', 'dⁿ/dxⁿ'),
-      ...list(String.raw`\partial \nabla \Delta`).map(named),
+      tpl('\\nabla #?', '勾配 ∇f（grad）', '∇f'),
+      tpl('\\nabla\\cdot #?', '発散 ∇·F（div）', '∇·'),
+      tpl('\\nabla\\times #?', '回転 ∇×F（rot）', '∇×'),
+      tpl('\\nabla^{2}#?', 'ラプラシアン ∇²f', '∇²'),
+      tpl('\\int_{\\left\\{\\left(#?\\right)\\mid#?\\right\\}}#?\\,ds', '線積分 ∫_C f ds（曲線を {(x(t), y(t)) | a ≤ t ≤ b} の形で）', '∫_C ds'),
+      tpl('\\oint_{\\left\\{\\left(#?\\right)\\mid#?\\right\\}}#?\\cdot d\\mathbf{r}', '線積分（仕事）∮_C F · dr', '∮ F·dr'),
+      tpl('\\iint_{\\left\\{\\left(#?\\right)\\mid#?\\right\\}}#?\\cdot d\\mathbf{S}', '面積分（流束）∬_S F · dS（曲面を {(x(u,v), …) | …} の形で）', '∬ F·dS'),
+      ...list(String.raw`\partial`).map(named),
       ...['det', 'dim', 'ker', 'deg', 'gcd', 'hom', 'Pr', 'arg'].map((f) => tpl(`\\${f}#?`, `\\${f}`, f)),
       tpl('\\bmod', '余り \\bmod', 'mod'),
       tpl('\\pmod{#?}', '合同式の法 \\pmod{…}', '(mod)'),

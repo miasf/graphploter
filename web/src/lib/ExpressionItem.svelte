@@ -7,7 +7,7 @@
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
-  import { coordName, missingParam, neededDims, prettyName } from './params'
+  import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
   import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
 
   interface Props {
@@ -150,6 +150,8 @@
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
   const missing = $derived(missingParam(item.error))
+  /** 未定義の文字が、関数の呼び出しの形 f(…) で使われているか（そうなら、スライダーの代わりに関数の定義を足す） */
+  const missingCall = $derived(missing !== null && calledAsFunction(item.latex, missing))
   /** 次元が足りなくてエラーになっているなら、必要な次元（その次元にするボタンを出す） */
   const moreDims = $derived(neededDims(item.error))
   /** 次元の上限（SpacePanel と同じ） */
@@ -481,7 +483,7 @@
         <!-- 押した瞬間に入力欄からフォーカスが外れると、縦の表示に切り替わってボタンが動き、押せなくなる。
              フォーカスを動かさないようにする -->
         <button class="add-slider" onmousedown={(e) => e.preventDefault()} onclick={() => onAddSlider(missing)}
-          >＋ {prettyName(missing)} のスライダーを追加</button>
+          >＋ {missingCall ? `${prettyName(missing)}(x) の定義を追加` : `${prettyName(missing)} のスライダーを追加`}</button>
       {/if}
       {#if moreDims && moreDims <= MAX_DIMS}
         <button class="add-slider" onmousedown={(e) => e.preventDefault()} onclick={() => onSetDims(moreDims)}

@@ -7,7 +7,7 @@
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
   import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
-  import { complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
+  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
   import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -503,6 +503,58 @@
     return out
   }
 
+  /** 計算エンジン用の式の、関数の定義の左辺 `f(x, y) =` */
+  const DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*\(\s*[A-Za-z]\w*(\s*,\s*[A-Za-z]\w*)*\s*\)\s*=/
+  /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
+  const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
+
+  /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
+  function defNameOf(it: PlotItem): string | null {
+    if (it.def) return it.def
+    try {
+      const text = latexToText(it.latex)
+      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD)
+      return m ? m[1] : null
+    } catch {
+      return null
+    }
+  }
+
+  /** ほかの行の定義（関数 f(x) = … など）。計算エンジン用の式を改行でつなぐ（計画 docs/plan-math-notation.md の M1） */
+  function currentDefinitions(except: PlotItem): string {
+    const out: string[] = []
+    for (const it of items) {
+      if (it === except || !defNameOf(it)) continue
+      try {
+        out.push(latexToText(it.latex))
+      } catch {
+        // 変換できない行は使わない
+      }
+    }
+    return out.join('\n')
+  }
+
+  /** 定義 names が変わった・増えた・消えたとき、それを使う式と、エラーの式（未定義だった関数が定義されたかもしれない）を計算し直す */
+  function defsChanged(names: string[], except?: PlotItem) {
+    for (const it of items) {
+      if (it === except) continue
+      if (it.usedDefs?.some((n) => names.includes(n)) || it.error || running.has(it.id)) schedule(it, 0)
+    }
+  }
+
+  /** 式ごとの、最後に計算した定義の行の式（中身が変わったら、それを使う式を計算し直す） */
+  const lastDefSource = new Map<number, string>()
+
+  /** 計算の結果から、この行が定義の行かを覚え、定義が変わったら使う式を計算し直す */
+  function noteDefinition(item: PlotItem, name: string | null, source: string) {
+    const prev = item.def ?? null
+    item.def = name ?? undefined
+    const changed = prev !== name || (name !== null && lastDefSource.get(item.id) !== source)
+    if (name) lastDefSource.set(item.id, source)
+    else lastDefSource.delete(item.id)
+    if (changed) defsChanged([prev, name].filter((n): n is string => n !== null), item)
+  }
+
   /** 範囲で重ねるパラメータ → [最小, 最大] */
   function currentStacks(): Record<string, [number, number]> {
     const out: Record<string, [number, number]> = {}
@@ -653,6 +705,7 @@
       item.info = undefined
       item.usedParams = []
       dropParam(item)
+      noteDefinition(item, null, '')
       return
     }
 
@@ -676,6 +729,7 @@
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
+      currentDefinitions(item),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -687,11 +741,16 @@
       item.error = res.error.replace(/（\d+文字目）/g, '')
       item.info = undefined
       dropParam(item)
+      // 誤りのある定義の行も定義の行のまま（左辺の形で決める）。定義が消えた・変わったら、使う式を計算し直す
+      const head = source.match(DEF_HEAD)
+      noteDefinition(item, head ? head[1] : null, source)
       return
     }
 
     item.error = undefined
     item.usedParams = res.usedParams
+    item.usedDefs = res.usedDefs
+    noteDefinition(item, res.defName, source)
     budget.record(item.id, res.ms, used, res.cost, res.reprojected)
     if (res.reprojected) {
       reusable.add(item.id)
@@ -951,12 +1010,16 @@
     delete playing[-item.id]
     items.splice(items.indexOf(item), 1)
     if (item.param) paramsChanged([item.param.name])
+    if (item.def) defsChanged([item.def])
+    lastDefSource.delete(item.id)
   }
 
   /** 「a のスライダーを追加」: その式のすぐ上に a = 1 の行を足す */
   function addSlider(item: PlotItem, name: string) {
     const k = items.indexOf(item)
-    items.splice(k, 0, newItem(`${name}=1`, { folder: item.folder }))
+    // f(…) の形で使われていれば、スライダーではなく関数の定義 f(x) = x を足す
+    const line = calledAsFunction(item.latex, name) ? `${latexName(name)}\\left(x\\right)=x` : `${name}=1`
+    items.splice(k, 0, newItem(line, { folder: item.folder }))
     schedule(items[k], 0) // items[k] は Svelte の状態に入ったもの（元のオブジェクトではない）
   }
 

@@ -1,0 +1,594 @@
+<title>graphploter G0 光線の速さ</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* 計画 12 章 G0 の測定ページ。上に絵（光線で描いた陰関数）、下に結果の表と判断。
+   方眼紙の青みがかった灰色を地に、等値線の色（青緑）を差し色にする */
+:root {
+  --bg: #f3f5f7;
+  --panel: #ffffff;
+  --fg: #1c2430;
+  --muted: #5d6a7a;
+  --line: #d5dce4;
+  --accent: #0f7b8a;
+  --good: #1f8a4c;
+  --warn: #b7791f;
+  --bad: #c53030;
+  --good-bg: #e3f4ea;
+  --warn-bg: #fbf0dc;
+  --bad-bg: #fbe4e4;
+  --font-body: "IBM Plex Sans JP", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12171d; --panel: #1a2129; --fg: #e3e8ee; --muted: #93a0b0; --line: #2c3540; --accent: #4cc3d1;
+    --good: #5fd08f; --warn: #e5b45a; --bad: #f07a7a; --good-bg: #173326; --warn-bg: #3a2e17; --bad-bg: #3d1d1f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12171d; --panel: #1a2129; --fg: #e3e8ee; --muted: #93a0b0; --line: #2c3540; --accent: #4cc3d1;
+  --good: #5fd08f; --warn: #e5b45a; --bad: #f07a7a; --good-bg: #173326; --warn-bg: #3a2e17; --bad-bg: #3d1d1f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body); line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+}
+main { max-width: 980px; margin: 0 auto; display: grid; gap: 20px; }
+h1 { font-size: 1.35rem; margin: 0; text-wrap: balance; }
+h2 { font-size: 1.05rem; margin: 0 0 8px; }
+p { margin: 0; }
+.lead { color: var(--muted); max-width: 65ch; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+.stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 280px); gap: 16px; align-items: start; }
+@media (max-width: 720px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+canvas#view { width: 100%; aspect-ratio: 16 / 9; display: block; border-radius: 6px; background: #0c1116; touch-action: none; cursor: grab; }
+.controls { display: grid; gap: 12px; }
+label { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+select, button { font: inherit; font-size: 0.9rem; }
+.controls > * { min-width: 0; }
+select { width: 100%; max-width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); }
+fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+legend { font-size: 0.8rem; color: var(--muted); padding: 0 4px; }
+fieldset label { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 0.85rem; }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; }
+button { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: var(--panel); cursor: pointer; font-weight: 600; }
+button.ghost { background: transparent; color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.status { font-size: 0.85rem; color: var(--muted); font-family: var(--font-mono); min-height: 1.4em; }
+.progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.progress > div { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+.verdict { display: grid; gap: 6px; }
+.pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }
+.pill.good { background: var(--good-bg); color: var(--good); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.pill.none { background: var(--line); color: var(--muted); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 0.85rem; min-width: 640px; width: 100%; }
+th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th { color: var(--muted); font-weight: 600; font-size: 0.78rem; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+td.good { color: var(--good); } td.warn { color: var(--warn); } td.bad { color: var(--bad); font-weight: 600; }
+td.lost { color: var(--bad); }
+.expr { font-family: var(--font-mono); font-size: 0.82rem; }
+.device { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); word-break: break-all; }
+textarea { width: 100%; min-height: 120px; font-family: var(--font-mono); font-size: 0.75rem; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.legend { font-size: 0.8rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 14px; }
+ol { margin: 0; padding-left: 1.3em; max-width: 65ch; }
+@media (prefers-reduced-motion: reduce) { .progress > div { transition: none; } }
+</style>
+
+<main>
+  <header style="display:grid; gap:6px">
+    <h1>G0: 陰関数を光線で描く速さ</h1>
+    <p class="lead">graphploter の計画 12 章の試作です。メッシュを作らずに、画素ごとに光線を進めて <i>F</i> = 0 の面を探します（決まった歩幅で進み、符号が変わったら二分法）。この端末の GPU で 1 コマに何 ms かかるかを測り、画素ごとの描き方を既定にできるかを決めます。</p>
+  </header>
+
+  <section class="stage">
+    <div class="panel" style="padding:10px">
+      <canvas id="view" aria-label="光線で描いた陰関数。ドラッグで回せます"></canvas>
+    </div>
+    <div class="panel controls">
+      <label for="exprSel">見る式（ドラッグで回す）
+        <select id="exprSel"></select>
+      </label>
+      <label for="stepSel">歩数
+        <select id="stepSel"><option>128</option><option selected>256</option><option>512</option></select>
+      </label>
+      <label for="deviceSel">この端末
+        <select id="deviceSel"><option value="desktop">デスクトップ・ノート PC</option><option value="phone">スマートフォン・タブレット</option></select>
+      </label>
+      <fieldset id="sizeSet"><legend>測る画面の大きさ</legend>
+        <label><input type="checkbox" id="size720" checked> 1280 × 720</label>
+        <label><input type="checkbox" id="size1080" checked> 1920 × 1080</label>
+      </fieldset>
+      <fieldset id="stepSet"><legend>測る歩数</legend>
+        <label><input type="checkbox" id="steps128" checked> 128</label>
+        <label><input type="checkbox" id="steps256" checked> 256</label>
+        <label><input type="checkbox" id="steps512" checked> 512</label>
+      </fieldset>
+      <div class="btns">
+        <button id="runBtn" type="button">測る</button>
+        <button id="stopBtn" type="button" class="ghost" disabled>止める</button>
+      </div>
+      <div class="progress" aria-hidden="true"><div id="bar"></div></div>
+      <p class="status" id="status" role="status">準備中…</p>
+    </div>
+  </section>
+
+  <section class="panel verdict" aria-live="polite">
+    <h2>判断</h2>
+    <p id="verdictLine"><span class="pill none">まだ測っていません</span></p>
+    <p class="lead" id="verdictNote">基準: 歩数 256・1280 × 720 で、6 式のうち最も遅い式が 1 コマ 50 ms 以内か。スマートフォンで超えたら、スマートフォンはメッシュのまま。デスクトップでも超えたら、画素ごとの描き方は 2D 表示までにします。</p>
+  </section>
+
+  <section class="panel">
+    <h2>結果（1 コマの ms。中央値）</h2>
+    <div class="legend">
+      <span><span class="pill good">16 以下</span> 60fps に届く</span>
+      <span><span class="pill warn">50 以下</span> 動かすと少し重い</span>
+      <span><span class="pill bad">50 超</span> 基準を超える</span>
+      <span id="timerKind"></span>
+    </div>
+    <div class="tablewrap" style="margin-top:10px">
+      <table id="table"><thead></thead><tbody></tbody></table>
+    </div>
+    <p class="device" id="device" style="margin-top:10px"></p>
+  </section>
+
+  <section class="panel" style="display:grid; gap:10px">
+    <h2>結果を送る</h2>
+    <ol>
+      <li>デスクトップとスマートフォンの両方で「測る」を押します（1 回 1〜3 分。画面は消さないでください）</li>
+      <li>終わったら「結果をコピー」を押して、チャットに貼ってください</li>
+    </ol>
+    <div class="btns"><button id="copyBtn" type="button" class="ghost">結果をコピー</button></div>
+    <textarea id="tsv" readonly aria-label="結果の表（タブ区切り）"></textarea>
+  </section>
+</main>
+
+<script>
+'use strict'
+// ---------------------------------------------------------------------------
+// 式（計画 12.4 の G0 の 6 式）。表示範囲はアプリの既定と同じ x, y ∈ [−10, 10]、z ∈ [−6, 6]
+// ---------------------------------------------------------------------------
+const EXPRS = [
+  { name: '球', text: 'x^2 + y^2 + z^2 = 4', glsl: 'p.x*p.x + p.y*p.y + p.z*p.z - 4.0' },
+  { name: '波', text: 'sin(x) = cos(y) z', glsl: 'sin(p.x) - cos(p.y)*p.z' },
+  { name: '極', text: 'tan(x) = z y', glsl: 'tan(p.x) - p.z*p.y' },
+  { name: '段差', text: 'floor(x y) = z floor(z)', glsl: 'floor(p.x*p.y) - p.z*floor(p.z)' },
+  { name: '余り', text: 'mod(x y, z) = 1', glsl: 'mod(p.x*p.y, p.z) - 1.0' },
+  { name: 'ジャイロイド', text: 'sin x cos y + sin y cos z + sin z cos x = 0', glsl: 'sin(p.x)*cos(p.y) + sin(p.y)*cos(p.z) + sin(p.z)*cos(p.x)' },
+]
+const BOX_MIN = [-10, -10, -6]
+const BOX_MAX = [10, 10, 6]
+const SIZES = [{ id: 'size720', w: 1280, h: 720 }, { id: 'size1080', w: 1920, h: 1080 }]
+const STEPS = [128, 256, 512]
+
+const $ = (id) => document.getElementById(id)
+const canvas = $('view')
+const statusEl = $('status')
+
+const VERT = `#version 300 es
+in vec2 aPos;
+out vec2 vUv;
+void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`
+
+// G5 の最も素朴な形: 箱に入る点から出る点まで、決まった歩数で進む。符号が変わったら 10 回二分し、
+// |F| が縮まなければ（極・段差）零点ではないとみなして先へ進む。法線は中心差分（6 回の計算）
+const frag = (expr) => `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform vec3 uEye, uRight, uUp, uFwd;
+uniform float uTanHalf, uAspect;
+uniform vec3 uMin, uMax;
+uniform int uSteps;
+float F(vec3 p) { return ${expr}; }
+void main() {
+  vec2 ndc = vUv * 2.0 - 1.0;
+  vec3 dir = normalize(uFwd + ndc.x * uTanHalf * uAspect * uRight + ndc.y * uTanHalf * uUp);
+  vec3 inv = 1.0 / dir;
+  vec3 t0 = (uMin - uEye) * inv, t1 = (uMax - uEye) * inv;
+  vec3 tn = min(t0, t1), tf = max(t0, t1);
+  float tNear = max(max(max(tn.x, tn.y), tn.z), 0.0);
+  float tFar = min(min(tf.x, tf.y), tf.z);
+  vec3 bg = vec3(0.047, 0.067, 0.086) + 0.05 * vUv.y;
+  if (tNear >= tFar) { outColor = vec4(bg, 1.0); return; }
+  float dt = (tFar - tNear) / float(uSteps);
+  float ta = tNear;
+  float fa = F(uEye + ta * dir);
+  float hit = -1.0;
+  for (int i = 0; i < 2048; i++) {
+    if (i >= uSteps) break;
+    float tb = ta + dt;
+    float fb = F(uEye + tb * dir);
+    if (fa * fb <= 0.0 && fa == fa && fb == fb) {
+      float lo = ta, hi = tb, flo = fa;
+      for (int k = 0; k < 10; k++) {
+        float m = 0.5 * (lo + hi);
+        float fm = F(uEye + m * dir);
+        if (flo * fm <= 0.0) { hi = m; } else { lo = m; flo = fm; }
+      }
+      float tm = 0.5 * (lo + hi);
+      float fm = abs(F(uEye + tm * dir));
+      if (fm <= 0.02 * (abs(fa) + abs(fb)) + 1e-5) { hit = tm; break; }
+    }
+    ta = tb; fa = fb;
+  }
+  if (hit < 0.0) { outColor = vec4(bg, 1.0); return; }
+  vec3 p = uEye + hit * dir;
+  float e = 0.004;
+  vec3 g = vec3(F(p + vec3(e,0,0)) - F(p - vec3(e,0,0)), F(p + vec3(0,e,0)) - F(p - vec3(0,e,0)), F(p + vec3(0,0,e)) - F(p - vec3(0,0,e)));
+  vec3 n = length(g) > 0.0 ? normalize(g) : -dir;
+  if (dot(n, dir) > 0.0) n = -n;
+  vec3 light = normalize(vec3(0.4, -0.5, 0.8));
+  float diff = 0.25 + 0.75 * max(dot(n, light), 0.0);
+  float rim = pow(1.0 - max(dot(n, -dir), 0.0), 3.0) * 0.25;
+  vec3 base = mix(vec3(0.16, 0.55, 0.62), vec3(0.93, 0.62, 0.3), smoothstep(-6.0, 6.0, p.z));
+  outColor = vec4(base * diff + rim, 1.0);
+}`
+
+// ---------------------------------------------------------------------------
+// WebGL の準備
+// ---------------------------------------------------------------------------
+const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' })
+let lost = false
+let timerExt = null
+const programs = []
+let quad = null
+let fbo = null
+let fboTex = null
+let fboSize = [0, 0]
+
+function compile(type, src) {
+  const s = gl.createShader(type)
+  gl.shaderSource(s, src)
+  gl.compileShader(s)
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || 'シェーダーを作れませんでした')
+  return s
+}
+
+function setup() {
+  timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2')
+  quad = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
+  const vs = compile(gl.VERTEX_SHADER, VERT)
+  programs.length = 0
+  for (const e of EXPRS) {
+    const p = gl.createProgram()
+    gl.attachShader(p, vs)
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, frag(e.glsl)))
+    gl.bindAttribLocation(p, 0, 'aPos')
+    gl.linkProgram(p)
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) || 'シェーダーをつなげませんでした')
+    const u = {}
+    for (const n of ['uEye', 'uRight', 'uUp', 'uFwd', 'uTanHalf', 'uAspect', 'uMin', 'uMax', 'uSteps']) u[n] = gl.getUniformLocation(p, n)
+    programs.push({ p, u })
+  }
+  fboSize = [0, 0]
+}
+
+function ensureFbo(w, h) {
+  if (fbo && fboSize[0] === w && fboSize[1] === h) return
+  if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex) }
+  fboTex = gl.createTexture()
+  gl.bindTexture(gl.TEXTURE_2D, fboTex)
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h)
+  fbo = gl.createFramebuffer()
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fboTex, 0)
+  fboSize = [w, h]
+}
+
+// カメラ: 箱の中心のまわりを回る。z が上
+const cam = { yaw: -0.9, pitch: 0.45, dist: 34 }
+function camVectors(aspect) {
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch)
+  const eye = [cam.dist * cp * Math.cos(cam.yaw), cam.dist * cp * Math.sin(cam.yaw), cam.dist * sp]
+  const len = Math.hypot(...eye)
+  const fwd = eye.map((v) => -v / len)
+  let right = [fwd[1], -fwd[0], 0]
+  const rl = Math.hypot(...right) || 1
+  right = right.map((v) => v / rl)
+  const up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]]
+  return { eye, fwd, right, up, aspect }
+}
+
+function draw(k, steps, w, h, target) {
+  const { p, u } = programs[k]
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target)
+  gl.viewport(0, 0, w, h)
+  gl.useProgram(p)
+  const c = camVectors(w / h)
+  gl.uniform3fv(u.uEye, c.eye)
+  gl.uniform3fv(u.uRight, c.right)
+  gl.uniform3fv(u.uUp, c.up)
+  gl.uniform3fv(u.uFwd, c.fwd)
+  gl.uniform1f(u.uTanHalf, Math.tan((40 * Math.PI) / 360))
+  gl.uniform1f(u.uAspect, c.aspect)
+  gl.uniform3fv(u.uMin, BOX_MIN)
+  gl.uniform3fv(u.uMax, BOX_MAX)
+  gl.uniform1i(u.uSteps, steps)
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad)
+  gl.enableVertexAttribArray(0)
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+}
+
+function fitCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const r = canvas.getBoundingClientRect()
+  const w = Math.max(16, Math.round(r.width * dpr)), h = Math.max(9, Math.round(r.height * dpr))
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h }
+}
+
+// 測っていない間は、選んだ式を画面の大きさで描く（ドラッグで回す）
+let running = false
+let dirty = true
+function frame() {
+  if (!lost && !running && dirty) {
+    fitCanvas()
+    draw(Number($('exprSel').value), Number($('stepSel').value), canvas.width, canvas.height, null)
+    dirty = false
+  }
+  requestAnimationFrame(frame)
+}
+
+// ---------------------------------------------------------------------------
+// 測る
+// ---------------------------------------------------------------------------
+const results = new Map() // "k|w|steps" → { wall, gpu } または { lost: true }
+let stopRequested = false
+// 次のコマを待つ。埋め込みの画面では requestAnimationFrame が止まることがあるので、100 ms でも進める
+const nextFrame = () =>
+  new Promise((r) => {
+    let done = false
+    const go = () => { if (!done) { done = true; r() } }
+    requestAnimationFrame(go)
+    setTimeout(go, 100)
+  })
+/** 最後の誤り（結果のコピーに入れる） */
+let lastError = ''
+/** 測り始めたか */
+let started = false
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : NaN }
+const pixel = new Uint8Array(4)
+
+async function gpuTime(fn) {
+  if (!timerExt) return NaN
+  const q = gl.createQuery()
+  gl.beginQuery(timerExt.TIME_ELAPSED_EXT, q)
+  fn()
+  gl.endQuery(timerExt.TIME_ELAPSED_EXT)
+  for (let i = 0; i < 120; i++) {
+    await nextFrame()
+    if (gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) {
+      const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT)
+      const ns = gl.getQueryParameter(q, gl.QUERY_RESULT)
+      gl.deleteQuery(q)
+      return disjoint ? NaN : ns / 1e6
+    }
+  }
+  gl.deleteQuery(q)
+  return NaN
+}
+
+// 1 回の描画の時間。readPixels で 1 画素読むと、描き終わるまで待つ（GPU の時間 + 少しの手間）
+function wallTime(k, steps, w, h) {
+  const t0 = performance.now()
+  draw(k, steps, w, h, fbo)
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel)
+  return performance.now() - t0
+}
+
+function showFbo(w, h) {
+  fitCanvas()
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo)
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
+  gl.blitFramebuffer(0, 0, w, h, 0, 0, canvas.width, canvas.height, gl.COLOR_BUFFER_BIT, gl.LINEAR)
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+}
+
+async function measure(k, steps, w, h) {
+  ensureFbo(w, h)
+  // 慣らし（シェーダーの最初のコンパイル・クロックの立ち上がり）
+  wallTime(k, steps, w, h)
+  await nextFrame()
+  const walls = [], gpus = []
+  const start = performance.now()
+  for (let i = 0; i < 9; i++) {
+    if (lost || stopRequested) return null
+    walls.push(wallTime(k, steps, w, h))
+    if (timerExt && i < 5) {
+      const g = await gpuTime(() => draw(k, steps, w, h, fbo))
+      if (Number.isFinite(g)) gpus.push(g)
+    }
+    await nextFrame()
+    if (i >= 3 && performance.now() - start > 4000) break // 遅い端末では回数を減らす
+  }
+  showFbo(w, h)
+  return { wall: median(walls), gpu: median(gpus), n: walls.length }
+}
+
+async function run() {
+  const sizes = SIZES.filter((s) => $(s.id).checked)
+  const steps = STEPS.filter((n) => $(`steps${n}`).checked)
+  if (!sizes.length || !steps.length) { statusEl.textContent = '大きさと歩数を 1 つ以上選んでください'; return }
+  running = true
+  stopRequested = false
+  $('runBtn').disabled = true
+  $('stopBtn').disabled = false
+  started = true
+  lastError = ''
+  // 画面を消さない（アプリの中では返事が来ないことがあるので、待たない）
+  let wakeLock = null
+  try { navigator.wakeLock?.request('screen').then((l) => { wakeLock = l }).catch(() => {}) } catch { /* 使えない */ }
+  const jobs = []
+  // 軽い組み合わせから測る（重い所で GPU が落ちても、軽い分の結果は残る）
+  for (const s of sizes) for (const n of steps) for (let k = 0; k < EXPRS.length; k++) jobs.push({ k, n, s })
+  jobs.sort((a, b) => a.s.w * a.s.h * a.n - b.s.w * b.s.h * b.n)
+  let done = 0
+  for (const j of jobs) {
+    if (stopRequested || lost) break
+    statusEl.textContent = `${EXPRS[j.k].name}・${j.s.w}×${j.s.h}・歩数 ${j.n}（${done + 1}/${jobs.length}）`
+    const key = `${j.k}|${j.s.w}|${j.n}`
+    try {
+      const r = await measure(j.k, j.n, j.s.w, j.s.h)
+      if (r) results.set(key, r)
+      else if (lost) results.set(key, { lost: true })
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e)
+      results.set(key, { lost: true })
+    }
+    done++
+    $('bar').style.width = `${(100 * done) / jobs.length}%`
+    renderTable()
+  }
+  try { await wakeLock?.release() } catch { /* 何もしない */ }
+  running = false
+  dirty = true
+  $('runBtn').disabled = lost
+  $('stopBtn').disabled = true
+  statusEl.textContent = lost
+    ? 'GPU が止まりました（重すぎて端末が描画を打ち切りました）。ページを読み込み直し、重い組み合わせを外して測ってください'
+    : stopRequested ? '止めました' : '測り終えました'
+  $('tsv').value = toTsv()
+}
+
+// ---------------------------------------------------------------------------
+// 表と判断
+// ---------------------------------------------------------------------------
+const cls = (ms) => (ms <= 16.7 ? 'good' : ms <= 50 ? 'warn' : 'bad')
+const val = (r) => (r && !r.lost ? (Number.isFinite(r.gpu) ? r.gpu : r.wall) : NaN)
+
+function renderTable() {
+  const cols = []
+  for (const s of SIZES) for (const n of STEPS) cols.push({ s, n })
+  $('table').querySelector('thead').innerHTML =
+    '<tr><th>式</th>' + cols.map((c) => `<th>${c.s.w}×${c.s.h}<br>歩数 ${c.n}</th>`).join('') + '</tr>'
+  $('table').querySelector('tbody').innerHTML = EXPRS.map((e, k) => {
+    const cells = cols.map((c) => {
+      const r = results.get(`${k}|${c.s.w}|${c.n}`)
+      if (!r) return '<td class="num">–</td>'
+      if (r.lost) return '<td class="lost">落ちた</td>'
+      const v = val(r)
+      return `<td class="num ${cls(v)}">${v.toFixed(1)}</td>`
+    }).join('')
+    return `<tr><td><span class="expr">${e.text}</span></td>${cells}</tr>`
+  }).join('')
+  const anyGpu = [...results.values()].some((r) => r && Number.isFinite(r.gpu))
+  $('timerKind').textContent = anyGpu
+    ? '値は GPU の時間（timer query）'
+    : '値は描き終わるまでの待ち時間（この端末は GPU の時間を測れないため、少し多めに出ます）'
+  renderVerdict()
+  $('tsv').value = toTsv()
+}
+
+function renderVerdict() {
+  const vals = EXPRS.map((_, k) => results.get(`${k}|1280|256`))
+  const line = $('verdictLine')
+  if (vals.some((r) => !r)) {
+    line.innerHTML = '<span class="pill none">基準の組み合わせ（1280 × 720・歩数 256）をまだ測っていません</span>'
+    return
+  }
+  const lostAny = vals.some((r) => r.lost)
+  const worst = Math.max(...vals.map((r) => (r.lost ? Infinity : val(r))))
+  const k = vals.findIndex((r) => (r.lost ? Infinity : val(r)) === worst)
+  const phone = $('deviceSel').value === 'phone'
+  const ok = !lostAny && worst <= 50
+  const msg = ok
+    ? (phone ? 'スマートフォンでも画素ごとの描き方を既定にできます' : 'デスクトップで画素ごとの描き方を既定にできます')
+    : (phone ? 'スマートフォンはメッシュのまま（画素ごとはデスクトップだけ）' : 'デスクトップでも重いので、画素ごとの描き方は 2D 表示まで')
+  const worstText = lostAny ? '落ちた式があります' : `最も遅い式「${EXPRS[k].text}」${worst.toFixed(1)} ms`
+  line.innerHTML = `<span class="pill ${ok ? 'good' : 'bad'}">${msg}</span> <span class="device">${worstText}</span>`
+}
+
+function deviceInfo() {
+  let renderer = gl.getParameter(gl.RENDERER)
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info')
+  if (dbg) renderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+  return {
+    device: $('deviceSel').value,
+    renderer,
+    ua: navigator.userAgent,
+    dpr: window.devicePixelRatio,
+    timer: timerExt ? 'yes' : 'no',
+    highp: (gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT) || {}).precision,
+  }
+}
+
+function toTsv() {
+  const d = deviceInfo()
+  const head = [
+    ...Object.entries(d).map(([k, v]) => `# ${k}\t${v}`),
+    `# started\t${started ? 'yes' : 'no'}`,
+    `# status\t${statusEl.textContent}`,
+    `# lost\t${lost ? 'yes' : 'no'}`,
+    ...(lastError ? [`# error\t${lastError}`] : []),
+  ].join('\n')
+  const rows = ['式\t幅\t高さ\t歩数\tGPU ms\t待ち ms\t回数']
+  for (let k = 0; k < EXPRS.length; k++) for (const s of SIZES) for (const n of STEPS) {
+    const r = results.get(`${k}|${s.w}|${n}`)
+    if (!r) continue
+    rows.push(r.lost
+      ? `${EXPRS[k].text}\t${s.w}\t${s.h}\t${n}\t落ちた\t\t`
+      : `${EXPRS[k].text}\t${s.w}\t${s.h}\t${n}\t${Number.isFinite(r.gpu) ? r.gpu.toFixed(2) : ''}\t${r.wall.toFixed(2)}\t${r.n}`)
+  }
+  return `${head}\n${rows.join('\n')}`
+}
+
+// ---------------------------------------------------------------------------
+// 操作
+// ---------------------------------------------------------------------------
+function init() {
+  EXPRS.forEach((e, k) => $('exprSel').add(new Option(`${e.name}: ${e.text}`, String(k))))
+  $('exprSel').value = '5'
+  for (const id of ['exprSel', 'stepSel']) $(id).addEventListener('change', () => { dirty = true })
+  $('deviceSel').value = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ? 'phone' : 'desktop'
+  $('deviceSel').addEventListener('change', () => { renderVerdict(); $('tsv').value = toTsv() })
+  $('runBtn').addEventListener('click', run)
+  $('stopBtn').addEventListener('click', () => { stopRequested = true })
+  window.addEventListener('error', (e) => { lastError = String(e.message); $('tsv').value = toTsv() })
+  window.addEventListener('unhandledrejection', (e) => { lastError = String(e.reason); $('tsv').value = toTsv() })
+  $('copyBtn').addEventListener('click', async () => {
+    const t = $('tsv')
+    try { await navigator.clipboard.writeText(t.value); $('copyBtn').textContent = 'コピーしました' }
+    catch { t.focus(); t.select(); $('copyBtn').textContent = '選択しました（コピーしてください）' }
+    setTimeout(() => { $('copyBtn').textContent = '結果をコピー' }, 2000)
+  })
+  let drag = null
+  canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId) })
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag || running) return
+    cam.yaw -= (e.clientX - drag.x) * 0.008
+    cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch + (e.clientY - drag.y) * 0.008))
+    drag = { x: e.clientX, y: e.clientY }
+    dirty = true
+  })
+  canvas.addEventListener('pointerup', () => { drag = null })
+  window.addEventListener('resize', () => { dirty = true })
+  canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true })
+  renderTable()
+  const d = deviceInfo()
+  $('device').textContent = `GPU: ${d.renderer} ／ 画素密度 ${d.dpr} ／ GPU の時間を測れるか: ${d.timer === 'yes' ? 'はい' : 'いいえ'} ／ highp の精度: ${d.highp} ビット`
+  statusEl.textContent = '「測る」を押してください'
+  requestAnimationFrame(frame)
+}
+
+if (!gl) {
+  statusEl.textContent = 'この端末のブラウザは WebGL2 を使えません'
+  $('runBtn').disabled = true
+} else {
+  try { setup(); init() } catch (e) { statusEl.textContent = `準備できませんでした: ${e.message}`; $('runBtn').disabled = true }
+}
+</script>

@@ -12,6 +12,7 @@ import init, {
   complex_coords,
   coord_system,
   coord_grid,
+  definitions,
   last_used_params,
   plot,
   take_field_values,
@@ -97,7 +98,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord, req.definitions]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -149,6 +150,9 @@ function costOf(kind: string, curve: boolean, flat: boolean): Cost {
   if (curve && !/陰関数|切り口/.test(kind)) return 'curve'
   return 'surface'
 }
+
+/** 式ごとの、最後に計算し直したときの「使った定義」と「定義の行の名前」（使い回して射影し直した結果には入っていないので、これを返す） */
+const lastDefs = new Map<number, { used: string[]; name: string | null }>()
 
 function forget(itemId: number) {
   shapes.get(itemId)?.shape.free()
@@ -318,6 +322,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       hidden_style(hiddenStyle)
       complex_coords(req.complexCoords)
       coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
+      // ほかの行の定義と、この式そのもの（定義の行なら、自分の定義が要る）
+      definitions(req.definitions ? `${req.definitions}\n${source}` : source)
       return plot(
         source,
         domainArr,
@@ -442,6 +448,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         cached.ires === implicitResolution &&
         cached.thorough === thorough
       r = callPlot()
+      lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null })
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
@@ -552,11 +559,12 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const usedParams = [...new Set([...r.used_params.split(',').filter((s) => s !== ''), ...rangeUsed])]
     const pv = r.param_value
     const param = r.param_name ? { name: r.param_name, re: pv[0], im: pv[1] } : null
+    const defs = lastDefs.get(itemId) ?? { used: [], name: null }
     r.free() // Rust 側のメモリを解放
     geom?.free()
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
-    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
+    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     field_mode_reset()
     forget(itemId)

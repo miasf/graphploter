@@ -25,7 +25,7 @@
 //! q = R (p − c) + c に動かしてから、断面・射影をとる。式は p = c + Rᵀ (q − c) を代入して q の式にする。
 
 use crate::eval::{Params, Program};
-use crate::parser::{parse, parse_system, BinOp, Expr, ParseError, Rel};
+use crate::parser::{parse_system_with, parse_with, BinOp, Expr, ParseError, Rel};
 use num_complex::Complex64 as C;
 
 /// 座標空間の設定
@@ -414,8 +414,64 @@ pub fn others(axis: usize) -> (usize, usize) {
 }
 
 /// `offset` 文字目から始まる部分を解析する（エラーの位置を全体の位置に直す）
-fn parse_at(src: &str, offset: usize) -> Result<Expr, String> {
-    parse(src).map_err(|e| ParseError { pos: e.pos + offset, ..e }.to_string())
+fn parse_at(src: &str, offset: usize, params: &Params) -> Result<Expr, String> {
+    let e = parse_with(src, &crate::expand::names()).map_err(|e| ParseError { pos: e.pos + offset, ..e }.to_string())?;
+    crate::expand::expand(&e, params)
+}
+
+/// 式を解析して、数学の記法を展開する（`expand.rs`）。定義の行（`f(x) = …`）は展開せずに、その印を返す
+/// （定義の行は、[`compile_with`] が「縦 = f(横, 奥)」などの形にしてから描く）
+fn parse_expanded(source: &str, params: &Params) -> Result<Vec<crate::parser::Chain>, String> {
+    let mut chains = parse_system_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    for chain in &mut chains {
+        // 逆関数 y = f⁻¹(x) → f(y) = x
+        if chain.rels == [Rel::Eq] {
+            let (l, r) = (chain.exprs[0].clone(), chain.exprs[1].clone());
+            let (l, r) = crate::expand::rewrite_inverse(l, r);
+            chain.exprs = vec![l, r];
+        }
+        for e in &mut chain.exprs {
+            *e = crate::expand::expand(e, params)?;
+        }
+    }
+    Ok(chains)
+}
+
+/// 定義の行（`f(x) = …`・`h = f + g`）を、描く形の式に置き換える。定義の行でなければ None。
+/// 引数 1 つは「奥 = f(横)」、2 つは「縦 = f(横, 奥)」。値が組の関数は媒介変数表示（引数を t / u, v / u, v, t にする）。
+/// 描けない定義（引数 3 つ以上・引数なし）は Some(None)
+fn definition_source(source: &str, space: &Space) -> Option<Option<Vec<crate::parser::Chain>>> {
+    let names = crate::expand::names();
+    if names.is_empty() {
+        return None;
+    }
+    let chains = parse_system_with(source, &names).ok()?;
+    let [chain] = chains.as_slice() else { return None };
+    if chain.rels != [Rel::Eq] {
+        return None;
+    }
+    let (name, arity, tuple) = crate::expand::definition_line(&chain.exprs[0])?;
+    let shown = space.shown();
+    let drawn = match (arity, tuple) {
+        (1, true) => Some(format!("曲線 {name}(t)")),
+        (2, true) => Some(format!("曲面 {name}(u, v)")),
+        (3, true) => Some(format!("立体 {name}(u, v, t)")),
+        (1, false) => Some(format!("{} = {name}({})", shown[1], shown[0])),
+        (2, false) => Some(format!("{} = {name}({}, {})", shown[2], shown[0], shown[1])),
+        _ => None,
+    };
+    crate::expand::mark_def_line(&name, drawn);
+    let call = |args: Vec<&str>| Expr::Apply { name: name.clone(), primes: 0, args: args.into_iter().map(|a| Expr::Var(a.into())).collect() };
+    let one = |e: Expr| crate::parser::Chain { exprs: vec![e], rels: vec![], pos: vec![0] };
+    let eq = |l: Expr, r: Expr| crate::parser::Chain { exprs: vec![l, r], rels: vec![Rel::Eq], pos: vec![0, 0] };
+    Some(match (arity, tuple) {
+        (1, true) => Some(vec![one(call(vec!["t"]))]),
+        (2, true) => Some(vec![one(call(vec!["u", "v"]))]),
+        (3, true) => Some(vec![one(call(vec!["u", "v", "t"]))]),
+        (1, false) => Some(vec![eq(Expr::Var(shown[1].clone()), call(vec![&shown[0]]))]),
+        (2, false) => Some(vec![eq(Expr::Var(shown[2].clone()), call(vec![&shown[0], &shown[1]]))]),
+        _ => None,
+    })
 }
 
 /// 次元より先の座標（3次元なのに w を使った など）を使っていたらエラーにする
@@ -439,9 +495,197 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
-    let shown = space.shown();
+    // 論理・集合の記号があれば、論理式として描く（計画 M11）
+    if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
+        return compile_logic(source, params, space);
+    }
+    let chains = match definition_source(source, space) {
+        // 定義の行: 描く形の式に置き換えて展開する（描けない定義は、図形なし）
+        Some(Some(mut chains)) => {
+            for chain in &mut chains {
+                for e in &mut chain.exprs {
+                    *e = crate::expand::expand(e, params)?;
+                }
+            }
+            chains
+        }
+        Some(None) => return Ok(Plot::Multi(Vec::new())),
+        None => parse_expanded(source, params)?,
+    };
+    // ± があれば、符号を +1 と −1 にした 2 つの図形（全部の ± がそろって動く）
+    let pm = crate::expand::PM_SIGN;
+    if chains.iter().any(|c| c.exprs.iter().any(|e| e.uses_var(pm))) {
+        let mut plots = Vec::with_capacity(2);
+        for s in [1.0, -1.0] {
+            let mut cs = chains.clone();
+            for c in &mut cs {
+                for e in &mut c.exprs {
+                    *e = e.substitute(&|v: &str| (v == pm).then_some(Expr::Num(s)));
+                }
+            }
+            plots.push(compile_chains(cs, params, space)?);
+        }
+        if plots.iter().any(|p| matches!(p, Plot::Param { .. })) {
+            return Err("± はパラメータの定義には使えません".into());
+        }
+        return Ok(Plot::Multi(plots));
+    }
+    compile_chains(chains, params, space)
+}
 
-    let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+/// 論理式・集合（計画 M11）を描く。選言標準形にして、かたまりが 1 つなら今の連立方程式・不等式の道で描く。
+/// 領域（等式の無いかたまり）どうしの「または」は、1 本の不等式 $\min_k \max_j g_{kj} \le 0$ にまとめる
+/// （重なった面を切り取らなくてよい。和集合の角は、格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
+/// ≠ は「かつ」の中では描き方が変わらないので無視し、説明に注意を出す
+fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
+    use crate::logic::{Lit, Op};
+    use crate::parser::{Chain, Formula, SetE};
+    let names = crate::expand::names();
+    // 集合の定義の行 `S = …` は、その集合を描く
+    let set_line = source.split_once('=').map(|(n, _)| n.trim().trim_start_matches('{').trim_end_matches('}').to_string());
+    let formula = match set_line.filter(|n| crate::expand::set_def(n).is_some()) {
+        Some(name) => {
+            crate::expand::mark_def_line(&name, Some("集合".into()));
+            Formula::Set(SetE::Named(name))
+        }
+        None => crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?,
+    };
+    // 点を媒介変数の式で書いた集合 {(cos t, sin t) | 0 ≤ t ≤ π} は、媒介変数表示
+    if let Formula::Set(SetE::Builder { point, cond }) = &formula {
+        let comps: Vec<&Expr> = match point {
+            Expr::Tuple(items) => items.iter().collect(),
+            e => vec![e],
+        };
+        let mut seen: Vec<&str> = Vec::new();
+        let plain = comps.iter().all(|c| match c {
+            Expr::Var(v) if !seen.contains(&v.as_str()) => {
+                seen.push(v);
+                true
+            }
+            _ => false,
+        });
+        if !plain {
+            return parametric_set(point, cond, params, space);
+        }
+    }
+    let shown: Vec<String> = space.shown().to_vec();
+    let lookup = |n: &str| crate::expand::set_def(n);
+    // ⋃・⋂ を、添字ごとの「または」「かつ」にする
+    let formula = crate::expand::expand_big(&formula, params)?;
+    let clauses = crate::logic::clauses(&formula, &shown, &lookup)?;
+    // 原子の式を展開する（関数・Σ など）
+    let mut expanded: Vec<Vec<Lit>> = Vec::with_capacity(clauses.len());
+    for c in clauses {
+        let mut out = Vec::new();
+        for l in c {
+            if l.op == Op::Ne {
+                crate::expand::add_note("≠ は描き方が変わらないので無視");
+                continue;
+            }
+            out.push(Lit { l: crate::expand::expand(&l.l, params)?, op: l.op, r: crate::expand::expand(&l.r, params)? });
+        }
+        expanded.push(out);
+    }
+    if expanded.is_empty() {
+        crate::expand::add_note("空集合");
+        return Ok(Plot::Multi(Vec::new()));
+    }
+    let chain_of = |l: &Lit| Chain {
+        exprs: vec![l.l.clone(), l.r.clone()],
+        rels: vec![match l.op {
+            Op::Lt => Rel::Lt,
+            Op::Le => Rel::Le,
+            _ => Rel::Eq,
+        }],
+        pos: vec![0, 0],
+    };
+    // 全体（条件の無いかたまり）は、表示範囲の箱全体の領域。座標を使わない条件は連立の道が受け付けないので、
+    // 形の上だけ座標を含めた x − x − 1（どこでも −1）にする
+    let x = Expr::Var(shown[0].clone());
+    let minus_one = Expr::Bin(BinOp::Sub, Box::new(Expr::Bin(BinOp::Sub, Box::new(x.clone()), Box::new(x))), Box::new(Expr::Num(1.0)));
+    let everything = || Chain { exprs: vec![minus_one.clone(), Expr::Num(0.0)], rels: vec![Rel::Le], pos: vec![0, 0] };
+    if expanded.len() == 1 {
+        let c = &expanded[0];
+        let chains = if c.is_empty() { vec![everything()] } else { c.iter().map(chain_of).collect() };
+        return compile_chains(chains, params, space);
+    }
+    let (regions, surfaces): (Vec<&Vec<Lit>>, Vec<&Vec<Lit>>) = expanded.iter().partition(|c| c.iter().all(|l| l.op != Op::Eq));
+    let mut plots = Vec::new();
+    if !regions.is_empty() {
+        let sub = |l: &Lit| Expr::Bin(BinOp::Sub, Box::new(l.l.clone()), Box::new(l.r.clone()));
+        let fold = |es: Vec<Expr>, f: crate::functions::Func| es.into_iter().reduce(|a, b| Expr::Call(f, vec![a, b]));
+        let parts: Vec<Expr> = regions
+            .iter()
+            .map(|c| fold(c.iter().map(sub).collect(), crate::functions::Func::Max).unwrap_or(minus_one.clone()))
+            .collect();
+        let strict = regions.iter().all(|c| !c.is_empty() && c.iter().all(|l| l.op == Op::Lt));
+        let g = fold(parts, crate::functions::Func::Min).unwrap_or(minus_one.clone());
+        let chain = Chain { exprs: vec![g, Expr::Num(0.0)], rels: vec![if strict { Rel::Lt } else { Rel::Le }], pos: vec![0, 0] };
+        plots.push(compile_chains(vec![chain], params, space)?);
+    }
+    for c in surfaces {
+        plots.push(compile_chains(c.iter().map(chain_of).collect(), params, space)?);
+    }
+    Ok(if plots.len() == 1 { plots.pop().unwrap_or(Plot::Multi(Vec::new())) } else { Plot::Multi(plots) })
+}
+
+/// 点を媒介変数の式で書いた集合 {(cos t, sin t, 0) | 0 ≤ t ≤ π} を、媒介変数表示にする。
+/// 条件は媒介変数の範囲（a ≤ t ≤ b、t ≤ b など）だけ。範囲は画面の範囲の欄より優先する（[`crate::expand::param_range`]）
+fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
+    use crate::parser::Formula;
+    let mut chains = Vec::new();
+    fn flatten<'a>(f: &'a Formula, out: &mut Vec<&'a crate::parser::Chain>) -> Result<(), String> {
+        match f {
+            Formula::And(v) => v.iter().try_for_each(|g| flatten(g, out)),
+            Formula::Chain(c) => {
+                out.push(c);
+                Ok(())
+            }
+            Formula::True => Ok(()),
+            _ => Err("媒介変数で書いた集合の条件には、0 ≤ t ≤ 2π のような媒介変数の範囲だけを書けます".into()),
+        }
+    }
+    flatten(cond, &mut chains)?;
+    let mut lo: Vec<(String, f64)> = Vec::new();
+    let mut hi: Vec<(String, f64)> = Vec::new();
+    let value = |e: &Expr| -> Result<f64, String> {
+        let p = Program::compile_with(e, &[], params).map_err(|_| "媒介変数の範囲は、数とパラメータで書いてください".to_string())?;
+        let mut out = [C::new(0.0, 0.0)];
+        p.eval_batch(&[], &mut out);
+        Ok(crate::eval::as_real(out[0]))
+    };
+    for c in chains {
+        for (k, rel) in c.rels.iter().enumerate() {
+            let (a, b) = (&c.exprs[k], &c.exprs[k + 1]);
+            let (small, big) = match rel {
+                Rel::Lt | Rel::Le => (a, b),
+                Rel::Gt | Rel::Ge => (b, a),
+                Rel::Eq => return Err("媒介変数で書いた集合の条件に = は使えません".into()),
+            };
+            match (small, big) {
+                (_, Expr::Var(v)) if is_param_var(v) => lo.push((v.clone(), value(small)?)),
+                (Expr::Var(v), _) if is_param_var(v) => hi.push((v.clone(), value(big)?)),
+                _ => return Err("媒介変数で書いた集合の条件には、0 ≤ t ≤ 2π のような媒介変数（t, u, v）の範囲だけを書けます".into()),
+            }
+        }
+    }
+    for (v, a) in &lo {
+        let Some((_, b)) = hi.iter().find(|(w, _)| w == v) else { return Err(format!("{v} の上の端を書いてください")) };
+        crate::expand::set_param_range(v, *a, *b);
+    }
+    if let Some((v, _)) = hi.iter().find(|(v, _)| !lo.iter().any(|(w, _)| w == v)) {
+        return Err(format!("{v} の下の端を書いてください"));
+    }
+    let items = match crate::expand::expand(point, params)? {
+        Expr::Tuple(items) => items,
+        e => return Err(format!("媒介変数で書いた集合の点は、(x(t), y(t)) のように組で書いてください（{e:?}）")),
+    };
+    parametric(items, params, space)
+}
+
+/// 解析・展開した式（[`compile_with`]）をコンパイルする
+fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
+    let shown = space.shown();
     for chain in &mut chains {
         for e in &mut chain.exprs {
             *e = rename_coords(e, space);
@@ -599,7 +843,7 @@ pub fn compile_coord_map(source: &str, params: &Params, space: &Space) -> Result
             format!("座標系の式は、{} の式を 3 つ書いてください", shown.join(", "))
         }
     };
-    let e = rename_coords(&crate::parser::parse(source).map_err(|e| e.to_string())?, space);
+    let e = rename_coords(&parse_at(source, 0, params)?, space);
     let Expr::Tuple(items) = e else { return Err(msg()) };
     if items.len() != 3 {
         return Err(msg());
@@ -622,7 +866,7 @@ pub fn compile_coord_map(source: &str, params: &Params, space: &Space) -> Result
 /// この形でない式・h が絡む回転をしている式はエラー
 pub fn hidden_field(source: &str, params: &Params, space: &Space) -> Result<(Program, usize), String> {
     let shape_err = || "断面の塗り分け・伝達関数は、w = f(x, y, z) の形（表示していない座標 = 式）で使えます".to_string();
-    let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    let mut chains = parse_expanded(source, params)?;
     for chain in &mut chains {
         for e in &mut chain.exprs {
             *e = rename_coords(e, space);
@@ -1232,6 +1476,8 @@ fn uses_i(e: &Expr) -> bool {
         Expr::Neg(a) => uses_i(a),
         Expr::Bin(_, a, b) => uses_i(a) || uses_i(b),
         Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(uses_i),
+        // 展開の段（expand.rs）で消える節は、ここには来ない
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => false,
     }
 }
 
@@ -1249,6 +1495,7 @@ fn first_list(e: &Expr) -> Option<&Vec<Expr>> {
         Expr::Neg(a) => first_list(a),
         Expr::Bin(_, a, b) => first_list(a).or_else(|| first_list(b)),
         Expr::Call(_, args) | Expr::Tuple(args) => args.iter().find_map(first_list),
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => None,
     }
 }
 
@@ -1271,6 +1518,7 @@ fn replace_first_list(e: &Expr, with: &Expr, done: &mut bool) -> Expr {
         }
         Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| replace_first_list(a, with, done)).collect()),
         Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| replace_first_list(a, with, done)).collect()),
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => e.clone(),
     }
 }
 
@@ -1308,7 +1556,7 @@ pub fn eval_constant(source: &str) -> Result<f64, String> {
 /// パラメータを使ってよい式の値を計算する（媒介変数の範囲 0 ≤ t ≤ b など）。
 /// 値と、使ったパラメータの名前を返す
 pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<String>), String> {
-    let e = parse_at(source, 0)?;
+    let e = parse_at(source, 0, params)?;
     let prog = Program::compile_with(&e, &[], params).map_err(|err| {
         // 未定義の文字なら、その名前を残す（画面側で「a のスライダーを追加」ボタンを出すのに使う）
         match err.strip_prefix("変数 '").and_then(|r| r.split_once('\'')) {
