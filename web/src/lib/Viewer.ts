@@ -1412,7 +1412,7 @@ export class Viewer {
     this.updateStencil(id)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
-    this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'))
+    this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'), style.render === 'gpu')
     this.setStyle(id, style)
   }
 
@@ -1466,8 +1466,10 @@ export class Viewer {
   }
 
   /** 光線で描く箱を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
-  private syncGpu3d(id: number, mesh: MeshData, want: boolean) {
-    const info = !this.flat && want ? mesh.gpu3d : undefined
+  private syncGpu3d(id: number, mesh: MeshData, want: boolean, forced: boolean) {
+    let info = !this.flat && want ? mesh.gpu3d : undefined
+    // 打ち切りが多くてメッシュに回した式（自動のときだけ。画素ごとを選んでいれば、そのまま光線で描く）
+    if (info && !forced && this.gpuRejected.get(id)?.glsl === info.glsl) info = undefined
     const glsl = info?.glsl
     const old = this.gpu3d.get(id)
     const d = this.domain
@@ -1511,11 +1513,84 @@ export class Viewer {
       layer.ready = true
       this.scene.add(layer.mesh)
       this.quality.forget()
+      // 自動のときは、打ち切りが多ければメッシュに回す（描いた後の次のコマで、一度だけ数える）
+      if (!forced) requestAnimationFrame(() => this.checkAborts(id, layer))
       const st = this.styles.get(id)
       if (st) this.setStyle(id, st)
       this.dirty = true
     }
     this.renderer.compileAsync(m, this.camera, this.scene).then(show, show)
+  }
+
+  /**
+   * 光線で描くと打ち切りが多い式（自動のとき、メッシュに回した）。式の番号 → その GLSL と理由。
+   * 同じ GLSL の結果が届いても、光線の箱を作り直さない（計画 12.6 の危ない所 1 の (c)）
+   */
+  private gpuRejected = new Map<number, { glsl: string; reason: string }>()
+  /** 光線の描き方からメッシュに回したとき（App が式の ⚙ に理由を出す） */
+  onGpuFallback: ((id: number, reason: string) => void) | null = null
+
+  /** 光線の描き方からメッシュに回した理由（回していなければ空） */
+  gpuFallbackReason(id: number, glsl: string | undefined): string {
+    const r = this.gpuRejected.get(id)
+    return r && r.glsl === glsl ? r.reason : ''
+  }
+
+  /**
+   * 光線の描き方で、打ち切った画素の割合を数える。小さな描画先（横 192 画素）に一度だけ描き、光を当てずに
+   * (打ち切ったか, 当たったか) を出させて読む。1 画素の大きさは画面のものを使う（同じ深さまで詰めたときの割合）。
+   * mod(x y, z) = 0 のように、値の飛ぶ所が 1 画素より細かく並ぶ式は、画面の大きさではほとんどの画素が打ち切りになる
+   */
+  private abortRatio(layer: { mesh: THREE.Mesh; ray: RaycastUniforms }): number {
+    const w = 192
+    const h = Math.max(1, Math.round((w * (this.container.clientHeight || 1)) / (this.container.clientWidth || 1)))
+    const rt = new THREE.WebGLRenderTarget(w, h)
+    const probe = new THREE.Scene()
+    const parent = layer.mesh.parent
+    probe.add(layer.mesh)
+    layer.ray.uProbe.value = 1
+    layer.mesh.userData.pixelH = this.renderer.domElement.height
+    const prevTarget = this.renderer.getRenderTarget()
+    const prevColor = this.renderer.getClearColor(new THREE.Color())
+    const prevAlpha = this.renderer.getClearAlpha()
+    const px = new Uint8Array(w * h * 4)
+    try {
+      this.renderer.setRenderTarget(rt)
+      this.renderer.setClearColor(0x000000, 0)
+      this.renderer.clear()
+      this.renderer.render(probe, this.camera)
+      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, px)
+    } finally {
+      this.renderer.setRenderTarget(prevTarget)
+      this.renderer.setClearColor(prevColor, prevAlpha)
+      layer.ray.uProbe.value = 0
+      delete layer.mesh.userData.pixelH
+      if (parent) parent.add(layer.mesh)
+      rt.dispose()
+      this.dirty = true
+    }
+    let drawn = 0
+    let aborted = 0
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i + 1] > 127) {
+        drawn++
+        if (px[i] > 127) aborted++
+      }
+    }
+    return drawn >= 20 ? aborted / drawn : 0
+  }
+
+  /** 打ち切りが 15 % を超えたら、メッシュに回す（自動のときだけ） */
+  private checkAborts(id: number, layer: { mesh: THREE.Mesh; ray: RaycastUniforms; glsl: string }) {
+    if (this.gpu3d.get(id) !== layer) return
+    const ratio = this.abortRatio(layer)
+    if (ratio <= 0.15) return
+    const reason = `値の飛ぶ所などが細かすぎて、画素ごとの描き方では詰めきれません（打ち切り ${Math.round(ratio * 100)} %）`
+    this.gpuRejected.set(id, { glsl: layer.glsl, reason })
+    this.removeGpu3d(id)
+    const st = this.styles.get(id)
+    if (st) this.setStyle(id, st)
+    this.onGpuFallback?.(id, reason)
   }
 
   private removeGpu3d(id: number) {
@@ -2181,6 +2256,7 @@ export class Viewer {
   removePlot(id: number) {
     this.removeGpu2d(id)
     this.removeGpu3d(id)
+    this.gpuRejected.delete(id)
     const p = this.plots.get(id)
     if (!p) return
     this.dirty = true

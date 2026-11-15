@@ -48,6 +48,8 @@ const CASES: &[&str] = &[
     "sin(x) = cos(y) z",
     "floor(x y) = z floor(z)",
     "mod(x y, z) = 1",
+    // 値がいつも 0 以上で、値が飛ぶ所でちょうど 0 になる（面が無数に重なる）
+    "mod(x y, z) = 0",
 ];
 
 fn norm(v: [f64; 3]) -> [f64; 3] {

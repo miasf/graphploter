@@ -52,6 +52,8 @@ export interface RaycastUniforms {
   uParam: { value: number[] }
   /** カメラの手前の面までの距離（これより近い所は描かない） */
   uNear: { value: number }
+  /** 1 なら、光を当てずに (打ち切ったか, 当たったか, 0, 1) を出す（打ち切りの割合を数えるとき。Viewer の probeGpu3d） */
+  uProbe: { value: number }
 }
 
 /** 計算エンジンが返した 1 次式（式の座標ごとに [A_k0, A_k1, A_k2, b_k]）を uniform にする */
@@ -154,10 +156,11 @@ export function createRaycastMaterial(glsl: string, n: number, grid: GridUniform
     shader.fragmentShader = shader.fragmentShader
       // 光の計算が使う点の位置を、箱の面ではなく当たった点にする（同じ名前の変数にして、three.js の部品をそのまま使う）
       .replace('varying vec3 vViewPosition;', 'vec3 vViewPosition;')
-      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
+      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
       .replace('#include <clipping_planes_fragment>', RAY_MAIN)
       .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);`)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = gRayN;\nnonPerturbedNormal = gRayN;')
+      .replace('#include <dithering_fragment>', '#include <dithering_fragment>\nif (uProbe > 0.5) gl_FragColor = vec4(gRayAborted ? 1.0 : 0.0, 1.0, 0.0, 1.0);')
   }
   // 式ごとに GLSL が違うので、three.js のシェーダーの使い回しの鍵にも入れる
   m.customProgramCacheKey = () => 'raycast:' + glsl
@@ -166,9 +169,11 @@ export function createRaycastMaterial(glsl: string, n: number, grid: GridUniform
 
 /**
  * 光線の回数の上限。止まっているとき（RAY_STILL）と、視点を動かしている間（RAY_MOVING）。
- * 動かしている間は軽くして、画面全体の画素密度を下げてぼやけさせる代わりにする（打ち切った画素は手前の候補に描く。止まったら描き直す）
+ * 動かしている間は軽くして、画面全体の画素密度を下げてぼやけさせる代わりにする（打ち切った画素は手前の候補に描く。止まったら描き直す）。
+ * 止まっているときの合計の上限は、ループの上限（uIters）と同じにする: mod(x y, z) = 0 のように、最初の面に当たるまでに値が飛ぶ所を
+ * たくさん通る式は、飛ぶ所ごとに 1/16 画素まで詰めるので、1 本の光線に 1500 回を超える区間演算が要る（1536 にしたら全部の画素が打ち切りになった）
  */
-export const RAY_STILL = { maxIter: 256, work: 1536 }
+export const RAY_STILL = { maxIter: 256, work: 4096 }
 export const RAY_MOVING = { maxIter: 64, work: 192 }
 
 export function createRaycastUniforms(): RaycastUniforms {
@@ -186,6 +191,7 @@ export function createRaycastUniforms(): RaycastUniforms {
     uPb: { value: [0, 0, 0] },
     uParam: { value: [] },
     uNear: { value: 0 },
+    uProbe: { value: 0 },
   }
 }
 
@@ -204,7 +210,9 @@ export function raycastMesh(mat: THREE.MeshStandardMaterial, ray: RaycastUniform
   mesh.onBeforeRender = (renderer, _scene, camera) => {
     renderer.getCurrentViewport(vp)
     const fov = (camera as THREE.PerspectiveCamera).fov ?? 45
-    ray.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(fov) / 2)) / Math.max(1, vp.w)
+    // 小さな描画先で打ち切りを数えるときは、画面の大きさでの 1 画素の大きさを使う（userData.pixelH。同じ深さまで詰める）
+    const h = (mesh.userData.pixelH as number | undefined) ?? vp.w
+    ray.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(fov) / 2)) / Math.max(1, h)
     ray.uNear.value = (camera as THREE.PerspectiveCamera).near ?? 0
   }
   return mesh

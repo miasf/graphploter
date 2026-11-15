@@ -130,6 +130,14 @@
 
   onMount(() => {
     viewer = new Viewer(viewerEl)
+    // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
+    viewer.onGpuFallback = (id, reason) => {
+      const it = items.find((x) => x.id === id)
+      if (it && it.render !== 'gpu') {
+        it.gpuAvailable = false
+        it.gpuReason = reason
+      }
+    }
     viewer.setMotionMode(motionMode)
     if (BENCH) {
       // ベンチマーク: 保存した状態は読まず、自動保存もしない（loaded を false のままにする）
@@ -813,6 +821,12 @@
     if (!res.mesh.transformOnly) {
       item.gpuAvailable = !!(res.mesh.gpu3d || res.mesh.gpu2d)
       item.gpuReason = res.mesh.gpuReason ?? ''
+      // 打ち切りが多くてメッシュに回した式（Viewer が決めた）
+      const fb = viewer.gpuFallbackReason(item.id, res.mesh.gpu3d?.glsl)
+      if (fb && item.render !== 'gpu') {
+        item.gpuAvailable = false
+        item.gpuReason = fb
+      }
     }
     // 見せ方が断面でない式で、新しく表示していない座標を使うようになったら、範囲を用意して計算し直す
     if (item.hidden && usesHiddenRanges(item.hidden.mode) && ensureHiddenRanges(item)) schedule(item, 0)
