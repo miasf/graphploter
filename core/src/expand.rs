@@ -18,7 +18,8 @@
 //! - 線積分・面積分・体積分: 点を媒介変数の式で書いた `@intset((cos(t), sin(t), 0), 0 ≤ t ≤ 2pi)(f)`（弧長 ds・面積 dS・体積 dV）と、
 //!   `@intset(…; {vec})(F)`（F · dr・F · dS）
 //! - 領域の上の重積分 `@intset((x, y), 0 ≤ x ≤ 1, x^2 ≤ y ≤ x)(式)`（条件から累次積分の順番と範囲を見つける。
-//!   範囲の形にならない条件は、条件の外を 0 にした近似）
+//!   範囲の形にならない条件は、条件の外を 0 にした近似。変数ごとの範囲が無くても、1 次式の範囲 `−1 ≤ x + y ≤ 1, 0 ≤ x − y ≤ 1` なら
+//!   変数変換（ヤコビアン 1/|det|）で累次積分にする）
 //!
 //! 定義は、ほかの行（式の一覧）から [`Defs::parse`] で作り、[`install`] で入れておく（`lib.rs` が `plot` の間だけ入れる）。
 //! 計算エンジンの式の文法は `parser.rs` の先頭の説明。展開した後の式には、新しい節を残さない（残れば内部エラー）
@@ -1118,6 +1119,104 @@ impl Expander<'_> {
         self.region_integral(&args)
     }
 
+    /// 1 次式の範囲で書いた領域（平行四辺形・平行六面体。`−1 ≤ x + y ≤ 1, 0 ≤ x − y ≤ 1`）の上の積分を、変数変換で累次積分にする。
+    /// 下と上の両方の端がある 1 次式 $g_i = \sum_j a_{ij} x_j + b_i$ を変数の数だけ選び、新しい変数 $u_i = g_i$ に取り替える。
+    /// $x = A^{-1}(u - b)$ を中身と残りの条件に入れ、ヤコビアン $1 / |\det A|$ を掛けて、$u$ の箱の上の積分にする。
+    /// そういう 1 次式が足りない（または互いに独立でない）なら `None`
+    fn linear_change(&mut self, vars: &[String], pairs: &[(Expr, bool, Expr)], body: &Expr) -> Result<Option<Expr>, String> {
+        use crate::diff::{add, diff, div, mul, sub};
+        let n = vars.len();
+        let free = |e: &Expr| !vars.iter().any(|v| e.uses_var(v));
+        // 条件ごとに、「数 ≤ 1 次式」（下の端）か「1 次式 ≤ 数」（上の端）かを調べる
+        struct Form {
+            g: Expr,
+            coef: Vec<Expr>,
+            lo: bool,
+            hi: bool,
+        }
+        let mut forms: Vec<Form> = Vec::new();
+        let mut role: Vec<Option<(usize, bool)>> = Vec::new();
+        for (l, _, r) in pairs {
+            let (g, lower) = match (free(l), free(r)) {
+                (true, false) => (r, true),
+                (false, true) => (l, false),
+                _ => {
+                    role.push(None);
+                    continue;
+                }
+            };
+            // 1 次式: どの変数で微分しても、変数が残らない
+            let coef: Option<Vec<Expr>> = vars.iter().map(|v| diff(g, v).ok().filter(|d| free(d))).collect();
+            let Some(coef) = coef else {
+                role.push(None);
+                continue;
+            };
+            let i = forms.iter().position(|f| f.g == *g).unwrap_or_else(|| {
+                forms.push(Form { g: g.clone(), coef, lo: false, hi: false });
+                forms.len() - 1
+            });
+            if lower {
+                forms[i].lo = true;
+            } else {
+                forms[i].hi = true;
+            }
+            role.push(Some((i, lower)));
+        }
+        let chosen: Vec<usize> = (0..forms.len()).filter(|&i| forms[i].lo && forms[i].hi).take(n).collect();
+        if chosen.len() < n {
+            return Ok(None);
+        }
+        // 行列式（行 = 選んだ 1 次式の係数。列 col を w に取り替えたものも作る: クラメルの公式）
+        let m = |a: &Expr, b: &Expr| mul(a.clone(), b.clone());
+        let det = |rows: &[Vec<Expr>]| -> Expr {
+            match rows.len() {
+                1 => rows[0][0].clone(),
+                2 => sub(m(&rows[0][0], &rows[1][1]), m(&rows[0][1], &rows[1][0])),
+                _ => {
+                    let minor = |j: usize, k: usize| sub(m(&rows[1][j], &rows[2][k]), m(&rows[1][k], &rows[2][j]));
+                    add(sub(m(&rows[0][0], &minor(1, 2)), m(&rows[0][1], &minor(0, 2))), m(&rows[0][2], &minor(0, 1)))
+                }
+            }
+        };
+        let a: Vec<Vec<Expr>> = chosen.iter().map(|&i| forms[i].coef.clone()).collect();
+        let d = det(&a);
+        // 係数が数なら、独立かを確かめる（x + y と 2x + 2y では変換できない）
+        if let Ok(v) = self.number(&d, "領域の条件") {
+            if v.abs() < 1e-12 {
+                return Ok(None);
+            }
+        }
+        let zero = |v: &str| vars.iter().any(|w| w == v).then_some(Expr::Num(0.0));
+        let names: Vec<String> = (0..n).map(|i| format!("⟨u{i}⟩")).collect();
+        // w = u − b
+        let w: Vec<Expr> = chosen.iter().zip(&names).map(|(&i, u)| sub(Expr::Var(u.clone()), forms[i].g.substitute(&zero))).collect();
+        let xs: Vec<Expr> = (0..n)
+            .map(|col| {
+                let mut rows = a.clone();
+                for (row, wi) in rows.iter_mut().zip(&w) {
+                    row[col] = wi.clone();
+                }
+                div(det(&rows), d.clone())
+            })
+            .collect();
+        let back = |v: &str| vars.iter().position(|w| w == v).map(|j| xs[j].clone());
+        let body = self.scalar(body)?.substitute(&back);
+        let body = div(body, Expr::Call(crate::functions::Func::Abs, vec![d]));
+        let mut args = vec![Expr::Tuple(names.iter().map(|u| Expr::Var(u.clone())).collect())];
+        for ((l, strict, r), role) in pairs.iter().zip(&role) {
+            let op = if *strict { "rel:<" } else { "rel:≤" }.to_string();
+            let u = |i: usize| chosen.iter().position(|&c| c == i).map(|k| Expr::Var(names[k].clone()));
+            let sides = match role.and_then(|(i, lower)| u(i).map(|u| (u, lower))) {
+                Some((u, true)) => vec![l.clone(), u],
+                Some((u, false)) => vec![u, r.clone()],
+                None => vec![l.substitute(&back), r.substitute(&back)],
+            };
+            args.push(Expr::Op { op, args: sides });
+        }
+        args.push(body);
+        self.region_integral(&args).map(Some)
+    }
+
     fn region_integral(&mut self, args: &[Expr]) -> Result<Expr, String> {
         use crate::functions::Func;
         let (Some(vars_e), Some(body)) = (args.first(), args.last()) else { return Err("内部エラー: 領域の積分の形".into()) };
@@ -1208,6 +1307,10 @@ impl Expander<'_> {
             }
         }
         let Some((order, bounds, rest)) = best else {
+            // 変数ごとの範囲が無くても、条件が 1 次式の範囲（−1 ≤ x + y ≤ 1, 0 ≤ x − y ≤ 1）なら、変数変換で累次積分にする
+            if let Some(e) = self.linear_change(&vars, &pairs, body)? {
+                return Ok(e);
+            }
             return Err(format!(
                 "積分する領域は、それぞれの変数の範囲を書いてください（例: 0 ≤ {0} ≤ 1, 0 ≤ {1} ≤ {0}）",
                 vars[0],

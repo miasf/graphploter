@@ -1,7 +1,15 @@
 // calcKeys.ts のテスト。実行: npm test
 // 「∑∫∈」のタブの全部のキーの雛形が、空欄を埋めると計算エンジン用の式に変換できること（「まだ使えません」にならないこと）
 import { CALC_PAGES } from './calcKeys.ts'
-import { latexToText } from './latex.ts'
+import { latexToText, setRegions } from './latex.ts'
+
+// 名前で書いた積分の範囲（∬_D など）の、範囲の欄の中身
+setRegions({
+  D: '\\left\\{\\left(x,y\\right)\\mid x^2+y^2<1\\right\\}',
+  V: '\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2+z^2<1\\right\\}',
+  C: '\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}',
+  S: '\\left\\{\\left(u,v,0\\right)\\mid0\\le u\\le1,0\\le v\\le1\\right\\}',
+})
 
 let failures = 0
 for (const page of CALC_PAGES) {

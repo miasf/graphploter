@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { fenceBareDelimiters, joinTuple, latexToText, splitTuple } from './latex.ts'
+import { fenceBareDelimiters, joinTuple, latexToText, regionsUsed, setRegions, splitTuple } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -69,6 +69,10 @@ const cases: [string, string][] = [
   ['x\\ne0', 'x≠0'],
   ['\\emptyset\\lor\\top', '∅∨⊤'],
   ['S=\\left\\{\\left(x,y\\right)\\mid x^2+y^2<1\\right\\}', 'S= ⦃(x,y)∣x^(2)+y^(2)<1⦄'],
+  // 縦線を消して | で打ち直したもの（\mid ではなく裸の |）も、区切りとして読む。絶対値の組はそのまま
+  ['\\left\\{\\left(x,y\\right)|x<1\\right\\}', '⦃(x,y)∣x<1⦄'],
+  ['\\left\\{\\left(x,y\\right)|\\left|x\\right|<1\\right\\}', '⦃(x,y)∣abs(x)<1⦄'],
+  ['\\left\\{\\left(x,y\\right)\\mid\\left|x\\right|+\\left|y\\right|<1\\right\\}', '⦃(x,y)∣abs(x)+ abs(y)<1⦄'],
   ['\\left\\{x+1\\right\\}', '(x+1)'],
   // 集合の上の総和・総積、有限集合、⋃・⋂
   ['\\sum_{n\\in\\left\\{1,4,9\\right\\}}n', '@sumset(n; n∈⦃1,4,9⦄) n'],
@@ -176,6 +180,39 @@ check('fence 対にならない', fenceBareDelimiters('\\lfloor x\\rceil'), '\\l
 check('fence { } をまたがない', fenceBareDelimiters('\\frac{\\lfloor x}{y\\rfloor}'), '\\frac{\\lfloor x}{y\\rfloor}')
 check('fence 変換結果は同じ', latexToText(fenceBareDelimiters('z=\\lfloor x\\rfloor+1')), latexToText('z=\\lfloor x\\rfloor+1'))
 check('join', joinTuple(['a', 'b']), '\\left(a,b\\right)')
+
+// 名前で書いた積分の範囲（∬_D の D。範囲は別の欄に書く）
+setRegions({
+  D: '\\left\\{\\left(x,y\\right)\\mid0\\le x\\le1,0\\le y\\le x\\right\\}',
+  C: '\\left\\{\\left(\\cos t,\\sin t\\right)|0\\le t\\le2\\pi\\right\\}',
+  '\\Omega': '\\left[0,1\\right]\\times\\left[0,2\\right]',
+  E: '',
+})
+check('∬_D', latexToText('\\iint_{D}xy\\,dA'), '@intset((x,y),0<=x<=1,0<=y<=x)(xy)')
+check('∬_D（括弧なし）', latexToText('\\iint_Dxy\\,dA'), '@intset((x,y),0<=x<=1,0<=y<=x)(xy)')
+check('∮_C F·dr', latexToText('\\oint_{C}\\left(-y,x\\right)\\cdot d\\mathbf{r}'), '@intset(( cos t, sin t),0<=t<=2 pi; {vec})((-y,x))')
+check('∫_Ω dx dy', latexToText('\\int_{\\Omega}xy\\,dx\\,dy'), '@intset((x,y),0<=x<=1,0<=y<=2)(xy)')
+check('定積分はそのまま', latexToText('\\int_{a}^{b}t\\,dt'), '@int(t,a,b)(t)')
+for (const name of ['E', 'G']) {
+  let message = ''
+  try {
+    latexToText(`\\iint_{${name}}xy\\,dA`)
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e)
+  }
+  check(`範囲 ${name} が空`, message.startsWith(`${name} の範囲を、下の欄に`), true)
+}
+check(
+  '使っている範囲',
+  regionsUsed('\\iint_{D}x\\,dA+\\int_{C}x\\,ds+\\iiint_{V}1\\,dV+\\iint_{S}F\\cdot d\\mathbf{S}+\\int_{a}^{b}t\\,dt+\\iint_{D}y\\,dA').map((r) => `${r.name}=${r.template}`),
+  [
+    'D=\\left\\{\\left(x,y\\right)\\mid\\placeholder{}\\right\\}',
+    'C=\\left\\{\\left(\\placeholder{}\\right)\\mid\\placeholder{}\\right\\}',
+    'V=\\left\\{\\left(x,y,z\\right)\\mid\\placeholder{}\\right\\}',
+    'S=\\left\\{\\left(\\placeholder{}\\right)\\mid\\placeholder{}\\right\\}',
+  ],
+)
+setRegions({})
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')

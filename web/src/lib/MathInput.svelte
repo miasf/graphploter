@@ -3,7 +3,7 @@
   import type { MathfieldElement } from 'mathlive'
   import { onMount } from 'svelte'
   import { fenceBareDelimiters } from './latex'
-  import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SHORTCUTS } from './mathSetup'
+  import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
   interface Props {
     /** 入力欄の中身（LaTeX） */
@@ -45,9 +45,124 @@
     el.inlineShortcuts = SHORTCUTS
     el.smartFence = true // ( を打つと ) も自動で入る
     el.mathVirtualKeyboardPolicy = keyboardPolicy() // 画面上の数式キーボードを出す（PC では入力欄に入ったときに出す）
+    // 指数・下付き（積分の範囲など）を大きく描く
+    const root = el.shadowRoot
+    if (root && !root.adoptedStyleSheets.includes(SCRIPT_SIZE_SHEET)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, SCRIPT_SIZE_SHEET]
     if (autofocus) startEditing()
     el.addEventListener('keydown', fixLayoutKey, { capture: true })
+    el.addEventListener('pointerdown', fieldDown, { capture: true })
+    el.addEventListener('pointermove', fieldMove, { capture: true })
+    el.addEventListener('pointerup', fieldUp, { capture: true })
+    el.addEventListener('pointercancel', fieldCancel, { capture: true })
+    el.addEventListener('wheel', fieldWheel, { passive: false })
   })
+
+  // ---- 長い式を横に送る（スクロール）----
+  // 欄に収まらない式は、MathLive が中身（.ML__content）を横に送って、カーソルのある所を見せる。
+  // 自分で送るには矢印キーを 1 回ずつ押すしかなかったので、指で横になぞる（PC では横スクロール・Shift + ホイール）と送れるようにする。
+  // 送った位置は、ほかの式へ移っても（入力をやめても）そのまま残す。
+
+  /** 横に送られる中身 */
+  const content = () => el?.shadowRoot?.querySelector<HTMLElement>('.ML__content') ?? null
+  /** 欄に収まっていないか */
+  const overflowing = (c: HTMLElement) => c.scrollWidth > c.clientWidth + 1
+
+  /** 入力中の欄を指でなぞっている間の状態 */
+  let swipe: {
+    id: number
+    x: number
+    y: number
+    left: number
+    /** 横に送り始めたか */
+    panning: boolean
+    /** 長押しして範囲を選んでいるなら、その始まりの位置 */
+    anchor: number | null
+    timer: ReturnType<typeof setTimeout> | undefined
+  } | null = null
+
+  /**
+   * 入力中の欄に指を置いたとき（収まらない式だけ）。MathLive は指をなぞると範囲を選ぶので、こちらで受け取って、
+   * なぞったら横に送り、動かさずに離したらその位置にカーソルを置く。範囲を選ぶのは、長押ししてからなぞる
+   */
+  function fieldDown(e: PointerEvent) {
+    if (e.pointerType === 'mouse' || !focused || !e.isPrimary) return
+    const c = content()
+    if (!c || !overflowing(c) || !e.composedPath().includes(c)) return
+    e.stopPropagation()
+    e.preventDefault()
+    const { clientX: x, clientY: y } = e
+    swipe = { id: e.pointerId, x, y, left: c.scrollLeft, panning: false, anchor: null, timer: undefined }
+    swipe.timer = setTimeout(() => {
+      if (!swipe || swipe.panning) return
+      const at = el.getOffsetFromPoint(x, y)
+      if (at >= 0) {
+        swipe.anchor = at
+        el.position = at
+      }
+    }, 450)
+    el.setPointerCapture(e.pointerId)
+  }
+
+  function fieldMove(e: PointerEvent) {
+    if (!swipe || e.pointerId !== swipe.id) return
+    e.stopPropagation()
+    e.preventDefault()
+    const c = content()
+    if (!c) return
+    if (swipe.anchor !== null) {
+      // 長押しの後: 範囲を選ぶ
+      const to = el.getOffsetFromPoint(e.clientX, e.clientY)
+      if (to >= 0) el.selection = { ranges: [[Math.min(swipe.anchor, to), Math.max(swipe.anchor, to)]], direction: to < swipe.anchor ? 'backward' : 'forward' }
+      return
+    }
+    const dx = e.clientX - swipe.x
+    if (!swipe.panning && Math.hypot(dx, e.clientY - swipe.y) < 10) return
+    swipe.panning = true
+    clearTimeout(swipe.timer)
+    c.scrollLeft = swipe.left - dx
+  }
+
+  function fieldUp(e: PointerEvent) {
+    if (!swipe || e.pointerId !== swipe.id) return
+    e.stopPropagation()
+    e.preventDefault()
+    clearTimeout(swipe.timer)
+    const { panning, anchor } = swipe
+    swipe = null
+    // 動かさずに離した（タップ）: その位置にカーソルを置く
+    if (!panning && anchor === null) {
+      const at = el.getOffsetFromPoint(e.clientX, e.clientY)
+      if (at >= 0) el.position = at
+    }
+  }
+
+  function fieldCancel(e: PointerEvent) {
+    if (!swipe || e.pointerId !== swipe.id) return
+    clearTimeout(swipe.timer)
+    swipe = null
+  }
+
+  /** PC: 横スクロール（トラックパッド）か、Shift + ホイールで横に送る */
+  function fieldWheel(e: WheelEvent) {
+    const c = content()
+    if (!c || !overflowing(c)) return
+    const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.shiftKey ? e.deltaY : 0
+    if (dx === 0) return
+    e.preventDefault()
+    c.scrollLeft += dx
+  }
+
+  /** 入力をやめたとき: 横に送った位置を残す（MathLive が戻してしまっても、元の位置に戻す） */
+  function keepScroll() {
+    const c = content()
+    if (!c) return
+    const left = c.scrollLeft
+    const put = () => {
+      if (!focused && c.scrollLeft !== left) c.scrollLeft = left
+    }
+    requestAnimationFrame(put)
+    setTimeout(put, 100)
+  }
 
   // ---- 日本語（JIS）配列などのキーボード ----
   // MathLive は、キーの操作（\ で LaTeX の命令の入力、" で文字の入力など）をキーの位置（code）から US 配列として決める。
@@ -104,10 +219,20 @@
 
   /** 入力を始める（スマホでは数式キーボードが出る）。x, y があれば、その位置にカーソルを置く */
   function startEditing(x?: number, y?: number) {
+    // 入力を始めると、MathLive は前のカーソルの位置まで式を横に送る。押した所にカーソルを置くので、
+    // 横に送ってあった位置はそのままにする（送り直されたら戻す）
+    const c = content()
+    const left = c?.scrollLeft ?? 0
     el.focus()
     if (x !== undefined && y !== undefined) {
+      if (c) c.scrollLeft = left
       const offset = el.getOffsetFromPoint(x, y)
       if (offset >= 0) el.position = offset
+      const put = () => {
+        if (c && c.scrollLeft !== left) c.scrollLeft = left
+      }
+      put()
+      requestAnimationFrame(put)
     }
   }
 
@@ -115,12 +240,23 @@
   // MathLive の入力欄は、指が上に乗るとスクロールを止めてしまう（触れただけで入力が始まりキーボードが出る）。
   // そこで入力中でないときは透明な板を重ねておき、指を動かしたらふつうにスクロール、
   // 動かさずに離したら（タップ）入力を始める。
-  let tapStart: { x: number; y: number; t: number } | null = null
+  let tapStart: { x: number; y: number; t: number; left: number; panning: boolean } | null = null
   let tapped = false
 
   function coverDown(e: PointerEvent) {
-    tapStart = { x: e.clientX, y: e.clientY, t: e.timeStamp }
+    tapStart = { x: e.clientX, y: e.clientY, t: e.timeStamp, left: content()?.scrollLeft ?? 0, panning: false }
     tapped = false
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  }
+
+  /** 入力中でない欄を横になぞったら、式を横に送る（縦はふつうのスクロール） */
+  function coverMove(e: PointerEvent) {
+    const c = content()
+    if (!tapStart || !c || !overflowing(c)) return
+    const dx = e.clientX - tapStart.x
+    if (!tapStart.panning && Math.abs(dx) < 10) return
+    tapStart.panning = true
+    c.scrollLeft = tapStart.left - dx
   }
 
   function coverUp(e: PointerEvent) {
@@ -332,6 +468,7 @@
     onFocusChange?.(true)
   }}
   onblur={() => {
+    keepScroll()
     focused = false
     keyboardOnBlur()
     onFocusChange?.(false)
@@ -344,6 +481,7 @@
       class="tap-cover"
       aria-hidden="true"
       onpointerdown={coverDown}
+      onpointermove={coverMove}
       onpointerup={coverUp}
       onpointercancel={() => (tapStart = null)}
       onclick={coverClick}

@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { joinTuple, splitTuple } from './latex'
+  import { joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
@@ -19,6 +19,10 @@
     axisNames: string[]
     /** 式（LaTeX）が書き換えられたとき */
     onInput: (latex: string) => void
+    /** 名前で書いた積分の範囲（∬_D の D → 範囲の LaTeX）。全部の式で共通 */
+    regions: Record<string, string>
+    /** 範囲の欄が書き換えられたとき */
+    onRegion: (name: string, latex: string) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -96,6 +100,8 @@
     domain,
     axisNames,
     onInput,
+    regions,
+    onRegion,
     onColor,
     onGrid,
     onOpacity,
@@ -161,6 +167,8 @@
   let editingLine = $state(false)
   /** 式が組 (a, b, c) なら成分の配列 */
   const parts = $derived(splitTuple(item.latex))
+  /** この式で使っている、名前で書いた積分の範囲（∬_D の D） */
+  const regionNames = $derived(regionsUsed(item.latex).map((r) => r.name))
   const showVertical = $derived(item.vertical && parts !== null && !editingLine)
 
   function setPart(k: number, value: string) {
@@ -420,6 +428,20 @@
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
       {/if}
     {/if}
+    <!-- 積分の範囲（∬_D の D）。式には名前だけを書き、範囲はここに書く。同じ名前は、どの式でも同じ範囲 -->
+    {#each regionNames as name (name)}
+      <div class="region">
+        <span class="name">{regionLabel(name)} =</span>
+        <MathInput
+          small
+          keyboardToggle={false}
+          value={regions[name] ?? ''}
+          label="積分の範囲 {regionLabel(name)}"
+          placeholder={'\\left\\{\\left(x,y\\right)\\mid x^2+y^2<1\\right\\}'}
+          onInput={(v) => onRegion(name, v)}
+        />
+      </div>
+    {/each}
     {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
       <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
       {#each hiddenCoords.filter((n) => item.slice && n in item.slice) as name (name)}
@@ -1156,6 +1178,13 @@
     grid-template-columns: auto 1fr;
     align-items: baseline;
     gap: 6px;
+  }
+  .region {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
   }
   .name {
     font: italic 15px 'Times New Roman', serif;

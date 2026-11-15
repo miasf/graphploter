@@ -7,6 +7,8 @@ export interface CalcKey {
   insert: string
   tooltip: string
   class?: string
+  /** 長押しで出る別のキー（入れる LaTeX） */
+  variants?: string[]
 }
 
 /** 雛形のキー（label はキーの表示、insert は入れる LaTeX（#? は空欄、#0 は選んでいた部分）、ja は長押しで出る名前） */
@@ -36,11 +38,11 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('Δₓ', '\\Delta_{x}#?', '前進差分 f(x+h) − f(x)（幅は Δ_{x, h}）'),
         key('∇ₓ', '\\nabla_{x}#?', '後退差分 f(x) − f(x−h)'),
         key('δₓ', '\\delta_{x}#?', '中心差分 f(x+h/2) − f(x−h/2)'),
-        key('∬', '\\iint_{\\left\\{\\left(x,y\\right)\\mid#?\\right\\}}#?\\,dA', '領域の上の 2 重積分'),
-        key('∭', '\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid#?\\right\\}}#?\\,dV', '領域の上の 3 重積分'),
-        key('∫_C', '\\int_{\\left\\{\\left(#?\\right)\\mid#?\\right\\}}#?\\,ds', '線積分（曲線を {(x(t), y(t)) | a ≤ t ≤ b} で）'),
-        key('∮F·dr', '\\oint_{\\left\\{\\left(#?\\right)\\mid#?\\right\\}}#?\\cdot d\\mathbf{r}', '仕事（線積分 F · dr）'),
-        key('∬F·dS', '\\iint_{\\left\\{\\left(#?\\right)\\mid#?\\right\\}}#?\\cdot d\\mathbf{S}', '流束（面積分 F · dS）'),
+        key('∬_D', '\\iint_{D}#?\\,dA', '領域 D の上の 2 重積分（D の範囲は式の下の欄に書く。文字は自由）'),
+        key('∭_V', '\\iiint_{V}#?\\,dV', '領域 V の上の 3 重積分（V の範囲は式の下の欄に書く）'),
+        key('∫_C', '\\int_{C}#?\\,ds', '線積分（曲線 C は式の下の欄に {(x(t), y(t)) | a ≤ t ≤ b} で書く）'),
+        key('∮F·dr', '\\oint_{C}#?\\cdot d\\mathbf{r}', '仕事（線積分 F · dr。曲線 C は式の下の欄に書く）'),
+        key('∬F·dS', '\\iint_{S}#?\\cdot d\\mathbf{S}', '流束（面積分 F · dS。曲面 S は式の下の欄に書く）'),
       ],
       [
         key('{⋮', '\\begin{cases}#? & #?\\\\ #? & \\text{otherwise}\\end{cases}', '場合分け（値 & 条件）'),
@@ -79,8 +81,8 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
       [
         key('{xy|}', '\\left\\{\\left(x,y\\right)\\mid#?\\right\\}', '集合 {(x, y) | 条件}（平面）'),
         key('{xyz|}', '\\left\\{\\left(x,y,z\\right)\\mid#?\\right\\}', '集合 {(x, y, z) | 条件}（空間）'),
-        key('∈', '\\in', '属する'),
-        key('∉', '\\notin', '属さない'),
+        { ...key('∈', '\\in', '属する（長押しで ∉ 属さない）'), variants: ['\\notin'] },
+        key('∣', '\\mid', '集合の区切りの縦線 {点 ∣ 条件}（消してしまったときに。約数 d ∣ 12 にも）'),
         key('∩', '\\cap', '共通部分'),
         key('∪', '\\cup', '和集合'),
         key('∖', '\\setminus', '差集合'),
