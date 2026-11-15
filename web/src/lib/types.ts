@@ -327,6 +327,8 @@ export interface MeshData {
   valueRange: [number, number] | null
   /** 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる）での値。無ければ省略 */
   volume?: { n: number; values: Float32Array }
+  /** 2D 表示の曲線・不等式の領域を画素ごとに描くための GLSL（計画 12 章の G4）。GPU に移せない式では省略 */
+  gpu2d?: import('./gpu2dMaterial').Gpu2dInfo
   /** 2D 表示の不等式の領域の境目の線（実線。点の列で、途切れる所に NaN）。無ければ省略 */
   outline?: Float32Array
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */

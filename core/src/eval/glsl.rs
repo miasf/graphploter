@@ -145,6 +145,27 @@ fn lit(v: f64) -> String {
     }
 }
 
+/// いくつかの式を 1 つのシェーダーに入れる GLSL（下請けの関数は 1 回だけ）。`items` は (式, 関数の名前)。
+/// パラメータは uniform にしない（式に畳み込まれた定数のまま）。戻り値は GLSL と、式ごとの引数の配列の長さ
+pub fn glsl_bundle(items: &[(&Program, &str)]) -> Result<(String, Vec<usize>), String> {
+    let mut used: Vec<&'static str> = Vec::new();
+    let mut body = String::new();
+    let mut lens = Vec::with_capacity(items.len());
+    for (p, name) in items {
+        let (g, u) = to_glsl_used(&p.code, p.vars.len(), &GlslOptions { name: name.to_string(), ..Default::default() })?;
+        for n in u {
+            if !used.contains(&n) {
+                used.push(n);
+            }
+        }
+        body.push_str(&g.value);
+        body.push_str(&g.dual);
+        body.push_str(&g.interval);
+        lens.push(g.inputs.max(1));
+    }
+    Ok((format!("{}{body}", prelude_for(&used)), lens))
+}
+
 impl Program {
     /// GLSL にする（計画 12 章の G3）。実数だけで計算できない式（複素数・特殊関数）と、
     /// GPU に移していない関数（場合分けなど）を使う式は `Err` を返す（呼び出し側はメッシュの道に戻る）
@@ -157,6 +178,11 @@ impl Program {
 pub const MAX_GLSL_OPS: usize = 2000;
 
 fn to_glsl(code: &Code, nvars: usize, opts: &GlslOptions) -> Result<GlslCode, String> {
+    to_glsl_used(code, nvars, opts).map(|(g, _)| g)
+}
+
+/// [`to_glsl`] と、使った下請けの名前
+fn to_glsl_used(code: &Code, nvars: usize, opts: &GlslOptions) -> Result<(GlslCode, Vec<&'static str>), String> {
     if !code.real {
         // 使えない関数の名前を出す
         for op in &code.ops {
@@ -363,7 +389,8 @@ fn to_glsl(code: &Code, nvars: usize, opts: &GlslOptions) -> Result<GlslCode, St
     let _ = writeln!(inter, "  return r{out};\n}}");
 
     let uniforms = if n_par > 0 { format!("uniform float {u}[{n_par}];\n") } else { String::new() };
-    Ok(GlslCode { prelude: prelude_for(&used), uniforms, value: val, dual, interval: inter, inputs: n_in, params: n_par })
+    let prelude = prelude_for(&used);
+    Ok((GlslCode { prelude, uniforms, value: val, dual, interval: inter, inputs: n_in, params: n_par }, used))
 }
 
 #[derive(Clone, Copy)]

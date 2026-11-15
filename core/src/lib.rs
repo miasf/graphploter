@@ -20,6 +20,7 @@ pub mod expand;
 pub mod integrate;
 pub mod logic;
 pub mod functions;
+pub mod gpu2d;
 pub mod interval;
 pub mod mesh;
 pub mod pixel;
@@ -75,10 +76,20 @@ pub struct MeshResult {
     outline_target: (Vec<f32>, Vec<f32>),
     /// 展開で使った定義の名前と、この行が定義の行ならその名前（[`definitions`]）
     defs: (Vec<String>, Option<String>),
+    /// 2D 表示の曲線・不等式の領域を、画素ごとに描くための GLSL（計画 12 章の G4。GPU に移せない式・座標系を使う式では None）
+    gpu2d: Option<gpu2d::Scene2d>,
 }
 
 #[wasm_bindgen]
 impl MeshResult {
+    /// 画素ごとに描く 2D の図形の GLSL（[`gpu2d`]）。無ければ空
+    pub fn gpu2d_glsl(&self) -> String {
+        self.gpu2d.as_ref().map_or(String::new(), |g| g.glsl.clone())
+    }
+    /// 同じく [等式の数, 不等式の数, 実線を引く不等式のビット]。無ければ空
+    pub fn gpu2d_info(&self) -> Vec<u32> {
+        self.gpu2d.as_ref().map_or(Vec::new(), |g| vec![g.eq as u32, g.cuts as u32, g.lines])
+    }
     /// 表示していない座標の値で色を付けるなら [最小, 最大]（値は complex_values の 1 つ目）。付けないなら空
     pub fn value_range(&self) -> Vec<f64> {
         self.value_range.map_or(Vec::new(), |(a, b)| vec![a, b])
@@ -352,6 +363,7 @@ pub fn coord_grid(
         value_range: None,
         volume: None,
         defs: Default::default(),
+        gpu2d: None,
     })
 }
 
@@ -686,6 +698,7 @@ pub fn plot(
             _ => None,
         },
         local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        gpu2d: if coord.is_some() { None } else { built.gpu2d },
         coord,
         defs: (expand::used(), expand::def_line()),
     })
@@ -1152,6 +1165,8 @@ struct Built {
     value_range: Option<(f64, f64)>,
     /// 伝達関数の格子の値と、1 辺の点の数
     volume: Option<(Vec<f32>, usize)>,
+    /// 2D 表示で、画素ごとに描くための GLSL
+    gpu2d: Option<gpu2d::Scene2d>,
 }
 
 impl Built {
@@ -1505,6 +1520,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.curve = true;
             b.kind = format!("{} = f({}, {}) の切り口（f = 0）", names[2], names[0], names[1]);
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+            b.gpu2d = gpu2d::scene(Some(prog), &[], &[]).ok();
         }
         P::Explicit { axis: 2, prog, names, .. } => {
             b.kind = format!("{} の値で塗り分け", names[2]);
@@ -1532,6 +1548,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 None => "陰関数の曲線".into(),
             };
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+            b.gpu2d = gpu2d::scene(Some(prog), &[], &[]).ok();
         }
         P::Solid { prog, ranges, .. } => {
             b.kind = "範囲で重ねた領域".into();
@@ -1573,6 +1590,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             0 => {
                 b.kind = "不等式の領域（2D）".into();
                 b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
+                b.gpu2d = gpu2d::scene(None, cuts, strict).ok();
                 // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線
                 for (i, g) in cuts.iter().enumerate() {
                     let mut line = mesh::implicit_curve_2d(g, dom, res2).positions;
@@ -1588,6 +1606,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 b.curve = true;
                 b.kind = "陰関数の曲線（不等式で切り取り）".into();
                 b.inner = mesh::implicit_curve_2d(&eqs[0], dom, res2);
+                b.gpu2d = gpu2d::scene(Some(&eqs[0]), cuts, strict).ok();
                 for g in cuts {
                     system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
                 }
@@ -1753,6 +1772,7 @@ impl Shape {
             param: None,
             local_available: false,
             defs: Default::default(),
+            gpu2d: None,
         }
     }
 }
@@ -1848,6 +1868,7 @@ impl CapSource {
             value_range: None,
             volume: None,
             defs: Default::default(),
+            gpu2d: None,
         })
     }
 }

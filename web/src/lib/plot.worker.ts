@@ -513,7 +513,10 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
     const outlineDashedTarget = r.take_outline_dashed_target()
+    const gi = r.gpu2d_info()
+    const gpu2d = gi.length === 3 ? { glsl: r.gpu2d_glsl(), eq: gi[0], cuts: gi[1], lines: gi[2] } : undefined
     const mesh = {
+      ...(gpu2d ? { gpu2d } : {}),
       valueRange: vr.length === 2 ? ([vr[0], vr[1]] as [number, number]) : null,
       ...(volume ? { volume } : {}),
       ...(outline.length > 0 ? { outline } : {}),

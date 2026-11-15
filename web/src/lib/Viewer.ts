@@ -9,6 +9,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
+import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
@@ -143,6 +144,13 @@ export class Viewer {
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
+  /**
+   * 2D 表示で、画素ごとに描く曲線・領域（計画 12 章の G4）。式の番号 → 平面と材質と、その GLSL・表示範囲。
+   * あるときは、plots の線・面を隠して（カーソルの下の点にはそれを使う）、こちらを描く
+   */
+  private gpu2d = new Map<number, { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; glsl: string; key: string; eq: number; ready: boolean }>()
+  /** 画素ごとの 2D の描き方を使うか（?gpu2d=0 で使わない。描き方の切り替えの画面は G7） */
+  private gpu2dOn = typeof location === 'undefined' || new URLSearchParams(location.search).get('gpu2d') !== '0'
   /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
   private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
   /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
@@ -1066,6 +1074,14 @@ export class Viewer {
     this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
     this.camera.up.set(0, on ? 1 : 0, on ? 0 : 1)
     for (const p of this.plots.values()) if (p.kind === 'surface') p.grid.uNoBackShade.value = on ? 1 : 0
+    // 3D に戻すときは、画素ごとの 2D の平面を捨てて、隠していた線・面を戻す（3D の結果が届くまでの間も見えるように）
+    if (!on) {
+      for (const id of [...this.gpu2d.keys()]) {
+        this.removeGpu2d(id)
+        const st = this.styles.get(id)
+        if (st) this.styleGpu2d(id, st)
+      }
+    }
     if (this.domain) this.setDomain(this.domain, true)
   }
 
@@ -1344,7 +1360,86 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
+    this.syncGpu2d(id, mesh)
     this.setStyle(id, style)
+  }
+
+  /** 画素ごとの 2D の描き方の平面を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
+  private syncGpu2d(id: number, mesh: MeshData) {
+    const info = this.flat && this.gpu2dOn ? mesh.gpu2d : undefined
+    const old = this.gpu2d.get(id)
+    const d = this.domain
+    if (!info || !d) {
+      if (old) this.removeGpu2d(id)
+      return
+    }
+    const key = `${d.xmin},${d.xmax},${d.ymin},${d.ymax}`
+    if (old && old.glsl === info.glsl) {
+      if (old.key !== key) {
+        if (old.ready) this.scene.remove(old.mesh)
+        old.mesh.geometry.dispose()
+        old.mesh = gpu2dMesh(old.mat, d)
+        old.key = key
+        if (old.ready) this.scene.add(old.mesh)
+      }
+      this.dirty = true
+      return
+    }
+    if (old) this.removeGpu2d(id)
+    const mat = gpu2dMaterial(info)
+    const m = gpu2dMesh(mat, d)
+    const layer = { mesh: m, mat, glsl: info.glsl, key, eq: info.eq, ready: false }
+    this.gpu2d.set(id, layer)
+    // パラメータは式に畳み込まれた定数なので、スライダーを動かすと GLSL が変わる。コンパイルは裏で行い
+    // （KHR_parallel_shader_compile。無い環境ではその場で）、終わるまでは今までのメッシュの線・面を見せる
+    const show = () => {
+      if (this.gpu2d.get(id) !== layer) return // 待っている間に、次の結果が来た・式が消えた
+      layer.ready = true
+      this.scene.add(layer.mesh)
+      const st = this.styles.get(id)
+      if (st) this.styleGpu2d(id, st)
+      this.dirty = true
+    }
+    this.renderer.compileAsync(m, this.camera, this.scene).then(show, show)
+  }
+
+  private removeGpu2d(id: number) {
+    const g = this.gpu2d.get(id)
+    if (!g) return
+    if (g.ready) this.scene.remove(g.mesh)
+    g.mesh.geometry.dispose()
+    g.mat.dispose()
+    this.gpu2d.delete(id)
+    this.dirty = true
+  }
+
+  /** 画素ごとの描き方の見た目。メッシュの線・面（と実線の境目）は隠し、点線の境目だけ残す */
+  private styleGpu2d(id: number, style: PlotStyle) {
+    const p = this.plots.get(id)
+    const layer = this.gpu2d.get(id)
+    const g = layer?.ready ? layer : undefined
+    if (!p) return
+    if (p.kind === 'curve') {
+      p.line.visible = style.visible && !g
+    } else {
+      p.group.children[0].visible = !g
+      for (const l of p.outlines) l.visible = !g || l.userData.dashed === true
+    }
+    if (!layer) return
+    layer.mesh.visible = style.visible
+    const u = layer.mat.uniforms as Gpu2dUniforms
+    u.uColor.value.set(style.color)
+    // 曲線は式の線の太さ、領域の境目はメッシュの道と同じ 2.5
+    u.uWidth.value = layer.eq === 1 ? style.lineWidth : 2.5
+    // 面の材質は光が当たって明るくなる分、同じ不透明度でも濃く見える。それに近い濃さにする
+    const opacity = Math.min(1, Math.max(0, style.opacity))
+    u.uFill.value = opacity * 0.88
+    const gs = style.grid
+    const sp = (v: number) => (gs.enabled && Number.isFinite(v) && v > 0 ? v : 0)
+    u.uGridSpacing.value.set(sp(gs.x), sp(gs.y))
+    u.uGridColor.value.set(style.color).multiplyScalar(0.3 + 0.7 * (1 - opacity))
+    u.uGridStrength.value = 0.75 + 0.25 * (1 - opacity)
+    u.uGridWidth.value = gs.width
   }
 
   /**
@@ -1714,6 +1809,7 @@ export class Viewer {
       mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
       const line = new LineSegments2(this.curveGeometry(pts), mat)
       if (dashed) line.computeLineDistances()
+      line.userData.dashed = dashed
       line.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
       p.outlines.push(line)
       p.group.add(line)
@@ -1823,6 +1919,11 @@ export class Viewer {
 
   /** 色・表示/非表示・格子線などの見た目だけを変える（計算し直さない） */
   setStyle(id: number, style: PlotStyle) {
+    this.setStyleInner(id, style)
+    this.styleGpu2d(id, style)
+  }
+
+  private setStyleInner(id: number, style: PlotStyle) {
     const p = this.plots.get(id)
     if (!p) return
     this.styles.set(id, style)
@@ -1903,6 +2004,7 @@ export class Viewer {
   }
 
   removePlot(id: number) {
+    this.removeGpu2d(id)
     const p = this.plots.get(id)
     if (!p) return
     this.dirty = true
