@@ -349,7 +349,18 @@ function frame() {
 // ---------------------------------------------------------------------------
 const results = new Map() // "k|w|steps" → { wall, gpu } または { lost: true }
 let stopRequested = false
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()))
+// 次のコマを待つ。埋め込みの画面では requestAnimationFrame が止まることがあるので、100 ms でも進める
+const nextFrame = () =>
+  new Promise((r) => {
+    let done = false
+    const go = () => { if (!done) { done = true; r() } }
+    requestAnimationFrame(go)
+    setTimeout(go, 100)
+  })
+/** 最後の誤り（結果のコピーに入れる） */
+let lastError = ''
+/** 測り始めたか */
+let started = false
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : NaN }
 const pixel = new Uint8Array(4)
 
@@ -417,8 +428,11 @@ async function run() {
   stopRequested = false
   $('runBtn').disabled = true
   $('stopBtn').disabled = false
+  started = true
+  lastError = ''
+  // 画面を消さない（アプリの中では返事が来ないことがあるので、待たない）
   let wakeLock = null
-  try { wakeLock = await navigator.wakeLock?.request('screen') } catch { wakeLock = null }
+  try { navigator.wakeLock?.request('screen').then((l) => { wakeLock = l }).catch(() => {}) } catch { /* 使えない */ }
   const jobs = []
   // 軽い組み合わせから測る（重い所で GPU が落ちても、軽い分の結果は残る）
   for (const s of sizes) for (const n of steps) for (let k = 0; k < EXPRS.length; k++) jobs.push({ k, n, s })
@@ -433,6 +447,7 @@ async function run() {
       if (r) results.set(key, r)
       else if (lost) results.set(key, { lost: true })
     } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e)
       results.set(key, { lost: true })
     }
     done++
@@ -513,7 +528,13 @@ function deviceInfo() {
 
 function toTsv() {
   const d = deviceInfo()
-  const head = Object.entries(d).map(([k, v]) => `# ${k}\t${v}`).join('\n')
+  const head = [
+    ...Object.entries(d).map(([k, v]) => `# ${k}\t${v}`),
+    `# started\t${started ? 'yes' : 'no'}`,
+    `# status\t${statusEl.textContent}`,
+    `# lost\t${lost ? 'yes' : 'no'}`,
+    ...(lastError ? [`# error\t${lastError}`] : []),
+  ].join('\n')
   const rows = ['式\t幅\t高さ\t歩数\tGPU ms\t待ち ms\t回数']
   for (let k = 0; k < EXPRS.length; k++) for (const s of SIZES) for (const n of STEPS) {
     const r = results.get(`${k}|${s.w}|${n}`)
@@ -536,6 +557,8 @@ function init() {
   $('deviceSel').addEventListener('change', () => { renderVerdict(); $('tsv').value = toTsv() })
   $('runBtn').addEventListener('click', run)
   $('stopBtn').addEventListener('click', () => { stopRequested = true })
+  window.addEventListener('error', (e) => { lastError = String(e.message); $('tsv').value = toTsv() })
+  window.addEventListener('unhandledrejection', (e) => { lastError = String(e.reason); $('tsv').value = toTsv() })
   $('copyBtn').addEventListener('click', async () => {
     const t = $('tsv')
     try { await navigator.clipboard.writeText(t.value); $('copyBtn').textContent = 'コピーしました' }
