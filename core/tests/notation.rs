@@ -364,3 +364,44 @@ fn integral_against_bessel() {
         assert!((v - j).abs() < 1e-8, "x = {x}, y = {y}: {v} と {j}");
     }
 }
+
+// ---- 差分（総和の逆） ----
+
+#[test]
+fn differences() {
+    // 幅 1: Δx² = 2x + 1、∇x² = 2x − 1、δx² = 2x
+    assert!(max_diff("y = @fdiff(x) x^2", "y = 2x + 1", "") < 1e-4);
+    assert!(max_diff("y = @bdiff(x) x^2", "y = 2x - 1", "") < 1e-4);
+    assert!(max_diff("y = @cdiff(x) x^2", "y = 2x", "") < 1e-4);
+    // 幅を変える: Δ_{0.5} x² = x + 0.25
+    assert!(max_diff("y = @fdiff(x, 0.5) x^2", "y = x + 0.25", "") < 1e-4);
+    // 幅に変数: h = x/10 なら (1.1x)² − x² = 0.21x²
+    assert!(max_diff("y = @fdiff(x, x/10) x^2", "y = 0.21 x^2", "") < 1e-4);
+    // 2 階: Δ²x³ = 6x + 6
+    assert!(max_diff("y = @fdiff(x, 1, 2) x^3", "y = 6x + 6", "") < 1e-3);
+    // 関数の名前だけ
+    assert!(max_diff("y = @fdiff(x) f", "y = 2x + 1", "f(t) = t^2") < 1e-4);
+    // 2 変数の式で、y の差分
+    assert!(max_diff("z = @fdiff(y) x y^2", "z = x (2y + 1)", "") < 1e-3);
+}
+
+#[test]
+fn differences_and_sums_are_inverse() {
+    // Σ_{n=0}^{N−1} Δf(n) = f(N) − f(0)（和分と差分）
+    assert_eq!(value("@sum(n,0,4) @fdiff(n) n^2"), 25.0);
+    assert_eq!(value("@sum(n,1,5) @bdiff(n) n^3"), 125.0);
+    // 幅はパラメータでもよく、使ったパラメータとして返す
+    let m = run("y = @fdiff(x, h) sin(x)", "", &[("h", 0.5)]).unwrap();
+    assert!(m.used_params().split(',').any(|p| p == "h"));
+    assert!(error_of("y = @fdiff(x, 1, 9) x", "").contains("0〜8"));
+}
+
+#[test]
+fn derivatives_inside_definitions_and_sums() {
+    // 定義の中の微分・差分（仮引数の名前を置き換えるときに、微分の変数も一緒に変わる）
+    assert!(max_diff("y = g(2x)", "y = 3 (2x)^2", "g(t) = @diff(t) t^3") < 1e-3);
+    assert!(max_diff("y = q(x)", "y = 2x + 1", "q(t) = @fdiff(t) t^2") < 1e-4);
+    // Σ・積分の中の微分
+    assert_eq!(value("@sum(n,1,3) @diff(n) n^2"), 12.0);
+    assert!((value("@int(t,0,1)(@diff(t) t^3)") - 1.0).abs() < 1e-12);
+}

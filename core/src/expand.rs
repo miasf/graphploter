@@ -8,6 +8,8 @@
 //! - 総和 `@sum(n, 1, N) 項`・総積 `@prod(…)`、等差のリスト `[1, 3, …, 9]`、両方の符号 `±`・`∓`（M4）
 //! - 微分 `@diff(x) 項`・`@diff(x, 2) 項`、導関数 `f'(x)`（M3。記号微分は `diff.rs`）
 //! - 場合分け `@cases(値, 条件; 値, 条件; それ以外の値)`（M2。[`crate::functions::Func::Piece`] にする）
+//! - 差分 `@fdiff(x) 項`（前進 Δ）・`@bdiff`（後退 ∇）・`@cdiff`（中心 δ）。`@fdiff(x, h) 項` で幅 h（既定 1。式でよく、x を使ってもよい）、
+//!   `@fdiff(x, h, k) 項` で k 階（総和 Σ の逆。M4 の続き）
 //! - 定積分 `@int(t, a, b)(式)`（M5。ガウス・ルジャンドルの 16 点 × 2 区間の重み付きの和にする。端は式でも ∞ でもよい）
 //!
 //! 定義は、ほかの行（式の一覧）から [`Defs::parse`] で作り、[`install`] で入れておく（`lib.rs` が `plot` の間だけ入れる）。
@@ -429,6 +431,9 @@ impl Expander<'_> {
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
+            Expr::Binder { op, var, args, body } if op == "fdiff" || op == "bdiff" || op == "cdiff" => {
+                Val::S(self.difference(op, var, args, body)?)
+            }
             Expr::Binder { op, var, args, body } if op == "diff" => {
                 let k = match args.as_slice() {
                     [] => 1,
@@ -518,6 +523,50 @@ impl Expander<'_> {
         Ok(Expr::Call(Func::Piece, out))
     }
 
+    /// 差分（幅 h、k 階）。前進 $\Delta_h f(x) = f(x+h) - f(x)$、後退 $\nabla_h f(x) = f(x) - f(x-h)$、
+    /// 中心 $\delta_h f(x) = f(x+\tfrac h2) - f(x-\tfrac h2)$。変数を x + h などに置き換えた式を作る（置き換えは 1 回なので、
+    /// h が x を含んでも f(x + h(x)) − f(x) になる）。k 階は k 回くり返す（h が x を含むなら、h も一緒にずれる）
+    fn difference(&mut self, op: &str, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        let sym = match op {
+            "fdiff" => "Δ",
+            "bdiff" => "∇",
+            _ => "δ",
+        };
+        let (h, k) = match args {
+            [] => (Expr::Num(1.0), 1),
+            [h] => (self.scalar(h)?, 1),
+            [h, k] => {
+                let k = self.integer(k, &format!("{sym} の階数"))?;
+                if !(0..=8).contains(&k) {
+                    return Err(format!("{sym} の階数は 0〜8 にしてください"));
+                }
+                (self.scalar(h)?, k as usize)
+            }
+            _ => return Err(format!("{sym} は {sym}_{{x}}、{sym}_{{x, h}} の形で書いてください")),
+        };
+        // 中身（df のように関数の名前だけなら、その関数を x に当てはめたもの）
+        let mut f = match self.val(body)? {
+            Val::S(s) => s,
+            Val::Fn { arity: 1, body } => apply_body(&body, &[Expr::Var(var.to_string())]),
+            Val::Fn { .. } => return Err(fn_as_value_error(body)),
+        };
+        let b = |o: BinOp, x: Expr, y: Expr| Expr::Bin(o, Box::new(x), Box::new(y));
+        let x = Expr::Var(var.to_string());
+        let shifted = |f: &Expr, by: Expr| f.substitute(&|v: &str| (v == var).then(|| b(BinOp::Add, x.clone(), by.clone())));
+        for _ in 0..k {
+            let half = b(BinOp::Div, h.clone(), Expr::Num(2.0));
+            f = match op {
+                "fdiff" => b(BinOp::Sub, shifted(&f, h.clone()), f),
+                "bdiff" => b(BinOp::Sub, f.clone(), shifted(&f, Expr::Neg(Box::new(h.clone())))),
+                _ => b(BinOp::Sub, shifted(&f, half.clone()), shifted(&f, Expr::Neg(Box::new(half)))),
+            };
+            if f.node_count() > MAX_NODES {
+                return Err(format!("{sym} の式が大きくなりすぎます（階数を減らしてください）"));
+            }
+        }
+        Ok(f)
+    }
+
     /// 定積分 $\int_a^b g(t)\,dt$ を、区間を 2 つに分けたガウス・ルジャンドルの重み付きの和にする（2 重目は 8 点 × 2）。
     /// 端 a, b は式のまま（x を使ってよい）。∞ の端は変数変換で有限の区間にする:
     /// $[a, \infty)$ は $t = a + \frac{s}{1-s}$、$(-\infty, b]$ は $t = b - \frac{s}{1-s}$（$s \in [0, 1)$）、
@@ -567,6 +616,8 @@ impl Expander<'_> {
         let h = b(BinOp::Div, b(BinOp::Sub, s1, s0.clone()), num(2.0));
         let half_h = b(BinOp::Div, h.clone(), num(2.0));
         self.int_depth += 1;
+        // 先に中身を記号のまま展開する（中の微分・差分は、積分の変数の式になる）。できなければ点ごとに展開する
+        let symbolic = self.scalar(body).ok();
         let mut terms = Vec::new();
         let mut nodes_count = 0;
         for j in 0..2 {
@@ -575,13 +626,16 @@ impl Expander<'_> {
                 let sk = b(BinOp::Add, mid.clone(), b(BinOp::Mul, num(*xi), half_h.clone()));
                 let at_s = |e: &Expr| e.substitute(&|v: &str| (v == "#s").then(|| sk.clone()));
                 let t = at_s(&phi);
-                let g = body.substitute(&|v: &str| (v == var).then(|| t.clone()));
-                let g = match self.scalar(&g) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        self.int_depth -= 1;
-                        return Err(e);
-                    }
+                let put = |e: &Expr| e.substitute(&|v: &str| (v == var).then(|| t.clone()));
+                let g = match &symbolic {
+                    Some(s) => put(s),
+                    None => match self.scalar(&put(body)) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            self.int_depth -= 1;
+                            return Err(e);
+                        }
+                    },
                 };
                 let term = b(BinOp::Mul, num(*w), b(BinOp::Mul, g, at_s(&dphi)));
                 nodes_count += term.node_count();
@@ -650,9 +704,15 @@ impl Expander<'_> {
         }
         let mut terms = Vec::with_capacity((b - a + 1) as usize);
         let mut nodes = 0;
+        // 先に中身を記号のまま 1 回展開して、数を入れる（中の微分・差分は、その変数の式になってから数が入る）。
+        // 展開できなければ（範囲が束縛する変数で決まる入れ子の Σ など）、項ごとに数を入れてから展開する
+        let symbolic = self.scalar(body).ok();
         for k in a..=b {
-            let t = body.substitute(&|v: &str| (v == var).then_some(Expr::Num(k as f64)));
-            let t = self.scalar(&t)?;
+            let put = |e: &Expr| e.substitute(&|v: &str| (v == var).then_some(Expr::Num(k as f64)));
+            let t = match &symbolic {
+                Some(s) => put(s),
+                None => self.scalar(&put(body))?,
+            };
             nodes += t.node_count();
             if nodes > MAX_NODES {
                 return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));

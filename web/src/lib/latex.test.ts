@@ -24,6 +24,12 @@ const cases: [string, string][] = [
   // 場合分け（M2）
   ['f\\left(x\\right)=\\begin{cases}x^2 & x<0\\\\ x & \\text{otherwise}\\end{cases}', 'f(x)= @cases(x^(2), x<0; x)'],
   ['\\begin{cases}1 & \\text{if } 0\\le x<1\\\\ 0 & x\\ge1\\\\ -1\\end{cases}', '@cases(1, 0<=x<1; 0, x>=1; -1)'],
+  // 差分（前進 Δ・後退 ∇・中心 δ）
+  ['y=\\Delta_{x}x^2', 'y= @fdiff(x) x^(2)'],
+  ['y=\\nabla_{x,0.5}x^2', 'y= @bdiff(x,0.5) x^(2)'],
+  ['y=\\delta_{x}^{2}x^3', 'y= @cdiff(x,1,2) x^(3)'],
+  ['y=\\Delta_{x,\\frac{x}{10}}x^2', 'y= @fdiff(x,((x)/(10))) x^(2)'],
+  ['y=\\Delta^{2}_{x,h}f\\left(x\\right)', 'y= @fdiff(x,h,2) f(x)'],
   // 定積分（M5）
   ['y=\\int_{0}^{x}e^{-t^{2}}\\,dt', 'y= @int(t,0,x)(e^(-t^(2)))'],
   ['\\int_0^1t\\,dt+1', '@int(t,0,1)(t) +1'],

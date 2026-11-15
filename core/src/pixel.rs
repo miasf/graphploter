@@ -127,7 +127,12 @@ pub fn ray_hit(prog: &Program, o: [f64; 3], d: [f64; 3], t0: f64, t1: f64, s: Ra
             continue;
         }
         if f.dec < Dec::Dac {
-            continue; // 極・段差（連続でない）。描かない
+            // 極・段差・定義域の縁（連続でない）。その横に本物の面が張り付いていることがあるので、1/16 画素まで詰めて、
+            // 連続で符号の変わる小区間があれば当たり。無ければ描かない
+            match refine(prog, &at, &boxes, a, b, eps / 16.0, 64) {
+                Some(hit) => return hit,
+                None => continue,
+            }
         }
         let (fa, fb) = (value_at(prog, &at(a)), value_at(prog, &at(b)));
         if fa * fb < 0.0 {
@@ -152,7 +157,7 @@ pub fn ray_hit(prog: &Program, o: [f64; 3], d: [f64; 3], t0: f64, t1: f64, s: Ra
             return RayHit::Hit { t: if fa == 0.0 { a } else { b }, sure: true };
         }
         // 連続で、符号が同じ: 接するだけの零点か、かすめるだけ（区間演算の広がり）か。1/16 画素まで詰めて決める
-        match refine_touch(prog, &at, &boxes, a, b, eps / 16.0, 64) {
+        match refine(prog, &at, &boxes, a, b, eps / 16.0, 64) {
             Some(hit) => return hit,
             None => continue,
         }
@@ -160,10 +165,11 @@ pub fn ray_hit(prog: &Program, o: [f64; 3], d: [f64; 3], t0: f64, t1: f64, s: Ra
     RayHit::Miss
 }
 
-/// 連続で両端の符号が同じ区間 [a, b] を、幅 `eps` まで詰める（`budget` 回まで）。
-/// 符号の変わる所が見つかれば当たり、全部の小区間で 0 を含まなければ None（当たらない）、
-/// 詰めきっても 0 を含む小区間が残れば、接するだけの零点としてその真ん中
-fn refine_touch(
+/// 1 画素の区間 [a, b] を、幅 `eps` まで詰めて決める（`budget` 回まで）。手前の小区間から調べ、
+/// - 連続（Dac 以上）で両端の符号が逆なら、二分法で詰めて当たり
+/// - 幅 `eps` まで詰めても、連続で 0 を含むなら、接するだけの零点としてその真ん中
+/// - 0 を含まない・連続でない小区間は捨てる。全部捨てたら None（当たらない）
+fn refine(
     prog: &Program,
     at: &dyn Fn(f64) -> [f64; 3],
     boxes: &dyn Fn(f64, f64) -> [Interval; 3],
@@ -173,38 +179,42 @@ fn refine_touch(
     mut budget: usize,
 ) -> Option<RayHit> {
     let mut stack = vec![(a, b)];
-    let mut touch = None;
+    let mut touch: Option<f64> = None;
     while let Some((lo, hi)) = stack.pop() {
         if budget == 0 {
-            return Some(RayHit::Hit { t: touch.unwrap_or(0.5 * (a + b)), sure: false });
+            break;
         }
         budget -= 1;
         let f = prog.eval_interval_dec(&boxes(lo, hi));
         if f.is_empty() || !f.may_contain_zero() {
             continue;
         }
-        let m = 0.5 * (lo + hi);
-        let (fl, fm, fh) = (value_at(prog, &at(lo)), value_at(prog, &at(m)), value_at(prog, &at(hi)));
-        if fl * fm <= 0.0 || fm * fh <= 0.0 {
-            // 符号が変わる: 二分法で詰める
-            let (mut x0, mut x1, mut f0) = if fl * fm <= 0.0 { (lo, m, fl) } else { (m, hi, fm) };
-            for _ in 0..50 {
-                let c = 0.5 * (x0 + x1);
-                let fc = value_at(prog, &at(c));
-                if f0 * fc <= 0.0 {
-                    x1 = c;
-                } else {
-                    x0 = c;
-                    f0 = fc;
+        if f.dec >= Dec::Dac {
+            let (fl, fh) = (value_at(prog, &at(lo)), value_at(prog, &at(hi)));
+            if fl * fh <= 0.0 {
+                // 符号が変わる: 二分法で詰める
+                let (mut x0, mut x1, mut f0) = (lo, hi, fl);
+                for _ in 0..50 {
+                    let c = 0.5 * (x0 + x1);
+                    let fc = value_at(prog, &at(c));
+                    if f0 * fc <= 0.0 {
+                        x1 = c;
+                    } else {
+                        x0 = c;
+                        f0 = fc;
+                    }
                 }
+                return Some(RayHit::Hit { t: 0.5 * (x0 + x1), sure: true });
             }
-            return Some(RayHit::Hit { t: 0.5 * (x0 + x1), sure: true });
+            if hi - lo <= eps {
+                // 手前の接する所を覚えておく（奥に符号の変わる所があっても、手前が先）
+                touch.get_or_insert(0.5 * (lo + hi));
+                return Some(RayHit::Hit { t: 0.5 * (lo + hi), sure: false });
+            }
+        } else if hi - lo <= eps {
+            continue; // 詰めきっても連続でない: 極・段差そのもの
         }
-        if hi - lo <= eps {
-            touch.get_or_insert(m);
-            // 手前の接する所を返す（奥は見なくてよい）
-            return Some(RayHit::Hit { t: m, sure: false });
-        }
+        let m = 0.5 * (lo + hi);
         stack.push((m, hi));
         stack.push((lo, m));
     }

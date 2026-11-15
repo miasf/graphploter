@@ -72,6 +72,10 @@ impl Expr {
             Expr::Index { index, .. } => index.collect_vars(out),
             // x' は x の導関数で、x そのものではないので、変数として数えない
             Expr::Prime { .. } => {}
+            Expr::Binder { op, args, body, .. } if !binds(op) => {
+                args.iter().for_each(|a| a.collect_vars(out));
+                body.collect_vars(out);
+            }
             Expr::Binder { var, args, body, .. } => {
                 args.iter().for_each(|a| a.collect_vars(out));
                 // 束縛する変数は、中身の中では外の同じ名前を隠す（外へは出さない）
@@ -105,6 +109,23 @@ impl Expr {
             }
             Expr::Index { name, index } => Expr::Index { name: name.clone(), index: Box::new(index.substitute(f)) },
             Expr::Prime { .. } => self.clone(),
+            // 微分・差分の変数は束縛しない（結果はその変数の式）。名前の置き換え（変数 → 変数）なら一緒に変える
+            Expr::Binder { op, var, args, body } if !binds(op) && !matches!(f(var), Some(Expr::Var(_)) | None) => {
+                let inner = |v: &str| if v == var { None } else { f(v) };
+                Expr::Binder {
+                    op: op.clone(),
+                    var: var.clone(),
+                    args: args.iter().map(|a| a.substitute(f)).collect(),
+                    body: Box::new(body.substitute(&inner)),
+                }
+            }
+            Expr::Binder { op, var, args, body } if !binds(op) => {
+                let var = match f(var) {
+                    Some(Expr::Var(new)) => new,
+                    _ => var.clone(),
+                };
+                Expr::Binder { op: op.clone(), var, args: args.iter().map(|a| a.substitute(f)).collect(), body: Box::new(body.substitute(f)) }
+            }
             Expr::Binder { op, var, args, body } => {
                 // 中身の中の束縛する変数は置き換えない（外の同じ名前を隠している）
                 let inner = |v: &str| if v == var { None } else { f(v) };
@@ -130,6 +151,7 @@ impl Expr {
             Expr::Matrix { items, .. } => items.iter().any(|a| a.uses_var(name)),
             Expr::Index { index, .. } => index.uses_var(name),
             Expr::Prime { .. } => false,
+            Expr::Binder { op, var, args, body } if !binds(op) => var == name || args.iter().any(|a| a.uses_var(name)) || body.uses_var(name),
             Expr::Binder { var, args, body, .. } => args.iter().any(|a| a.uses_var(name)) || (var != name && body.uses_var(name)),
         }
     }
@@ -254,10 +276,16 @@ pub enum OpKind {
     Func,
 }
 
+/// `@名前` の演算子が、変数を本当に束縛するか（Σ・Π・積分は束縛する。微分・差分は、結果がその変数の式なので束縛しない）
+pub fn binds(op: &str) -> bool {
+    !matches!(op, "diff" | "fdiff" | "bdiff" | "cdiff")
+}
+
 /// `@名前` の演算子の一覧（名前 → 読み方）。ステップごとに足す（計画 `docs/plan-math-notation.md`）
 pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
-        "sum" | "prod" | "int" | "diff" => OpKind::Binder,
+        // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
+        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
         "cases" => OpKind::Func,
         _ => return None,
     })

@@ -325,6 +325,40 @@ class Converter {
         this.out += ` @${name}(${m[1]},${m[2].trim()},${hi.trim()}) `
         return
       }
+      case 'Delta':
+      case 'nabla':
+      case 'delta': {
+        // 差分（下付きがあるときだけ）: \Delta_{x} f → @fdiff(x) f、\nabla_{x,h} → @bdiff(x,h)、\delta_{x}^{2} → @cdiff(x,1,2)。
+        // 下付きの無い \nabla・\Delta は、勾配・ラプラシアン（まだ使えない）、\delta は文字の名前（まだ使えない）
+        let sub: string | null = null
+        let sup: string | null = null
+        while (this.peek() === '_' || this.peek() === '^') {
+          if (this.toks[this.i++] === '_') sub = this.arg()
+          else sup = this.arg()
+        }
+        if (sub === null) throw new LatexError(`${t} はまだ使えません（差分なら ${t}_{x} のように変数を下に書いてください）`)
+        const op = name === 'Delta' ? 'fdiff' : name === 'nabla' ? 'bdiff' : 'cdiff'
+        // 下付きは「変数」か「変数, 幅」。幅の中のカンマ（括弧の中）では分けない
+        let depth = 0
+        let cut = -1
+        for (let k = 0; k < sub.length; k++) {
+          const c = sub[k]
+          if (c === '(' || c === '[') depth++
+          else if (c === ')' || c === ']') depth--
+          else if (c === ',' && depth === 0) {
+            cut = k
+            break
+          }
+        }
+        const v = (cut < 0 ? sub : sub.slice(0, cut)).trim()
+        const h = cut < 0 ? '' : sub.slice(cut + 1).trim()
+        if (!/^[A-Za-z]\w*$/.test(v)) throw new LatexError(`${t} の下には、差分をとる変数を書いてください（例: ${t}_{x}、幅を変えるなら ${t}_{x, h}）`)
+        const order = sup?.trim() ?? ''
+        if (order !== '' && !/^\d+$/.test(order)) throw new LatexError(`${t} の右上には、階数（整数）を書いてください`)
+        const parts = [v, ...(h !== '' || order !== '' ? [h === '' ? '1' : h] : []), ...(order !== '' ? [order] : [])]
+        this.out += ` @${op}(${parts.join(',')}) `
+        return
+      }
       case 'int':
       case 'intop':
       case 'smallint': {
