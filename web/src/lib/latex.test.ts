@@ -70,6 +70,14 @@ const cases: [string, string][] = [
   ['\\emptyset\\lor\\top', '∅∨⊤'],
   ['S=\\left\\{\\left(x,y\\right)\\mid x^2+y^2<1\\right\\}', 'S= ⦃(x,y)∣x^(2)+y^(2)<1⦄'],
   ['\\left\\{x+1\\right\\}', '(x+1)'],
+  // 集合の上の総和・総積、有限集合、⋃・⋂
+  ['\\sum_{n\\in\\left\\{1,4,9\\right\\}}n', '@sumset(n; n∈⦃1,4,9⦄) n'],
+  ['\\sum_{1\\le n\\le10,\\ \\operatorname{mod}\\left(n,2\\right)=1}n', '@sumset(n; 1<=n<=10, mod (n,2)=1) n'],
+  ['\\sum_{d\\mid12}d', '@sumset(d; d∣12) d'],
+  ['\\prod_{\\left(m,n\\right)\\in\\left[1,3\\right]\\times\\left[1,3\\right]}mn', '@prodset((m,n); (m,n)∈[1,3]×[1,3]) mn'],
+  ['\\bigcup_{k=1}^{3}\\left\\{\\left(x,y\\right)\\mid x<k\\right\\}', '@bigcup(k; 1<=k<=3) ⦃(x,y)∣x<k⦄'],
+  ['\\bigcap_{k\\in\\left\\{0,1\\right\\}}A', '@bigcap(k; k∈⦃0,1⦄) A'],
+  ['x\\in\\left\\{1,2,3\\right\\}', 'x∈⦃1,2,3⦄'],
   // 微分（M3）
   ['\\frac{d}{dx}\\sin\\left(x\\right)', '@diff(x) sin (x)'],
   ['z=\\frac{\\partial}{\\partial x}\\sin\\left(xy\\right)', 'z= @diff(x) sin (xy)'],

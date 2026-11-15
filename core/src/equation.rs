@@ -570,6 +570,8 @@ fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, S
     }
     let shown: Vec<String> = space.shown().to_vec();
     let lookup = |n: &str| crate::expand::set_def(n);
+    // ⋃・⋂ を、添字ごとの「または」「かつ」にする
+    let formula = crate::expand::expand_big(&formula, params)?;
     let clauses = crate::logic::clauses(&formula, &shown, &lookup)?;
     // 原子の式を展開する（関数・Σ など）
     let mut expanded: Vec<Vec<Lit>> = Vec::with_capacity(clauses.len());
@@ -1475,7 +1477,7 @@ fn uses_i(e: &Expr) -> bool {
         Expr::Bin(_, a, b) => uses_i(a) || uses_i(b),
         Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(uses_i),
         // 展開の段（expand.rs）で消える節は、ここには来ない
-        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => false,
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => false,
     }
 }
 
@@ -1493,7 +1495,7 @@ fn first_list(e: &Expr) -> Option<&Vec<Expr>> {
         Expr::Neg(a) => first_list(a),
         Expr::Bin(_, a, b) => first_list(a).or_else(|| first_list(b)),
         Expr::Call(_, args) | Expr::Tuple(args) => args.iter().find_map(first_list),
-        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => None,
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => None,
     }
 }
 
@@ -1516,7 +1518,7 @@ fn replace_first_list(e: &Expr, with: &Expr, done: &mut bool) -> Expr {
         }
         Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| replace_first_list(a, with, done)).collect()),
         Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| replace_first_list(a, with, done)).collect()),
-        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => e.clone(),
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => e.clone(),
     }
 }
 

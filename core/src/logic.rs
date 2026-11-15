@@ -61,6 +61,10 @@ pub fn arity(s: &SetE, sets: SetLookup) -> Result<usize, String> {
         },
         SetE::Named(n) => arity(&sets(n).ok_or_else(|| undefined_set(n))?, sets)?,
         SetE::Interval { .. } | SetE::Numbers(_) => 1,
+        SetE::Finite(items) => match items.first() {
+            Some(Expr::Tuple(c)) => c.len(),
+            _ => 1,
+        },
         SetE::Product(parts) => parts.iter().map(|p| arity(p, sets)).sum::<Result<usize, _>>()?,
         SetE::Union(a, _) | SetE::Inter(a, _) | SetE::Diff(a, _) | SetE::SymDiff(a, _) => arity(a, sets)?,
         SetE::Complement(a) => arity(a, sets)?,
@@ -97,6 +101,20 @@ pub fn member(p: &Expr, s: &SetE, sets: SetLookup) -> Result<Formula, String> {
             substitute(cond, &|v: &str| names.iter().position(|n| n == v).map(|k| ps[k].clone()))
         }
         SetE::Named(n) => member(p, &sets(n).ok_or_else(|| undefined_set(n))?, sets)?,
+        // 有限集合: どれかの要素と等しい
+        SetE::Finite(items) => {
+            let ps = comps(p);
+            let mut ors = Vec::new();
+            for it in items {
+                let qs = comps(it);
+                if qs.len() != ps.len() {
+                    return Err(format!("点の成分の数（{}）が、集合の要素の成分の数（{}）と違います", ps.len(), qs.len()));
+                }
+                let eqs: Vec<Formula> = ps.iter().zip(&qs).map(|(a, b)| chain(vec![a.clone(), b.clone()], vec![Rel::Eq])).collect();
+                ors.push(if eqs.len() == 1 { eqs.into_iter().next().unwrap_or(Formula::True) } else { Formula::And(eqs) });
+            }
+            if ors.is_empty() { Formula::False } else { Formula::Or(ors) }
+        }
         SetE::Interval { lo, hi, lo_open, hi_open } => {
             if matches!(p, Expr::Tuple(_)) {
                 return Err("区間には、数（座標 1 つ）の ∈ だけが使えます".into());
@@ -173,6 +191,12 @@ pub fn substitute(f: &Formula, s: &dyn Fn(&str) -> Option<Expr>) -> Formula {
         Formula::Nor(x, y) => Formula::Nor(b(x), b(y)),
         Formula::In(p, set) => Formula::In(p.substitute(s), substitute_set(set, s)),
         Formula::Set(set) => Formula::Set(substitute_set(set, s)),
+        Formula::Big { or, vars, cond, body } => {
+            let mut bound = Vec::new();
+            vars.collect_vars(&mut bound);
+            let inner = |v: &str| if bound.iter().any(|n| n == v) { None } else { s(v) };
+            Formula::Big { or: *or, vars: vars.clone(), cond: Box::new(substitute(cond, &inner)), body: Box::new(substitute(body, &inner)) }
+        }
     }
 }
 
@@ -194,6 +218,7 @@ fn substitute_set(set: &SetE, s: &dyn Fn(&str) -> Option<Expr>) -> SetE {
         SetE::Diff(x, y) => SetE::Diff(b(x), b(y)),
         SetE::SymDiff(x, y) => SetE::SymDiff(b(x), b(y)),
         SetE::Complement(x) => SetE::Complement(b(x)),
+        SetE::Finite(items) => SetE::Finite(items.iter().map(|e| e.substitute(s)).collect()),
         SetE::Named(_) | SetE::Numbers(_) | SetE::Empty => set.clone(),
     }
 }
@@ -221,6 +246,7 @@ fn resolve(f: &Formula, coords: &[String], sets: SetLookup) -> Result<Formula, S
         Formula::Nand(x, y) => Formula::Nand(r(x)?, r(y)?),
         Formula::Nor(x, y) => Formula::Nor(r(x)?, r(y)?),
         Formula::True | Formula::False | Formula::Chain(_) | Formula::Ne(..) => f.clone(),
+        Formula::Big { .. } => return Err("内部エラー: ⋃・⋂ が展開されていません".into()),
     })
 }
 
@@ -270,7 +296,7 @@ fn nnf(f: &Formula, neg: bool) -> Nnf {
         // A ⊼ B = ¬(A ∧ B)、A ⊽ B = ¬(A ∨ B)
         Formula::Nand(a, b) => and_or(vec![nnf(a, !neg), nnf(b, !neg)], neg),
         Formula::Nor(a, b) => and_or(vec![nnf(a, !neg), nnf(b, !neg)], !neg),
-        Formula::In(..) | Formula::Set(_) => Nnf::False, // resolve の後には残らない
+        Formula::In(..) | Formula::Set(_) | Formula::Big { .. } => Nnf::False, // resolve の後には残らない
     }
 }
 

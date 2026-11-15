@@ -158,7 +158,7 @@ impl Defs {
 fn uses_function_value(e: &Expr, names: &[String]) -> bool {
     match e {
         Expr::Var(v) => names.contains(v),
-        Expr::Num(_) | Expr::Const(_) | Expr::Prime { .. } => false,
+        Expr::Num(_) | Expr::Const(_) | Expr::Prime { .. } | Expr::Cond(_) => false,
         Expr::Neg(a) | Expr::Index { index: a, .. } => uses_function_value(a, names),
         Expr::Bin(_, a, b) => uses_function_value(a, names) || uses_function_value(b, names),
         Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) | Expr::Op { args, .. } => {
@@ -528,6 +528,8 @@ impl Expander<'_> {
                 }
             }
             Expr::Op { op, args } if op == "cases" => Val::S(self.cases(args)?),
+            Expr::Op { op, args } if op == "sumset" || op == "prodset" => Val::S(self.set_sum(op == "sumset", args)?),
+            Expr::Cond(_) => return Err("条件は、Σ・Π の下でだけ使えます".into()),
             Expr::Op { op, args } if op == "intset" => Val::S(self.region_integral(args)?),
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
@@ -672,6 +674,206 @@ impl Expander<'_> {
             }
         }
         Ok(f)
+    }
+
+    /// 添字の変数の名前（変数か変数の組）
+    fn index_vars(vars: &Expr) -> Result<Vec<String>, String> {
+        let msg = || "添字は n か (m, n) のように変数で書いてください".to_string();
+        match vars {
+            Expr::Var(v) => Ok(vec![v.clone()]),
+            Expr::Tuple(items) => items.iter().map(|e| if let Expr::Var(v) = e { Ok(v.clone()) } else { Err(msg()) }).collect(),
+            _ => Err(msg()),
+        }
+    }
+
+    /// 数とパラメータだけの式の値（座標などを含めばエラー）
+    fn const_value(&mut self, e: &Expr, what: &str) -> Result<f64, String> {
+        self.number(e, what)
+    }
+
+    /// 条件を満たす添字の値を全部並べる（計画 M4 の追加: 集合の上の総和）。
+    /// 要素を書き並べた集合 `n ∈ {1, 4, 9}` があればその要素、無ければ条件の不等式から整数の範囲を出し、1 つずつ条件を調べる
+    fn enumerate(&mut self, vars: &[String], cond: &crate::parser::Formula) -> Result<Vec<Vec<f64>>, String> {
+        use crate::logic::{Lit, Op};
+        use crate::parser::{Formula, SetE};
+        const MAX_CANDIDATES: usize = 20_000;
+        let what = "Σ・Π の条件";
+        let lookup = |n: &str| set_def(n);
+        let point = if vars.len() == 1 { Expr::Var(vars[0].clone()) } else { Expr::Tuple(vars.iter().map(|v| Expr::Var(v.clone())).collect()) };
+        // 書き並べた集合
+        fn finite_of(f: &Formula, point: &Expr) -> Option<Vec<Expr>> {
+            match f {
+                Formula::In(p, set) if p == point => match set {
+                    SetE::Finite(items) => Some(items.clone()),
+                    SetE::Named(n) => match set_def(n) {
+                        Some(SetE::Finite(items)) => Some(items),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                Formula::And(v) => v.iter().find_map(|g| finite_of(g, point)),
+                _ => None,
+            }
+        }
+        let mut candidates: Vec<Vec<f64>> = Vec::new();
+        if let Some(items) = finite_of(cond, &point) {
+            for it in items {
+                let comps = match it {
+                    Expr::Tuple(c) => c,
+                    e => vec![e],
+                };
+                if comps.len() != vars.len() {
+                    return Err("集合の要素の成分の数が、添字の数と違います".into());
+                }
+                let mut vals = Vec::new();
+                for c in &comps {
+                    let e = self.scalar(c)?;
+                    vals.push(self.const_value(&e, what)?);
+                }
+                candidates.push(vals);
+            }
+        } else {
+            // 条件の不等式から、添字ごとの整数の範囲を出す（「または」で分かれていれば、全部を含む範囲）
+            let clauses = crate::logic::clauses(cond, vars, &lookup)?;
+            let mut lo = vec![f64::INFINITY; vars.len()];
+            let mut hi = vec![f64::NEG_INFINITY; vars.len()];
+            for c in &clauses {
+                // このかたまりでの添字ごとの範囲。別の添字で書いた端（m < n）は、その添字の範囲が分かってから区間演算で絞る
+                let n = vars.len();
+                let (mut l, mut h) = (vec![f64::NEG_INFINITY; n], vec![f64::INFINITY; n]);
+                for _ in 0..=n {
+                    for (k, v) in vars.iter().enumerate() {
+                        for Lit { l: a, op, r: b } in c {
+                            let is_v = |e: &Expr| matches!(e, Expr::Var(name) if name == v);
+                            let other = if is_v(a) { b } else if is_v(b) { a } else { continue };
+                            if other.uses_var(v) {
+                                continue;
+                            }
+                            // 反対側の値の範囲（ほかの添字を使うなら、その添字の今の範囲で）
+                            let used: Vec<usize> = (0..n).filter(|&j| other.uses_var(&vars[j])).collect();
+                            let e = self.scalar(other)?;
+                            let (xl, xh) = if used.is_empty() {
+                                match self.const_value(&e, what) {
+                                    Ok(x) => (x, x),
+                                    Err(_) => continue,
+                                }
+                            } else {
+                                // まだ分からない端は ±10¹² と置く（上の端を出すには相手の上の端だけが要り、下の端も同じなので、
+                                // 要る側の答えが有限なら使える。m < n ≤ 3 から m ≤ 2）
+                                const BIG: f64 = 1e12;
+                                let names: Vec<&str> = used.iter().map(|&j| vars[j].as_str()).collect();
+                                let Ok(p) = crate::eval::Program::compile_with(&e, &names, self.params) else { continue };
+                                let boxes: Vec<crate::interval::Interval> =
+                                    used.iter().map(|&j| crate::interval::Interval::new(l[j].max(-BIG), h[j].min(BIG))).collect();
+                                match p.eval_interval(&boxes) {
+                                    crate::interval::Range::Known(i) => (
+                                        if i.lo > -BIG / 10.0 { i.lo } else { f64::NEG_INFINITY },
+                                        if i.hi < BIG / 10.0 { i.hi } else { f64::INFINITY },
+                                    ),
+                                    crate::interval::Range::Unknown => continue,
+                                }
+                            };
+                            match (op, is_v(a)) {
+                                (Op::Lt, true) => h[k] = h[k].min(xh.ceil() - 1.0),
+                                (Op::Le, true) => h[k] = h[k].min(xh.floor()),
+                                (Op::Lt, false) => l[k] = l[k].max(xl.floor() + 1.0),
+                                (Op::Le, false) => l[k] = l[k].max(xl.ceil()),
+                                (Op::Eq, _) => {
+                                    l[k] = l[k].max(xl.ceil());
+                                    h[k] = h[k].min(xh.floor());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                for (k, v) in vars.iter().enumerate() {
+                    if !l[k].is_finite() || !h[k].is_finite() {
+                        return Err(format!("Σ・Π の添字 {v} の範囲を、1 ≤ {v} ≤ 10 や {v} ∈ {{1, 2, 3}} のように書いてください"));
+                    }
+                    lo[k] = lo[k].min(l[k]);
+                    hi[k] = hi[k].max(h[k]);
+                }
+            }
+            // 添字の組を、番号から作る（各添字の範囲の大きさを桁にした数え方）
+            let sizes: Vec<f64> = (0..vars.len()).map(|k| (hi[k] - lo[k] + 1.0).max(0.0)).collect();
+            let total: f64 = sizes.iter().product();
+            if total > MAX_CANDIDATES as f64 {
+                return Err(format!("Σ・Π の添字の候補が多すぎます（{total} 個。{MAX_CANDIDATES} 個まで）"));
+            }
+            for idx in 0..total as usize {
+                let mut rest = idx;
+                let mut vals = vec![0.0; vars.len()];
+                for k in (0..vars.len()).rev() {
+                    let size = sizes[k] as usize;
+                    vals[k] = lo[k] + (rest % size) as f64;
+                    rest /= size;
+                }
+                candidates.push(vals);
+            }
+        }
+        // 条件を 1 つずつ調べる
+        let mut out = Vec::new();
+        for vals in candidates {
+            let f = crate::logic::substitute(cond, &|n: &str| vars.iter().position(|v| v == n).map(|k| Expr::Num(vals[k])));
+            let clauses = crate::logic::clauses(&f, vars, &lookup)?;
+            let mut ok_any = false;
+            for c in &clauses {
+                let mut ok = true;
+                for Lit { l, op, r } in c {
+                    let (a, b) = (self.scalar(l)?, self.scalar(r)?);
+                    let (a, b) = (self.const_value(&a, what)?, self.const_value(&b, what)?);
+                    let eq = (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0);
+                    ok &= match op {
+                        Op::Lt => a < b && !eq,
+                        Op::Le => a <= b || eq,
+                        Op::Eq => eq,
+                        Op::Ne => !eq,
+                    };
+                    if !ok {
+                        break;
+                    }
+                }
+                if ok {
+                    ok_any = true;
+                    break;
+                }
+            }
+            if ok_any {
+                out.push(vals);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 集合の上の総和・総積 `@sumset(n; 条件) 項`
+    fn set_sum(&mut self, sum: bool, args: &[Expr]) -> Result<Expr, String> {
+        let sym = if sum { "Σ" } else { "Π" };
+        let [vars, Expr::Cond(cond), body] = args else { return Err("内部エラー: 集合の上の総和の形".into()) };
+        let names = Self::index_vars(vars)?;
+        let values = self.enumerate(&names, cond)?;
+        if values.len() > MAX_TERMS {
+            return Err(format!("{sym} の項が多すぎます（{} 個。{MAX_TERMS} 個まで）", values.len()));
+        }
+        if values.is_empty() {
+            return Ok(Expr::Num(if sum { 0.0 } else { 1.0 }));
+        }
+        let symbolic = self.scalar(body).ok();
+        let mut terms = Vec::with_capacity(values.len());
+        let mut nodes = 0;
+        for vals in &values {
+            let put = |e: &Expr| e.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| Expr::Num(vals[k])));
+            let t = match &symbolic {
+                Some(s) => put(s),
+                None => self.scalar(&put(body))?,
+            };
+            nodes += t.node_count();
+            if nodes > MAX_NODES {
+                return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));
+            }
+            terms.push(t);
+        }
+        Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
     }
 
     /// 定積分 $\int_a^b g(t)\,dt$ を、区間を 2 つに分けたガウス・ルジャンドルの重み付きの和にする（2 重目は 8 点 × 2）。
@@ -1286,6 +1488,47 @@ fn balanced(mut terms: Vec<Expr>, op: BinOp) -> Expr {
         terms = next;
     }
     terms.pop().unwrap_or(Expr::Num(0.0))
+}
+
+/// 論理式の中の ⋃・⋂（[`crate::parser::Formula::Big`]）を、添字ごとの「または」「かつ」に展開する（計画 M12 の一部）
+pub fn expand_big(f: &crate::parser::Formula, params: &Params) -> Result<crate::parser::Formula, String> {
+    use crate::parser::Formula as F;
+    let defs = current();
+    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new() };
+    fn go(f: &F, x: &mut Expander) -> Result<F, String> {
+        let b = |g: &F, x: &mut Expander| go(g, x).map(Box::new);
+        Ok(match f {
+            F::Big { or, vars, cond, body } => {
+                let names = Expander::index_vars(vars)?;
+                let values = x.enumerate(&names, cond)?;
+                if values.len() > crate::logic::MAX_CLAUSES * 4 {
+                    return Err(format!("⋃・⋂ の項が多すぎます（{} 個）", values.len()));
+                }
+                let mut parts = Vec::new();
+                for vals in values {
+                    let g = crate::logic::substitute(body, &|v: &str| names.iter().position(|n| n == v).map(|k| Expr::Num(vals[k])));
+                    parts.push(go(&g, x)?);
+                }
+                if parts.is_empty() {
+                    if *or { F::False } else { F::True }
+                } else if *or {
+                    F::Or(parts)
+                } else {
+                    F::And(parts)
+                }
+            }
+            F::Not(a) => F::Not(b(a, x)?),
+            F::And(v) => F::And(v.iter().map(|g| go(g, x)).collect::<Result<_, _>>()?),
+            F::Or(v) => F::Or(v.iter().map(|g| go(g, x)).collect::<Result<_, _>>()?),
+            F::Xor(p, q) => F::Xor(b(p, x)?, b(q, x)?),
+            F::Iff(p, q) => F::Iff(b(p, x)?, b(q, x)?),
+            F::Implies(p, q) => F::Implies(b(p, x)?, b(q, x)?),
+            F::Nand(p, q) => F::Nand(b(p, x)?, b(q, x)?),
+            F::Nor(p, q) => F::Nor(b(p, x)?, b(q, x)?),
+            _ => f.clone(),
+        })
+    }
+    go(f, &mut x)
 }
 
 /// 等式の片側が `f^(-1)(式)`（f は引数 1 つの関数）だけなら、`f(反対側) = 式` に書き換える（逆関数）

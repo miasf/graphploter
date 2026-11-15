@@ -251,6 +251,14 @@ fn latex_outputs_are_readable() {
     for src in ["A∪B∖C", "A△B", "A^(c)∩Bᶜ"] {
         assert!(run(src, defs, &[]).is_ok(), "{src}");
     }
+    // 集合の上の総和・⋃（latex.test.ts の変換結果）
+    assert_eq!(value("@sumset(n; n∈⦃1,4,9⦄) n"), 14.0);
+    assert_eq!(value("@sumset(n; 1<=n<=10, mod (n,2)=1) n"), 25.0);
+    assert_eq!(value("@sumset(d; d∣12) d"), 28.0);
+    assert_eq!(value("@prodset((m,n); (m,n)∈[1,3]×[1,3]) mn"), 46656.0);
+    for src in ["@bigcup(k; 1<=k<=3) ⦃(x,y)∣x<k⦄", "x∈⦃1,2,3⦄"] {
+        assert!(run(src, "", &[]).is_ok(), "{src}");
+    }
 }
 
 // ---- M3: 記号微分 ----
@@ -610,4 +618,49 @@ fn not_equal_empty_and_parametric_sets() {
     }
     assert!(error_of("⦃(cos(t), sin(t), 0) ∣ 0 ≤ t⦄", "").contains("上の端"));
     assert!(error_of("x ∈ ℚ", "").contains("有理数"));
+}
+
+// ---- 集合の上の総和・総積、有限集合、⋃・⋂ ----
+
+#[test]
+fn sums_over_sets() {
+    assert_eq!(value("@sumset(n; n ∈ ⦃1, 4, 9⦄) n"), 14.0);
+    assert_eq!(value("@prodset(n; n ∈ ⦃2, 3, 5⦄) n"), 30.0);
+    // 範囲と条件（1 から 10 までの奇数の和 = 25）
+    assert_eq!(value("@sumset(n; 1 ≤ n ≤ 10, mod(n, 2) = 1) n"), 25.0);
+    assert_eq!(value("@sumset(n; n ∈ [1, 10], mod(n, 2) = 1) n"), 25.0);
+    // 約数の和 σ(12) = 28、個数 6
+    assert_eq!(value("@sumset(d; d ∣ 12) d"), 28.0);
+    assert_eq!(value("@sumset(d; d ∣ 12) 1"), 6.0);
+    // 2 つの添字: Σ_{1≤m≤3, 1≤n≤3} m n = 36、m < n だけなら 11
+    assert_eq!(value("@sumset((m, n); 1 ≤ m ≤ 3, 1 ≤ n ≤ 3) m n"), 36.0);
+    assert_eq!(value("@sumset((m, n); 1 ≤ m < n ≤ 3) m n"), 11.0);
+    // 「または」で分かれた範囲、空の集合
+    assert_eq!(value("@sumset(n; n ≤ -8 ∨ n ≥ 8, -9 ≤ n ≤ 9) 1"), 4.0);
+    assert_eq!(value("@sumset(n; 3 ≤ n ≤ 1) n"), 0.0);
+    // 項は式（x を使ってよい）。範囲にパラメータ
+    let mut ps = std::collections::BTreeMap::new();
+    ps.insert("N".to_string(), num_complex::Complex64::new(5.0, 0.0));
+    let sp = graph_core::equation::Space::standard();
+    assert!(graph_core::equation::compile_with("z = @sumset(n; 1 ≤ n ≤ N, mod(n, 2) = 1) sin(n x)/n", &ps, &sp).is_ok());
+    // 名前を付けた有限集合
+    let defs = "S = ⦃1, 2, 3⦄";
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse(defs, &Default::default()));
+    assert_eq!(graph_core::equation::eval_constant("@sumset(k; k ∈ S) k^2").unwrap(), 14.0);
+    drop(_d);
+    assert!(error_of("z = @sumset(n; n ≥ 1) n", "").contains("範囲"));
+    assert!(error_of("z = @sumset(n; 1 ≤ n ≤ 3, n < x) n", "").contains("x"));
+}
+
+#[test]
+fn finite_sets_and_big_unions() {
+    // x ∈ {1, 2, 3} は 3 枚の平面
+    assert_eq!(mesh("x ∈ ⦃-1, 0, 1⦄", "", &[]).0.len(), mesh("x = -1 ∨ x = 0 ∨ x = 1", "", &[]).0.len());
+    // ⋃_{k=1}^{3} {(x,y,z) | (x − 2k + 4)² + y² + z² ≤ 0.5}: 3 つの球
+    let m = run("@bigcup(k; 1 ≤ k ≤ 3) ⦃(x, y, z) ∣ (x - k + 2)^2 + y^2 + z^2 ≤ 0.2⦄", "", &[]).unwrap();
+    let p = m.positions();
+    let centers: std::collections::BTreeSet<i32> = p.chunks_exact(3).filter(|v| v[0].is_finite()).map(|v| v[0].round() as i32).collect();
+    assert!(centers.contains(&-1) && centers.contains(&0) && centers.contains(&1), "{centers:?}");
+    // ⋂: 3 つの半空間の共通部分
+    assert_eq!(mesh("@bigcap(k; k ∈ ⦃0, 1⦄) (x + k ≥ 0)", "", &[]), mesh("x + 0 ≥ 0 ∧ x + 1 ≥ 0", "", &[]));
 }

@@ -345,6 +345,17 @@ class Converter {
         if (!(d in OPENERS)) throw new LatexError(`括弧 ${d} は使えません`)
         // 集合の括弧 \left\{ 点 \mid 条件 \right\}
         if (d === '\\{' && this.setBuilder('\\right')) return
+        // ∈ のすぐ後の \left\{1,4,9\right\} は有限集合
+        if (d === '\\{' && /[∈∉]$/.test(this.out.trimEnd())) {
+          const saved = this.out
+          this.out = ''
+          this.seq('\\right')
+          if (this.toks[this.i] !== '\\right') throw new LatexError('括弧が閉じていません')
+          this.i += 2
+          const inner = this.out.trim()
+          this.out = `${saved}⦃${inner}⦄`
+          return
+        }
         this.out += OPENERS[d]
         this.seq('\\right')
         if (this.toks[this.i] !== '\\right') throw new LatexError('括弧が閉じていません')
@@ -383,8 +394,14 @@ class Converter {
         return
       }
       case 'sum':
-      case 'prod': {
-        // \sum_{n=1}^{10} → @sum(n,1,10)。中身は直後の項（計算エンジンの解析器が決める）
+      case 'prod':
+      case 'bigcup':
+      case 'bigcap':
+      case 'bigvee':
+      case 'bigwedge': {
+        // \sum_{n=1}^{10} → @sum(n,1,10)。中身は直後の項（計算エンジンの解析器が決める）。
+        // 上が無ければ集合の上: \sum_{n\in S}・\sum_{1\le n\le10,\ …}・\sum_{d\mid12} → @sumset(n; 条件)。
+        // \bigcup・\bigcap（\bigvee・\bigwedge）は、どちらの形も @bigcup(k; 条件)
         let lo: string | null = null
         let hi: string | null = null
         while (this.peek() === '_' || this.peek() === '^' || this.peek() === '\\limits' || this.peek() === '\\nolimits') {
@@ -392,8 +409,28 @@ class Converter {
           if (t2 === '_') lo = this.arg()
           else if (t2 === '^') hi = this.arg()
         }
-        const sym = name === 'sum' ? 'Σ' : 'Π'
+        const big = name.startsWith('big')
+        const sym = name === 'sum' ? 'Σ' : name === 'prod' ? 'Π' : name === 'bigcup' ? '⋃' : name === 'bigcap' ? '⋂' : name === 'bigvee' ? '⋁' : '⋀'
         const m = lo?.match(/^\s*([A-Za-z]\w*)\s*=(.+)$/)
+        if (lo !== null && (hi === null || big) && !(m && hi !== null)) {
+          // 集合の上: 添字は「n ∈ …」「(m,n) ∈ …」「d ∣ …」の左、または連鎖 a ≤ n ≤ b の真ん中
+          const cond = lo.trim()
+          const v =
+            cond.match(/^\s*(\([^)]*\)|[A-Za-z]\w*)\s*[∈∉∣]/)?.[1] ??
+            cond.match(/^[^,]*?(?:<=|<|>=|>)\s*([A-Za-z]\w*)\s*(?:<=|<|>=|>)/)?.[1] ??
+            cond.match(/^\s*([A-Za-z]\w*)\s*(?:<=|<|>=|>)/)?.[1]
+          if (!v) throw new LatexError(`${sym} の下に、n ∈ S や 1 ≤ n ≤ 10 のように添字を書いてください`)
+          const op = big ? (name === 'bigcup' || name === 'bigvee' ? 'bigcup' : 'bigcap') : name === 'sum' ? 'sumset' : 'prodset'
+          this.out += ` @${op}(${v}; ${cond}) `
+          return
+        }
+        if (big) {
+          // \bigcup_{k=1}^{3} → @bigcup(k; 1<=k<=3)
+          if (!m || hi === null || hi.trim() === '') throw new LatexError(`${sym} の下と上に、k=1 と 3 のように添字の範囲を書いてください`)
+          const op = name === 'bigcup' || name === 'bigvee' ? 'bigcup' : 'bigcap'
+          this.out += ` @${op}(${m[1]}; ${m[2].trim()}<=${m[1]}<=${hi.trim()}) `
+          return
+        }
         if (!m) throw new LatexError(`${sym} の下に n=1 の形で書いてください`)
         if (hi === null || hi.trim() === '') throw new LatexError(`${sym} の上に終わりの値を書いてください`)
         this.out += ` @${name}(${m[1]},${m[2].trim()},${hi.trim()}) `

@@ -956,7 +956,7 @@ impl Compiler<'_> {
             Expr::List(_) => {
                 return Err("リスト [a, b] は、今は媒介変数表示 ( … ) の中でだけ使えます".into())
             }
-            Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => {
+            Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => {
                 return Err("内部エラー: 展開されていない式があります".into())
             }
         })

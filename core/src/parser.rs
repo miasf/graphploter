@@ -47,6 +47,8 @@ pub enum Expr {
     Index { name: String, index: Box<Expr> },
     /// 呼び出しでないプライム `x'`・`y''`
     Prime { name: String, order: u8 },
+    /// 条件（論理式）。集合の上の総和 `@sumset(n; 条件) 項` の条件を持つ
+    Cond(Box<Formula>),
 }
 
 impl Expr {
@@ -72,6 +74,7 @@ impl Expr {
             Expr::Index { index, .. } => index.collect_vars(out),
             // x' は x の導関数で、x そのものではないので、変数として数えない
             Expr::Prime { .. } => {}
+            Expr::Cond(f) => f.collect_vars(out),
             Expr::Binder { op, args, body, .. } if !binds(op) => {
                 args.iter().for_each(|a| a.collect_vars(out));
                 body.collect_vars(out);
@@ -109,6 +112,7 @@ impl Expr {
             }
             Expr::Index { name, index } => Expr::Index { name: name.clone(), index: Box::new(index.substitute(f)) },
             Expr::Prime { .. } => self.clone(),
+            Expr::Cond(c) => Expr::Cond(Box::new(crate::logic::substitute(c, f))),
             // 微分・差分の変数は束縛しない（結果はその変数の式）。名前の置き換え（変数 → 変数）なら一緒に変える
             Expr::Binder { op, var, args, body } if !binds(op) && !matches!(f(var), Some(Expr::Var(_)) | None) => {
                 let inner = |v: &str| if v == var { None } else { f(v) };
@@ -151,6 +155,11 @@ impl Expr {
             Expr::Matrix { items, .. } => items.iter().any(|a| a.uses_var(name)),
             Expr::Index { index, .. } => index.uses_var(name),
             Expr::Prime { .. } => false,
+            Expr::Cond(f) => {
+                let mut vs = Vec::new();
+                f.collect_vars(&mut vs);
+                vs.iter().any(|v| v == name)
+            }
             Expr::Binder { op, var, args, body } if !binds(op) => var == name || args.iter().any(|a| a.uses_var(name)) || body.uses_var(name),
             Expr::Binder { var, args, body, .. } => args.iter().any(|a| a.uses_var(name)) || (var != name && body.uses_var(name)),
         }
@@ -163,14 +172,14 @@ impl Expr {
             Expr::Neg(a) => a.has_notation(),
             Expr::Bin(_, a, b) => a.has_notation() || b.has_notation(),
             Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(Expr::has_notation),
-            Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => true,
+            Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } | Expr::Cond(_) => true,
         }
     }
 
     /// 節の数（展開した式の大きさの上限を調べるのに使う）
     pub fn node_count(&self) -> usize {
         1 + match self {
-            Expr::Num(_) | Expr::Const(_) | Expr::Var(_) | Expr::Prime { .. } => 0,
+            Expr::Num(_) | Expr::Const(_) | Expr::Var(_) | Expr::Prime { .. } | Expr::Cond(_) => 0,
             Expr::Neg(a) => a.node_count(),
             Expr::Bin(_, a, b) => a.node_count() + b.node_count(),
             Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) | Expr::Apply { args, .. } | Expr::Op { args, .. } => {
@@ -288,7 +297,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
         "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
-        "cases" | "intset" => OpKind::Func,
+        "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
         "grad" | "div" | "rot" | "curl" | "lap" => OpKind::Prefix,
         _ => return None,
@@ -749,6 +758,16 @@ impl Parser<'_> {
         Ok(Expr::Op { op: format!("rel:{rels}"), args: exprs })
     }
 
+    /// 添字と条件 `(n; 条件)`（`@名前` は読んだ後）
+    fn index_set(&mut self, name: &str) -> Result<(Expr, Formula), ParseError> {
+        self.expect(Tok::LParen, &format!("@{name} の後の '('"))?;
+        let vars = self.expr()?;
+        self.expect(Tok::Semi, "';'")?;
+        let cond = self.formula()?;
+        self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+        Ok((vars, cond))
+    }
+
     /// 領域の上の積分 `@intset((x, y), 条件, 条件, …)(中身)`（`@intset(` は読んだ後）。中身は直後の項。
     /// `Expr::Op { op: "intset", args: [変数の組, 関係の連鎖…, 中身] }`
     fn intset(&mut self) -> Result<Expr, ParseError> {
@@ -822,6 +841,15 @@ impl Parser<'_> {
         if name == "intset" {
             self.expect(Tok::LParen, "@intset の後の '('")?;
             return self.intset();
+        }
+        if name == "sumset" || name == "prodset" {
+            // 集合の上の総和・総積 `@sumset(n; 条件) 項`（添字は変数か変数の組）
+            let (vars, cond) = self.index_set(&name)?;
+            let body = self.term()?;
+            return Ok(Expr::Op { op: name, args: vec![vars, Expr::Cond(Box::new(cond)), body] });
+        }
+        if matches!(name.as_str(), "bigcup" | "bigcap" | "bigvee" | "bigwedge") {
+            return err(format!("@{name} は条件・集合の中で使ってください"), pos);
         }
         match op_kind(&name) {
             Some(OpKind::Binder) => {
@@ -1009,6 +1037,76 @@ pub enum Formula {
     In(Expr, SetE),
     /// 集合そのもの（その行の座標の点が属するという条件）
     Set(SetE),
+    /// 添字で並べた「または」「かつ」 ⋃_{k ∈ S} A_k・⋂（`or` が true なら ⋃）。添字は `vars`（変数か変数の組）
+    Big { or: bool, vars: Expr, cond: Box<Formula>, body: Box<Formula> },
+}
+
+impl Formula {
+    /// 論理式の中の変数（{点 | 条件} の点の変数・⋃ の添字は外へ出さない）
+    pub fn collect_vars(&self, out: &mut Vec<String>) {
+        let push = |e: &Expr, out: &mut Vec<String>| e.collect_vars(out);
+        match self {
+            Formula::True | Formula::False => {}
+            Formula::Chain(c) => c.exprs.iter().for_each(|e| push(e, out)),
+            Formula::Ne(a, b) => {
+                push(a, out);
+                push(b, out);
+            }
+            Formula::Not(a) => a.collect_vars(out),
+            Formula::And(v) | Formula::Or(v) => v.iter().for_each(|g| g.collect_vars(out)),
+            Formula::Xor(a, b) | Formula::Iff(a, b) | Formula::Implies(a, b) | Formula::Nand(a, b) | Formula::Nor(a, b) => {
+                a.collect_vars(out);
+                b.collect_vars(out);
+            }
+            Formula::In(p, s) => {
+                push(p, out);
+                s.collect_vars(out);
+            }
+            Formula::Set(s) => s.collect_vars(out),
+            Formula::Big { vars, cond, body, .. } => {
+                let mut bound = Vec::new();
+                vars.collect_vars(&mut bound);
+                let mut inner = Vec::new();
+                cond.collect_vars(&mut inner);
+                body.collect_vars(&mut inner);
+                for v in inner {
+                    if !bound.contains(&v) && !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl SetE {
+    fn collect_vars(&self, out: &mut Vec<String>) {
+        match self {
+            SetE::Builder { point, cond } => {
+                let mut bound = Vec::new();
+                point.collect_vars(&mut bound);
+                let mut inner = Vec::new();
+                cond.collect_vars(&mut inner);
+                for v in inner {
+                    if !bound.contains(&v) && !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+            SetE::Interval { lo, hi, .. } => {
+                lo.collect_vars(out);
+                hi.collect_vars(out);
+            }
+            SetE::Finite(items) => items.iter().for_each(|e| e.collect_vars(out)),
+            SetE::Product(parts) => parts.iter().for_each(|p| p.collect_vars(out)),
+            SetE::Union(a, b) | SetE::Inter(a, b) | SetE::Diff(a, b) | SetE::SymDiff(a, b) => {
+                a.collect_vars(out);
+                b.collect_vars(out);
+            }
+            SetE::Complement(a) => a.collect_vars(out),
+            SetE::Named(_) | SetE::Numbers(_) | SetE::Empty => {}
+        }
+    }
 }
 
 /// 集合
@@ -1018,6 +1116,8 @@ pub enum SetE {
     Builder { point: Expr, cond: Box<Formula> },
     /// 名前を付けた集合（定義 `S = {…}`）
     Named(String),
+    /// 要素を書き並べた有限集合 {1, 4, 9}
+    Finite(Vec<Expr>),
     /// 区間（端は ±∞ でもよい）
     Interval { lo: Expr, hi: Expr, lo_open: bool, hi_open: bool },
     /// ℝ ℤ ℕ ℂ ℚ
@@ -1039,8 +1139,18 @@ impl Parser<'_> {
         }
     }
 
-    /// 論理式（弱い順に ⇔ < ⇒・⇐ < ∨・∪・⊕・△・⊽ < ∧・∩・∖・⊼・`,` < ¬ < 原子）
+    /// 論理式（弱い順に `,` < ⇔ < ⇒・⇐ < ∨・∪・⊕・△・⊽ < ∧・∩・∖・⊼ < ¬ < 原子）。
+    /// `,` は条件の区切り（かつ）で、いちばん弱い: `x < 0 ∨ y < 0, z > 0` は (x < 0 ∨ y < 0) ∧ z > 0
     fn formula(&mut self) -> Result<Formula, ParseError> {
+        let mut parts = vec![self.equivalence()?];
+        while *self.peek() == Tok::Comma {
+            self.next();
+            parts.push(self.equivalence()?);
+        }
+        Ok(if parts.len() == 1 { parts.pop().unwrap_or(Formula::True) } else { Formula::And(parts) })
+    }
+
+    fn equivalence(&mut self) -> Result<Formula, ParseError> {
         let mut f = self.implication()?;
         while self.sym() == Some('⇔') {
             self.next();
@@ -1066,14 +1176,14 @@ impl Parser<'_> {
     }
 
     fn disjunction(&mut self) -> Result<Formula, ParseError> {
-        let mut f = self.conjunction(true)?;
+        let mut f = self.conjunction(false)?;
         loop {
             let c = match self.sym() {
                 Some(c @ ('∨' | '∪' | '⊕' | '△' | '⊽')) => c,
                 _ => return Ok(f),
             };
             self.next();
-            let g = self.conjunction(true)?;
+            let g = self.conjunction(false)?;
             f = match c {
                 '∨' | '∪' => Formula::Or(vec![f, g]),
                 '⊽' => Formula::Nor(Box::new(f), Box::new(g)),
@@ -1135,6 +1245,15 @@ impl Parser<'_> {
     }
 
     fn logic_atom(&mut self) -> Result<Formula, ParseError> {
+        // ⋃_{k ∈ S} A_k・⋂（⋁・⋀ も）
+        if let Tok::Op(name) = self.peek().clone() {
+            if matches!(name.as_str(), "bigcup" | "bigcap" | "bigvee" | "bigwedge") {
+                self.next();
+                let (vars, cond) = self.index_set(&name)?;
+                let body = self.negation()?;
+                return Ok(Formula::Big { or: name == "bigcup" || name == "bigvee", vars, cond: Box::new(cond), body: Box::new(body) });
+            }
+        }
         match self.sym() {
             Some('⊤') => {
                 self.next();
@@ -1174,6 +1293,15 @@ impl Parser<'_> {
             (_, Some('≠')) => {
                 self.next();
                 Ok(Formula::Ne(e, self.expr()?))
+            }
+            // 割り切る d ∣ n（mod(n, d) = 0 で、1 ≤ d ≤ |n|）
+            (_, Some('∣')) => {
+                self.next();
+                let n = self.expr()?;
+                let mk = |exprs: Vec<Expr>, rels: Vec<Rel>| Formula::Chain(Chain { pos: vec![pos; exprs.len()], exprs, rels });
+                let modulo = Expr::Call(Func::Mod, vec![n.clone(), e.clone()]);
+                let abs = Expr::Call(Func::Abs, vec![n]);
+                Ok(Formula::And(vec![mk(vec![modulo, Expr::Num(0.0)], vec![Rel::Eq]), mk(vec![Expr::Num(1.0), e, abs], vec![Rel::Le, Rel::Le])]))
             }
             (_, Some('∈')) => {
                 self.next();
@@ -1255,8 +1383,21 @@ impl Parser<'_> {
             (_, Some('⦃')) => {
                 self.next();
                 let point = self.expr()?;
+                // 要素を書き並べた有限集合 {1, 4, 9}
+                if matches!(self.peek(), Tok::Comma) || self.sym() == Some('⦄') {
+                    let mut items = vec![point];
+                    while *self.peek() == Tok::Comma {
+                        self.next();
+                        items.push(self.expr()?);
+                    }
+                    if self.sym() != Some('⦄') {
+                        return err("集合の括弧 } が閉じていません", self.pos());
+                    }
+                    self.next();
+                    return Ok(SetE::Finite(items));
+                }
                 if self.sym() != Some('∣') {
-                    return err("集合は {(x, y) | 条件} の形で書いてください", self.pos());
+                    return err("集合は {(x, y) | 条件} か {1, 2, 3} の形で書いてください", self.pos());
                 }
                 self.next();
                 let cond = self.formula()?;
