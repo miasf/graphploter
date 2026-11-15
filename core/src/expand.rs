@@ -13,6 +13,10 @@
 //! - 定積分 `@int(t, a, b)(式)`（M5。ガウス・ルジャンドルの 16 点 × 2 区間の重み付きの和にする。端は式でも ∞ でもよい）。
 //!   3 重まで（入れ子の 2 重目は 8 点、3 重目は 4 点 × 2 区間）
 //! - 不定積分 `@int(x)(式)`（積分定数を省いた形。表で扱える形は記号で `integrate.rs`、扱えなければ数値で $\int_0^x$）
+//! - ベクトル（組）の計算: 和・差・スカラー倍・内積（`*`）・外積（`×`）・大きさ（`abs`）。勾配 `@grad f`・発散 `@div F`・
+//!   回転 `@rot F`（`@curl`）・ラプラシアン `@lap f`（座標は x, y, z）
+//! - 線積分・面積分・体積分: 点を媒介変数の式で書いた `@intset((cos(t), sin(t), 0), 0 ≤ t ≤ 2pi)(f)`（弧長 ds・面積 dS・体積 dV）と、
+//!   `@intset(…; {vec})(F)`（F · dr・F · dS）
 //! - 領域の上の重積分 `@intset((x, y), 0 ≤ x ≤ 1, x^2 ≤ y ≤ x)(式)`（条件から累次積分の順番と範囲を見つける。
 //!   範囲の形にならない条件は、条件の外を 0 にした近似）
 //!
@@ -25,8 +29,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-/// 展開した式の節の数の上限（計画 2.5）
-pub const MAX_NODES: usize = 200_000;
+/// 展開した式の節の数の上限（計画 2.5）。球座標で書いた球の体積積分（3 重・体積要素 |det J|）が約 132 万節（展開とコンパイルで 0.4 秒ほど）。
+/// これより大きい式は、メモリ（WASM で数十 MB）と時間が重くなるので断る
+pub const MAX_NODES: usize = 1_500_000;
 /// Σ・Π の項の数の上限
 const MAX_TERMS: usize = 2_000;
 /// `[a, …, c]` の要素の数の上限（リストの組み合わせの上限と同じ）
@@ -272,7 +277,7 @@ struct Expander<'a> {
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
 pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
-    if !e.has_notation() && !mentions_defs(e) {
+    if !e.has_notation() && !mentions_defs(e) && !nested_tuple(e, true) {
         return Ok(e.clone());
     }
     let defs = current();
@@ -285,6 +290,18 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
         return Err("式が大きくなりすぎます（関数の入れ子・Σ の項の数を減らしてください）".into());
     }
     Ok(out)
+}
+
+/// 式の途中（一番外でない所）に組があるか（ベクトルの計算。展開の段で成分の式にする）
+fn nested_tuple(e: &Expr, top: bool) -> bool {
+    match e {
+        Expr::Tuple(items) => !top || items.iter().any(|i| nested_tuple(i, false)),
+        Expr::Num(_) | Expr::Const(_) | Expr::Var(_) => false,
+        Expr::Neg(a) => nested_tuple(a, false),
+        Expr::Bin(_, a, b) => nested_tuple(a, false) || nested_tuple(b, false),
+        Expr::Call(_, args) | Expr::List(args) => args.iter().any(|a| nested_tuple(a, false)),
+        _ => false,
+    }
 }
 
 /// 式が、定義された名前を（呼び出しでなく）使っているか
@@ -397,6 +414,7 @@ impl Expander<'_> {
                 }
             }
             Expr::Neg(a) => match self.val(a)? {
+                Val::S(Expr::Tuple(items)) => Val::S(Expr::Tuple(items.into_iter().map(|c| Expr::Neg(Box::new(c))).collect())),
                 Val::S(s) => Val::S(Expr::Neg(Box::new(s))),
                 Val::Fn { arity, body } => Val::Fn { arity, body: Expr::Neg(Box::new(body)) },
             },
@@ -409,6 +427,13 @@ impl Expander<'_> {
                 // 1 引数の関数に関数を渡したら合成（sin(f) = sin ∘ f）
                 if let [Val::Fn { arity, body }] = vals.as_slice() {
                     return Ok(Val::Fn { arity: *arity, body: Expr::Call(*f, vec![body.clone()]) });
+                }
+                // ベクトルの大きさ |v| = √(v · v)。ほかの関数にベクトルは渡せない
+                if let [Val::S(Expr::Tuple(items))] = vals.as_slice() {
+                    if *f == crate::functions::Func::Abs {
+                        return Ok(Val::S(norm(items)));
+                    }
+                    return Err(format!("{} にベクトルは渡せません", f.names().first().copied().unwrap_or("この関数")));
                 }
                 let mut out = Vec::with_capacity(vals.len());
                 for v in vals {
@@ -467,10 +492,16 @@ impl Expander<'_> {
                 }
             }
             Expr::Op { op, args } if op == "cross" => {
-                // 外積はベクトル・行列の段階で入る。それまではスカラーの掛け算
-                let (va, vb) = (self.val(&args[0])?, self.val(&args[1])?);
-                self.bin(BinOp::Mul, va, vb, e)?
+                // 外積: 両方がベクトル（3 成分ならベクトル、2 成分ならスカラー）。スカラーどうしは掛け算
+                match (self.val(&args[0])?, self.val(&args[1])?) {
+                    (Val::S(Expr::Tuple(u)), Val::S(Expr::Tuple(v))) => Val::S(cross(&u, &v)?),
+                    (Val::S(Expr::Tuple(_)), _) | (_, Val::S(Expr::Tuple(_))) => {
+                        return Err("× の両側がベクトルなら外積、スカラーなら掛け算です（ベクトルとスカラーなら · か並べて書いてください）".into())
+                    }
+                    (va, vb) => self.bin(BinOp::Mul, va, vb, e)?,
+                }
             }
+            Expr::Op { op, args } if matches!(op.as_str(), "grad" | "div" | "rot" | "curl" | "lap") => Val::S(self.vector_operator(op, &args[0])?),
             Expr::Op { op, args } if op == "compose" => {
                 let (f, g) = (self.val(&args[0])?, self.val(&args[1])?);
                 match (f, g) {
@@ -692,9 +723,162 @@ impl Expander<'_> {
     /// 領域の上の重積分 `@intset((x, y), 条件…)(中身)`。条件を「変数 ≤ 式」の形の範囲に分け、
     /// 内側の変数の範囲が外側の変数だけで決まる順番を探して、累次積分にする。範囲の形にならない条件（x² + y² ≤ 1 など）は、
     /// 中身に「条件の外では 0」を掛けた近似にする（境目で値が飛ぶので、誤差は 10⁻² ほど）
+    /// 勾配・発散・回転・ラプラシアン（座標は x, y, z）。中身が関数の名前なら、座標に当てはめる
+    fn vector_operator(&mut self, op: &str, arg: &Expr) -> Result<Expr, String> {
+        use crate::diff::{add, diff, sub};
+        const XYZ: [&str; 3] = ["x", "y", "z"];
+        let v = match self.val(arg)? {
+            Val::S(s) => s,
+            Val::Fn { arity, body } if arity <= 3 => {
+                apply_body(&body, &XYZ[..arity].iter().map(|c| Expr::Var((*c).into())).collect::<Vec<_>>())
+            }
+            Val::Fn { .. } => return Err(fn_as_value_error(arg)),
+        };
+        let name = match op {
+            "grad" => "∇（勾配）",
+            "div" => "∇·（発散）",
+            "rot" | "curl" => "∇×（回転）",
+            _ => "∇²（ラプラシアン）",
+        };
+        let d = |e: &Expr, c: &str| diff(e, c);
+        Ok(match (op, &v) {
+            ("grad", Expr::Tuple(_)) | ("lap", Expr::Tuple(_)) => return Err(format!("{name} はスカラーの式に使ってください")),
+            ("grad", _) => Expr::Tuple(XYZ.iter().map(|c| d(&v, c)).collect::<Result<_, _>>()?),
+            ("lap", _) => {
+                let mut s = Expr::Num(0.0);
+                for c in XYZ {
+                    s = add(s, d(&d(&v, c)?, c)?);
+                }
+                s
+            }
+            ("div", Expr::Tuple(items)) if items.len() <= 3 => {
+                let mut s = Expr::Num(0.0);
+                for (f, c) in items.iter().zip(XYZ) {
+                    s = add(s, d(f, c)?);
+                }
+                s
+            }
+            ("rot" | "curl", Expr::Tuple(items)) if items.len() == 2 => sub(d(&items[1], "x")?, d(&items[0], "y")?),
+            ("rot" | "curl", Expr::Tuple(items)) if items.len() == 3 => {
+                let (p, q, r) = (&items[0], &items[1], &items[2]);
+                Expr::Tuple(vec![sub(d(r, "y")?, d(q, "z")?), sub(d(p, "z")?, d(r, "x")?), sub(d(q, "x")?, d(p, "y")?)])
+            }
+            _ => return Err(format!("{name} は 2 成分か 3 成分のベクトル場 (P, Q, R) に使ってください")),
+        })
+    }
+
+    /// 点を媒介変数の式で書いた集合の上の積分（線積分・面積分・体積分）。被積分関数の x, y, z に点の成分を入れ、
+    /// 弧長 $|\mathbf r'|$・面積要素 $|\mathbf r_u \times \mathbf r_v|$・体積要素 $|\det J|$（`vec` なら $\mathbf F \cdot \mathbf r'$・
+    /// $\mathbf F \cdot (\mathbf r_u \times \mathbf r_v)$）を掛けて、媒介変数の領域の上の積分にする。
+    /// 媒介変数は、条件で範囲を書いた名前のうち点の式に出てくるもの（出てくる順。面の向き $\mathbf r_u \times \mathbf r_v$ もこの順）
+    fn parametric_integral(&mut self, point: &Expr, chains: &[Expr], vec_mode: bool, body: &Expr) -> Result<Expr, String> {
+        use crate::diff::{add, diff, mul, sub};
+        const XYZ: [&str; 3] = ["x", "y", "z"];
+        let comps: Vec<Expr> = match self.scalar(point)? {
+            Expr::Tuple(items) => items,
+            e => vec![e],
+        };
+        let dim = comps.len();
+        if dim > 3 {
+            return Err("曲線・曲面の点は 3 成分までにしてください".into());
+        }
+        // 条件で範囲を書いた名前
+        let mut bounded: Vec<String> = Vec::new();
+        for chain in chains {
+            if let Expr::Op { args: exprs, .. } = chain {
+                for e in exprs {
+                    if let Expr::Var(v) = e {
+                        bounded.push(v.clone());
+                    }
+                }
+            }
+        }
+        let mut params: Vec<String> = Vec::new();
+        for c in &comps {
+            let mut vs = Vec::new();
+            c.collect_vars(&mut vs);
+            for v in vs {
+                if bounded.contains(&v) && !params.contains(&v) {
+                    params.push(v);
+                }
+            }
+        }
+        let k = params.len();
+        if k == 0 {
+            return Err("曲線・曲面の媒介変数の範囲を、0 ≤ t ≤ 2π のように書いてください".into());
+        }
+        let jac: Vec<Vec<Expr>> = params.iter().map(|p| comps.iter().map(|c| diff(c, p)).collect::<Result<_, _>>()).collect::<Result<_, _>>()?;
+        // 被積分関数（関数の名前なら座標に当てはめる）の x, y, z に点の成分を入れる
+        let g = match self.val(body)? {
+            Val::S(s) => s,
+            Val::Fn { arity, body } if arity <= 3 => {
+                apply_body(&body, &XYZ[..arity].iter().map(|c| Expr::Var((*c).into())).collect::<Vec<_>>())
+            }
+            Val::Fn { .. } => return Err(fn_as_value_error(body)),
+        };
+        let g = g.substitute(&|v: &str| XYZ[..dim].iter().position(|c| *c == v).map(|i| comps[i].clone()));
+        let dot = |u: &[Expr], v: &[Expr]| u.iter().zip(v).fold(Expr::Num(0.0), |s, (a, b)| add(s, mul(a.clone(), b.clone())));
+        let integrand = if vec_mode {
+            let Expr::Tuple(f) = &g else { return Err("F · dr・F · dS の F はベクトル場 (P, Q, R) にしてください".into()) };
+            if f.len() != dim {
+                return Err(format!("ベクトル場の成分の数（{}）を、点の成分の数（{dim}）にそろえてください", f.len()));
+            }
+            match k {
+                1 => dot(f, &jac[0]),
+                2 if dim == 3 => match cross(&jac[0], &jac[1])? {
+                    Expr::Tuple(n) => dot(f, &n),
+                    _ => unreachable!(),
+                },
+                _ => return Err("F · dr は曲線（媒介変数 1 つ）、F · dS は 3 次元の曲面（媒介変数 2 つ）で使えます".into()),
+            }
+        } else {
+            if matches!(g, Expr::Tuple(_)) {
+                return Err("ベクトル場を積分するなら F · dr・F · dS の形で書いてください".into());
+            }
+            let measure = match (k, dim) {
+                (1, _) => norm(&jac[0]),
+                (2, 3) => match cross(&jac[0], &jac[1])? {
+                    Expr::Tuple(n) => norm(&n),
+                    _ => unreachable!(),
+                },
+                (2, 2) => Expr::Call(crate::functions::Func::Abs, vec![sub(mul(jac[0][0].clone(), jac[1][1].clone()), mul(jac[0][1].clone(), jac[1][0].clone()))]),
+                (3, 3) => Expr::Call(crate::functions::Func::Abs, vec![det3(&jac)]),
+                _ => return Err(format!("媒介変数 {k} つで {dim} 成分の点の積分はできません（曲線は 1 つ、曲面は 2 つ、立体は 3 つ）")),
+            };
+            mul(g, measure)
+        };
+        let mut args = vec![Expr::Tuple(params.iter().map(|p| Expr::Var(p.clone())).collect())];
+        args.extend(chains.iter().cloned());
+        args.push(integrand);
+        self.region_integral(&args)
+    }
+
     fn region_integral(&mut self, args: &[Expr]) -> Result<Expr, String> {
         use crate::functions::Func;
         let (Some(vars_e), Some(body)) = (args.first(), args.last()) else { return Err("内部エラー: 領域の積分の形".into()) };
+        // 点が変数の組でなければ（媒介変数の式）、線積分・面積分・体積分。`; vec` の印も、ここで取り出す
+        let vec_mode = args.iter().any(|a| matches!(a, Expr::Op { op, .. } if op == "mode:vec"));
+        if let Some(bad) = args.iter().find_map(|a| match a {
+            Expr::Op { op, .. } if op.starts_with("mode:") && op != "mode:vec" => Some(op.trim_start_matches("mode:").to_string()),
+            _ => None,
+        }) {
+            return Err(format!("; の後の {bad} は使えません（{{vec}} と書いてください）"));
+        }
+        let chains: Vec<Expr> = args[1..args.len() - 1].iter().filter(|a| !matches!(a, Expr::Op { op, .. } if op.starts_with("mode:"))).cloned().collect();
+        let plain_vars = |e: &Expr| -> bool {
+            let names: Vec<&String> = match e {
+                Expr::Var(v) => vec![v],
+                Expr::Tuple(items) => items.iter().filter_map(|i| if let Expr::Var(v) = i { Some(v) } else { None }).collect(),
+                _ => return false,
+            };
+            let n = if let Expr::Tuple(items) = e { items.len() } else { 1 };
+            names.len() == n && (1..names.len()).all(|i| !names[..i].contains(&names[i]))
+        };
+        if vec_mode || !plain_vars(vars_e) {
+            return self.parametric_integral(vars_e, &chains, vec_mode, body);
+        }
+        let args: Vec<Expr> = std::iter::once(vars_e.clone()).chain(chains).chain(std::iter::once(body.clone())).collect();
+        let args = args.as_slice();
         let vars: Vec<String> = match vars_e {
             Expr::Var(v) => vec![v.clone()],
             Expr::Tuple(items) => items
@@ -889,7 +1073,10 @@ impl Expander<'_> {
     fn bin(&mut self, op: BinOp, a: Val, b: Val, whole: &Expr) -> Result<Val, String> {
         let mk = |a: Expr, b: Expr| Expr::Bin(op, Box::new(a), Box::new(b));
         Ok(match (a, b) {
-            (Val::S(a), Val::S(b)) => Val::S(mk(a, b)),
+            (Val::S(a), Val::S(b)) => match vector_bin(op, &a, &b)? {
+                Some(v) => Val::S(v),
+                None => Val::S(mk(a, b)),
+            },
             (Val::Fn { arity, body }, Val::S(arg)) if op == BinOp::Mul => {
                 Val::S(self.apply("この関数", arity, &body, vec![arg])?)
             }
@@ -945,6 +1132,60 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
         ws[i] = 2.0 / ((1.0 - x * x) * dp * dp);
     }
     (xs, ws)
+}
+
+/// ベクトルの大きさ √(Σ cᵢ²)
+fn norm(items: &[Expr]) -> Expr {
+    use crate::diff::{add, mul};
+    let s = items.iter().fold(Expr::Num(0.0), |s, c| add(s, mul(c.clone(), c.clone())));
+    Expr::Call(crate::functions::Func::Sqrt, vec![s])
+}
+
+/// 外積（3 成分ならベクトル、2 成分ならスカラー u₁v₂ − u₂v₁）
+fn cross(u: &[Expr], v: &[Expr]) -> Result<Expr, String> {
+    use crate::diff::{mul, sub};
+    let m = |a: &Expr, b: &Expr| mul(a.clone(), b.clone());
+    match (u, v) {
+        ([a1, a2, a3], [b1, b2, b3]) => Ok(Expr::Tuple(vec![sub(m(a2, b3), m(a3, b2)), sub(m(a3, b1), m(a1, b3)), sub(m(a1, b2), m(a2, b1))])),
+        ([a1, a2], [b1, b2]) => Ok(sub(m(a1, b2), m(a2, b1))),
+        _ => Err(format!("外積は 3 成分（か 2 成分）のベクトルどうしで使えます（{} 成分と {} 成分）", u.len(), v.len())),
+    }
+}
+
+/// 3 × 3 の行列式（列 cols[j][i]）
+fn det3(cols: &[Vec<Expr>]) -> Expr {
+    use crate::diff::{add, mul, sub};
+    let a = |i: usize, j: usize| cols[j][i].clone();
+    let minor = |i: usize, j: usize, k: usize, l: usize| sub(mul(a(i, k), a(j, l)), mul(a(i, l), a(j, k)));
+    add(sub(mul(a(0, 0), minor(1, 2, 1, 2)), mul(a(0, 1), minor(1, 2, 0, 2))), mul(a(0, 2), minor(1, 2, 0, 1)))
+}
+
+/// 組（ベクトル）の 2 項の演算: 和・差（同じ成分の数）、内積（ベクトル × ベクトル）、スカラー倍・スカラーでの割り算。
+/// ベクトルを含まなければ None（ふつうの演算）
+fn vector_bin(op: BinOp, a: &Expr, b: &Expr) -> Result<Option<Expr>, String> {
+    use crate::diff::{add, mul};
+    let bin = |x: Expr, y: Expr| Expr::Bin(op, Box::new(x), Box::new(y));
+    Ok(Some(match (a, b) {
+        (Expr::Tuple(u), Expr::Tuple(v)) => {
+            if u.len() != v.len() {
+                return Err(format!("{} 成分と {} 成分のベクトルは計算できません", u.len(), v.len()));
+            }
+            match op {
+                BinOp::Add | BinOp::Sub => Expr::Tuple(u.iter().zip(v).map(|(x, y)| bin(x.clone(), y.clone())).collect()),
+                BinOp::Mul => u.iter().zip(v).fold(Expr::Num(0.0), |s, (x, y)| add(s, mul(x.clone(), y.clone()))),
+                _ => return Err("ベクトルどうしは、和・差・内積（·）・外積（×）だけが使えます".into()),
+            }
+        }
+        (Expr::Tuple(u), s) if !matches!(s, Expr::List(_)) => match op {
+            BinOp::Mul | BinOp::Div => Expr::Tuple(u.iter().map(|x| bin(x.clone(), s.clone())).collect()),
+            _ => return Err("ベクトルとスカラーは、掛け算・割り算だけが使えます".into()),
+        },
+        (s, Expr::Tuple(v)) if !matches!(s, Expr::List(_)) => match op {
+            BinOp::Mul => Expr::Tuple(v.iter().map(|x| bin(s.clone(), x.clone())).collect()),
+            _ => return Err("スカラーとベクトルは、掛け算だけが使えます".into()),
+        },
+        _ => return Ok(None),
+    }))
 }
 
 /// 並び替えの全部（3 つまで）

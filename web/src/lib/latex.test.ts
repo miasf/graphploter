@@ -41,6 +41,16 @@ const cases: [string, string][] = [
   ['\\iint_{\\left\\{\\left(x,y\\right)\\mid0\\le x\\le1,0\\le y\\le x\\right\\}}xy\\,dA', '@intset((x,y),0<=x<=1,0<=y<=x)(xy)'],
   ['\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}xy\\,dx\\,dy', '@intset((x,y),0<=x<=1,0<=y<=2)(xy)'],
   ['\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x\\le1,0\\le y\\le1,0\\le z\\le1\\right\\}}1\\,dV', '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1)(1)'],
+  // ベクトル場の演算子・外積・線積分・面積分
+  ['z=\\nabla\\cdot\\left(x^2,y^2,0\\right)', 'z= @div (x^(2),y^(2),0)'],
+  ['z=\\nabla\\times\\left(-y,x\\right)', 'z= @rot (-y,x)'],
+  ['z=\\nabla^{2}x^2y', 'z= @lap x^(2)y'],
+  ['\\nabla f', '@grad f'],
+  ['z=\\Delta\\left(x^2y\\right)', 'z= @lap (x^(2)y)'],
+  ['\\operatorname{div}F', '@div F'],
+  ['\\left(1,2,3\\right)\\times\\left(4,5,6\\right)', '(1,2,3)×(4,5,6)'],
+  ['\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', '@intset(( cos t, sin t),0<=t<=2 pi; {vec})((-y,x))'],
+  ['\\int_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi)(x^(2))'],
   // 微分（M3）
   ['\\frac{d}{dx}\\sin\\left(x\\right)', '@diff(x) sin (x)'],
   ['z=\\frac{\\partial}{\\partial x}\\sin\\left(xy\\right)', 'z= @diff(x) sin (xy)'],

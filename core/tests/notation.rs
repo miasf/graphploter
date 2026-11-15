@@ -236,6 +236,13 @@ fn latex_outputs_are_readable() {
     assert!((value("@intset((x,y),0<=x<=1,0<=y<=x)(xy)") - 0.125).abs() < 1e-12);
     assert!((value("@intset((x,y),0<=x<=1,0<=y<=2)(xy)") - 1.0).abs() < 1e-12);
     assert!((value("@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1)(1)") - 1.0).abs() < 1e-12);
+    // ベクトル場・線積分（latex.test.ts の変換結果）
+    for src in ["z= @div (x^(2),y^(2),0)", "z= @rot (-y,x)", "z= @lap x^(2)y", "z= @lap (x^(2)y)"] {
+        assert!(graph_core::equation::compile_with(src, &ps, &sp).is_ok(), "{src}");
+    }
+    assert_eq!(value("(1,2,3)×(4,5,6)(1,0,0)"), -3.0);
+    assert!((value("@intset(( cos t, sin t),0<=t<=2 pi; {vec})((-y,x))") - 2.0 * std::f64::consts::PI).abs() < 1e-9);
+    assert!((value("@intset(( cos t, sin t),0<=t<=2 pi)(x^(2))") - std::f64::consts::PI).abs() < 1e-9);
 }
 
 // ---- M3: 記号微分 ----
@@ -464,4 +471,60 @@ fn region_integrals_with_outer_variables() {
     // 近似を使ったら説明に出す
     let m = run("z = @intset((s, t), -1 ≤ s ≤ 1, -1 ≤ t ≤ 1, s^2 + t^2 ≤ 1)(1) + x", "", &[]).unwrap();
     assert!(m.kind().contains("積分は近似"), "{}", m.kind());
+}
+
+// ---- ベクトル・grad・div・rot・線積分・面積分・体積分 ----
+
+#[test]
+fn vector_algebra() {
+    assert_eq!(value("(1,2,3)(4,5,6)"), 32.0);
+    assert_eq!(value("abs((3,4))"), 5.0);
+    assert!((value("abs((1,2,3)×(4,5,6))") - 54f64.sqrt()).abs() < 1e-12);
+    assert_eq!(value("(1,2)×(3,4)"), -2.0);
+    assert_eq!(value("((1,2,3) + (1,1,1))(1,0,0)"), 2.0);
+    assert_eq!(value("(2 (1,2,3))(0,0,1)"), 6.0);
+    // 直線 (1, 2, 3) + t (0, 1, 1)
+    assert_eq!(mesh("(1, 2, 3) + t (0, 1, 1)", "", &[]), mesh("(1, 2 + t, 3 + t)", "", &[]));
+    assert!(error_of("z = (1,2) + x", "").contains("掛け算・割り算"));
+    assert!(error_of("z = sin((x, y))", "").contains("ベクトル"));
+}
+
+#[test]
+fn grad_div_rot() {
+    assert!(max_diff("z = @div((x^2, y^2, 0))", "z = 2x + 2y", "") < 1e-4);
+    assert!(max_diff("z = (@grad(x^2 + y^2))(1, 1, 0)", "z = 2x + 2y", "") < 1e-4);
+    assert!(max_diff("z = @rot((-y, x)) + 0 x", "z = 2 + 0 x", "") < 1e-6);
+    assert!(max_diff("z = abs(@rot((-y, x, 0))) + 0 x", "z = 2 + 0 x", "") < 1e-6);
+    assert!(max_diff("z = @lap(x^2 y)", "z = 2y", "") < 1e-4);
+    // div rot = 0、rot grad = 0
+    assert!(max_diff("z = @div(@rot((x y, y z, z x))) + x", "z = x", "") < 1e-6);
+    assert!(max_diff("z = abs(@rot(@grad(sin(x y) + x^3))) + x", "z = x", "") < 1e-6);
+    // 定義したベクトル場・関数の名前に
+    assert!(max_diff("z = @div F", "z = 2x + 1", "F(x, y, z) = (x^2, y, 0)") < 1e-4);
+    assert!(max_diff("z = (@grad f)(1, 0, 0)", "z = 2x", "f(x, y, z) = x^2 + y") < 1e-4);
+}
+
+#[test]
+fn line_surface_volume_integrals() {
+    use std::f64::consts::PI;
+    // 円周の長さ 2π、らせんの長さ 2π√2
+    close("@intset((cos(t), sin(t)), 0 ≤ t ≤ 2pi)(1)", 2.0 * PI, 1e-9);
+    close("@intset((cos(t), sin(t), t), 0 ≤ t ≤ 2pi)(1)", 2.0 * PI * 2f64.sqrt(), 1e-9);
+    // スカラーの線積分 ∫_C x² ds（単位円）= π
+    close("@intset((cos(t), sin(t)), 0 ≤ t ≤ 2pi)(x^2)", PI, 1e-9);
+    // 仕事 ∮ (−y, x) · dr = 2π
+    close("@intset((cos(t), sin(t)), 0 ≤ t ≤ 2pi; {vec})((-y, x))", 2.0 * PI, 1e-9);
+    // 球面の面積 4π、流束 ∯ (x, y, z) · dS = 4π（外向き）
+    let sphere = "(sin(u) cos(v), sin(u) sin(v), cos(u)), 0 ≤ u ≤ pi, 0 ≤ v ≤ 2pi";
+    close(&format!("@intset({sphere})(1)"), 4.0 * PI, 1e-6);
+    close(&format!("@intset({sphere}; {{vec}})((x, y, z))"), 4.0 * PI, 1e-6);
+    // 流束 ∯ (x³, y³, z³) · dS = 12π/5（ガウスの発散定理で ∭ div F dV と同じ値）
+    close(&format!("@intset({sphere}; {{vec}})((x^3, y^3, z^3))"), 12.0 * PI / 5.0, 1e-4);
+    // 体積の側（立方体 [0, 1]³ の上の ∭ div F = 3）
+    close("@intset((x, y, z), 0 ≤ x ≤ 1, 0 ≤ y ≤ 1, 0 ≤ z ≤ 1)(@div((x^3, y^3, z^3)))", 3.0, 1e-12);
+    // 球の体積（球座標で）4π/3
+    close("@intset((p sin(u) cos(v), p sin(u) sin(v), p cos(u)), 0 ≤ p ≤ 1, 0 ≤ u ≤ pi, 0 ≤ v ≤ 2pi)(1)", 4.0 * PI / 3.0, 1e-6);
+    // 平面の領域の変数変換（極座標）: 円の面積 π
+    close("@intset((r cos(t), r sin(t)), 0 ≤ r ≤ 1, 0 ≤ t ≤ 2pi)(1)", PI, 1e-9);
+    assert!(error_of("z = @intset((cos(t), sin(t)), 0 ≤ t ≤ 1; {vec})(x)", "").contains("ベクトル場"));
 }

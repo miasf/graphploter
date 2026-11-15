@@ -38,7 +38,8 @@ const SYMBOLS: Record<string, string> = {
   exponentialE: 'e',
   imaginaryI: 'i',
   cdot: '*',
-  times: '*',
+  // 外積（スカラーどうしなら、計算エンジンが掛け算にする）
+  times: '×',
   ast: '*',
   div: '/',
   ',': ' ',
@@ -305,6 +306,11 @@ class Converter {
         // 中身は名前の文字だけを取り出す。数式キーボードから入れると
         // \operatorname{\mathrm{Im}} のように命令が入れ子になることがあるため、命令名と {} を取り除く
         const s = this.rawGroup(true)
+        // ベクトル場の演算子の名前
+        if (name === 'operatorname' && ['grad', 'div', 'rot', 'curl'].includes(s)) {
+          this.out += ` @${s === 'curl' ? 'rot' : s} `
+          return
+        }
         this.out += s === 'e' || s === 'i' ? s : ` ${s} `
         return
       }
@@ -336,7 +342,25 @@ class Converter {
           if (this.toks[this.i++] === '_') sub = this.arg()
           else sup = this.arg()
         }
-        if (sub === null) throw new LatexError(`${t} はまだ使えません（差分なら ${t}_{x} のように変数を下に書いてください）`)
+        if (sub === null) {
+          // 下付きが無ければ、ベクトル場の演算子: ∇f（勾配）・∇·F（発散）・∇×F（回転）・∇²f と Δf（ラプラシアン）
+          if (name === 'nabla' && (sup === null || sup.trim() === '2')) {
+            if (sup !== null) this.out += ' @lap '
+            else if (this.peek() === '\\cdot') {
+              this.i++
+              this.out += ' @div '
+            } else if (this.peek() === '\\times') {
+              this.i++
+              this.out += ' @rot '
+            } else this.out += ' @grad '
+            return
+          }
+          if (name === 'Delta' && sup === null) {
+            this.out += ' @lap '
+            return
+          }
+          throw new LatexError(`${t} はまだ使えません（差分なら ${t}_{x} のように変数を下に書いてください）`)
+        }
         const op = name === 'Delta' ? 'fdiff' : name === 'nabla' ? 'bdiff' : 'cdiff'
         // 下付きは「変数」か「変数, 幅」。幅の中のカンマ（括弧の中）では分けない
         let depth = 0
@@ -362,11 +386,13 @@ class Converter {
       case 'int':
       case 'intop':
       case 'smallint':
+      case 'oint':
       case 'iint':
+      case 'oiint':
       case 'iiint': {
         // 定積分 \int_{a}^{b} … dt → @int(t,a,b)(…)、不定積分 \int … dx → @int(x)(…)、
         // 領域の上の積分 \iint_{\{(x,y)\mid …\}} … dA・\int_{[0,1]\times[0,2]} … dx\,dy → @intset((x,y),条件…)(…)
-        const multi = name === 'iint' ? 2 : name === 'iiint' ? 3 : 1
+        const multi = name === 'iint' || name === 'oiint' ? 2 : name === 'iiint' ? 3 : 1
         let subToks: Token[] | null = null
         let hi: string | null = null
         while (this.peek() === '_' || this.peek() === '^' || this.peek() === '\\limits' || this.peek() === '\\nolimits') {
@@ -374,7 +400,13 @@ class Converter {
           if (t2 === '_') subToks = this.rawTokens()
           else if (t2 === '^') hi = this.arg()
         }
-        const { body, vars } = this.integrand(multi)
+        const { body, vars, vector } = this.integrand(multi)
+        if (vector) {
+          // ベクトル場の線積分・流束 ∫_C F · dr、∬_S F · dS: 曲線・曲面を集合で書く
+          if (subToks === null || hi !== null) throw new LatexError('F · dr・F · dS の積分は、下に曲線・曲面を {(cos t, sin t) | 0 ≤ t ≤ 2π} の形で書いてください')
+          this.out += ` @intset(${regionOf(subToks, [])}; {vec})(${body}) `
+          return
+        }
         if (subToks === null && hi === null) {
           if (multi > 1 || vars.length !== 1) throw new LatexError('不定積分は 1 変数で、∫ … dx の形で書いてください')
           this.out += ` @int(${vars[0]})(${body}) `
@@ -464,7 +496,7 @@ class Converter {
    * 積分の中身と、その後の「d + 文字」の並び（dx\,dy など）を読む。中身は、同じ深さで最初に出てくる「d + 文字」の手前まで。
    * 中身の中の積分（入れ子）の「d + 文字」は、その積分のものとして飛ばす（∫∫ … dy dx の内側の dy を、外側の物と取り違えない）
    */
-  private integrand(multi: number): { body: string; vars: string[] } {
+  private integrand(multi: number): { body: string; vars: string[]; vector: boolean } {
     const start = this.i
     let depth = 0
     let pending = 0
@@ -486,8 +518,19 @@ class Converter {
         p += d.len
         continue
       }
-      const body = new Converter(this.toks.slice(start, p)).run()
+      // F · dr の形なら、中身の最後の · は内積の印（中身に入れない）
+      let end = p
+      while (end > start && SPACES.has(this.toks[end - 1])) end--
+      if (d.vector) {
+        if (this.toks[end - 1] !== '\\cdot') throw new LatexError('ベクトル場の積分は F \\cdot d\\mathbf{r} の形で書いてください')
+        end--
+      }
+      const body = new Converter(this.toks.slice(start, end)).run()
       if (body === '') throw new LatexError('積分する式を書いてください')
+      if (d.vector) {
+        this.i = p + d.len + 1
+        return { body, vars: [d.v], vector: true }
+      }
       // 続く「d + 文字」をまとめて読む（間の \, などの空白は飛ばす）
       const vars: string[] = []
       let q = p
@@ -499,7 +542,7 @@ class Converter {
         q += e.len + 1
       }
       this.i = q
-      return { body, vars }
+      return { body, vars, vector: false }
     }
     throw new LatexError('積分の変数を dx のように書いてください')
   }
@@ -538,9 +581,13 @@ function derivative(a: string, b: string): string | null {
 const SPACES = new Set(['\\,', '\;', '\\:', '\\ ', '\\!', '\\quad', '\\qquad'])
 
 /** 位置 p から「d + 文字 1 つ」（\mathrm{d}x・\differentialD x も）なら、変数と、d の部分のトークンの数（変数の手前まで） */
-function differentialAt(toks: Token[], p: number): { v: string; len: number } | null {
+function differentialAt(toks: Token[], p: number): { v: string; len: number; vector?: boolean } | null {
   const letter = (k: number) => (/^[A-Za-z]$/.test(toks[k] ?? '') ? toks[k] : null)
   const t = toks[p]
+  // ベクトルの微分 d\mathbf{r}・d\vec{S}（len は文字の手前まで。文字の後の } も読み飛ばすので、文字の位置に 1 足して返す）
+  if ((t === 'd' || t === '\\differentialD') && ['\\mathbf', '\\vec', '\\boldsymbol', '\\overrightarrow'].includes(toks[p + 1] ?? '') && toks[p + 2] === '{' && letter(p + 3) && toks[p + 4] === '}') {
+    return { v: toks[p + 3], len: 4, vector: true }
+  }
   if ((t === 'd' || t === '\\differentialD') && letter(p + 1)) return { v: toks[p + 1], len: 1 }
   if ((t === '\\mathrm' || t === '\\operatorname') && toks[p + 1] === '{' && toks[p + 2] === 'd' && toks[p + 3] === '}' && letter(p + 4)) {
     return { v: toks[p + 4], len: 4 }

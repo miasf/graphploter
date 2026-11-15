@@ -287,6 +287,8 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
         "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
         "cases" | "intset" => OpKind::Func,
+        // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
+        "grad" | "div" | "rot" | "curl" | "lap" => OpKind::Prefix,
         _ => return None,
     })
 }
@@ -749,6 +751,14 @@ impl Parser<'_> {
         while *self.peek() == Tok::Comma {
             self.next();
             args.push(self.relation_chain("積分する領域の条件")?);
+        }
+        // `; {vec}`: ベクトル場と向きの付いた要素の内積（F · dr、F · dS）
+        if *self.peek() == Tok::Semi {
+            self.next();
+            match self.next().tok {
+                Tok::Var(m) => args.push(Expr::Op { op: format!("mode:{m}"), args: Vec::new() }),
+                _ => return err("; の後には {vec} と書いてください", self.pos()),
+            }
         }
         self.expect(Tok::RParen, "閉じ括弧 ')'")?;
         args.push(self.term()?);
