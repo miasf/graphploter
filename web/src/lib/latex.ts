@@ -68,6 +68,11 @@ const SYMBOLS: Record<string, string> = {
   dotsc: '…',
   dotsb: '…',
   circ: '∘',
+  // 微分（\frac{d}{dx} などの部品。単独では計算エンジンが読めない）とプライム
+  partial: '∂',
+  differentialD: 'd',
+  prime: "'",
+  doubleprime: "''",
   limits: '',
   nolimits: '',
   lfloor: ' floor(',
@@ -208,7 +213,9 @@ class Converter {
         this.out += '*(pi/180)'
         return
       }
-      this.out += '^(' + this.arg() + ')'
+      const a = this.arg()
+      // f^{\prime} は f'（導関数）
+      this.out += /^'+$/.test(a.replace(/\s+/g, '')) ? a.replace(/\s+/g, '') : '^(' + a + ')'
       return
     }
     if (t === '_') {
@@ -259,7 +266,8 @@ class Converter {
       case 'tfrac': {
         const a = this.arg()
         const b = this.arg()
-        this.out += `((${a})/(${b}))`
+        const d = derivative(a, b)
+        this.out += d ?? `((${a})/(${b}))`
         return
       }
       case 'sqrt': {
@@ -337,6 +345,24 @@ class Converter {
     this.out = saved
     return r
   }
+}
+
+/**
+ * 分数の形の微分（変換した後の分子 a・分母 b）を、計算エンジンの @diff にする。微分の形でなければ null。
+ * d/dx → "@diff(x) "、d²/dx² → "@diff(x,2) "、∂²/∂x∂y → "@diff(x) @diff(y) "、df/dx → "@diff(x) f"
+ */
+function derivative(a: string, b: string): string | null {
+  const num = a.replace(/\s+/g, '').match(/^(d|∂)(?:\^\((\d+)\))?([A-Za-z]\w*)?$/)
+  if (!num) return null
+  const den = b.replace(/\s+/g, '')
+  const parts = [...den.matchAll(/(d|∂)([A-Za-z]\w*?)(?:\^\((\d+)\))?(?=d|∂|$)/g)]
+  if (parts.length === 0 || parts.map((m) => m[0]).join('') !== den) return null
+  if (parts.some((m) => m[1] !== num[1])) return null
+  const order = Number(num[2] ?? 1)
+  const total = parts.reduce((s, m) => s + Number(m[3] ?? 1), 0)
+  if (order !== total) throw new LatexError('微分の分子と分母の階数をそろえてください')
+  const ops = parts.map((m) => (m[3] && m[3] !== '1' ? `@diff(${m[2]},${m[3]}) ` : `@diff(${m[2]}) `)).join('')
+  return ` ${ops}${num[3] ?? ''} `
 }
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */

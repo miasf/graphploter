@@ -227,3 +227,35 @@ fn latex_outputs_are_readable() {
     assert!(graph_core::equation::compile_with("z=[1,3,…,9] x", &ps, &sp).is_ok());
     assert!((value("30*(pi/180)") - std::f64::consts::PI / 6.0).abs() < 1e-15);
 }
+
+// ---- M3: 記号微分 ----
+
+/// 2 つの式の頂点の差の最大
+fn max_diff(a: &str, b: &str, defs: &str) -> f64 {
+    let (pa, ia) = mesh(a, defs, &[]);
+    let (pb, ib) = mesh(b, "", &[]);
+    assert_eq!(ia, ib, "{a} と {b} の三角形");
+    pa.iter().zip(&pb).filter(|(x, y)| x.is_finite() && y.is_finite()).map(|(x, y)| (x - y).abs() as f64).fold(0.0, f64::max)
+}
+
+#[test]
+fn derivatives_match_hand_written() {
+    assert!(max_diff("z = @diff(x) sin(x y)", "z = y cos(x y)", "") < 1e-5);
+    assert!(max_diff("y = @diff(x, 2) exp(-x^2)", "y = (4x^2 - 2) exp(-x^2)", "") < 1e-5);
+    assert!(max_diff("z = @diff(x) @diff(y) sin(x y)", "z = cos(x y) - x y sin(x y)", "") < 1e-5);
+    // 導関数 f'、f''
+    assert!(max_diff("y = f'(x)", "y = 3x^2", "f(x) = x^3") < 1e-5);
+    assert!(max_diff("y = f''(2x)", "y = 12x", "f(x) = x^3") < 1e-5);
+    // df/dx の形
+    assert!(max_diff("y = @diff(x) f", "y = cos(x)", "f(t) = sin(t)") < 1e-5);
+}
+
+#[test]
+fn derivative_values() {
+    // 差分に落ちる関数: ζ'(2) = −0.9375482543…
+    let mut ps = std::collections::BTreeMap::new();
+    ps.insert("s".to_string(), num_complex::Complex64::new(2.0, 0.0));
+    let (d, _) = graph_core::equation::eval_constant_with("@diff(s) zeta(s)", &ps).unwrap();
+    assert!((d + 0.937_548_254_3).abs() < 1e-6, "{d}");
+    assert!(error_of("z = h'(x, y)", "h(x, y) = x y").contains("∂"));
+}

@@ -21,6 +21,15 @@ const cases: [string, string][] = [
   ['\\left(f\\circ g\\right)\\left(x\\right)', '(f∘g)(x)'],
   ['f\\colon x\\mapsto x^2', 'f(x)=x^(2)'],
   ['30^{\\circ}', '30*(pi/180)'],
+  // 微分（M3）
+  ['\\frac{d}{dx}\\sin\\left(x\\right)', '@diff(x) sin (x)'],
+  ['z=\\frac{\\partial}{\\partial x}\\sin\\left(xy\\right)', 'z= @diff(x) sin (xy)'],
+  ['\\frac{d^{2}}{dx^{2}}e^{-x^2}', '@diff(x,2) e^(-x^(2))'],
+  ['\\frac{\\partial^{2}}{\\partial x\\partial y}xy', '@diff(x) @diff(y) xy'],
+  ['\\frac{\\mathrm{d}f}{\\mathrm{d}x}', '@diff(x) f'],
+  ["y=f^{\\prime}\\left(x\\right)", "y=f'(x)"],
+  ["y=f''\\left(x\\right)", "y=f''(x)"],
+  ['\\frac{d}{2}', '((d)/(2))'],
   // 座標の名前（座標系。計画 S38）
   ['r=\\cos\\left(2\\theta\\right)', 'r= cos (2 theta )'],
   ['\\rho\\sin\\varphi+\\vartheta', 'rho sin phi + theta'],

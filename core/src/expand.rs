@@ -6,6 +6,7 @@
 //!
 //! - 関数の定義 `f(x) = x^2` と、その呼び出し `f(2x)`・合成 `g(f(x))`・関数どうしの演算 `(f + g)(x)`・`(f ∘ g)(x)`（M1）
 //! - 総和 `@sum(n, 1, N) 項`・総積 `@prod(…)`、等差のリスト `[1, 3, …, 9]`、両方の符号 `±`・`∓`（M4）
+//! - 微分 `@diff(x) 項`・`@diff(x, 2) 項`、導関数 `f'(x)`（M3。記号微分は `diff.rs`）
 //!
 //! 定義は、ほかの行（式の一覧）から [`Defs::parse`] で作り、[`install`] で入れておく（`lib.rs` が `plot` の間だけ入れる）。
 //! 計算エンジンの式の文法は `parser.rs` の先頭の説明。展開した後の式には、新しい節を残さない（残れば内部エラー）
@@ -357,15 +358,23 @@ impl Expander<'_> {
                 None => Val::S(e.clone()),
             },
             Expr::Apply { name, primes, args } => {
-                if *primes > 0 {
-                    return Err(format!("{name}{} はまだ使えません（微分は次の段階で入ります）", "'".repeat(*primes as usize)));
-                }
                 let Some(f) = self.def_value(name)? else {
                     return Err(format!("{name} は定義されていません"));
                 };
                 let args = args.iter().map(|a| self.scalar(a)).collect::<Result<Vec<_>, _>>()?;
                 match f {
-                    Val::Fn { arity, body } => Val::S(self.apply(name, arity, &body, args)?),
+                    Val::Fn { arity, body } => {
+                        // f'(u): 本体を仮引数で微分してから当てはめる
+                        let body = if *primes > 0 {
+                            if arity != 1 {
+                                return Err(format!("{name} は引数が {arity} 個なので、' ではなく ∂ で微分してください"));
+                            }
+                            crate::diff::diff_n(&body, &arg_name(0), *primes as usize)?
+                        } else {
+                            body
+                        };
+                        Val::S(self.apply(name, arity, &body, args)?)
+                    }
                     Val::S(_) => return Err(format!("{name} は関数ではありません")),
                 }
             }
@@ -414,6 +423,25 @@ impl Expander<'_> {
             }
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
+            Expr::Binder { op, var, args, body } if op == "diff" => {
+                let k = match args.as_slice() {
+                    [] => 1,
+                    [k] => {
+                        let k = self.integer(k, "微分の回数")?;
+                        if !(0..=8).contains(&k) {
+                            return Err("微分の回数は 0〜8 にしてください".into());
+                        }
+                        k as usize
+                    }
+                    _ => return Err("微分は d/dx か d²/dx² の形で書いてください".into()),
+                };
+                match self.val(body)? {
+                    Val::S(s) => Val::S(crate::diff::diff_n(&s, var, k)?),
+                    // df/dx（f は引数 1 つの関数）は f'(x)
+                    Val::Fn { arity: 1, body } => Val::S(apply_body(&crate::diff::diff_n(&body, &arg_name(0), k)?, &[Expr::Var(var.clone())])),
+                    Val::Fn { .. } => return Err(fn_as_value_error(body)),
+                }
+            }
             Expr::Op { op, args } if op == "cross" => {
                 // 外積はベクトル・行列の段階で入る。それまではスカラーの掛け算
                 let (va, vb) = (self.val(&args[0])?, self.val(&args[1])?);

@@ -13,6 +13,7 @@
 
 pub mod adaptive;
 pub mod coords;
+pub mod diff;
 pub mod equation;
 pub mod eval;
 pub mod expand;
