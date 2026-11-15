@@ -35,6 +35,8 @@ export interface RaycastUniforms {
   uPixel: { value: number }
   /** 光線の区間を分ける回数の上限（主の探索の分。詰める分は別に 64 回まで） */
   uMaxIter: { value: number }
+  /** 区間演算の回数の合計の上限（主の探索と詰める分の合計） */
+  uWork: { value: number }
   /** ループの回数の上限（いつも 4096。uniform にして展開させない） */
   uIters: { value: number }
   /** 切り口の平面（n · p + c ≥ 0 の側を残す。three.js の Plane と同じ）。uCutOn が 0 なら切らない */
@@ -51,6 +53,8 @@ export interface RaycastUniforms {
   uXfB: { value: THREE.Vector3 }
   /** スライダーのパラメータ（GLSL の uniform float uParam[N]。式の GLSL にパラメータが無ければ使わない） */
   uParam: { value: number[] }
+  /** カメラの手前の面までの距離（これより近い所は描かない） */
+  uNear: { value: number }
 }
 
 /** 計算エンジンが返した 1 次式 [M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂] を uniform にする */
@@ -70,6 +74,10 @@ const RAY_MAIN = /* glsl */ `
   vec3 ro = cameraPosition;
   vec3 rd = normalize(vRayWorld - cameraPosition);
   vec2 tr = gRayBox(ro, rd);
+  // カメラが箱の中にいるとき、光線はカメラの位置（t = 0）から始まる。1 画素の大きさ（uPixel · t）は t = 0 で 0 になるので、
+  // 面が密な式（tan(xyz) = 1 など）ではカメラのすぐ手前を際限なく細かく分け、繰り返しの上限まで使い切っていた（拡大して 1 コマ 0.5 秒）。
+  // メッシュと同じく、カメラの手前の面（near）より近い所は描かない
+  tr.x = max(tr.x, uNear);
   if (uCutOn > 0.5) {
     float s0 = dot(uCut.xyz, ro) + uCut.w;
     float sd = dot(uCut.xyz, rd);
@@ -134,7 +142,7 @@ export function createRaycastMaterial(glsl: string, grid: GridUniforms, ray: Ray
     shader.fragmentShader = shader.fragmentShader
       // 光の計算が使う点の位置を、箱の面ではなく当たった点にする（同じ名前の変数にして、three.js の部品をそのまま使う）
       .replace('varying vec3 vViewPosition;', 'vec3 vViewPosition;')
-      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform mat3 uXfM;\nuniform mat3 uXfA;\nuniform vec3 uXfB;\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
+      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform mat3 uXfM;\nuniform mat3 uXfA;\nuniform vec3 uXfB;\nuniform float uNear;\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
       .replace('#include <clipping_planes_fragment>', RAY_MAIN)
       .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);`)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = gRayN;\nnonPerturbedNormal = gRayN;')
@@ -144,12 +152,20 @@ export function createRaycastMaterial(glsl: string, grid: GridUniforms, ray: Ray
   return m
 }
 
+/**
+ * 光線の回数の上限。止まっているとき（RAY_STILL）と、視点を動かしている間（RAY_MOVING）。
+ * 動かしている間は軽くして、画面全体の画素密度を下げてぼやけさせる代わりにする（打ち切った画素は手前の候補に描く。止まったら描き直す）
+ */
+export const RAY_STILL = { maxIter: 256, work: 1536 }
+export const RAY_MOVING = { maxIter: 64, work: 192 }
+
 export function createRaycastUniforms(): RaycastUniforms {
   return {
     uBoxLo: { value: new THREE.Vector3() },
     uBoxHi: { value: new THREE.Vector3() },
     uPixel: { value: 1e-3 },
-    uMaxIter: { value: 256 },
+    uMaxIter: { value: RAY_STILL.maxIter },
+    uWork: { value: RAY_STILL.work },
     uIters: { value: 4096 },
     uCut: { value: new THREE.Vector4() },
     uCutOn: { value: 0 },
@@ -158,6 +174,7 @@ export function createRaycastUniforms(): RaycastUniforms {
     uXfA: { value: new THREE.Matrix3() },
     uXfB: { value: new THREE.Vector3() },
     uParam: { value: [] },
+    uNear: { value: 0 },
   }
 }
 
@@ -177,6 +194,7 @@ export function raycastMesh(mat: THREE.MeshStandardMaterial, ray: RaycastUniform
     renderer.getCurrentViewport(vp)
     const fov = (camera as THREE.PerspectiveCamera).fov ?? 45
     ray.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(fov) / 2)) / Math.max(1, vp.w)
+    ray.uNear.value = (camera as THREE.PerspectiveCamera).near ?? 0
   }
   return mesh
 }

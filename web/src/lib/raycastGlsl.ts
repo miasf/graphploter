@@ -8,6 +8,8 @@ uniform vec3 uBoxLo;
 uniform vec3 uBoxHi;
 uniform float uPixel;
 uniform int uMaxIter;
+// 区間演算の回数の合計の上限（主の探索と、1/16 画素まで詰める分の合計）
+uniform int uWork;
 uniform int uIters;
 uniform vec4 uCut;
 uniform float uCutOn;
@@ -54,6 +56,7 @@ int gRay(vec3 o, vec3 d, float t0, float t1, out float tHit) {
   sb[0] = t1;
   int n = 1;
   int mainIt = 0;
+  int work = 0;
   int budget = 0;
   float epsR = 0.0;
   bool bis = false;
@@ -87,6 +90,9 @@ int gRay(vec3 o, vec3 d, float t0, float t1, out float tHit) {
       budget--;
     }
     if (!skip) {
+      // 仕事の総量の上限: 極が密な式（tan(xyz) = 1 の奥など）では、極を含む区間ごとに詰める分が走り、1 本の光線の仕事が膨らむ
+      work++;
+      if (work > uWork) { tHit = a; return 2; }
       Div r = gRayI(o, d, a, b);
       if (!gi_none(r) && r.lo <= 0.0 && 0.0 <= r.hi) {
         float eps = max(uPixel * max(a, 1e-9), 1e-12);

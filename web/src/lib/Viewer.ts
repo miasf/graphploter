@@ -11,7 +11,7 @@ import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
-import { createRaycastMaterial, createRaycastUniforms, raycastMesh, setRayTransform, type RaycastUniforms } from './raycastMaterial'
+import { createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayTransform, type RaycastUniforms } from './raycastMaterial'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
@@ -693,7 +693,15 @@ export class Viewer {
     if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio)
     this.applyLineScale(ratio / this.basePixelRatio)
     for (const p of this.plots.values()) this.applyLod(p)
+    for (const g of this.gpu3d.values()) this.applyRayBudget(g.ray)
     this.dirty = true
+  }
+
+  /** 光線の回数の上限: 視点を動かしている間は軽くする（止まったら元に戻して描き直す） */
+  private applyRayBudget(ray: RaycastUniforms) {
+    const b = this.camMoving ? RAY_MOVING : RAY_STILL
+    ray.uMaxIter.value = b.maxIter
+    ray.uWork.value = b.work
   }
 
   /** 格子線の太さの倍率（全部の曲面の材質で共有する。今の画素密度 ÷ ふつうのときの画素密度） */
@@ -1489,6 +1497,7 @@ export class Viewer {
     if (old) this.removeGpu3d(id)
     const ray = createRaycastUniforms()
     setUniforms(ray)
+    this.applyRayBudget(ray)
     // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
     const mat = createRaycastMaterial(glsl, p.grid, ray)
     const m = raycastMesh(mat, ray, d)
@@ -1500,6 +1509,7 @@ export class Viewer {
       if (this.gpu3d.get(id) !== layer) return
       layer.ready = true
       this.scene.add(layer.mesh)
+      this.quality.forget()
       const st = this.styles.get(id)
       if (st) this.setStyle(id, st)
       this.dirty = true
@@ -1510,6 +1520,7 @@ export class Viewer {
   private removeGpu3d(id: number) {
     const g = this.gpu3d.get(id)
     if (!g) return
+    this.quality.forget()
     if (g.ready) this.scene.remove(g.mesh)
     g.mesh.geometry.dispose()
     g.mat.dispose()
@@ -2110,7 +2121,10 @@ export class Viewer {
       return
     }
 
-    if (p.group.visible !== style.visible) this.sceneChanged = true
+    if (p.group.visible !== style.visible) {
+      this.sceneChanged = true
+      this.quality.forget() // 重い式を隠したら、下げた画質を覚えたままにしない
+    }
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)

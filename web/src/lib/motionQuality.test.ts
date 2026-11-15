@@ -38,6 +38,28 @@ check('粗い版が無ければ画素密度だけ', stageList(1, false).map((s) 
 check('くっきり: 画素密度は下げない', stageList(2, true, 'sharp').map((s) => [s.lod, s.ratio]), [[false, 2], [true, 2]])
 check('常にそのまま: 段階 0 だけ', stageList(2, true, 'full').map((s) => [s.lod, s.ratio]), [[false, 2]])
 
+// 最初の 2 コマは数えない（止まっている間の重い描画の時間が入るので、それで画素密度を下げない）
+{
+  const q = start()
+  q.frame(500)
+  q.frame(400)
+  check('最初の 2 コマ（500・400 ms）の後も 16.7 ms なら段階 0', Math.max(...run(q, 16.7, 60)), 0)
+}
+// forget: 覚えた段階を捨てる（重い式を隠したとき）
+{
+  const q = start()
+  run(q, helps, 40)
+  check('遅い操作で段階が下がる', q.level > 0, true)
+  q.end()
+  q.forget()
+  q.begin()
+  check('forget の後の操作は段階 0 から', q.level, 0)
+  const r = start()
+  run(r, helps, 40)
+  r.end()
+  r.begin()
+  check('forget しなければ、覚えた段階から', r.level > 0, true)
+}
 // (a) 16.7 ms が続けば、段階 0 のまま
 {
   const q = start()

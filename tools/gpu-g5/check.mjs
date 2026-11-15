@@ -83,6 +83,7 @@ void main() {
   gl.uniform1f(u('uPixel'), (2 * cam.tanHalf) / h)
   gl.uniform1i(u('uMaxIter'), maxIter)
   gl.uniform1i(u('uIters'), 4096)
+  gl.uniform1i(u('uWork'), 100000)
   gl.uniform1f(u('uCutOn'), 0)
   const buf = gl.createBuffer()
   gl.bindBuffer(gl.ARRAY_BUFFER, buf)
