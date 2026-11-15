@@ -7,6 +7,8 @@ export interface CalcKey {
   insert: string
   tooltip: string
   class?: string
+  /** 長押しで出る別のキー（入れる LaTeX） */
+  variants?: string[]
 }
 
 /** 雛形のキー（label はキーの表示、insert は入れる LaTeX（#? は空欄、#0 は選んでいた部分）、ja は長押しで出る名前） */
@@ -79,8 +81,8 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
       [
         key('{xy|}', '\\left\\{\\left(x,y\\right)\\mid#?\\right\\}', '集合 {(x, y) | 条件}（平面）'),
         key('{xyz|}', '\\left\\{\\left(x,y,z\\right)\\mid#?\\right\\}', '集合 {(x, y, z) | 条件}（空間）'),
-        key('∈', '\\in', '属する'),
-        key('∉', '\\notin', '属さない'),
+        { ...key('∈', '\\in', '属する（長押しで ∉ 属さない）'), variants: ['\\notin'] },
+        key('∣', '\\mid', '集合の区切りの縦線 {点 ∣ 条件}（消してしまったときに。約数 d ∣ 12 にも）'),
         key('∩', '\\cap', '共通部分'),
         key('∪', '\\cup', '和集合'),
         key('∖', '\\setminus', '差集合'),

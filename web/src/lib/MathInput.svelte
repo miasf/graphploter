@@ -3,7 +3,7 @@
   import type { MathfieldElement } from 'mathlive'
   import { onMount } from 'svelte'
   import { fenceBareDelimiters } from './latex'
-  import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SHORTCUTS } from './mathSetup'
+  import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
   interface Props {
     /** 入力欄の中身（LaTeX） */
@@ -45,6 +45,9 @@
     el.inlineShortcuts = SHORTCUTS
     el.smartFence = true // ( を打つと ) も自動で入る
     el.mathVirtualKeyboardPolicy = keyboardPolicy() // 画面上の数式キーボードを出す（PC では入力欄に入ったときに出す）
+    // 指数・下付き（積分の範囲など）を大きく描く
+    const root = el.shadowRoot
+    if (root && !root.adoptedStyleSheets.includes(SCRIPT_SIZE_SHEET)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, SCRIPT_SIZE_SHEET]
     if (autofocus) startEditing()
     el.addEventListener('keydown', fixLayoutKey, { capture: true })
   })

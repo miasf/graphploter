@@ -193,6 +193,19 @@ const SPECIAL_PAGES: { title: string; keys: ReturnType<typeof sp>[] }[] = [
   },
 ]
 
+/**
+ * 入力欄の中に足す見た目の指定: 右肩の指数と、下付き（積分の範囲・添字）を大きくする。
+ * MathLive は肩や下付きを本文の 70%（その中の肩はさらに小さく）で描くので、スマホでは読みにくい。
+ * 肩と下付きの両方が付く所（x₂³）は、大きくしすぎると上下がぶつかるので控えめにする。
+ * 入力欄は Shadow DOM の中にあるので、ページの CSS ではなく、入力欄ごとにこのスタイルシートを足す（MathInput.svelte）
+ */
+export const SCRIPT_SIZE_SHEET = new CSSStyleSheet()
+SCRIPT_SIZE_SHEET.replaceSync(`
+  .ML__msubsup span[style*="font-size: 70%"] { font-size: 78% !important; }
+  .ML__msubsup .ML__vlist > span:only-child > span[style*="font-size: 70%"] { font-size: 86% !important; }
+  .ML__msubsup span[style*="font-size: 50%"] { font-size: 72% !important; }
+`)
+
 /** 特殊関数のタブ: ページごとに層（layer）を分け、下の段の ◀ ▶ でページをめくる */
 const SPECIAL_LAYOUT = {
   label: '特殊',
@@ -566,11 +579,12 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
         ],
         [
           { latex: '#@^{2}', label: 'x²', tooltip: '2乗' },
-          { latex: '#@^{#?}', label: 'xⁿ', tooltip: 'べき乗' },
+          { latex: '#@^{#?}', label: 'xⁿ', tooltip: 'べき乗（長押しで階乗 !）', variants: ['!'] },
           { latex: '\\sqrt{#0}', label: '√', tooltip: '平方根' },
           { latex: '\\left|#0\\right|', label: '|x|', tooltip: '絶対値' },
-          { latex: '!', tooltip: '階乗' },
           { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
+          { latex: 'f', tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h）', variants: ['f\\left(x\\right)', 'h'] },
+          { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)）', variants: ['g\\left(x\\right)'] },
           '[separator-5]',
           '1',
           '2',

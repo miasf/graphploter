@@ -69,6 +69,10 @@ const cases: [string, string][] = [
   ['x\\ne0', 'x≠0'],
   ['\\emptyset\\lor\\top', '∅∨⊤'],
   ['S=\\left\\{\\left(x,y\\right)\\mid x^2+y^2<1\\right\\}', 'S= ⦃(x,y)∣x^(2)+y^(2)<1⦄'],
+  // 縦線を消して | で打ち直したもの（\mid ではなく裸の |）も、区切りとして読む。絶対値の組はそのまま
+  ['\\left\\{\\left(x,y\\right)|x<1\\right\\}', '⦃(x,y)∣x<1⦄'],
+  ['\\left\\{\\left(x,y\\right)|\\left|x\\right|<1\\right\\}', '⦃(x,y)∣abs(x)<1⦄'],
+  ['\\left\\{\\left(x,y\\right)\\mid\\left|x\\right|+\\left|y\\right|<1\\right\\}', '⦃(x,y)∣abs(x)+ abs(y)<1⦄'],
   ['\\left\\{x+1\\right\\}', '(x+1)'],
   // 集合の上の総和・総積、有限集合、⋃・⋂
   ['\\sum_{n\\in\\left\\{1,4,9\\right\\}}n', '@sumset(n; n∈⦃1,4,9⦄) n'],

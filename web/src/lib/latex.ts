@@ -589,21 +589,29 @@ class Converter {
     let depth = 0
     let sep = -1
     let close = -1
+    /** 括弧の外にある裸の縦線（| ・\\vert）の位置。縦線を消して打ち直すと \\mid ではなくこれになる */
+    const bars: number[] = []
     for (let k = this.i; k < this.toks.length; k++) {
       const t = this.toks[k]
-      if (t === '{' || t === '\\left') depth++
-      else if (t === '}' || t === '\\right') {
+      if (t === '{') depth++
+      else if (t === '\\left') {
+        depth++
+        k++ // 括弧の形（\\left| の | など）は区切りに数えない
+      } else if (t === '}' || t === '\\right') {
         if (depth === 0 && end === '\\right' && t === '\\right') {
           close = k
           break
         }
         depth--
+        if (t === '\\right') k++
       } else if (depth === 0 && end === null && (t === '\\}' || t === '\\rbrace')) {
         close = k
         break
-      }
-      if (depth === 0 && sep < 0 && (t === '\\mid' || t === ':' || t === '\\colon')) sep = k
+      } else if (depth === 0 && sep < 0 && (t === '\\mid' || t === ':' || t === '\\colon')) sep = k
+      else if (depth === 0 && (t === '|' || t === '\\vert')) bars.push(k)
     }
+    // 裸の縦線が 1 本だけ（絶対値の組になっていない）なら、それを区切りとして読む
+    if (sep < 0 && bars.length === 1) sep = bars[0]
     if (sep < 0 || close < 0) return false
     const point = new Converter(this.toks.slice(this.i, sep)).run()
     const cond = new Converter(this.toks.slice(sep + 1, close)).run()
