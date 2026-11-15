@@ -233,6 +233,8 @@ export interface PlotItem extends PlotStyle {
   usedParams: string[]
   /** 非表示の間に計算し直す必要が生じた（表示したときに計算する） */
   stale?: boolean
+  /** 積分の範囲（∬_D の D）を描くための行なら、その範囲の名前。式の一覧には出さず、保存もしない（一覧の最後に置く） */
+  regionName?: string
   /** 表示されたらすぐ入力を始める（エンターで新しく足した式） */
   autofocus?: boolean
   /** 範囲で重ねた立体として描いたことがあるか（最初の1回だけ半透明にするため） */

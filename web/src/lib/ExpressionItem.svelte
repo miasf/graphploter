@@ -23,6 +23,10 @@
     regions: Record<string, string>
     /** 範囲の欄が書き換えられたとき */
     onRegion: (name: string, latex: string) => void
+    /** グラフに描いている範囲 → 色と、描けないときの説明 */
+    regionViews: Record<string, { color: string; error?: string }>
+    /** 範囲の欄の「表示」ボタン（描く・消すを切り替える） */
+    onRegionShow: (name: string) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -102,6 +106,8 @@
     onInput,
     regions,
     onRegion,
+    regionViews,
+    onRegionShow,
     onColor,
     onGrid,
     onOpacity,
@@ -440,7 +446,17 @@
           placeholder={'\\left\\{\\left(x,y\\right)\\mid x^2+y^2<1\\right\\}'}
           onInput={(v) => onRegion(name, v)}
         />
+        <button
+          class="region-show"
+          class:on={name in regionViews}
+          style:--region-color={regionViews[name]?.color}
+          aria-pressed={name in regionViews}
+          title={name in regionViews ? 'この範囲をグラフから消す' : 'この範囲をグラフに描く'}
+          onclick={() => onRegionShow(name)}>{name in regionViews ? '表示中' : '表示'}</button>
       </div>
+      {#if regionViews[name]?.error}
+        <div class="region-error">{regionLabel(name)} を描けません: {regionViews[name].error}</div>
+      {/if}
     {/each}
     {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
       <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
@@ -1179,9 +1195,29 @@
     align-items: baseline;
     gap: 6px;
   }
+  .region-show {
+    padding: 3px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: none;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .region-show.on {
+    border-color: var(--region-color);
+    background: color-mix(in srgb, var(--region-color) 18%, transparent);
+    color: var(--text);
+  }
+  .region-error {
+    margin-top: 2px;
+    color: var(--error, #c0392b);
+    font-size: 12px;
+  }
   .region {
     display: grid;
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto 1fr auto;
     align-items: center;
     gap: 6px;
     margin-top: 4px;

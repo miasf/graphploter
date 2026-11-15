@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { fenceBareDelimiters, joinTuple, latexToText, regionsUsed, setRegions, splitTuple } from './latex.ts'
+import { fenceBareDelimiters, joinTuple, latexToText, regionDisplayLatex, regionsUsed, setRegions, splitTuple } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -213,6 +213,21 @@ check(
   ],
 )
 setRegions({})
+
+// 積分の範囲を描くための式
+const shown: [string, string | null][] = [
+  ['\\left\\{\\left(x,y\\right)\\mid-1\\le x+y\\le1,0\\le x-y\\le1\\right\\}', '⦃(x,y,z)∣-1<=x+y<=1,0<=x-y<=1,z=0⦄'],
+  ['\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2+z^2<1\\right\\}', '⦃(x,y,z)∣x^(2)+y^(2)+z^(2)<1⦄'],
+  ['\\left[0,1\\right]\\times\\left[0,2\\pi\\right]', '⦃(x,y,z)∣0<=x<=1,0<=y<=2 pi ,z=0⦄'],
+  ['\\left\\{\\left(r\\cos\\theta,r\\sin\\theta\\right)\\mid0\\le r\\le1,0\\le\\theta\\le2\\pi\\right\\}', '⦃(u cos v,u sin v)∣0<=u<=1,0<=v<=2 pi⦄'],
+  ['\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}', '⦃( cos t, sin t)∣0<=t<=2 pi⦄'],
+  ['\\left\\{\\left(x,y\\right)\\mid\\placeholder{}\\right\\}', null],
+  ['', null],
+]
+for (const [def, want] of shown) {
+  const latex = regionDisplayLatex(def)
+  check(`範囲を描く式 ${def}`, latex === null ? null : latexToText(latex), want)
+}
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')
