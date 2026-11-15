@@ -481,7 +481,7 @@ $$\text{文字列} \xrightarrow{\ \texttt{parse}\ } \text{構文木（新しい�
    - 増えた成分は空欄（`\placeholder{}`）で、**空欄は 0 として読む**（`latex.ts`）。足したとたんにエラーにならず、大きさを変えながら絵が続けて変わる
    - 大きさを小さくして消える行・列に中身があれば、消す前に確かめない（Ctrl + Z で戻せることを確かめる。MathLive の取り消しの 1 手になること）
    - 括弧の形（`pmatrix`・`bmatrix`・`vmatrix`）は、大きさを変えても変わらない。組 `(a, b, c)` で書いた列ベクトルには、この帯は出さない（成分を足すのは `,` を打つだけ）
-   - 作り方: MathLive（`^0.111.4`）には、行・列を足す・消す命令（`addRowAfter`・`addRowBefore`・`addColumnAfter`・`addColumnBefore`・`removeRow`・`removeColumn`）があるはず（**この環境には `node_modules` が無く、確かめていない。最初に `mathlive` の型定義で名前を確かめること**）。あれば、ボタン・キーは `el.executeCommand(...)` を呼ぶだけ。無い・足りない場合と、マス目からの「一度に変える」は、LaTeX を直接書き換える小さな関数 `resizeMatrix(latex, at, rows, cols)`（新しい `web/src/lib/matrixEdit.ts`。カーソルのある `\begin{…matrix}` … `\end{…matrix}` を `&`・`\\` で分け、足りない所を `\placeholder{}` で埋め、余った所を捨てる。入れ子の行列・成分の中の `\frac` などの `{}` の深さを数える）で行い、`el.setValue` の後にカーソルを元の成分へ戻す
+   - 作り方: MathLive（`^0.111.4`）には、行・列を足す・消す命令（`addRowAfter`・`addRowBefore`・`addColumnAfter`・`addColumnBefore`・`removeRow`・`removeColumn`）がある（`mathlive` 0.111 の型定義で確かめた）。あれば、ボタン・キーは `el.executeCommand(...)` を呼ぶだけ。無い・足りない場合と、マス目からの「一度に変える」は、LaTeX を直接書き換える小さな関数 `resizeMatrix(latex, at, rows, cols)`（新しい `web/src/lib/matrixEdit.ts`。カーソルのある `\begin{…matrix}` … `\end{…matrix}` を `&`・`\\` で分け、足りない所を `\placeholder{}` で埋め、余った所を捨てる。入れ子の行列・成分の中の `\frac` などの `{}` の深さを数える）で行い、`el.setValue` の後にカーソルを元の成分へ戻す
    - カーソルが行列の中かどうか・何行何列目かは、`el.position` より前の LaTeX（`el.getValue(0, el.position, 'latex')`）の、閉じていない `\begin{…matrix}` と、その後の `&`・`\\` の数で求める（`MathInput.svelte` の、添字の中かどうかを調べている所と同じやり方）
    - 行列の定義の行（`A = …`）を**新しく足すとき**の入口も置く: 式の一覧の「＋」の中に「行列」。押すと、マス目で大きさを選んで `A=\begin{pmatrix}…\end{pmatrix}`（名前は、使っていない大文字の最初のもの）の行ができる
 
