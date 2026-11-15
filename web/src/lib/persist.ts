@@ -65,6 +65,8 @@ export interface SavedState {
   folders?: Folder[]
   /** 名前で書いた積分の範囲（∬_D の D → 範囲の LaTeX。古い保存データには無い） */
   regions?: Record<string, string>
+  /** グラフに描いている積分の範囲の名前（古い保存データには無い） */
+  regionsShown?: string[]
   /** マウスの操作モード（古い保存データには無い） */
   controlMode?: 'A' | 'B'
   /** 式の回転の標準が「この式だけ」になった後の保存データか（古いものは、グループに入っていない式が全体の回転） */

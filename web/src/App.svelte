@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { latexToText, regionsUsed, setRegions } from './lib/latex'
+  import { latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
@@ -162,7 +162,7 @@
   function snapshot(): SavedState {
     return $state.snapshot({
       version: 1 as const,
-      items: items.map((it) => ({
+      items: listed().map((it) => ({
         latex: it.latex,
         color: it.color,
         visible: it.visible,
@@ -201,6 +201,10 @@
       flatSlice,
       controlMode,
       // 今の式で使っている範囲だけを残す
+      regionsShown: (() => {
+        const shown = items.flatMap((it) => (it.regionName ? [it.regionName] : []))
+        return shown.length > 0 ? shown : undefined
+      })(),
       regions: (() => {
         const used = new Set(items.flatMap((it) => regionsUsed(it.latex).map((r) => r.name)))
         const kept = Object.entries(regions).filter(([name, v]) => used.has(name) && v.trim() !== '')
@@ -248,6 +252,7 @@
     coordSystems = (s.coordSystems ?? []).map((c) => ({ ...c, morph: Math.min(1, Math.max(0, Number(c.morph) || 0)) }))
     nextCoordId = Math.max(0, ...coordSystems.map((c) => c.id)) + 1
     playingMorph = []
+    for (const name of s.regionsShown ?? []) showRegion(name)
   }
 
   // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
@@ -908,8 +913,7 @@
   // ---- 式の一覧の操作 ----
 
   function addItem() {
-    const it = newItem('')
-    items.push(it)
+    pushItem(newItem(''))
   }
 
   /** エンター: その式のすぐ下に空の式を足して、そこに入力を始める */
@@ -977,6 +981,7 @@
     const out: Row[] = []
     const seen = new Set<number>()
     items.forEach((item, index) => {
+      if (item.regionName) return // 積分の範囲を描くための行は、一覧に出さない
       const f = item.folder ? folders.find((f) => f.id === item.folder) : undefined
       if (f && !seen.has(f.id)) {
         seen.add(f.id)
@@ -1044,6 +1049,7 @@
   }
 
   function removeItem(item: PlotItem) {
+    if (!items.includes(item)) return // すでに消してある（範囲を描く行は、使う式が消えると一緒に消える）
     viewer?.removePlot(item.id)
     lastBreakdown.delete(item.id)
     budget.forget(item.id)
@@ -1057,6 +1063,7 @@
     if (item.param) paramsChanged([item.param.name])
     if (item.def) defsChanged([item.def])
     lastDefSource.delete(item.id)
+    if (!item.regionName) pruneRegionItems()
   }
 
   /** 「a のスライダーを追加」: その式のすぐ上に a = 1 の行を足す */
@@ -1089,6 +1096,7 @@
       if (!(r.name in regions)) regions[r.name] = r.template
     }
     setRegions(regions)
+    pruneRegionItems()
     schedule(item)
   }
 
@@ -1096,10 +1104,53 @@
   /** 範囲の名前 → 範囲（LaTeX）。同じ名前は、どの式でも同じ範囲 */
   let regions = $state<Record<string, string>>({})
 
+  /** 式の一覧に出す行（積分の範囲を描くための行を除く） */
+  const listed = () => items.filter((it) => !it.regionName)
+
+  /** 式を一覧の最後に足す（積分の範囲を描くための行は、いつも最後に置く） */
+  function pushItem(it: PlotItem) {
+    const k = items.findIndex((x) => x.regionName)
+    if (k < 0) items.push(it)
+    else items.splice(k, 0, it)
+  }
+
+  /** 範囲 name を描くための行（描いていなければ undefined） */
+  const regionItem = (name: string) => items.find((it) => it.regionName === name)
+
+  /** 範囲 name をグラフに描く（半透明の面・線） */
+  function showRegion(name: string) {
+    if (regionItem(name)) return
+    items.push(newItem(regionDisplayLatex(regions[name] ?? '') ?? '', { regionName: name, opacity: 0.45, vertical: false }))
+    schedule(items[items.length - 1], 0)
+  }
+
+  /** 範囲の欄の「表示」ボタン: 範囲を描く・消す */
+  function toggleRegion(name: string) {
+    const it = regionItem(name)
+    if (it) removeItem(it)
+    else showRegion(name)
+  }
+
+  /** どの式も使わなくなった範囲は、描くのをやめる */
+  function pruneRegionItems() {
+    const used = new Set(listed().flatMap((it) => regionsUsed(it.latex).map((r) => r.name)))
+    for (const it of items.filter((x) => x.regionName && !used.has(x.regionName))) removeItem(it)
+  }
+
+  /** 範囲の欄に出す、描いている範囲の色と誤り（描いていない範囲は入れない） */
+  const regionViews = $derived(
+    Object.fromEntries(items.flatMap((it) => (it.regionName ? [[it.regionName, { color: it.color, error: it.error ?? (it.latex === '' ? 'この形の範囲は描けません' : undefined) }]] : []))),
+  )
+
   /** 範囲の欄が書き換えられたとき: その範囲を使う式を全部計算し直す */
   function setRegion(name: string, latex: string) {
     regions[name] = latex
     setRegions(regions)
+    const shown = regionItem(name)
+    if (shown) {
+      shown.latex = regionDisplayLatex(latex) ?? ''
+      schedule(shown, 300)
+    }
     for (const it of items) {
       if (regionsUsed(it.latex).some((r) => r.name === name)) schedule(it, 300)
     }
@@ -1405,7 +1456,7 @@
   })
 
   /** グラフを描く式（パラメータの行でないもの） */
-  const plotItems = $derived(items.filter((it) => !it.param))
+  const plotItems = $derived(items.filter((it) => !it.param && !it.regionName))
 
   // ---- 座標系（計画 9 章の S37） ----
 
@@ -1793,7 +1844,7 @@
           folders = []
           resolution = c.res ?? 150
           implicitResolution = c.ires ?? 80
-          items.push(newItem(''))
+          pushItem(newItem(''))
           await addSample({
             label: c.label,
             items: c.items,
@@ -1822,7 +1873,7 @@
     // 4次元の例などは、次元が足りなければ増やす
     if (!view && sample.dims && space.dims < sample.dims) setLayout(resizeSpace(space, sample.dims))
     // 空の式が1つだけなら、それはサンプルで置き換える
-    if (items.length === 1 && items[0].latex === '') {
+    if (listed().length === 1 && items[0].latex === '') {
       viewer?.removePlot(items[0].id)
       items.splice(0, 1)
     }
@@ -1849,7 +1900,7 @@
     }
     for (const si of adding) {
       // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
-      items.push(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))
+      pushItem(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))
       if (!view) schedule(items[items.length - 1], 0)
     }
     if (view) applyView(view)
@@ -2041,6 +2092,8 @@
             onInput={(s) => setLatex(item, s)}
             {regions}
             onRegion={setRegion}
+            {regionViews}
+            onRegionShow={toggleRegion}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}

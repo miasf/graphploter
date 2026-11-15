@@ -869,6 +869,83 @@ export function regionsUsed(latex: string): { name: string; template: string }[]
   return out
 }
 
+/** 媒介変数の名前になりうるギリシャ文字 */
+const PARAM_GREEK = new Set(['\\theta', '\\vartheta', '\\varphi', '\\phi', '\\rho', '\\sigma', '\\tau', '\\alpha', '\\beta', '\\psi', '\\omega', '\\lambda', '\\mu', '\\nu'])
+
+/**
+ * 積分の範囲（範囲の欄の中身）を、グラフに描くための式（LaTeX）にする。描ける形でなければ null。
+ * - 平面の領域 {(x, y) | 条件}・[0,1]×[0,2] は、3 次元でも柱にならないよう、高さ 0 の面 {(x, y, z) | 条件, z = 0} にする
+ * - 点を式で書いた集合 {(r cos θ, r sin θ) | 0 ≤ r ≤ 1, …} は、媒介変数の名前を計算エンジンが読める t・u・v に付け替える
+ */
+export function regionDisplayLatex(def: string): string | null {
+  let toks = tokenize(def).filter((t) => t !== ' ')
+  if (toks.length === 0 || toks.includes('\\placeholder')) return null
+  const text = (ts: Token[]) => ts.map((t) => (/^\\[A-Za-z]+$/.test(t) ? `${t} ` : t)).join('')
+  const strip = (open: Token[], close: Token[]) => {
+    if (open.every((t, k) => toks[k] === t) && close.every((t, k) => toks[toks.length - close.length + k] === t)) {
+      toks = toks.slice(open.length, toks.length - close.length)
+      return true
+    }
+    return false
+  }
+  const set = (point: string, cond: string) => `\\left\\{\\left(${point}\\right)\\mid ${cond}\\right\\}`
+  if (!(strip(['\\left', '\\{'], ['\\right', '\\}']) || strip(['\\{'], ['\\}']) || strip(['\\lbrace'], ['\\rbrace']))) {
+    // 区間の直積 [a,b]×[c,d]: 座標は x, y, z の順
+    const boxes: Token[][] = [[]]
+    let depth = 0
+    for (let k = 0; k < toks.length; k++) {
+      const t = toks[k]
+      if (t === '\\left') depth++
+      else if (t === '\\right') depth--
+      if (depth === 0 && t === '\\times') boxes.push([])
+      else boxes[boxes.length - 1].push(t)
+    }
+    const conds: string[] = []
+    for (const [k, box] of boxes.entries()) {
+      const inner = box[0] === '\\left' ? box.slice(2, -2) : box.slice(1, -1)
+      const open = box[0] === '\\left' ? box[1] : box[0]
+      const comma = inner.indexOf(',')
+      if (open !== '[' || comma < 1 || comma === inner.length - 1 || k > 2) return null
+      conds.push(`${text(inner.slice(0, comma))}\\le ${'xyz'[k]}\\le ${text(inner.slice(comma + 1))}`)
+    }
+    if (conds.length === 1) return null
+    return conds.length === 2 ? set('x,y,z', `${conds.join(',')},z=0`) : set('x,y,z', conds.join(','))
+  }
+  // 点と条件に分ける
+  let sep = -1
+  let depth = 0
+  for (let k = 0; k < toks.length && sep < 0; k++) {
+    const t = toks[k]
+    if (t === '{' || t === '\\left') depth++
+    else if (t === '}' || t === '\\right') depth--
+    else if (depth === 0 && (t === '\\mid' || t === '|' || t === ':' || t === '\\vert' || t === '\\colon')) sep = k
+  }
+  if (sep < 1 || sep === toks.length - 1) return null
+  let point = toks.slice(0, sep)
+  const cond = toks.slice(sep + 1)
+  if (point[0] === '\\left' && point[1] === '(' && point[point.length - 2] === '\\right') point = point.slice(2, -2)
+  else if (point[0] === '(' && point[point.length - 1] === ')') point = point.slice(1, -1)
+  const names = text(point).split(',').map((n) => n.trim())
+  if (names.every((n) => /^[A-Za-z]$/.test(n))) {
+    // 変数の組: 2 つなら、3 つ目の座標 = 0 の面にする
+    if (names.length !== 2) return set(names.join(','), text(cond))
+    const third = ['z', 'w', 'c'].find((n) => !names.includes(n) && !cond.includes(n))
+    return third ? set(`${names.join(',')},${third}`, `${text(cond)},${third}=0`) : set(names.join(','), text(cond))
+  }
+  // 点を式で書いた集合: 条件に出てくる文字（媒介変数）を t・u・v に付け替える
+  const isName = (t: Token) => (/^[A-Za-z]$/.test(t) && t !== 'e' && t !== 'i' && t !== 'd') || PARAM_GREEK.has(t)
+  const params = [...new Set(cond.filter(isName))].filter((t) => point.includes(t))
+  if (params.length === 0 || params.length > 3) return null
+  const targets = params.length === 1 ? ['t'] : ['u', 'v', 't']
+  const free = targets.filter((n) => !params.includes(n))
+  const rename = new Map<Token, Token>()
+  for (const p of params) {
+    if (!targets.includes(p)) rename.set(p, free.shift()!)
+  }
+  const re = (ts: Token[]) => text(ts.map((t) => rename.get(t) ?? t))
+  return set(re(point), re(cond))
+}
+
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */
 export function latexToText(latex: string): string {
   // 写像の書き方 f\colon x\mapsto x^2 は、関数の定義 f(x)=x^2 と同じ
