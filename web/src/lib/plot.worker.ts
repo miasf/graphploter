@@ -513,12 +513,18 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
     const outlineDashedTarget = r.take_outline_dashed_target()
-    const gpu3d = r.gpu3d_glsl() || undefined
+    const g3 = r.gpu3d_glsl()
+    const g3t = g3 ? Array.from(r.gpu3d_transform()) : []
+    const gpu3d = g3
+      ? { glsl: g3, params: r.gpu3d_params().split(',').filter((s) => s !== ''), values: Array.from(r.gpu3d_values()), transform: g3t.slice(0, 12), local: g3t[12] === 1 }
+      : undefined
+    const gpuReason = r.gpu_reason
     const gi = r.gpu2d_info()
     const gpu2d = gi.length === 3 ? { glsl: r.gpu2d_glsl(), eq: gi[0], cuts: gi[1], lines: gi[2] } : undefined
     const mesh = {
       ...(gpu2d ? { gpu2d } : {}),
       ...(gpu3d ? { gpu3d } : {}),
+      ...(gpuReason ? { gpuReason } : {}),
       valueRange: vr.length === 2 ? ([vr[0], vr[1]] as [number, number]) : null,
       ...(volume ? { volume } : {}),
       ...(outline.length > 0 ? { outline } : {}),

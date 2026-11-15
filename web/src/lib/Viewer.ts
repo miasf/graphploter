@@ -10,7 +10,8 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
-import { createRaycastMaterial, createRaycastUniforms, raycastMesh, type RaycastUniforms } from './raycastMaterial'
+import { wantGpu } from './renderMode'
+import { createRaycastMaterial, createRaycastUniforms, raycastMesh, setRayTransform, type RaycastUniforms } from './raycastMaterial'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
@@ -156,15 +157,16 @@ export class Viewer {
    * あるときは、plots の線・面を隠して（カーソルの下の点にはそれを使う）、こちらを描く
    */
   private gpu2d = new Map<number, { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; glsl: string; key: string; eq: number; ready: boolean }>()
-  /** 画素ごとの 2D の描き方を使うか（?gpu2d=0 で使わない。描き方の切り替えの画面は G7） */
-  private gpu2dOn = typeof location === 'undefined' || new URLSearchParams(location.search).get('gpu2d') !== '0'
+
   /**
    * 3D の陰関数を光線で描く箱（計画 12 章の G5）。式の番号 → 箱と材質と、その GLSL・表示範囲。
    * あるときは、plots の面（メッシュ）を隠して（カーソルの下の点・切り口のふたにはそれを使う）、こちらを描く
    */
-  private gpu3d = new Map<number, { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; ray: RaycastUniforms; glsl: string; key: string; ready: boolean }>()
-  /** 3D の陰関数を光線で描くか（?gpu3d=0 で使わない。描き方の切り替えの画面は G7） */
-  private gpu3dOn = typeof location === 'undefined' || new URLSearchParams(location.search).get('gpu3d') !== '0'
+  private gpu3d = new Map<
+    number,
+    { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; ray: RaycastUniforms; glsl: string; key: string; ready: boolean; local: boolean; params: string[] }
+  >()
+
   /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
   private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
   /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
@@ -1400,14 +1402,15 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
-    this.syncGpu2d(id, mesh)
-    this.syncGpu3d(id, mesh)
+    // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
+    this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
+    this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'))
     this.setStyle(id, style)
   }
 
   /** 画素ごとの 2D の描き方の平面を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
-  private syncGpu2d(id: number, mesh: MeshData) {
-    const info = this.flat && this.gpu2dOn ? mesh.gpu2d : undefined
+  private syncGpu2d(id: number, mesh: MeshData, want: boolean) {
+    const info = this.flat && want ? mesh.gpu2d : undefined
     const old = this.gpu2d.get(id)
     const d = this.domain
     if (!info || !d) {
@@ -1455,14 +1458,20 @@ export class Viewer {
   }
 
   /** 光線で描く箱を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
-  private syncGpu3d(id: number, mesh: MeshData) {
-    const glsl = !this.flat && this.gpu3dOn ? mesh.gpu3d : undefined
+  private syncGpu3d(id: number, mesh: MeshData, want: boolean) {
+    const info = !this.flat && want ? mesh.gpu3d : undefined
+    const glsl = info?.glsl
     const old = this.gpu3d.get(id)
     const d = this.domain
     const p = this.plots.get(id)
-    if (!glsl || !d || !p || p.kind !== 'surface') {
+    if (!info || !glsl || !d || !p || p.kind !== 'surface') {
       if (old) this.removeGpu3d(id)
       return
+    }
+    // 回転の 1 次式・パラメータの値（GLSL が同じなら、これだけを変える）
+    const setUniforms = (ray: RaycastUniforms) => {
+      setRayTransform(ray, info.transform)
+      ray.uParam.value = info.values.slice()
     }
     const key = `,,,,,`
     if (old && old.glsl === glsl) {
@@ -1473,15 +1482,17 @@ export class Viewer {
         old.key = key
         if (old.ready) this.scene.add(old.mesh)
       }
+      setUniforms(old.ray)
       this.dirty = true
       return
     }
     if (old) this.removeGpu3d(id)
     const ray = createRaycastUniforms()
+    setUniforms(ray)
     // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
     const mat = createRaycastMaterial(glsl, p.grid, ray)
     const m = raycastMesh(mat, ray, d)
-    const layer = { mesh: m, mat, ray, glsl, key, ready: false }
+    const layer = { mesh: m, mat, ray, glsl, key, ready: false, local: info.local, params: info.params }
     this.gpu3d.set(id, layer)
     this.applyRayCut(layer.ray)
     // コンパイルは裏で行い、終わるまでは今までのメッシュの面を見せる
@@ -1511,10 +1522,24 @@ export class Viewer {
    * 光線の GLSL は回した後の式なので、向きが変わると合わなくなる（回転を uniform にするのは G7）
    */
   dropPixelLayers(id: number) {
-    if (!this.gpu3d.has(id)) return
+    const layer = this.gpu3d.get(id)
+    // 回す前の式で描いているなら、回転は setPlotTransform で uniform を変えるだけ
+    if (!layer || layer.local) return
     this.removeGpu3d(id)
     const st = this.styles.get(id)
     if (st) this.setStyle(id, st)
+  }
+
+  /**
+   * スライダーのパラメータの値（名前 → 値）を、光線で描く式の uniform に入れる。計算し直しの結果を待たずに描き直せる
+   * （その式が使っていない名前は無視する）
+   */
+  setGpuParams(values: Record<string, number>) {
+    for (const g of this.gpu3d.values()) {
+      if (g.params.length === 0) continue
+      g.ray.uParam.value = g.params.map((n, k) => values[n] ?? g.ray.uParam.value[k] ?? 0)
+      this.dirty = true
+    }
   }
 
   /** 光線の箱の切り口（three.js の Plane と同じく、n · p + c ≥ 0 の側を残す） */
@@ -1582,6 +1607,12 @@ export class Viewer {
    * 格子線は表示中の座標で引く（uGridWorld）。表示範囲・切り口で切り落とす平面は、もともと表示中の座標
    */
   setPlotTransform(id: number, t: ArrayLike<number> | null) {
+    // 回す前の式で描いている光線は、同じ 1 次式を uniform に入れる（GLSL は作り直さない）
+    const layer = this.gpu3d.get(id)
+    if (layer?.local && t && t.length === 12) {
+      setRayTransform(layer.ray, t)
+      this.dirty = true
+    }
     const p = this.plots.get(id)
     if (!p || p.kind !== 'surface') return
     const main = p.group.children[0] as THREE.Mesh

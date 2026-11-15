@@ -57,6 +57,8 @@ int gRay(vec3 o, vec3 d, float t0, float t1, out float tHit) {
   int budget = 0;
   float epsR = 0.0;
   bool bis = false;
+  // 値がちょうど 0 の所に当たった（式がまるごと 0 になる範囲など）: 0 でない所から 0 の所への境目を二分で詰める
+  bool zeroEdge = false;
   float blo = 0.0;
   float bhi = 0.0;
   float flo = 0.0;
@@ -106,11 +108,16 @@ int gRay(vec3 o, vec3 d, float t0, float t1, out float tHit) {
               if (k == 0) fa = v; else fb = v;
             }
           }
-          if (cont && (refine ? fa * fb <= 0.0 : fa * fb < 0.0)) {
+          if (cont && (fa == 0.0 || fb == 0.0)) {
+            // 区間の端で値がちょうど 0（1 画素の幅でも、詰める分でも）。その端をそのまま当たりにすると、当たる所が区間の幅だけずれて
+            // 画素ごとに揺れる（floor(x) + floor(y) + floor(z) = 0 の立体の面がざらついた）。
+            // 0 でない所から 0 の所への境目を二分で詰める。手前の端が 0 なら、その手前の同じ幅の区間を調べる
+            bis = true;
+            zeroEdge = true;
+            blo = fa == 0.0 ? max(a - (b - a), t0) : a;
+            bhi = fa == 0.0 ? a : b;
+          } else if (cont && fa * fb < 0.0) {
             bis = true; blo = a; bhi = b; flo = fa;
-          } else if (!refine && cont && (fa == 0.0 || fb == 0.0)) {
-            tHit = fa == 0.0 ? a : b;
-            return 1;
           } else if (!refine) {
             // 1 画素の幅で、連続でない・符号が同じ: 1/16 画素まで詰めて決める
             push = 1;
@@ -143,10 +150,15 @@ int gRay(vec3 o, vec3 d, float t0, float t1, out float tHit) {
       float mid = 0.5 * (blo + bhi);
       if (mid <= blo || mid >= bhi) break;
       float fm = gRayV(o + mid * d);
+      if (zeroEdge) {
+        // 0 の所の手前の端を探す
+        if (fm == 0.0) bhi = mid; else blo = mid;
+        continue;
+      }
       if (fm == 0.0) { blo = mid; bhi = mid; break; }
       if (flo * fm < 0.0) bhi = mid; else { blo = mid; flo = fm; }
     }
-    tHit = 0.5 * (blo + bhi);
+    tHit = zeroEdge ? bhi : 0.5 * (blo + bhi);
     return 1;
   }
   return n > 0 ? 2 : 0;

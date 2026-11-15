@@ -264,7 +264,8 @@ pub enum Plot {
     /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
     /// `local` は、回転が表示中の座標どうしだけのときの、回す前の F（変数は表示中の 3 つの座標）。
     /// これでメッシュを作って回せば、角度が変わっても計算し直さずに済む（lib.rs の build）
-    Implicit { prog: Program, from: Option<String>, local: Option<Program> },
+    /// `gpu` は、GPU の光線の描き方（計画 12 章の G5・G7）に渡す F（[`GpuImplicit`]）
+    Implicit { prog: Program, from: Option<String>, local: Option<Program>, gpu: Option<Box<GpuImplicit>> },
     /// 表示していない座標が絡む回転をした陽関数を、傾いた直交座標系 (u, v, t) の陽関数 t = g(u, v) として描くもの（[`tilted`]）。
     /// 表示中の点は q = u e₁ + v e₂ + t e₃（`frame` = [e₁, e₂, e₃]。正規直交・右手系）。
     /// `prog` の変数は (u, v)（利用者が打てない名前 [`TILT_U`]・[`TILT_V`]）。
@@ -304,6 +305,16 @@ pub enum Plot {
         /// 不等式ごとに、厳密（`<`・`>`）か
         strict: Vec<bool>,
     },
+}
+
+/// GPU の光線の描き方に渡す陰関数の F（計画 12 章の G7）。スライダーのパラメータは定数に畳み込まず、変数のまま残す
+/// （変数は表示中の 3 つの座標の後に `params` の順。GLSL では uniform にして、スライダーを動かしても GLSL を作り直さない）。
+/// `local` が true なら回す前の F（[`Plot::Implicit`] の `local` と同じ式）で、回転は 1 次式 q = M p + t として描画側で掛ける
+#[derive(Debug, Clone)]
+pub struct GpuImplicit {
+    pub prog: Program,
+    pub params: Vec<String>,
+    pub local: bool,
 }
 
 impl Plot {
@@ -1017,7 +1028,7 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     let base = match eq_rows.as_slice() {
         // 回す前の形（Plot::Implicit の local）は使わない（切り取った面は、回転が変わるたびに作り直す）
         [(l, r)] => Some(Box::new(match compile_pair(l.clone(), r.clone(), params, space)? {
-            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None },
+            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None, gpu: None },
             p => p,
         })),
         _ => None,
@@ -1076,12 +1087,16 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         r.collect_vars(&mut used);
         if space.rotation_keeps_shown(&used) && shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
             let f = Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()));
-            Some(Program::compile_with(&f, &shown_refs, &consts)?)
+            Some((Program::compile_with(&f, &shown_refs, &consts)?, f))
         } else {
             None
         }
     } else {
         None
+    };
+    let (local, local_expr) = match local {
+        Some((p, e)) => (Some(p), Some(e)),
+        None => (None, None),
     };
 
     // 陽関数（z = f(x, y) など）を回して陰関数として計算し直すときは、その形を覚えておく。
@@ -1134,7 +1149,22 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     let prog = Program::compile_with(&f, &shown_refs, &consts)?;
     // 線・点だけの解として描く式・複素数の陰関数（i を含む式）は、回す前の形（面のメッシュを 3D オブジェクトとして回す）を使わない
     let local = local.filter(|_| prog.common_zero_sets().is_none() && !prog.has_complex_const());
-    Ok(Plot::Implicit { prog, from, local })
+    // GPU の描き方の F: 回す前の F があればそれ（回転は描画側で掛ける）、無ければ回した F。
+    // 実数のスライダーのパラメータは変数として残す（複素数のパラメータは定数のまま）
+    let gpu = {
+        let base = if local.is_some() { local_expr } else { Some(f.clone()) };
+        base.and_then(|e| {
+            let names: Vec<String> = params.iter().filter(|(n, v)| v.im == 0.0 && e.uses_var(n) && !shown.contains(n)).map(|(n, _)| n.clone()).collect();
+            let mut cs = consts.clone();
+            for n in &names {
+                cs.remove(n);
+            }
+            let mut vars: Vec<&str> = shown_refs.to_vec();
+            vars.extend(names.iter().map(String::as_str));
+            Program::compile_with(&e, &vars, &cs).ok().map(|p| Box::new(GpuImplicit { prog: p, params: names, local: local.is_some() }))
+        })
+    };
+    Ok(Plot::Implicit { prog, from, local, gpu })
 }
 
 /// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）

@@ -32,6 +32,8 @@ export interface SavedItem {
   layers?: number
   /** 媒介変数が3つ以上の図形を辺だけで描くか（古い保存データには無い。無ければ面） */
   edges?: boolean
+  /** 描画の方法（古い保存データには無い。無ければ自動） */
+  render?: 'auto' | 'mesh' | 'gpu'
   /** 入っているフォルダの番号（古い保存データには無い） */
   folder?: number
   /** 座標系の番号（古い保存データには無い。無ければ直交座標） */

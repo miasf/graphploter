@@ -76,6 +76,9 @@ export type ComplexMode = 'off' | 'abs' | 're' | 'im' | 'arg' | 'param'
 export const COMPLEX_MODE_ORDER: ComplexMode[] = ['off', 'abs', 're', 'im', 'arg', 'param']
 
 /** 曲面の見た目 */
+/** 描画の方法（計画 12 章の G7）: 自動・メッシュ・画素ごと（GPU） */
+export type RenderMode = 'auto' | 'mesh' | 'gpu'
+
 export interface PlotStyle {
   color: string
   visible: boolean
@@ -86,6 +89,8 @@ export interface PlotStyle {
   lineWidth: number
   /** 表示していない座標の見せ方（値の色の対応表・伝達関数の不透明度は、計算し直さずに変える） */
   hidden?: HiddenStyle
+  /** 描画の方法（無ければ自動） */
+  render?: RenderMode
 }
 
 /** 媒介変数の範囲。媒介変数の名前（t, u, v, t1, …）→ [最小, 最大]（入力欄の LaTeX のまま。2π などの式も書ける） */
@@ -257,6 +262,9 @@ export interface PlotItem extends PlotStyle {
   layers?: number
   /** 媒介変数が3つ以上の図形を、面ではなく辺だけで描くか（無ければ面） */
   edges?: boolean
+  /** 最後の結果で、GPU の描き方を使えたか・使えない理由（計算エンジンが返したもの。保存しない） */
+  gpuAvailable?: boolean
+  gpuReason?: string
   /** 入っているフォルダの番号（無ければフォルダの外）。同じフォルダの式は、一覧で続けて並ぶ */
   folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
@@ -294,6 +302,19 @@ export interface CapData {
 }
 
 /** Rust 側で作ったメッシュ */
+/** 3D の陰関数を光線で描くための GLSL と uniform の値（計算エンジンの Gpu3d） */
+export interface Gpu3dInfo {
+  /** gR・gRd・gRi と下請けの関数。スライダーのパラメータは uniform の配列 uParam */
+  glsl: string
+  /** uParam の順のパラメータの名前と、今の値 */
+  params: string[]
+  values: number[]
+  /** F の座標 p から表示中の座標 q への 1 次式 q = M p + t（12 個） */
+  transform: number[]
+  /** 回す前の F か（回転だけが変わったら、transform を変えるだけで描ける） */
+  local: boolean
+}
+
 export interface MeshData {
   positions: Float32Array
   normals: Float32Array
@@ -329,8 +350,10 @@ export interface MeshData {
   volume?: { n: number; values: Float32Array }
   /** 2D 表示の曲線・不等式の領域を画素ごとに描くための GLSL（計画 12 章の G4）。GPU に移せない式では省略 */
   gpu2d?: import('./gpu2dMaterial').Gpu2dInfo
-  /** 3D の陰関数を光線で描くための GLSL（計画 12 章の G5。gR・gRd・gRi）。GPU に移せない式では省略 */
-  gpu3d?: string
+  /** 3D の陰関数を光線で描くためのもの（計画 12 章の G5・G7）。GPU に移せない式では省略 */
+  gpu3d?: Gpu3dInfo
+  /** GPU の描き方を使えない理由（式の ⚙ に出す）。使えるなら空 */
+  gpuReason?: string
   /** 2D 表示の不等式の領域の境目の線（実線。点の列で、途切れる所に NaN）。無ければ省略 */
   outline?: Float32Array
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */

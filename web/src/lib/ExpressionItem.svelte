@@ -8,7 +8,8 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
+  import { gpuByDefault } from './renderMode'
 
   interface Props {
     item: PlotItem
@@ -37,6 +38,8 @@
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
     onEdges: (on: boolean) => void
+    /** 描画の方法を変えたとき（計画 12 章の G7） */
+    onRender: (mode: RenderMode) => void
     /** 次元を n にする（「次元を 5 にする」ボタン・成分を足したとき） */
     onSetDims: (n: number) => void
     onLineWidth: (width: number) => void
@@ -109,6 +112,7 @@
     onWalls,
     onLayers,
     onEdges,
+    onRender,
     onSetDims,
     onLineWidth,
     onRange,
@@ -192,6 +196,14 @@
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
   /** 複素平面の点（1 + 2i、複素数のパラメータ c など）。曲線と同じく線の太さ（点の大きさ）を選べる */
   const isComplexPoint = $derived(/^複素平面の点/.test(item.kind ?? ''))
+  /** 描画の方法の説明: 選んだ方法で描けない理由・自動で選んだもの（計画 12 章の G7） */
+  const renderNote = $derived.by(() => {
+    const mode = item.render ?? 'auto'
+    if (mode === 'mesh') return ''
+    if (!item.gpuAvailable) return `画素ごとの描き方は使えないので、メッシュで描いています（${item.gpuReason || 'この式は対象外です'}）`
+    if (mode === 'auto' && !gpuByDefault()) return 'この端末では、自動のときはメッシュで描きます（画素ごと（GPU）を選ぶと使えます）'
+    return ''
+  })
   /** 媒介変数が3つ以上の図形を、辺だけで描いている（線として描く） */
   const isEdges = $derived(item.params.length >= 3 && (item.edges ?? false))
   const isCurve = $derived(item.params.length === 1 || isComplexPoint || isEdges)
@@ -610,6 +622,19 @@
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
               値が飛ぶ所（floor の段差など）に壁を描く
             </label>
+          {/if}
+          {#if item.gpuAvailable || item.gpuReason}
+            <div class="complex-mode">
+              <span class="label">描画の方法</span>
+              <select value={item.render ?? 'auto'} aria-label="描画の方法" onchange={(e) => onRender(e.currentTarget.value as RenderMode)}>
+                <option value="auto">自動</option>
+                <option value="mesh">メッシュ（三角形）</option>
+                <option value="gpu">画素ごと（GPU）</option>
+              </select>
+            </div>
+            {#if renderNote}
+              <p class="hint">{renderNote}</p>
+            {/if}
           {/if}
           {#if (item.params.length === 0 && !item.param) || item.complexCoords}
             <label class="check">
