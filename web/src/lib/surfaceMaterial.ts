@@ -166,7 +166,7 @@ export function colormapColor(t: number, which: 'viridis' | 'turbo' | 'shade', b
   return out.setRGB(lin(r), lin(g), lin(b))
 }
 
-const FRAGMENT_HEADER = /* glsl */ `
+export const FRAGMENT_HEADER = /* glsl */ `
 uniform float uValue;
 uniform vec2 uValueRange;
 uniform float uColormap;
@@ -205,7 +205,7 @@ float gridLine(float coord, float spacing) {
 }
 `
 
-const FRAGMENT_APPLY = /* glsl */ `
+export const FRAGMENT_APPLY = /* glsl */ `
 {
   if (uValue > 0.5) {
     // 表示していない座標の値で色を付ける（範囲が 1 点なら真ん中の色）

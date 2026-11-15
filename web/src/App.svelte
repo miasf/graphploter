@@ -32,6 +32,7 @@
     RotationGroup,
     SliderStyle,
     Space,
+    RenderMode,
   } from './lib/types'
   import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
   import { Viewer } from './lib/Viewer'
@@ -129,6 +130,14 @@
 
   onMount(() => {
     viewer = new Viewer(viewerEl)
+    // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
+    viewer.onGpuFallback = (id, reason) => {
+      const it = items.find((x) => x.id === id)
+      if (it && it.render !== 'gpu') {
+        it.gpuAvailable = false
+        it.gpuReason = reason
+      }
+    }
     viewer.setMotionMode(motionMode)
     if (BENCH) {
       // ベンチマーク: 保存した状態は読まず、自動保存もしない（loaded を false のままにする）
@@ -177,6 +186,7 @@
         walls: it.walls,
         layers: it.layers,
         edges: it.edges || undefined,
+        render: it.render && it.render !== 'auto' ? it.render : undefined,
         ranges: it.ranges,
         vertical: it.vertical,
         slider: it.slider,
@@ -858,12 +868,23 @@
     for (const n of item.params) if (!(n in item.ranges) && !(n in stacked)) item.ranges[n] = ['0', '2\\pi']
     item.paramSpan = res.mesh.paramSpan
     item.kind = res.kind
+    if (!res.mesh.transformOnly) {
+      item.gpuAvailable = !!(res.mesh.gpu3d || res.mesh.gpu2d)
+      item.gpuReason = res.mesh.gpuReason ?? ''
+      // 打ち切りが多くてメッシュに回した式（Viewer が決めた）
+      const fb = viewer.gpuFallbackReason(item.id, res.mesh.gpu3d?.glsl)
+      if (fb && item.render !== 'gpu') {
+        item.gpuAvailable = false
+        item.gpuReason = fb
+      }
+    }
     // 見せ方が断面でない式で、新しく表示していない座標を使うようになったら、範囲を用意して計算し直す
     if (item.hidden && usesHiddenRanges(item.hidden.mode) && ensureHiddenRanges(item)) schedule(item, 0)
     const s0 = performance.now()
     // 回す前の形で作った陰関数で、回転だけが変わった: 形はそのままで、3D オブジェクトの向きだけを変える
     viewer.setMorph(item.id, coordOf(item)?.morph ?? 0)
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
+    else viewer.dropPixelLayers(item.id) // 回した後の式で描いている光線は、向きだけが変わったらメッシュに戻す（回す前の式なら、setPlotTransform で回す）
     viewer.setPlotTransform(item.id, res.mesh.transform)
     viewer.setCap(item.id, res.cap, item)
     recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })
@@ -1087,6 +1108,9 @@
     item.param.im = im
     item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step, item.slider.min)}`
     paramsChanged([item.param.name], item)
+    // 光線で描く式は、計算し直しを待たずに uniform を変える（計画 G7）
+    const ps = currentParams()
+    viewer?.setGpuParams(Object.fromEntries(Object.entries(ps).map(([k, v]) => [k, v.re])))
   }
 
   function setLatex(item: PlotItem, latex: string) {
@@ -1178,6 +1202,12 @@
 
   function setLayers(item: PlotItem, layers: number) {
     item.layers = Math.max(1, Math.round(layers))
+    schedule(item, 0)
+  }
+
+  /** 描画の方法を変えたとき: 計算し直して、届いた結果で描き方を決め直す */
+  function setRender(item: PlotItem, mode: RenderMode) {
+    item.render = mode
     schedule(item, 0)
   }
 
@@ -2107,6 +2137,7 @@
             onWalls={(on) => setWalls(item, on)}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}
+            onRender={(mode) => setRender(item, mode)}
             onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}

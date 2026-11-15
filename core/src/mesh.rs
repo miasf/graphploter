@@ -8385,6 +8385,22 @@ impl View {
     }
 }
 
+/// `view` の回転で、回す前の座標 p（表示中の 3 つの座標）から表示中の座標 q への 1 次式 q = M p + t（[`LocalMesh::affine`]）。
+/// 表示していない座標は断面の値 `slice` のまま回る
+pub fn local_affine(view: &View, dims: usize, axes: [usize; 3], slice: &[f64]) -> ([[f64; 3]; 3], [f64; 3]) {
+    let mut m = [[0.0; 3]; 3];
+    let mut t = [0.0; 3];
+    for (a, (c0, cs)) in view.rows.iter().enumerate() {
+        t[a] = *c0;
+        for (k, &c) in cs.iter().enumerate().take(dims) {
+            match axes.iter().position(|&x| x == k) {
+                Some(b) => m[a][b] = c,
+                None => t[a] += c * slice.get(k).copied().unwrap_or(0.0),
+            }
+        }
+    }
+    (m, t)
+}
 /// 回す前の形で作った陰関数のメッシュ（変数は表示中の 3 つの座標）。回転が「表示中の座標どうし」だけなら、
 /// 回転は形を変えずに動かすだけなので、角度が変わっても F を計算し直さず [`LocalMesh::project`] で描き直せる。
 /// 回転の中心から表示範囲の角までの距離 ρ の立方体で作っておくので、どの角度に回しても表示範囲が欠けない
@@ -8404,18 +8420,7 @@ impl LocalMesh {
     /// `view` の回転で、回す前の座標 p から表示中の座標 q への 1 次式 q = M p + t。
     /// 遠近法は使わない（陰関数は今までも遠近法なしで描いていた）
     pub fn affine(&self, view: &View) -> ([[f64; 3]; 3], [f64; 3]) {
-        let mut m = [[0.0; 3]; 3];
-        let mut t = [0.0; 3];
-        for (a, (c0, cs)) in view.rows.iter().enumerate() {
-            t[a] = *c0;
-            for (k, &c) in cs.iter().enumerate().take(self.dims) {
-                match self.axes.iter().position(|&x| x == k) {
-                    Some(b) => m[a][b] = c,
-                    None => t[a] += c * self.slice.get(k).copied().unwrap_or(0.0),
-                }
-            }
-        }
-        (m, t)
+        local_affine(view, self.dims, self.axes, &self.slice)
     }
 
     /// 回して表示中の座標のメッシュにする

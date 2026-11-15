@@ -20,6 +20,7 @@ pub mod expand;
 pub mod integrate;
 pub mod logic;
 pub mod functions;
+pub mod gpu2d;
 pub mod interval;
 pub mod mesh;
 pub mod pixel;
@@ -75,10 +76,63 @@ pub struct MeshResult {
     outline_target: (Vec<f32>, Vec<f32>),
     /// 展開で使った定義の名前と、この行が定義の行ならその名前（[`definitions`]）
     defs: (Vec<String>, Option<String>),
+    /// 2D 表示の曲線・不等式の領域を、画素ごとに描くための GLSL（計画 12 章の G4。GPU に移せない式・座標系を使う式では None）
+    gpu2d: Option<gpu2d::Scene2d>,
+    /// 3D の陰関数を光線で描くためのもの（計画 12 章の G5・G7）。GPU に移せない式では None
+    gpu3d: Option<Gpu3d>,
+    /// GPU の描き方を使えない理由（画面の ⚙ に出す）。使えるなら空
+    gpu_reason: String,
+}
+
+/// 3D の陰関数を光線で描くための GLSL と、uniform の値
+#[derive(Clone)]
+struct Gpu3d {
+    /// gR・gRd・gRi と下請けの関数。スライダーのパラメータは uniform の配列 uParam
+    glsl: String,
+    /// uParam の順のパラメータの名前と、今の値
+    params: Vec<String>,
+    values: Vec<f64>,
+    /// 表示中の座標 q から F の座標（元の座標 x, y, z, w, …）P への 1 次式 P = A q + b（座標ごとに [A_k0, A_k1, A_k2, b_k]）
+    affine: Vec<f64>,
+    /// 表示中の 3 つの座標の番号（回転だけが変わった結果の 1 次式 q = M p + t で、その行を書き換えるため）
+    axes: [usize; 3],
 }
 
 #[wasm_bindgen]
 impl MeshResult {
+    /// 3D の陰関数を光線で描くための GLSL（[`MeshResult`] の `gpu3d`）。無ければ空
+    pub fn gpu3d_glsl(&self) -> String {
+        self.gpu3d.as_ref().map_or(String::new(), |g| g.glsl.clone())
+    }
+    /// 同じく、uniform の配列 uParam の順のパラメータの名前（カンマ区切り）
+    pub fn gpu3d_params(&self) -> String {
+        self.gpu3d.as_ref().map_or(String::new(), |g| g.params.join(","))
+    }
+    /// 同じく、パラメータの今の値
+    pub fn gpu3d_values(&self) -> Vec<f64> {
+        self.gpu3d.as_ref().map_or(Vec::new(), |g| g.values.clone())
+    }
+    /// 同じく、表示中の座標から F の座標への 1 次式（座標ごとに [A_k0, A_k1, A_k2, b_k]。座標の数 × 4 個）
+    pub fn gpu3d_affine(&self) -> Vec<f64> {
+        self.gpu3d.as_ref().map_or(Vec::new(), |g| g.affine.clone())
+    }
+    /// 同じく、表示中の 3 つの座標の番号
+    pub fn gpu3d_axes(&self) -> Vec<u32> {
+        self.gpu3d.as_ref().map_or(Vec::new(), |g| g.axes.map(|a| a as u32).to_vec())
+    }
+    /// GPU の描き方を使えない理由。使えるなら空
+    #[wasm_bindgen(getter)]
+    pub fn gpu_reason(&self) -> String {
+        self.gpu_reason.clone()
+    }
+    /// 画素ごとに描く 2D の図形の GLSL（[`gpu2d`]）。無ければ空
+    pub fn gpu2d_glsl(&self) -> String {
+        self.gpu2d.as_ref().map_or(String::new(), |g| g.glsl.clone())
+    }
+    /// 同じく [等式の数, 不等式の数, 実線を引く不等式のビット]。無ければ空
+    pub fn gpu2d_info(&self) -> Vec<u32> {
+        self.gpu2d.as_ref().map_or(Vec::new(), |g| vec![g.eq as u32, g.cuts as u32, g.lines])
+    }
     /// 表示していない座標の値で色を付けるなら [最小, 最大]（値は complex_values の 1 つ目）。付けないなら空
     pub fn value_range(&self) -> Vec<f64> {
         self.value_range.map_or(Vec::new(), |(a, b)| vec![a, b])
@@ -204,6 +258,7 @@ impl MeshResult {
             curve: self.shape_curve,
             used_params: self.used_params.clone(),
             coord: self.coord.clone(),
+            gpu3d: self.gpu3d.clone(),
         })
     }
     /// 媒介変数表示の立体（閉じた面で、外向きにそろっている）なら true
@@ -352,6 +407,9 @@ pub fn coord_grid(
         value_range: None,
         volume: None,
         defs: Default::default(),
+        gpu2d: None,
+        gpu3d: None,
+        gpu_reason: String::new(),
     })
 }
 
@@ -636,6 +694,8 @@ pub fn plot(
         c.apply(&mut inner, curve, flat);
         outline_target = (c.apply_line(&mut outline.0, flat), c.apply_line(&mut outline.1, flat));
     }
+    // 3D の陰関数（回した陽関数を陰関数にしたものも）を光線で描くための GLSL と、使えないならその理由
+    let gpu3d = gpu3d_of(&plot, &consts, &space, flat, hidden_on, coord.is_some(), built.gpu2d.is_some());
     let lod_start = timing::now_ms();
     if !curve {
         mesh::add_cluster_lod(&mut inner);
@@ -686,6 +746,9 @@ pub fn plot(
             _ => None,
         },
         local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        gpu2d: if coord.is_some() { None } else { built.gpu2d },
+        gpu3d: gpu3d.0,
+        gpu_reason: gpu3d.1,
         coord,
         defs: (expand::used(), expand::def_line()),
     })
@@ -1152,6 +1215,8 @@ struct Built {
     value_range: Option<(f64, f64)>,
     /// 伝達関数の格子の値と、1 辺の点の数
     volume: Option<(Vec<f32>, usize)>,
+    /// 2D 表示で、画素ごとに描くための GLSL
+    gpu2d: Option<gpu2d::Scene2d>,
 }
 
 impl Built {
@@ -1505,6 +1570,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.curve = true;
             b.kind = format!("{} = f({}, {}) の切り口（f = 0）", names[2], names[0], names[1]);
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+            b.gpu2d = gpu2d::scene(Some(prog), &[], &[]).ok();
         }
         P::Explicit { axis: 2, prog, names, .. } => {
             b.kind = format!("{} の値で塗り分け", names[2]);
@@ -1532,6 +1598,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 None => "陰関数の曲線".into(),
             };
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+            b.gpu2d = gpu2d::scene(Some(prog), &[], &[]).ok();
         }
         P::Solid { prog, ranges, .. } => {
             b.kind = "範囲で重ねた領域".into();
@@ -1573,6 +1640,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             0 => {
                 b.kind = "不等式の領域（2D）".into();
                 b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
+                b.gpu2d = gpu2d::scene(None, cuts, strict).ok();
                 // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線
                 for (i, g) in cuts.iter().enumerate() {
                     let mut line = mesh::implicit_curve_2d(g, dom, res2).positions;
@@ -1588,6 +1656,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 b.curve = true;
                 b.kind = "陰関数の曲線（不等式で切り取り）".into();
                 b.inner = mesh::implicit_curve_2d(&eqs[0], dom, res2);
+                b.gpu2d = gpu2d::scene(Some(&eqs[0]), cuts, strict).ok();
                 for g in cuts {
                     system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
                 }
@@ -1602,6 +1671,57 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         },
     }
     Ok(b)
+}
+
+/// 3D の陰関数を光線で描くためのもの（[`Gpu3d`]）と、使えないときの理由（2D 表示では、画素ごとの描き方を使えない理由）。
+/// 陰関数・不等式の領域でない式（陽関数・媒介変数表示など）は、もともと GPU の描き方の対象ではないので、理由も空
+#[allow(clippy::too_many_arguments)]
+fn gpu3d_of(
+    plot: &equation::Plot,
+    consts: &eval::Params,
+    space: &equation::Space,
+    flat: bool,
+    hidden_on: bool,
+    coord: bool,
+    has_gpu2d: bool,
+) -> (Option<Gpu3d>, String) {
+    if coord {
+        let implicit = matches!(plot, equation::Plot::Implicit { .. } | equation::Plot::System { .. });
+        return (None, if implicit { "座標系を使う式は、GPU の描き方では使えません".into() } else { String::new() });
+    }
+    if flat {
+        let reason = if has_gpu2d {
+            String::new()
+        } else {
+            match plot {
+                equation::Plot::Implicit { prog, .. } => prog_reason(prog),
+                equation::Plot::System { eqs, cuts, .. } => eqs.iter().chain(cuts).map(prog_reason).find(|r| !r.is_empty()).unwrap_or_else(|| "この式は 2D の画素ごとの描き方では使えません".into()),
+                _ => String::new(),
+            }
+        };
+        return (None, reason);
+    }
+    if hidden_on {
+        let implicit = matches!(plot, equation::Plot::Implicit { .. });
+        return (None, if implicit { "表示していない座標の見せ方を使う式は、GPU の描き方では使えません".into() } else { String::new() });
+    }
+    let equation::Plot::Implicit { prog, gpu, .. } = plot else {
+        return (None, String::new());
+    };
+    let Some(g) = gpu else { return (None, prog_reason(prog)) };
+    let idx: Vec<usize> = (g.dims..g.dims + g.params.len()).collect();
+    match g.prog.to_glsl(&eval::GlslOptions { name: "gR".into(), params: idx, ..Default::default() }) {
+        Ok(code) => {
+            let values = g.params.iter().map(|n| consts.get(n).map_or(0.0, |c| c.re)).collect();
+            (Some(Gpu3d { glsl: code.source(), params: g.params.clone(), values, affine: space.gpu_affine(), axes: space.axes }), String::new())
+        }
+        Err(e) => (None, e),
+    }
+}
+
+/// 式が GPU の描き方に移せない理由（移せるなら空）
+fn prog_reason(prog: &eval::Program) -> String {
+    prog.to_glsl(&eval::GlslOptions::default()).err().unwrap_or_default()
 }
 
 /// 回した陽関数を計算する範囲（表示中の座標で）: 回転の中心から表示範囲の角までの距離 ρ の、中心の周りの立方体。
@@ -1632,6 +1752,8 @@ pub struct Shape {
     used_params: Vec<String>,
     /// 座標系（[`coord_system`]）。射影し直した後に同じ写像をかける
     coord: Option<coords::CoordMap>,
+    /// 3D の陰関数を光線で描くためのもの（回す前の形のメッシュの結果にも載せる。載せないと描画側が光線の箱を捨てる）
+    gpu3d: Option<Gpu3d>,
 }
 
 #[wasm_bindgen]
@@ -1753,6 +1875,10 @@ impl Shape {
             param: None,
             local_available: false,
             defs: Default::default(),
+            gpu2d: None,
+            // 光線の 1 次式は、回転だけが変わったら描画側が書き換える（setPlotTransform）。ここでは形を作ったときのまま
+            gpu3d: self.gpu3d.clone(),
+            gpu_reason: String::new(),
         }
     }
 }
@@ -1848,6 +1974,9 @@ impl CapSource {
             value_range: None,
             volume: None,
             defs: Default::default(),
+            gpu2d: None,
+            gpu3d: None,
+            gpu_reason: String::new(),
         })
     }
 }

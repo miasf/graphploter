@@ -22,7 +22,9 @@ use crate::parser::{BinOp, Constant, Expr};
 use num_complex::Complex64 as C;
 use std::f64::consts::{E, PI};
 
+mod glsl;
 mod pieces;
+pub use glsl::{glsl_bundle, glsl_prelude_all, GlslCode, GlslOptions, MAX_GLSL_OPS};
 pub use pieces::Cond;
 
 /// 一度にまとめて計算する点の数

@@ -933,6 +933,18 @@ impl Parser<'_> {
             vec![self.power()?]
         };
 
+        // max・min は 3 つ以上の引数も受け付け、2 つずつの入れ子にする（max(a, b, c) = max(a, max(b, c))）
+        let args = if matches!(f, crate::functions::Func::Max | crate::functions::Func::Min) && args.len() > 2 {
+            let mut it = args.into_iter().rev();
+            let last = it.next().unwrap();
+            let nested = it.fold(last, |acc, a| Expr::Call(f, vec![a, acc]));
+            match nested {
+                Expr::Call(_, a) => a,
+                _ => unreachable!(),
+            }
+        } else {
+            args
+        };
         if !f.arities().contains(&args.len()) {
             let counts: Vec<String> = f.arities().iter().map(|n| n.to_string()).collect();
             return err(
@@ -1501,6 +1513,13 @@ pub fn definition_head(src: &str) -> Option<(String, Vec<String>)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn max_min_with_many_arguments_nest() {
+        // max(a, b, c) = max(a, max(b, c))（計画 12 章の表の S-11: max(|x|, |y|, |z|) = 1）
+        assert_eq!(parse("max(a, b, c)").unwrap(), parse("max(a, max(b, c))").unwrap());
+        assert_eq!(parse("min(a, b, c, d)").unwrap(), parse("min(a, min(b, min(c, d)))").unwrap());
+        assert!(parse("max(a)").is_err());
+    }
     use super::*;
 
     fn var(s: &str) -> Box<Expr> {

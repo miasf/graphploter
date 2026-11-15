@@ -9,6 +9,9 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
+import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
+import { wantGpu } from './renderMode'
+import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
@@ -124,6 +127,12 @@ type PlotObject =
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
 /** 拡大で中心の点にここまで（図形の大きさに対する割合）近づいたら、そこからは一定の速さで前に進む（通り抜けられる） */
 const NEAR_FRACTION = 0.08
+/**
+ * 2D 表示で拡大できる下限: 1 画素の大きさが、表示範囲の大きさのこの倍まで。
+ * 座標は 32 ビット（刻みは値の大きさの約 6 × 10⁻⁸）で GPU に渡るので、これより先は線・軸が何画素ずつ飛んで動く
+ * （表示範囲 ±10 なら 1 画素 3 × 10⁻⁶ で、座標 10 の近くの刻みはその 3 分の 1 画素）
+ */
+const FLAT_MIN_PIXEL = 1e-7
 const WHEEL_PER_PIXEL = 0.0022
 /** ホイールの拡大縮小をならす時間（秒） */
 const WHEEL_SMOOTH_S = 0.1
@@ -143,6 +152,21 @@ export class Viewer {
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
+  /**
+   * 2D 表示で、画素ごとに描く曲線・領域（計画 12 章の G4）。式の番号 → 平面と材質と、その GLSL・表示範囲。
+   * あるときは、plots の線・面を隠して（カーソルの下の点にはそれを使う）、こちらを描く
+   */
+  private gpu2d = new Map<number, { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; glsl: string; key: string; eq: number; ready: boolean }>()
+
+  /**
+   * 3D の陰関数を光線で描く箱（計画 12 章の G5）。式の番号 → 箱と材質と、その GLSL・表示範囲。
+   * あるときは、plots の面（メッシュ）を隠して（カーソルの下の点・切り口のふたにはそれを使う）、こちらを描く
+   */
+  private gpu3d = new Map<
+    number,
+    { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; ray: RaycastUniforms; glsl: string; key: string; ready: boolean; axes: number[]; params: string[] }
+  >()
+
   /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
   private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
   /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
@@ -547,6 +571,19 @@ export class Viewer {
     /** 中心の点の、進む向きに沿った奥行き（通り過ぎたら負） */
     const ahead = pivot.clone().sub(eye).dot(fwd)
     const floor = size * NEAR_FRACTION
+    // 2D 表示: 平面を通り抜けると何も見えなくなる（カメラが平面の向こうへ出て、描く奥行きの範囲からも外れる）。
+    // 通り抜けずに、注視点に向かって倍率どおりに近づく。近づける下限は、32 ビットの浮動小数点数で座標の違いが
+    // 見分けられる所まで（1 画素が表示範囲の大きさの FLAT_MIN_PIXEL 倍）
+    if (this.flat) {
+      const dist = eye.distanceTo(target)
+      const minDist = (size * FLAT_MIN_PIXEL) / (this.pixelAt(dist) / dist)
+      const next = THREE.MathUtils.clamp(dist * factor, minDist, (size * 200) / this.perspective)
+      const f = next / dist
+      eye.sub(pivot).multiplyScalar(f).add(pivot)
+      target.sub(pivot).multiplyScalar(f).add(pivot)
+      this.dirty = true
+      return
+    }
     // 中心の点までの距離を factor 倍にするだけだと、近づくほど1回に進む量が小さくなり、
     // 図形の手前の見えない壁で止まったようになる（通り抜けられない）。
     // 近づききったら（図形の大きさの NEAR_FRACTION まで来たら・通り過ぎたら）、そこからは一定の速さで前後に進む
@@ -656,7 +693,15 @@ export class Viewer {
     if (this.renderer.getPixelRatio() !== ratio) this.renderer.setPixelRatio(ratio)
     this.applyLineScale(ratio / this.basePixelRatio)
     for (const p of this.plots.values()) this.applyLod(p)
+    for (const g of this.gpu3d.values()) this.applyRayBudget(g.ray)
     this.dirty = true
+  }
+
+  /** 光線の回数の上限: 視点を動かしている間は軽くする（止まったら元に戻して描き直す） */
+  private applyRayBudget(ray: RaycastUniforms) {
+    const b = this.camMoving ? RAY_MOVING : RAY_STILL
+    ray.uMaxIter.value = b.maxIter
+    ray.uWork.value = b.work
   }
 
   /** 格子線の太さの倍率（全部の曲面の材質で共有する。今の画素密度 ÷ ふつうのときの画素密度） */
@@ -782,6 +827,10 @@ export class Viewer {
     if (this.controls.update()) this.dirty = true
     // 目に見えるほど動いたか。慣性の終わりのごくわずかな動きは「止まった」とみなす
     const dist = this.camera.position.distanceTo(this.controls.target)
+    // OrbitControls の update() は、動いた距離が決まった値（0.001）を超えたときだけ true を返す。
+    // 深く拡大すると 1 画素がそれよりずっと小さく、小さい動きが描かれずにたまって、何画素もまとめて飛んでいた。
+    // 1 画素の 1/100 以上動いたら描き直す（遠近感が弱いとカメラはとても遠く、距離に比べた割合では粗すぎる）
+    if (this.camera.position.distanceTo(this.lastCamPos) > this.pixelAt(dist) * 0.01 || this.camera.quaternion.angleTo(this.lastCamQuat) > 1e-6) this.dirty = true
     const visible =
       this.camera.position.distanceTo(this.lastCamPos) > dist * 3e-4 ||
       this.camera.quaternion.angleTo(this.lastCamQuat) > 3e-4
@@ -968,6 +1017,11 @@ export class Viewer {
     for (const l of this.labels) l.sprite.scale.set(l.w * k, l.h * k, 1)
   }
 
+  /** カメラから dist 離れた所での、1 画素（CSS の画素）の大きさ */
+  private pixelAt(dist: number): number {
+    return (2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / (this.container.clientHeight || 1)
+  }
+
   /** 表示範囲の対角線の長さ */
   private sceneSize(): number {
     const d = this.domain
@@ -1066,6 +1120,18 @@ export class Viewer {
     this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
     this.camera.up.set(0, on ? 1 : 0, on ? 0 : 1)
     for (const p of this.plots.values()) if (p.kind === 'surface') p.grid.uNoBackShade.value = on ? 1 : 0
+    // 3D に戻すときは、画素ごとの 2D の平面を捨てて、隠していた線・面を戻す（3D の結果が届くまでの間も見えるように）
+    // 2D に切り替えるときは光線の箱を捨てる（2D の結果が届くまで、隠していた面を見せる）
+    if (on) {
+      for (const id of [...this.gpu3d.keys()]) this.dropPixelLayers(id)
+    }
+    if (!on) {
+      for (const id of [...this.gpu2d.keys()]) {
+        this.removeGpu2d(id)
+        const st = this.styles.get(id)
+        if (st) this.styleGpu2d(id, st)
+      }
+    }
     if (this.domain) this.setDomain(this.domain, true)
   }
 
@@ -1344,7 +1410,275 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
+    // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
+    this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
+    this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'), style.render === 'gpu')
     this.setStyle(id, style)
+  }
+
+  /** 画素ごとの 2D の描き方の平面を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
+  private syncGpu2d(id: number, mesh: MeshData, want: boolean) {
+    const info = this.flat && want ? mesh.gpu2d : undefined
+    const old = this.gpu2d.get(id)
+    const d = this.domain
+    if (!info || !d) {
+      if (old) this.removeGpu2d(id)
+      return
+    }
+    const key = `${d.xmin},${d.xmax},${d.ymin},${d.ymax}`
+    if (old && old.glsl === info.glsl) {
+      if (old.key !== key) {
+        if (old.ready) this.scene.remove(old.mesh)
+        old.mesh.geometry.dispose()
+        old.mesh = gpu2dMesh(old.mat, d)
+        old.key = key
+        if (old.ready) this.scene.add(old.mesh)
+      }
+      this.dirty = true
+      return
+    }
+    if (old) this.removeGpu2d(id)
+    const mat = gpu2dMaterial(info)
+    const m = gpu2dMesh(mat, d)
+    const layer = { mesh: m, mat, glsl: info.glsl, key, eq: info.eq, ready: false }
+    this.gpu2d.set(id, layer)
+    // パラメータは式に畳み込まれた定数なので、スライダーを動かすと GLSL が変わる。コンパイルは裏で行い
+    // （KHR_parallel_shader_compile。無い環境ではその場で）、終わるまでは今までのメッシュの線・面を見せる
+    const show = () => {
+      if (this.gpu2d.get(id) !== layer) return // 待っている間に、次の結果が来た・式が消えた
+      layer.ready = true
+      this.scene.add(layer.mesh)
+      const st = this.styles.get(id)
+      if (st) this.styleGpu2d(id, st)
+      this.dirty = true
+    }
+    this.renderer.compileAsync(m, this.camera, this.scene).then(show, show)
+  }
+
+  private removeGpu2d(id: number) {
+    const g = this.gpu2d.get(id)
+    if (!g) return
+    if (g.ready) this.scene.remove(g.mesh)
+    g.mesh.geometry.dispose()
+    g.mat.dispose()
+    this.gpu2d.delete(id)
+    this.dirty = true
+  }
+
+  /** 光線で描く箱を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
+  private syncGpu3d(id: number, mesh: MeshData, want: boolean, forced: boolean) {
+    let info = !this.flat && want ? mesh.gpu3d : undefined
+    // 打ち切りが多くてメッシュに回した式（自動のときだけ。画素ごとを選んでいれば、そのまま光線で描く）
+    if (info && !forced && this.gpuRejected.get(id)?.glsl === info.glsl) info = undefined
+    const glsl = info?.glsl
+    const old = this.gpu3d.get(id)
+    const d = this.domain
+    const p = this.plots.get(id)
+    if (!info || !glsl || !d || !p || p.kind !== 'surface') {
+      if (old) this.removeGpu3d(id)
+      return
+    }
+    // 表示中の座標から式の座標への 1 次式（回転・断面）・パラメータの値（GLSL が同じなら、これだけを変える）
+    const setUniforms = (ray: RaycastUniforms) => {
+      setRayAffine(ray, info.affine)
+      ray.uParam.value = info.values.slice()
+    }
+    const key = `,,,,,`
+    if (old && old.glsl === glsl) {
+      if (old.key !== key) {
+        if (old.ready) this.scene.remove(old.mesh)
+        old.mesh.geometry.dispose()
+        old.mesh = raycastMesh(old.mat, old.ray, d)
+        old.key = key
+        if (old.ready) this.scene.add(old.mesh)
+      }
+      setUniforms(old.ray)
+      old.axes = info.axes
+      this.dirty = true
+      return
+    }
+    if (old) this.removeGpu3d(id)
+    const ray = createRaycastUniforms()
+    setUniforms(ray)
+    this.applyRayBudget(ray)
+    // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
+    const mat = createRaycastMaterial(glsl, Math.floor(info.affine.length / 4), p.grid, ray)
+    const m = raycastMesh(mat, ray, d)
+    const layer = { mesh: m, mat, ray, glsl, key, ready: false, axes: info.axes, params: info.params }
+    this.gpu3d.set(id, layer)
+    this.applyRayCut(layer.ray)
+    // コンパイルは裏で行い、終わるまでは今までのメッシュの面を見せる
+    const show = () => {
+      if (this.gpu3d.get(id) !== layer) return
+      layer.ready = true
+      this.scene.add(layer.mesh)
+      this.quality.forget()
+      // 自動のときは、打ち切りが多ければメッシュに回す（描いた後の次のコマで、一度だけ数える）
+      if (!forced) requestAnimationFrame(() => this.checkAborts(id, layer))
+      const st = this.styles.get(id)
+      if (st) this.setStyle(id, st)
+      this.dirty = true
+    }
+    this.renderer.compileAsync(m, this.camera, this.scene).then(show, show)
+  }
+
+  /**
+   * 光線で描くと打ち切りが多い式（自動のとき、メッシュに回した）。式の番号 → その GLSL と理由。
+   * 同じ GLSL の結果が届いても、光線の箱を作り直さない（計画 12.6 の危ない所 1 の (c)）
+   */
+  private gpuRejected = new Map<number, { glsl: string; reason: string }>()
+  /** 光線の描き方からメッシュに回したとき（App が式の ⚙ に理由を出す） */
+  onGpuFallback: ((id: number, reason: string) => void) | null = null
+
+  /** 光線の描き方からメッシュに回した理由（回していなければ空） */
+  gpuFallbackReason(id: number, glsl: string | undefined): string {
+    const r = this.gpuRejected.get(id)
+    return r && r.glsl === glsl ? r.reason : ''
+  }
+
+  /**
+   * 光線の描き方で、打ち切った画素の割合を数える。小さな描画先（横 192 画素）に一度だけ描き、光を当てずに
+   * (打ち切ったか, 当たったか) を出させて読む。1 画素の大きさは画面のものを使う（同じ深さまで詰めたときの割合）。
+   * mod(x y, z) = 0 のように、値の飛ぶ所が 1 画素より細かく並ぶ式は、画面の大きさではほとんどの画素が打ち切りになる
+   */
+  private abortRatio(layer: { mesh: THREE.Mesh; ray: RaycastUniforms }): number {
+    const w = 192
+    const h = Math.max(1, Math.round((w * (this.container.clientHeight || 1)) / (this.container.clientWidth || 1)))
+    const rt = new THREE.WebGLRenderTarget(w, h)
+    const probe = new THREE.Scene()
+    const parent = layer.mesh.parent
+    probe.add(layer.mesh)
+    layer.ray.uProbe.value = 1
+    layer.mesh.userData.pixelH = this.renderer.domElement.height
+    const prevTarget = this.renderer.getRenderTarget()
+    const prevColor = this.renderer.getClearColor(new THREE.Color())
+    const prevAlpha = this.renderer.getClearAlpha()
+    const px = new Uint8Array(w * h * 4)
+    try {
+      this.renderer.setRenderTarget(rt)
+      this.renderer.setClearColor(0x000000, 0)
+      this.renderer.clear()
+      this.renderer.render(probe, this.camera)
+      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, px)
+    } finally {
+      this.renderer.setRenderTarget(prevTarget)
+      this.renderer.setClearColor(prevColor, prevAlpha)
+      layer.ray.uProbe.value = 0
+      delete layer.mesh.userData.pixelH
+      if (parent) parent.add(layer.mesh)
+      rt.dispose()
+      this.dirty = true
+    }
+    let drawn = 0
+    let aborted = 0
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i + 1] > 127) {
+        drawn++
+        if (px[i] > 127) aborted++
+      }
+    }
+    return drawn >= 20 ? aborted / drawn : 0
+  }
+
+  /** 打ち切りが 15 % を超えたら、メッシュに回す（自動のときだけ） */
+  private checkAborts(id: number, layer: { mesh: THREE.Mesh; ray: RaycastUniforms; glsl: string }) {
+    if (this.gpu3d.get(id) !== layer) return
+    const ratio = this.abortRatio(layer)
+    if (ratio <= 0.15) return
+    const reason = `値の飛ぶ所などが細かすぎて、画素ごとの描き方では詰めきれません（打ち切り ${Math.round(ratio * 100)} %）`
+    this.gpuRejected.set(id, { glsl: layer.glsl, reason })
+    this.removeGpu3d(id)
+    const st = this.styles.get(id)
+    if (st) this.setStyle(id, st)
+    this.onGpuFallback?.(id, reason)
+  }
+
+  private removeGpu3d(id: number) {
+    const g = this.gpu3d.get(id)
+    if (!g) return
+    this.quality.forget()
+    if (g.ready) this.scene.remove(g.mesh)
+    g.mesh.geometry.dispose()
+    g.mat.dispose()
+    this.gpu3d.delete(id)
+    this.dirty = true
+  }
+
+  /**
+   * 回転だけが変わった結果（形は同じで、向きだけが届く）を受け取ったとき。光線の式は回転を入れる前の元の座標の式なので、
+   * 回転は setPlotTransform で uniform を変えるだけで、捨てなくてよい（計画 G7。前は回した後の式で、ここでメッシュに戻していた）
+   */
+  dropPixelLayers(_id: number) {}
+
+  /**
+   * スライダーのパラメータの値（名前 → 値）を、光線で描く式の uniform に入れる。計算し直しの結果を待たずに描き直せる
+   * （その式が使っていない名前は無視する）
+   */
+  setGpuParams(values: Record<string, number>) {
+    for (const g of this.gpu3d.values()) {
+      if (g.params.length === 0) continue
+      g.ray.uParam.value = g.params.map((n, k) => values[n] ?? g.ray.uParam.value[k] ?? 0)
+      this.dirty = true
+    }
+  }
+
+  /** 光線の箱の切り口（three.js の Plane と同じく、n · p + c ≥ 0 の側を残す） */
+  private applyRayCut(ray: RaycastUniforms) {
+    const c = this.cutPlane
+    ray.uCutOn.value = c ? 1 : 0
+    if (c) ray.uCut.value.set(c.normal.x, c.normal.y, c.normal.z, c.constant)
+  }
+
+  /** 光線の描き方の見た目: 面の色・不透明度は、隠したメッシュの面の材質と同じにする */
+  private styleGpu3d(id: number, style: PlotStyle) {
+    const p = this.plots.get(id)
+    const layer = this.gpu3d.get(id)
+    if (!p || p.kind !== 'surface' || !layer) return
+    const main = p.group.children[0] as THREE.Mesh
+    if (!layer.ready) {
+      main.visible = true
+      return
+    }
+    main.visible = false
+    layer.mesh.visible = style.visible
+    const src = main.material as THREE.MeshStandardMaterial
+    const m = layer.mat
+    m.color.copy(src.color)
+    m.emissive.copy(src.emissive)
+    if (m.transparent !== src.transparent) {
+      m.transparent = src.transparent
+      m.needsUpdate = true
+    }
+    m.depthWrite = src.depthWrite
+  }
+
+  /** 画素ごとの描き方の見た目。メッシュの線・面（と実線の境目）は隠し、点線の境目だけ残す */
+  private styleGpu2d(id: number, style: PlotStyle) {
+    const p = this.plots.get(id)
+    const layer = this.gpu2d.get(id)
+    const g = layer?.ready ? layer : undefined
+    if (!p) return
+    if (p.kind === 'curve') {
+      p.line.visible = style.visible && !g
+    } else {
+      p.group.children[0].visible = !g
+      for (const l of p.outlines) l.visible = !g || l.userData.dashed === true
+    }
+    if (!layer) return
+    layer.mesh.visible = style.visible
+    const u = layer.mat.uniforms as Gpu2dUniforms
+    u.uColor.value.set(style.color)
+    // 曲線は式の線の太さ、領域の境目はメッシュの道と同じ 2.5
+    u.uWidth.value = layer.eq === 1 ? style.lineWidth : 2.5
+    // 面の材質は光が当たって明るくなる分、同じ不透明度でも濃く見える。それに近い濃さにする
+    const opacity = Math.min(1, Math.max(0, style.opacity))
+    u.uFill.value = opacity * 0.88
+    const gs = style.grid
+    const sp = (v: number) => (gs.enabled && Number.isFinite(v) && v > 0 ? v : 0)
+    u.uGridSpacing.value.set(sp(gs.x), sp(gs.y))
+    u.uGridColor.value.set(style.color).multiplyScalar(0.3 + 0.7 * (1 - opacity))
+    u.uGridStrength.value = 0.75 + 0.25 * (1 - opacity)
+    u.uGridWidth.value = gs.width
   }
 
   /**
@@ -1353,6 +1687,12 @@ export class Viewer {
    * 格子線は表示中の座標で引く（uGridWorld）。表示範囲・切り口で切り落とす平面は、もともと表示中の座標
    */
   setPlotTransform(id: number, t: ArrayLike<number> | null) {
+    // 回す前の式で描いている光線は、同じ 1 次式を uniform に入れる（GLSL は作り直さない）
+    const layer = this.gpu3d.get(id)
+    if (layer && t && t.length === 12) {
+      applyShownRotation(layer.ray, layer.axes, t)
+      this.dirty = true
+    }
     const p = this.plots.get(id)
     if (!p || p.kind !== 'surface') return
     const main = p.group.children[0] as THREE.Mesh
@@ -1375,6 +1715,7 @@ export class Viewer {
   /** 曲面・曲線・ふたの材質に、切り落とす平面を設定し直す */
   private applyClipping() {
     this.clipPlanes = this.cutPlane ? [...this.boxPlanes, this.cutPlane] : this.boxPlanes
+    for (const g of this.gpu3d.values()) this.applyRayCut(g.ray)
     for (const p of this.plots.values()) {
       if (p.kind === 'curve') {
         ;(p.line.material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -1714,6 +2055,7 @@ export class Viewer {
       mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
       const line = new LineSegments2(this.curveGeometry(pts), mat)
       if (dashed) line.computeLineDistances()
+      line.userData.dashed = dashed
       line.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
       p.outlines.push(line)
       p.group.add(line)
@@ -1823,6 +2165,12 @@ export class Viewer {
 
   /** 色・表示/非表示・格子線などの見た目だけを変える（計算し直さない） */
   setStyle(id: number, style: PlotStyle) {
+    this.setStyleInner(id, style)
+    this.styleGpu2d(id, style)
+    this.styleGpu3d(id, style)
+  }
+
+  private setStyleInner(id: number, style: PlotStyle) {
     const p = this.plots.get(id)
     if (!p) return
     this.styles.set(id, style)
@@ -1842,7 +2190,10 @@ export class Viewer {
       return
     }
 
-    if (p.group.visible !== style.visible) this.sceneChanged = true
+    if (p.group.visible !== style.visible) {
+      this.sceneChanged = true
+      this.quality.forget() // 重い式を隠したら、下げた画質を覚えたままにしない
+    }
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
@@ -1903,6 +2254,9 @@ export class Viewer {
   }
 
   removePlot(id: number) {
+    this.removeGpu2d(id)
+    this.removeGpu3d(id)
+    this.gpuRejected.delete(id)
     const p = this.plots.get(id)
     if (!p) return
     this.dirty = true

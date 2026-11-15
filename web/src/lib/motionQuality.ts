@@ -38,6 +38,11 @@ const SETTLE_FRAMES = 4
 const MUST_GAIN = 0.85
 /** 下げた後、効いたかを確かめるまでのコマの数 */
 const PROBE_FRAMES = 2 * SETTLE_FRAMES
+/**
+ * 操作を始めてから、数えないコマの数。最初のコマの時間には、止まっている間の描画（光線で描く式は、止まっているときは
+ * 回数の上限を上げて丁寧に描く）の時間が入るので、それで「とても遅い」とみなして画素密度を 2 段下げていた
+ */
+const SKIP_FIRST = 2
 /** 画面の更新間隔を見積もるのに使う、直近のコマの数 */
 const RECENT = 120
 
@@ -108,6 +113,8 @@ export class MotionQuality {
   private probe: { from: number; before: number } | null = null
   /** 下げても速くならなかったので、この操作の間はもう下げない */
   private lowerFailed = false
+  /** 操作を始めてから、まだ数えないコマの数 */
+  private skip = 0
   /** 直近のコマの時間（画面の更新間隔の見積もり用） */
   private recent: number[] = []
 
@@ -147,6 +154,18 @@ export class MotionQuality {
     this.avg = this.count = this.fast = 0
     this.raised = this.raiseFailed = this.lowerFailed = false
     this.probe = null
+    this.skip = SKIP_FIRST
+  }
+
+  /**
+   * 覚えた段階を捨てる（式の表示・非表示、GPU の描き方の箱ができた・消えたとき）。
+   * 三角形の数に表れない重さの変化（光線で描く式）では、begin の「三角形の合計が変わったら」の判定が効かないため。
+   * 重い式を非表示にしても、下げた画素密度のまま次の操作が始まってぼやけていた
+   */
+  forget() {
+    this.saved = 0
+    this.savedTriangles = 0
+    if (!this.active) this.level = 0
   }
 
   /** 操作を終える（今の段階を覚えておく） */
@@ -174,6 +193,10 @@ export class MotionQuality {
    */
   frame(dt: number): boolean {
     if (!this.active) return false
+    if (this.skip > 0) {
+      this.skip--
+      return false
+    }
     this.recent.push(dt)
     if (this.recent.length > RECENT) this.recent.shift()
     this.avg = this.count === 0 ? dt : this.avg * 0.8 + dt * 0.2

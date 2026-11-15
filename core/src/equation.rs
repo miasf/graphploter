@@ -193,6 +193,29 @@ impl Space {
         Some(m)
     }
 
+    /// 表示中の座標 q（3 つ）から元の座標 P（`dims` 個）への 1 次式 P = A q + b（GPU の光線の描き方。[`GpuImplicit`]）。
+    /// [`rotate_coords`] と同じ置き換え P_k = c_k − Σ_j m[j][k] c_j + Σ_j m[j][k] Q_j で、Q_j は表示中の座標なら q、
+    /// 表示していない座標なら断面の値（次元より先の、回転のときだけ使う座標は 0）。戻り値は k ごとに [A_k0, A_k1, A_k2, b_k]
+    pub fn gpu_affine(&self) -> Vec<f64> {
+        let n = self.dims;
+        let rn = rot_dims(n);
+        let m = self.rotation_matrix().unwrap_or_else(|| (0..rn).map(|i| (0..rn).map(|j| (i == j) as u8 as f64).collect()).collect());
+        let c: Vec<f64> = (0..rn).map(|j| self.center.get(j).copied().unwrap_or(0.0)).collect();
+        let sigma = |j: usize| if j < n { self.slice.get(j).copied().unwrap_or(0.0) } else { 0.0 };
+        let mut out = Vec::with_capacity(4 * n);
+        for k in 0..n {
+            let mut b = c[k] - (0..rn).map(|j| m[j][k] * c[j]).sum::<f64>();
+            for j in 0..rn {
+                if !self.axes.contains(&j) {
+                    b += m[j][k] * sigma(j);
+                }
+            }
+            out.extend(self.axes.map(|a| m[a][k]));
+            out.push(b);
+        }
+        out
+    }
+
     /// 表示中の座標の名前（横・奥・縦の順）
     fn shown(&self) -> [String; 3] {
         self.axes.map(coord_name)
@@ -264,7 +287,8 @@ pub enum Plot {
     /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
     /// `local` は、回転が表示中の座標どうしだけのときの、回す前の F（変数は表示中の 3 つの座標）。
     /// これでメッシュを作って回せば、角度が変わっても計算し直さずに済む（lib.rs の build）
-    Implicit { prog: Program, from: Option<String>, local: Option<Program> },
+    /// `gpu` は、GPU の光線の描き方（計画 12 章の G5・G7）に渡す F（[`GpuImplicit`]）
+    Implicit { prog: Program, from: Option<String>, local: Option<Program>, gpu: Option<Box<GpuImplicit>> },
     /// 表示していない座標が絡む回転をした陽関数を、傾いた直交座標系 (u, v, t) の陽関数 t = g(u, v) として描くもの（[`tilted`]）。
     /// 表示中の点は q = u e₁ + v e₂ + t e₃（`frame` = [e₁, e₂, e₃]。正規直交・右手系）。
     /// `prog` の変数は (u, v)（利用者が打てない名前 [`TILT_U`]・[`TILT_V`]）。
@@ -304,6 +328,17 @@ pub enum Plot {
         /// 不等式ごとに、厳密（`<`・`>`）か
         strict: Vec<bool>,
     },
+}
+
+/// GPU の光線の描き方に渡す陰関数の F（計画 12 章の G7）。回転も断面も入れる前の、元の座標の式で、
+/// 変数は元の座標 x, y, z, w, …（`dims` 個。表示していない座標も変数）の後に、スライダーの実数のパラメータ（`params` の順）。
+/// 表示中の座標 q から元の座標 P への 1 次式 P = A q + b（回転・中心・断面の値で決まる。[`Space::gpu_affine`]）と
+/// パラメータの値を uniform にして、回転（表示していない座標が絡むものも）・断面・スライダーを動かしても GLSL を作り直さない
+#[derive(Debug, Clone)]
+pub struct GpuImplicit {
+    pub prog: Program,
+    pub params: Vec<String>,
+    pub dims: usize,
 }
 
 impl Plot {
@@ -1017,7 +1052,7 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     let base = match eq_rows.as_slice() {
         // 回す前の形（Plot::Implicit の local）は使わない（切り取った面は、回転が変わるたびに作り直す）
         [(l, r)] => Some(Box::new(match compile_pair(l.clone(), r.clone(), params, space)? {
-            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None },
+            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None, gpu: None },
             p => p,
         })),
         _ => None,
@@ -1076,13 +1111,14 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         r.collect_vars(&mut used);
         if space.rotation_keeps_shown(&used) && shown.iter().any(|v| l.uses_var(v) || r.uses_var(v)) {
             let f = Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()));
-            Some(Program::compile_with(&f, &shown_refs, &consts)?)
+            Some((Program::compile_with(&f, &shown_refs, &consts)?, f))
         } else {
             None
         }
     } else {
         None
     };
+    let local = local.map(|(p, _)| p);
 
     // 陽関数（z = f(x, y) など）を回して陰関数として計算し直すときは、その形を覚えておく。
     // 複素数の色分けをしているなら、f の代わりに高さ（|f|・Re f・Im f）を使う（f のままだと実数にならない）
@@ -1102,6 +1138,8 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         (l, r)
     };
 
+    // GPU の光線の描き方の F: 回転・断面を入れる前の元の座標の式（[`GpuImplicit`]）。光線の描き方が苦手な形は、同じ解の得意な形に言い換える
+    let unrotated = gpu_friendly(&l, &r);
     // 回転していれば、元の座標 p を回転後の座標 q の式に置き換える
     let (l, r) = match &rot {
         Some(m) => (rotate_coords(&l, m, space), rotate_coords(&r, m, space)),
@@ -1134,7 +1172,21 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     let prog = Program::compile_with(&f, &shown_refs, &consts)?;
     // 線・点だけの解として描く式・複素数の陰関数（i を含む式）は、回す前の形（面のメッシュを 3D オブジェクトとして回す）を使わない
     let local = local.filter(|_| prog.common_zero_sets().is_none() && !prog.has_complex_const());
-    Ok(Plot::Implicit { prog, from, local })
+    // GPU の描き方の F: 回転・断面を入れる前の、元の座標 x, y, z, w, … の式。実数のスライダーのパラメータも変数として残す
+    // （複素数のパラメータは定数のまま）。範囲で重ねる名前を使う式は、上で立体になっているので、ここには来ない
+    let gpu = {
+        let coords: Vec<String> = (0..space.dims).map(coord_name).collect();
+        let names: Vec<String> =
+            params.iter().filter(|(n, v)| v.im == 0.0 && unrotated.uses_var(n) && !coords.contains(n)).map(|(n, _)| n.clone()).collect();
+        let mut cs = params.clone();
+        for n in names.iter().chain(&coords) {
+            cs.remove(n);
+        }
+        let mut vars: Vec<&str> = coords.iter().map(String::as_str).collect();
+        vars.extend(names.iter().map(String::as_str));
+        Program::compile_with(&unrotated, &vars, &cs).ok().map(|p| Box::new(GpuImplicit { prog: p, params: names, dims: space.dims }))
+    };
+    Ok(Plot::Implicit { prog, from, local, gpu })
 }
 
 /// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）
@@ -1313,6 +1365,31 @@ fn rotate_coords(e: &Expr, m: &[Vec<f64>], space: &Space) -> Expr {
     })
 }
 
+/// GPU の光線の描き方（区間演算で、連続な関数の符号の変化を手がかりに面を探す）に渡す F = l − r。
+/// 苦手な形を、同じ解を持つ得意な形に言い換える（メッシュ・画面に出す式はそのまま）:
+///
+/// - `mod(A, B) = 0` → `sin(π A / B) = 0`。どちらも「A / B が整数」で、B = 0 ではどちらも定義されない。
+///   `mod` の解は値が飛ぶ所にあり、符号が変わらない（B > 0 なら 0 以上）ので、光線は飛ぶ所ごとに 1/16 画素まで詰めて
+///   「0 に触れているか」を調べるしかなく、解が密な所（`mod(x y, z) = 0` の z ≈ 0）で回数を使い切っていた。
+///   `sin` は解の所で符号が変わるので、1 画素の区間の両端の符号ですぐ分かる。
+///   32 ビットの GPU では A / B が大きい所（10⁶ を超える）で sin の角度の誤差が大きくなるが、そこは解の間隔が 1 画素よりずっと細かい所
+fn gpu_friendly(l: &Expr, r: &Expr) -> Expr {
+    let zero = |e: &Expr| matches!(e, Expr::Num(v) if *v == 0.0);
+    let modulo = |e: &Expr| match e {
+        Expr::Call(crate::functions::Func::Mod, args) if args.len() == 2 => Some((args[0].clone(), args[1].clone())),
+        _ => None,
+    };
+    let pair = if zero(r) { modulo(l) } else if zero(l) { modulo(r) } else { None };
+    if let Some((a, b)) = pair {
+        let arg = Expr::Bin(
+            BinOp::Div,
+            Box::new(Expr::Bin(BinOp::Mul, Box::new(Expr::Const(crate::parser::Constant::Pi)), Box::new(a))),
+            Box::new(b),
+        );
+        return Expr::Call(crate::functions::Func::Sin, vec![arg]);
+    }
+    Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()))
+}
 /// パラメータの定義 name = rhs。右辺の値を計算する
 fn param(name: &str, rhs: &Expr, params: &Params) -> Result<Plot, String> {
     // 自分自身は使えないので、ほかのパラメータだけを渡す
@@ -2134,5 +2211,35 @@ mod tests {
             Ok(_) => panic!(),
         };
         assert!(e.contains("8文字目"), "{e}");
+    }
+    #[test]
+    fn gpu_implicit_matches_rotated_field() {
+        // 4 次元・表示していない w が絡む回転・中心のずれ・w の断面 0.5・パラメータ a で、
+        // GPU の F（元の座標の式）を P = A q + b で計算した値が、回転を入れた F（表示中の座標の式）と同じ
+        let mut sp = Space::basic(4, [0, 1, 2], vec![0.0, 0.0, 0.0, 0.5]);
+        sp.rotation = vec![0.3, 0.2, 0.7, 0.0, -0.4, 0.0, 0.0, 0.5, 0.0, 0.0];
+        sp.center = vec![0.2, -0.1, 0.0, 0.3, 0.0];
+        let mut ps = Params::new();
+        ps.insert("a".into(), C::new(1.3, 0.0));
+        let Plot::Implicit { prog, gpu: Some(g), .. } = compile_with("x^2 + a y^2 + z w + w^3 = 4", &ps, &sp).unwrap() else {
+            panic!("陰関数で、GPU の F がある")
+        };
+        assert_eq!((g.dims, g.params.clone()), (4, vec!["a".to_string()]));
+        let aff = sp.gpu_affine();
+        assert_eq!(aff.len(), 16);
+        let val = |p: &crate::eval::Program, xs: &[f64]| {
+            let cols: Vec<[f64; 1]> = xs.iter().map(|&v| [v]).collect();
+            let refs: Vec<&[f64]> = cols.iter().map(|c| &c[..]).collect();
+            let mut out = [C::new(0.0, 0.0)];
+            p.eval_batch(&refs, &mut out);
+            out[0].re
+        };
+        for q in [[0.3, -1.2, 0.8], [2.0, 0.5, -1.5], [-0.7, 0.1, 0.0]] {
+            let want = val(&prog, &q);
+            let mut pp: Vec<f64> = (0..4).map(|k| aff[4 * k] * q[0] + aff[4 * k + 1] * q[1] + aff[4 * k + 2] * q[2] + aff[4 * k + 3]).collect();
+            pp.push(1.3);
+            let got = val(&g.prog, &pp);
+            assert!((got - want).abs() < 1e-9 * (1.0 + want.abs()), "q = {q:?}: {got} と {want}");
+        }
     }
 }
