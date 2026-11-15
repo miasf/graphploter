@@ -174,6 +174,19 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         label: 'ジャイロイド',
         items: [{ latex: '\\sin x\\cos y+\\sin y\\cos z+\\sin z\\cos x=0', options: { color: '#c74440' } }],
       },
+      // 画素ごとの描き方（GPU の光線。計画 12 章）でよく描ける式。メッシュでは崩れる・消える
+      {
+        label: 'tan x = z y（極に偽の壁が出ない）',
+        items: [{ latex: '\\tan\\left(x\\right)=zy', options: { color: '#388c46' } }],
+      },
+      {
+        label: '細い輪（管の太さ 0.02。メッシュでは消える）',
+        items: [{ latex: '\\left(\\sqrt{x^2+y^2}-3\\right)^2+z^2=0.01^2', options: { color: '#fa7e19' } }],
+      },
+      {
+        label: '⌊x⌋ + ⌊y⌋ + ⌊z⌋ = 0（解が体積を持つ）',
+        items: [{ latex: '\\left\\lfloor x\\right\\rfloor+\\left\\lfloor y\\right\\rfloor+\\left\\lfloor z\\right\\rfloor=0', options: { color: '#2d70b3' } }],
+      },
     ],
   },
   {
