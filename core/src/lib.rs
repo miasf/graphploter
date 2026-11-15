@@ -20,6 +20,7 @@ pub mod expand;
 pub mod functions;
 pub mod interval;
 pub mod mesh;
+pub mod pixel;
 pub mod parser;
 pub mod special;
 pub mod system;
