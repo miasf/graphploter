@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { latexToText } from './lib/latex'
+  import { latexToText, regionsUsed, setRegions } from './lib/latex'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
@@ -200,12 +200,20 @@
       flat,
       flatSlice,
       controlMode,
+      // 今の式で使っている範囲だけを残す
+      regions: (() => {
+        const used = new Set(items.flatMap((it) => regionsUsed(it.latex).map((r) => r.name)))
+        const kept = Object.entries(regions).filter(([name, v]) => used.has(name) && v.trim() !== '')
+        return kept.length > 0 ? Object.fromEntries(kept) : undefined
+      })(),
       rotOwn: true,
     })
   }
 
   function restore(s: SavedState) {
     nextId = 1
+    regions = { ...(s.regions ?? {}) }
+    setRegions(regions)
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
     items = s.items.map((si) => newItem(si.latex, { ...si, rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }))
     domain = s.domain
@@ -293,6 +301,43 @@
   // 幅の狭い画面では、式の一覧をグラフの上に重なるシートにする。
   // 上端のつまみをドラッグすると高さが変わり、指を離すと 3 段階（たたむ / 半分 / 全体）のどれかに収まる。
   // つまみをタップすると「たたむ ⇔ 半分」を切り替える。
+
+  // ---- PC 用: 式の一覧の幅 ----
+  // 長い式が欄に収まらないとき、右の端をドラッグして広げられる。幅はこのブラウザに覚える
+  const PANEL_WIDTH_KEY = 'graphploter:panelWidth'
+  let panelWidth = $state<number | null>(
+    (() => {
+      try {
+        const w = Number(localStorage.getItem(PANEL_WIDTH_KEY))
+        return w >= 300 ? w : null
+      } catch {
+        return null
+      }
+    })(),
+  )
+  let widthDrag = $state<{ startX: number; startW: number } | null>(null)
+
+  function setPanelWidth(w: number | null) {
+    panelWidth = w === null ? null : Math.round(Math.min(Math.max(w, 300), window.innerWidth * 0.7))
+    try {
+      if (panelWidth === null) localStorage.removeItem(PANEL_WIDTH_KEY)
+      else localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth))
+    } catch {
+      // 保存できない環境では、このページを開いている間だけ覚える
+    }
+  }
+  function widthDown(e: PointerEvent) {
+    const panel = (e.currentTarget as HTMLElement).parentElement!
+    widthDrag = { startX: e.clientX, startW: panel.getBoundingClientRect().width }
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    e.preventDefault()
+  }
+  function widthMove(e: PointerEvent) {
+    if (widthDrag) setPanelWidth(widthDrag.startW + e.clientX - widthDrag.startX)
+  }
+  function widthUp() {
+    widthDrag = null
+  }
 
   type SheetState = 'peek' | 'half' | 'full'
   let sheetState = $state<SheetState>('half')
@@ -1039,7 +1084,25 @@
 
   function setLatex(item: PlotItem, latex: string) {
     item.latex = latex
+    // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
+    for (const r of regionsUsed(latex)) {
+      if (!(r.name in regions)) regions[r.name] = r.template
+    }
+    setRegions(regions)
     schedule(item)
+  }
+
+  // ---- 名前で書いた積分の範囲（∬_D f dA の D）----
+  /** 範囲の名前 → 範囲（LaTeX）。同じ名前は、どの式でも同じ範囲 */
+  let regions = $state<Record<string, string>>({})
+
+  /** 範囲の欄が書き換えられたとき: その範囲を使う式を全部計算し直す */
+  function setRegion(name: string, latex: string) {
+    regions[name] = latex
+    setRegions(regions)
+    for (const it of items) {
+      if (regionsUsed(it.latex).some((r) => r.name === name)) schedule(it, 300)
+    }
   }
 
   function setColor(item: PlotItem, color: string) {
@@ -1920,7 +1983,7 @@
   onkeydown={(e) => e.key === 'Escape' && settingsOpen && closeSettings()}
 />
 
-<div class="app">
+<div class="app" style:--panel-w={panelWidth === null ? null : `${panelWidth}px`}>
   <aside
     class="panel"
     class:dragging={dragHeight !== null}
@@ -1976,6 +2039,8 @@
             {domain}
             {axisNames}
             onInput={(s) => setLatex(item, s)}
+            {regions}
+            onRegion={setRegion}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
@@ -2046,6 +2111,18 @@
 
 
     </div>
+    <!-- PC: 式の一覧の幅を変えるつまみ（右の端をドラッグ。ダブルクリックで元の幅） -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="panel-resizer"
+      class:active={widthDrag !== null}
+      title="ドラッグで式の欄の幅を変える（ダブルクリックで元に戻す）"
+      onpointerdown={widthDown}
+      onpointermove={widthMove}
+      onpointerup={widthUp}
+      onpointercancel={widthUp}
+      ondblclick={() => setPanelWidth(null)}
+    ></div>
   </aside>
 
   <main class="viewer" bind:this={viewerEl}></main>
@@ -2536,15 +2613,30 @@
 <style>
   .app {
     display: grid;
-    grid-template-columns: minmax(300px, 380px) 1fr;
+    grid-template-columns: clamp(300px, var(--panel-w, 380px), 70vw) 1fr;
     height: 100dvh;
   }
   .panel {
+    position: relative;
     display: flex;
     flex-direction: column;
     min-height: 0;
     border-right: 1px solid var(--border);
     background: var(--panel);
+  }
+  .panel-resizer {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    bottom: 0;
+    z-index: 5;
+    width: 8px;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .panel-resizer:hover,
+  .panel-resizer.active {
+    background: color-mix(in srgb, var(--accent, #2f6fb5) 35%, transparent);
   }
   .panel-body {
     flex: 1;
@@ -3026,6 +3118,9 @@
     }
     .app {
       display: block;
+    }
+    .panel-resizer {
+      display: none;
     }
     .viewer {
       position: fixed;

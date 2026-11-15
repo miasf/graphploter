@@ -745,6 +745,13 @@ function differentialAt(toks: Token[], p: number): { v: string; len: number; vec
  * 集合 \{(x,y) \mid 条件\}（\mid・|・: で区切る）と、区間の直積 [0,1]\times[0,2]（変数は dx\,dy の順）を読む
  */
 function regionOf(toks: Token[], vars: string[]): string {
+  // 名前で書いた範囲（∬_D の D）は、その範囲の欄の中身に置き換える
+  const name = regionNameOf(toks)
+  if (name !== null) {
+    const def = (REGIONS[name] ?? '').trim()
+    if (def === '') throw new LatexError(`${regionLabel(name)} の範囲を、下の欄に書いてください（例: {(x, y) | x² + y² < 1}）`)
+    toks = tokenize(def)
+  }
   // 集合の括弧を外す
   let inner = toks
   const strip = (open: Token[], close: Token[]) => {
@@ -781,6 +788,85 @@ function regionOf(toks: Token[], vars: string[]): string {
     return `${point},${conds.join(',')}`
   }
   throw new LatexError('積分する領域は、{(x,y) | 条件} か [0,1]×[0,2] の形で書いてください')
+}
+
+// ---- 名前で書いた積分の範囲（∬_D f dA の D）----
+// 積分記号の下に範囲そのものを書くと、小さくて読みにくく、式も長くなる。下に 1 文字（D・C・V・Ω など）だけを書き、
+// 範囲は式の下の欄に書く。同じ名前はどの式でも同じ範囲を指す
+
+/** 範囲の名前（積分記号の下の文字。"D"・"\\Omega" など）→ 範囲の LaTeX（{(x,y) | 条件} か [0,1]×[0,2]） */
+let REGIONS: Record<string, string> = {}
+
+/** 範囲の欄の中身を知らせる（latexToText が積分の範囲を置き換えるのに使う） */
+export function setRegions(regions: Record<string, string>) {
+  REGIONS = regions
+}
+
+const GREEK: Record<string, string> = {
+  '\\Gamma': 'Γ', '\\Delta': 'Δ', '\\Theta': 'Θ', '\\Lambda': 'Λ', '\\Xi': 'Ξ', '\\Pi': 'Π', '\\Sigma': 'Σ', '\\Phi': 'Φ', '\\Psi': 'Ψ', '\\Omega': 'Ω',
+  '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\delta': 'δ', '\\sigma': 'σ', '\\omega': 'ω', '\\partial': '∂',
+}
+
+/** 積分記号の下が範囲の名前（1 文字）なら、その名前。そうでなければ null */
+function regionNameOf(sub: Token[]): string | null {
+  if (sub.length !== 1) return null
+  return /^[A-Za-z]$/.test(sub[0]) || sub[0] in GREEK ? sub[0] : null
+}
+
+/** 範囲の名前の表示（"\\Omega" → "Ω"） */
+export function regionLabel(name: string): string {
+  return GREEK[name] ?? name
+}
+
+const INTEGRALS = new Set(['\\int', '\\intop', '\\smallint', '\\oint', '\\iint', '\\oiint', '\\iiint'])
+
+/**
+ * 式の中の、名前で書いた積分の範囲（上端の無い積分記号の下の 1 文字）。出てきた順で、同じ名前は 1 回だけ。
+ * template は、その範囲の欄に最初に入れておく雛形（積分の種類から決める）
+ */
+export function regionsUsed(latex: string): { name: string; template: string }[] {
+  const toks = tokenize(latex)
+  const out: { name: string; template: string }[] = []
+  /** 位置 k から引数 1 つ分（{…} か 1 トークン）を読み、中身と次の位置を返す */
+  const group = (k: number): [Token[], number] => {
+    if (toks[k] !== '{') return [toks[k] === undefined ? [] : [toks[k]], k + 1]
+    let depth = 1
+    let j = k + 1
+    for (; j < toks.length && depth > 0; j++) {
+      if (toks[j] === '{') depth++
+      else if (toks[j] === '}') depth--
+    }
+    return [toks.slice(k + 1, j - 1), j]
+  }
+  for (let i = 0; i < toks.length; i++) {
+    if (!INTEGRALS.has(toks[i])) continue
+    let k = i + 1
+    let sub: Token[] | null = null
+    let upper = false
+    while (toks[k] === '_' || toks[k] === '^' || toks[k] === '\\limits' || toks[k] === '\\nolimits') {
+      const t = toks[k++]
+      if (t === '_') [sub, k] = group(k)
+      else if (t === '^') {
+        upper = true
+        k = group(k)[1]
+      }
+    }
+    const name = sub && !upper ? regionNameOf(sub) : null
+    if (name === null || out.some((r) => r.name === name)) continue
+    // 雛形: ∬ … dA は平面の領域、∭ は空間の領域、それ以外（線積分・面積分）は媒介変数で書いた曲線・曲面
+    let end = toks.length
+    for (let j = k; j < toks.length; j++) {
+      if (INTEGRALS.has(toks[j])) {
+        end = j
+        break
+      }
+    }
+    const rest = toks.slice(k, end).join('')
+    const point =
+      toks[i] === '\\iiint' ? '\\left(x,y,z\\right)' : (toks[i] === '\\iint' || toks[i] === '\\oiint') && !/d\\mathbf\{S\}|dS/.test(rest) ? '\\left(x,y\\right)' : '\\left(\\placeholder{}\\right)'
+    out.push({ name, template: `\\left\\{${point}\\mid\\placeholder{}\\right\\}` })
+  }
+  return out
 }
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */
