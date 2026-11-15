@@ -814,6 +814,7 @@
     // 回す前の形で作った陰関数で、回転だけが変わった: 形はそのままで、3D オブジェクトの向きだけを変える
     viewer.setMorph(item.id, coordOf(item)?.morph ?? 0)
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
+    else viewer.dropPixelLayers(item.id) // 光線の描き方の式は回した後の式なので、向きだけが変わったらメッシュに戻す
     viewer.setPlotTransform(item.id, res.mesh.transform)
     viewer.setCap(item.id, res.cap, item)
     recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })

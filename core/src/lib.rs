@@ -78,10 +78,16 @@ pub struct MeshResult {
     defs: (Vec<String>, Option<String>),
     /// 2D 表示の曲線・不等式の領域を、画素ごとに描くための GLSL（計画 12 章の G4。GPU に移せない式・座標系を使う式では None）
     gpu2d: Option<gpu2d::Scene2d>,
+    /// 3D の陰関数を光線で描くための GLSL（計画 12 章の G5。関数の名前は gR・gRd・gRi）。GPU に移せない式では None
+    gpu3d: Option<String>,
 }
 
 #[wasm_bindgen]
 impl MeshResult {
+    /// 3D の陰関数を光線で描くための GLSL（[`MeshResult`] の `gpu3d`）。無ければ空
+    pub fn gpu3d_glsl(&self) -> String {
+        self.gpu3d.clone().unwrap_or_default()
+    }
     /// 画素ごとに描く 2D の図形の GLSL（[`gpu2d`]）。無ければ空
     pub fn gpu2d_glsl(&self) -> String {
         self.gpu2d.as_ref().map_or(String::new(), |g| g.glsl.clone())
@@ -364,6 +370,7 @@ pub fn coord_grid(
         volume: None,
         defs: Default::default(),
         gpu2d: None,
+        gpu3d: None,
     })
 }
 
@@ -699,6 +706,13 @@ pub fn plot(
         },
         local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
         gpu2d: if coord.is_some() { None } else { built.gpu2d },
+        // 3D の陰関数（回した陽関数を陰関数にしたものも）: 表示中の 3 つの座標の F。座標系・表示していない座標の見せ方を使う式は対象外
+        gpu3d: match &plot {
+            equation::Plot::Implicit { prog, .. } if !flat && !hidden_on && coord.is_none() => {
+                prog.to_glsl(&eval::GlslOptions { name: "gR".into(), ..Default::default() }).ok().map(|g| g.source())
+            }
+            _ => None,
+        },
         coord,
         defs: (expand::used(), expand::def_line()),
     })
@@ -1773,6 +1787,7 @@ impl Shape {
             local_available: false,
             defs: Default::default(),
             gpu2d: None,
+            gpu3d: None,
         }
     }
 }
@@ -1869,6 +1884,7 @@ impl CapSource {
             volume: None,
             defs: Default::default(),
             gpu2d: None,
+            gpu3d: None,
         })
     }
 }

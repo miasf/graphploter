@@ -10,6 +10,7 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
+import { createRaycastMaterial, createRaycastUniforms, raycastMesh, type RaycastUniforms } from './raycastMaterial'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
@@ -157,6 +158,13 @@ export class Viewer {
   private gpu2d = new Map<number, { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; glsl: string; key: string; eq: number; ready: boolean }>()
   /** 画素ごとの 2D の描き方を使うか（?gpu2d=0 で使わない。描き方の切り替えの画面は G7） */
   private gpu2dOn = typeof location === 'undefined' || new URLSearchParams(location.search).get('gpu2d') !== '0'
+  /**
+   * 3D の陰関数を光線で描く箱（計画 12 章の G5）。式の番号 → 箱と材質と、その GLSL・表示範囲。
+   * あるときは、plots の面（メッシュ）を隠して（カーソルの下の点・切り口のふたにはそれを使う）、こちらを描く
+   */
+  private gpu3d = new Map<number, { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; ray: RaycastUniforms; glsl: string; key: string; ready: boolean }>()
+  /** 3D の陰関数を光線で描くか（?gpu3d=0 で使わない。描き方の切り替えの画面は G7） */
+  private gpu3dOn = typeof location === 'undefined' || new URLSearchParams(location.search).get('gpu3d') !== '0'
   /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
   private morphSources = new Map<number, { mesh: MeshData; weld: Int32Array | null }>()
   /** 式ごとの移行のスライダーの値（0〜1。無ければ 0） */
@@ -1103,6 +1111,10 @@ export class Viewer {
     this.camera.up.set(0, on ? 1 : 0, on ? 0 : 1)
     for (const p of this.plots.values()) if (p.kind === 'surface') p.grid.uNoBackShade.value = on ? 1 : 0
     // 3D に戻すときは、画素ごとの 2D の平面を捨てて、隠していた線・面を戻す（3D の結果が届くまでの間も見えるように）
+    // 2D に切り替えるときは光線の箱を捨てる（2D の結果が届くまで、隠していた面を見せる）
+    if (on) {
+      for (const id of [...this.gpu3d.keys()]) this.dropPixelLayers(id)
+    }
     if (!on) {
       for (const id of [...this.gpu2d.keys()]) {
         this.removeGpu2d(id)
@@ -1389,6 +1401,7 @@ export class Viewer {
     }
     this.updateStencil(id)
     this.syncGpu2d(id, mesh)
+    this.syncGpu3d(id, mesh)
     this.setStyle(id, style)
   }
 
@@ -1439,6 +1452,99 @@ export class Viewer {
     g.mat.dispose()
     this.gpu2d.delete(id)
     this.dirty = true
+  }
+
+  /** 光線で描く箱を、届いた結果に合わせて作る・作り直す・捨てる（GLSL が同じなら材質をそのまま使う） */
+  private syncGpu3d(id: number, mesh: MeshData) {
+    const glsl = !this.flat && this.gpu3dOn ? mesh.gpu3d : undefined
+    const old = this.gpu3d.get(id)
+    const d = this.domain
+    const p = this.plots.get(id)
+    if (!glsl || !d || !p || p.kind !== 'surface') {
+      if (old) this.removeGpu3d(id)
+      return
+    }
+    const key = `,,,,,`
+    if (old && old.glsl === glsl) {
+      if (old.key !== key) {
+        if (old.ready) this.scene.remove(old.mesh)
+        old.mesh.geometry.dispose()
+        old.mesh = raycastMesh(old.mat, old.ray, d)
+        old.key = key
+        if (old.ready) this.scene.add(old.mesh)
+      }
+      this.dirty = true
+      return
+    }
+    if (old) this.removeGpu3d(id)
+    const ray = createRaycastUniforms()
+    // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
+    const mat = createRaycastMaterial(glsl, p.grid, ray)
+    const m = raycastMesh(mat, ray, d)
+    const layer = { mesh: m, mat, ray, glsl, key, ready: false }
+    this.gpu3d.set(id, layer)
+    this.applyRayCut(layer.ray)
+    // コンパイルは裏で行い、終わるまでは今までのメッシュの面を見せる
+    const show = () => {
+      if (this.gpu3d.get(id) !== layer) return
+      layer.ready = true
+      this.scene.add(layer.mesh)
+      const st = this.styles.get(id)
+      if (st) this.setStyle(id, st)
+      this.dirty = true
+    }
+    this.renderer.compileAsync(m, this.camera, this.scene).then(show, show)
+  }
+
+  private removeGpu3d(id: number) {
+    const g = this.gpu3d.get(id)
+    if (!g) return
+    if (g.ready) this.scene.remove(g.mesh)
+    g.mesh.geometry.dispose()
+    g.mat.dispose()
+    this.gpu3d.delete(id)
+    this.dirty = true
+  }
+
+  /**
+   * 画素ごと・光線の描き方をやめて、メッシュに戻す。回転だけが変わった結果（形は同じで、向きだけが届く）のとき:
+   * 光線の GLSL は回した後の式なので、向きが変わると合わなくなる（回転を uniform にするのは G7）
+   */
+  dropPixelLayers(id: number) {
+    if (!this.gpu3d.has(id)) return
+    this.removeGpu3d(id)
+    const st = this.styles.get(id)
+    if (st) this.setStyle(id, st)
+  }
+
+  /** 光線の箱の切り口（three.js の Plane と同じく、n · p + c ≥ 0 の側を残す） */
+  private applyRayCut(ray: RaycastUniforms) {
+    const c = this.cutPlane
+    ray.uCutOn.value = c ? 1 : 0
+    if (c) ray.uCut.value.set(c.normal.x, c.normal.y, c.normal.z, c.constant)
+  }
+
+  /** 光線の描き方の見た目: 面の色・不透明度は、隠したメッシュの面の材質と同じにする */
+  private styleGpu3d(id: number, style: PlotStyle) {
+    const p = this.plots.get(id)
+    const layer = this.gpu3d.get(id)
+    if (!p || p.kind !== 'surface' || !layer) return
+    const main = p.group.children[0] as THREE.Mesh
+    if (!layer.ready) {
+      main.visible = true
+      return
+    }
+    main.visible = false
+    layer.mesh.visible = style.visible
+    const src = main.material as THREE.MeshStandardMaterial
+    const m = layer.mat
+    m.color.copy(src.color)
+    m.emissive.copy(src.emissive)
+    if (m.transparent !== src.transparent) {
+      m.transparent = src.transparent
+      m.needsUpdate = true
+    }
+    m.depthWrite = src.depthWrite
   }
 
   /** 画素ごとの描き方の見た目。メッシュの線・面（と実線の境目）は隠し、点線の境目だけ残す */
@@ -1498,6 +1604,7 @@ export class Viewer {
   /** 曲面・曲線・ふたの材質に、切り落とす平面を設定し直す */
   private applyClipping() {
     this.clipPlanes = this.cutPlane ? [...this.boxPlanes, this.cutPlane] : this.boxPlanes
+    for (const g of this.gpu3d.values()) this.applyRayCut(g.ray)
     for (const p of this.plots.values()) {
       if (p.kind === 'curve') {
         ;(p.line.material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -1949,6 +2056,7 @@ export class Viewer {
   setStyle(id: number, style: PlotStyle) {
     this.setStyleInner(id, style)
     this.styleGpu2d(id, style)
+    this.styleGpu3d(id, style)
   }
 
   private setStyleInner(id: number, style: PlotStyle) {
@@ -2033,6 +2141,7 @@ export class Viewer {
 
   removePlot(id: number) {
     this.removeGpu2d(id)
+    this.removeGpu3d(id)
     const p = this.plots.get(id)
     if (!p) return
     this.dirty = true
