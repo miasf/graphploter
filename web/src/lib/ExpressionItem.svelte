@@ -1082,6 +1082,8 @@
     cursor: pointer;
   }
   .settings {
+    /* 中のスライダーの並べ方を、この枠の幅で決める（下の @container） */
+    container-type: inline-size;
     margin-top: 10px;
     padding: 10px;
     border-radius: 8px;
@@ -1251,6 +1253,23 @@
   }
   .sliders.disabled {
     opacity: 0.5;
+  }
+  /* 式の欄が狭いとき（スマートフォン・左の欄の幅 380px）: ラベル・スライダー・値を 1 行に並べると、
+     ラベル（「z（等高線）」）と値（「間隔 1」）に幅を取られて、スライダーが 30px ほどに潰れていた。
+     ラベルを上の行に出し、下の行にスライダーと値を並べる */
+  @container (max-width: 300px) {
+    .sliders {
+      grid-template-columns: minmax(0, 1fr) auto;
+      row-gap: 2px;
+    }
+    .sliders > .label {
+      grid-column: 1 / -1;
+      margin-top: 4px;
+    }
+    .sliders > input[type='range'] {
+      width: 100%;
+      min-width: 0;
+    }
   }
   .sliders input {
     width: 100%;

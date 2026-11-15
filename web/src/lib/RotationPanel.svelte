@@ -184,11 +184,28 @@
   .name {
     font: italic 15px 'Times New Roman', serif;
   }
+  .rotation {
+    /* 回転の並べ方を、この枠の幅で決める（下の @container） */
+    container-type: inline-size;
+  }
   .planes {
     display: grid;
     grid-template-columns: 2.6em 1fr auto 1.8em 1.8em;
     align-items: center;
     gap: 4px 8px;
+  }
+  /* 狭いとき（式の ⚙ の「回転」）: 1 行に 5 つ並べるとスライダーが 30px ほどに潰れていた。
+     上の行に名前・角度・再生・戻す、下の行にスライダーを横いっぱいに出す（dense で、名前の行の空きに角度などを詰める） */
+  @container (max-width: 300px) {
+    .planes {
+      grid-template-columns: 2.6em 1fr 1.8em 1.8em;
+      grid-auto-flow: row dense;
+      row-gap: 2px;
+    }
+    .planes input {
+      grid-column: 1 / -1;
+      margin-bottom: 6px;
+    }
   }
   .planes input {
     width: 100%;
