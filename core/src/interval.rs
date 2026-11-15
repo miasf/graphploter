@@ -322,6 +322,113 @@ pub(crate) fn max(a: Interval, b: Interval) -> Iv {
     Interval::new(a.lo.max(b.lo), a.hi.max(b.hi)).widen()
 }
 
+// ---------------------------------------------------------------------------
+// 飾り付きの区間（計画 12 章の G1。IEEE Std 1788-2015 の decoration）
+// ---------------------------------------------------------------------------
+
+/// 区間の飾り。弱い順に `Trv` < `Def` < `Dac` < `Com`（IEEE 1788 と同じ順）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Dec {
+    /// 何も言えない（箱の一部で定義されない・極を含むかもしれない）
+    Trv,
+    /// 箱の全部で定義されているが、連続とは言えない（floor・mod の飛ぶ所を含む）
+    Def,
+    /// 箱の全部で定義されていて連続（値の範囲は有界とは限らない）
+    Dac,
+    /// 箱の全部で定義されていて連続で、値の範囲が有界
+    Com,
+}
+
+/// 飾り付きの区間。`lo > hi` は空（箱のどこでも定義されない）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecInterval {
+    pub lo: f64,
+    pub hi: f64,
+    pub dec: Dec,
+}
+
+impl DecInterval {
+    /// 区間 i と飾り d（有界でなければ Com を Dac に下げる）
+    pub fn new(i: Interval, dec: Dec) -> DecInterval {
+        let bounded = i.lo.is_finite() && i.hi.is_finite();
+        DecInterval { lo: i.lo, hi: i.hi, dec: if dec == Dec::Com && !bounded { Dec::Dac } else { dec } }
+    }
+
+    /// 全部の実数
+    pub fn entire(dec: Dec) -> DecInterval {
+        DecInterval { lo: f64::NEG_INFINITY, hi: f64::INFINITY, dec: dec.min(Dec::Dac) }
+    }
+
+    /// 空（どこでも定義されない）
+    pub fn empty() -> DecInterval {
+        DecInterval { lo: f64::INFINITY, hi: f64::NEG_INFINITY, dec: Dec::Trv }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !(self.lo <= self.hi)
+    }
+
+    pub fn interval(&self) -> Interval {
+        Interval::new(self.lo, self.hi)
+    }
+
+    /// 0 を含むかもしれないか（空なら false）
+    pub fn may_contain_zero(&self) -> bool {
+        self.lo <= 0.0 && 0.0 <= self.hi
+    }
+
+    /// 上下が有限か
+    pub fn bounded(&self) -> bool {
+        self.lo.is_finite() && self.hi.is_finite()
+    }
+
+    /// 飾りを d 以下に下げる
+    pub fn weaken(self, d: Dec) -> DecInterval {
+        DecInterval { dec: self.dec.min(d), ..self }
+    }
+}
+
+/// 今の区間演算の関数（`Iv`。None は「分からない」）の結果を飾り付きにする。None なら、全部の実数で飾り `on_none`
+pub(crate) fn dec_of(r: Iv, dec: Dec, on_none: Dec) -> DecInterval {
+    match r {
+        Some(i) => DecInterval::new(i, dec),
+        None => DecInterval::entire(on_none),
+    }
+}
+
+/// 定義域 [lo, hi] の関数 f（単調に増える）を、定義域と重なる所だけで計算する。はみ出せば飾りは Trv、重ならなければ空
+pub(crate) fn dec_domain(a: Interval, dom_lo: f64, dom_hi: f64, f: impl Fn(Interval) -> Iv) -> DecInterval {
+    if a.hi < dom_lo || a.lo > dom_hi {
+        return DecInterval::empty();
+    }
+    let inside = Interval::new(a.lo.max(dom_lo), a.hi.min(dom_hi));
+    let partial = a.lo < dom_lo || a.hi > dom_hi;
+    dec_of(f(inside), if partial { Dec::Trv } else { Dec::Com }, if partial { Dec::Trv } else { Dec::Dac })
+}
+
+/// 飛ぶ所がある関数（floor など）: 両端の値が同じなら Com、違えば Def
+pub(crate) fn dec_step(a: Interval, f: impl Fn(f64) -> f64, r: Iv) -> DecInterval {
+    let same = f(a.lo) == f(a.hi);
+    dec_of(r, if same { Dec::Com } else { Dec::Def }, Dec::Def)
+}
+
+/// mod(a, b) = a − b⌊a/b⌋。b が 0 を含めば何も言えない。⌊a/b⌋ が箱で一定なら連続
+pub(crate) fn dec_mod(a: Interval, b: Interval) -> DecInterval {
+    if b.contains(0.0) {
+        return DecInterval::entire(Dec::Trv);
+    }
+    let Some(q) = div(a, b) else { return DecInterval::entire(Dec::Trv) };
+    let (k0, k1) = (q.lo.floor(), q.hi.floor());
+    if k0 == k1 {
+        // 一定の k で a − k b
+        let r = mul(b, Interval::point(k0)).and_then(|kb| sub(a, kb));
+        return dec_of(r, Dec::Com, Dec::Dac);
+    }
+    // 値は b と同じ符号の側で [0, |b|) に入る
+    let i = if b.lo > 0.0 { Interval::new(0.0, b.hi) } else { Interval::new(b.lo, 0.0) };
+    dec_of(i.widen(), Dec::Def, Dec::Def)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +543,117 @@ mod tests {
         let t = prog("(sqrt(x^2+y^2)-3)^2+z^2-0.04");
         assert!(!t.eval_interval(&b(-0.2, 0.2)).may_contain_zero(), "トーラスの軸の上の箱");
         assert!(!prog("sqrt(abs(x)) + 1").eval_interval(&b(-0.2, 0.2)).may_contain_zero());
+    }
+
+    /// 飾り付きの区間の箱（中心は ±5、幅は 0〜2）
+    fn random_boxes(rng: &mut Lcg) -> Vec<Interval> {
+        (0..3)
+            .map(|_| {
+                let (c, w) = (10.0 * rng.next() - 5.0, 2.0 * rng.next() * rng.next());
+                Interval::new(c - w / 2.0, c + w / 2.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decorated_contains_point_values() {
+        let mut rng = Lcg(777);
+        let mut exprs: Vec<&str> = EXPRS.to_vec();
+        exprs.extend(["mod(x y, z) - 1", "mod(x, 2) + y", "floor(x y) - z floor(z)", "x / (y z)", "sqrt(x) + ln(y) - z", "(x - 1)^(1.5) + asin(y/3)"]);
+        let mut checked = 0;
+        for src in exprs {
+            let p = prog(src);
+            for _ in 0..300 {
+                let boxes = random_boxes(&mut rng);
+                let d = p.eval_interval_dec(&boxes);
+                // 今の区間演算が答える所では、同じ区間で、飾りは Trv ではない
+                if let Range::Known(old) = p.eval_interval(&boxes) {
+                    assert!(d.dec > Dec::Trv && d.lo == old.lo && d.hi == old.hi, "{src}: {d:?} と {old:?}（箱 {boxes:?}）");
+                }
+                let mut cols: [Vec<f64>; 3] = Default::default();
+                for k in 0..40 {
+                    for (ax, b) in boxes.iter().enumerate() {
+                        let t = if k < 8 { ((k >> ax) & 1) as f64 } else { rng.next() };
+                        cols[ax].push(b.lo + (b.hi - b.lo) * t);
+                    }
+                }
+                let mut out = vec![C::new(0.0, 0.0); 40];
+                p.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+                for (k, v) in out.iter().enumerate() {
+                    let v = crate::eval::as_real(*v);
+                    let at = (cols[0][k], cols[1][k], cols[2][k]);
+                    if v.is_finite() {
+                        assert!(d.lo <= v && v <= d.hi, "{src}: 点 {at:?} の値 {v} が {d:?} に入らない（箱 {boxes:?}）");
+                    } else if d.dec >= Dec::Def {
+                        panic!("{src}: 飾り {:?} なのに、点 {at:?} で定義されない（箱 {boxes:?}）", d.dec);
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 400_000, "{checked}");
+    }
+
+    #[test]
+    fn decorations_mark_poles_and_jumps() {
+        let x = |lo: f64, hi: f64| [Interval::new(lo, hi), Interval::point(0.0), Interval::point(0.0)];
+        // tan の極（π/2）をまたぐ箱は Trv、またがなければ Com
+        assert_eq!(prog("tan(x)").eval_interval_dec(&x(1.0, 2.0)).dec, Dec::Trv);
+        assert_eq!(prog("tan(x)").eval_interval_dec(&x(0.0, 1.0)).dec, Dec::Com);
+        assert_eq!(prog("1/x").eval_interval_dec(&x(-1.0, 1.0)).dec, Dec::Trv);
+        // floor の飛びをまたぐ箱は Def（定義されているが連続でない）
+        assert_eq!(prog("floor(x)").eval_interval_dec(&x(0.5, 1.5)).dec, Dec::Def);
+        assert_eq!(prog("floor(x)").eval_interval_dec(&x(0.2, 0.8)).dec, Dec::Com);
+        assert_eq!(prog("mod(x, 2)").eval_interval_dec(&x(1.0, 3.0)).dec, Dec::Def);
+        assert_eq!(prog("mod(x, 2)").eval_interval_dec(&x(0.5, 1.5)).dec, Dec::Com);
+        assert_eq!(prog("sign(x)").eval_interval_dec(&x(-1.0, 1.0)).dec, Dec::Def);
+        // 定義域をはみ出す箱は Trv、外れれば空
+        assert_eq!(prog("sqrt(x)").eval_interval_dec(&x(-1.0, 1.0)).dec, Dec::Trv);
+        assert!(prog("sqrt(x)").eval_interval_dec(&x(-2.0, -1.0)).is_empty());
+        assert!(prog("ln(x) + 1").eval_interval_dec(&x(-2.0, -1.0)).is_empty());
+        // 弱い飾りは、式の外側へ伝わる
+        assert_eq!(prog("sin(floor(x)) + 1").eval_interval_dec(&x(0.5, 1.5)).dec, Dec::Def);
+        // 区間演算が使えない式は Trv
+        assert_eq!(prog("gamma(x)").eval_interval_dec(&x(1.0, 2.0)).dec, Dec::Trv);
+    }
+
+    #[test]
+    fn continuous_boxes_have_zeros_where_signs_change() {
+        // Com の箱の、向かい合う 2 つの角で符号が逆なら、その線分の上に零点がある（中間値の定理）
+        let mut rng = Lcg(4242);
+        let mut found = 0;
+        for src in ["sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x)", "x^2+y^2+z^2-4", "exp(-x^2) sin(5y) - z", "tanh(x z) - y", "floor(x) + y - z"] {
+            let p = prog(src);
+            for _ in 0..400 {
+                let b = random_boxes(&mut rng);
+                if p.eval_interval_dec(&b).dec != Dec::Com {
+                    continue;
+                }
+                let at = |t: f64| -> f64 {
+                    let pt: Vec<f64> = b.iter().map(|i| i.lo + (i.hi - i.lo) * t).collect();
+                    let mut o = [C::new(0.0, 0.0)];
+                    p.eval_batch(&[&[pt[0]], &[pt[1]], &[pt[2]]], &mut o);
+                    crate::eval::as_real(o[0])
+                };
+                let (mut lo, mut hi) = (0.0, 1.0);
+                let (f0, f1) = (at(lo), at(hi));
+                if f0 * f1 >= 0.0 {
+                    continue;
+                }
+                for _ in 0..60 {
+                    let m = 0.5 * (lo + hi);
+                    if at(m) * f0 > 0.0 {
+                        lo = m;
+                    } else {
+                        hi = m;
+                    }
+                }
+                let v = at(0.5 * (lo + hi));
+                assert!(v.abs() < 1e-6, "{src}: 箱 {b:?} で零点が見つからない（{v}）");
+                found += 1;
+            }
+        }
+        assert!(found > 20, "{found}");
     }
 
     #[test]
