@@ -33,8 +33,8 @@ function render({ glsl, frag, n, dom, width }) {
   canvas.height = n
   const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, antialias: false })
   const vs = `#version 300 es
-in vec2 aPos; uniform vec4 uDom; out vec2 vQ;
-void main() { vQ = mix(uDom.xy, uDom.zw, aPos * 0.5 + 0.5); gl_Position = vec4(aPos, 0.0, 1.0); }`
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`
   const fs = `#version 300 es
 precision highp float; precision highp int;
 layout(location = 0) out highp vec4 pc_fragColor;
@@ -59,7 +59,11 @@ ${frag.replace('#include <colorspace_fragment>', '')}`
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return { error: gl.getProgramInfoLog(prog) }
   gl.useProgram(prog)
   const u = (name) => gl.getUniformLocation(prog, name)
-  gl.uniform4f(u('uDom'), dom[0], dom[1], dom[2], dom[3])
+  // 画素 → 座標: 画面の中央の画素が表示範囲の中心
+  gl.uniform2f(u('uQ0'), (dom[0] + dom[2]) / 2, (dom[1] + dom[3]) / 2)
+  gl.uniform2f(u('uC'), n / 2, n / 2)
+  gl.uniform2f(u('uDx'), (dom[2] - dom[0]) / n, 0)
+  gl.uniform2f(u('uDy'), 0, (dom[3] - dom[1]) / n)
   gl.uniform3f(u('uColor'), 1, 1, 1)
   gl.uniform1f(u('uWidth'), width)
   gl.uniform1f(u('uRatio'), 1)

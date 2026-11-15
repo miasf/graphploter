@@ -125,6 +125,8 @@ type PlotObject =
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
 /** 拡大で中心の点にここまで（図形の大きさに対する割合）近づいたら、そこからは一定の速さで前に進む（通り抜けられる） */
 const NEAR_FRACTION = 0.08
+/** 2D 表示で近づける下限（表示範囲の大きさに対する、カメラから平面までの距離の割合）。これより先は 32 ビットの精度で線が崩れる */
+const FLAT_MIN_DIST = 2e-4
 const WHEEL_PER_PIXEL = 0.0022
 /** ホイールの拡大縮小をならす時間（秒） */
 const WHEEL_SMOOTH_S = 0.1
@@ -555,6 +557,18 @@ export class Viewer {
     /** 中心の点の、進む向きに沿った奥行き（通り過ぎたら負） */
     const ahead = pivot.clone().sub(eye).dot(fwd)
     const floor = size * NEAR_FRACTION
+    // 2D 表示: 平面を通り抜けると何も見えなくなる（カメラが平面の向こうへ出て、描く奥行きの範囲からも外れる）。
+    // 通り抜けずに、注視点に向かって倍率どおりに近づく。近づける下限は、32 ビットの浮動小数点数で座標の違いが
+    // 見分けられる所まで（表示範囲の大きさの FLAT_MIN_DIST 倍。1 画素がおよそ 10⁻⁶ · 表示範囲）
+    if (this.flat) {
+      const dist = eye.distanceTo(target)
+      const next = THREE.MathUtils.clamp(dist * factor, size * FLAT_MIN_DIST, (size * 200) / this.perspective)
+      const f = next / dist
+      eye.sub(pivot).multiplyScalar(f).add(pivot)
+      target.sub(pivot).multiplyScalar(f).add(pivot)
+      this.dirty = true
+      return
+    }
     // 中心の点までの距離を factor 倍にするだけだと、近づくほど1回に進む量が小さくなり、
     // 図形の手前の見えない壁で止まったようになる（通り抜けられない）。
     // 近づききったら（図形の大きさの NEAR_FRACTION まで来たら・通り過ぎたら）、そこからは一定の速さで前後に進む

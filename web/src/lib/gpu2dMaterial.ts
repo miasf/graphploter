@@ -39,12 +39,15 @@ export interface Gpu2dUniforms {
   uGridColor: { value: THREE.Color }
   uGridStrength: { value: number }
   uGridWidth: { value: number }
+  /** 画素 → 平面の座標の 1 次式: 画素 uC（gl_FragCoord）の座標が uQ0、1 画素右・上に進むと uDx・uDy だけ変わる */
+  uQ0: { value: THREE.Vector2 }
+  uC: { value: THREE.Vector2 }
+  uDx: { value: THREE.Vector2 }
+  uDy: { value: THREE.Vector2 }
 }
 
 export const GPU2D_VERTEX = /* glsl */ `
-out vec2 vQ;
 void main() {
-  vQ = position.xy;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `
@@ -59,7 +62,13 @@ uniform vec2 uGridSpacing;
 uniform vec3 uGridColor;
 uniform float uGridStrength;
 uniform float uGridWidth;
-in vec2 vQ;
+uniform vec2 uQ0;
+uniform vec2 uC;
+uniform vec2 uDx;
+uniform vec2 uDy;
+// 画素の中心の平面の座標。四角形の上の補間（32 ビットで、表示範囲全体の大きさに比例した誤差が出る）ではなく、
+// 画面の中央の画素からの差で求める（深く拡大しても、誤差は座標の値の大きさ × 2⁻²⁴ くらい）
+vec2 vQ;
 
 // 座標が spacing の整数倍の近くなら 1（surfaceMaterial.ts の gridLine と同じ）
 float gGrid(float coord, float spacing) {
@@ -160,7 +169,9 @@ float gRegion(vec2 c, vec2 px) {
 }
 
 void main() {
-  vec2 px = fwidth(vQ);
+  vec2 o = gl_FragCoord.xy - uC;
+  vQ = uQ0 + o.x * uDx + o.y * uDy;
+  vec2 px = abs(uDx) + abs(uDy);
   float hw = 0.5 * uWidth * uRatio;
   float line = 0.0;
   float fill = 0.0;
@@ -201,6 +212,10 @@ export function gpu2dMaterial(info: Gpu2dInfo): THREE.ShaderMaterial {
     uGridColor: { value: new THREE.Color() },
     uGridStrength: { value: 0.75 },
     uGridWidth: { value: 1 },
+    uQ0: { value: new THREE.Vector2() },
+    uC: { value: new THREE.Vector2() },
+    uDx: { value: new THREE.Vector2(1, 0) },
+    uDy: { value: new THREE.Vector2(0, 1) },
   }
   return new THREE.ShaderMaterial({
     uniforms,
@@ -221,8 +236,28 @@ export function gpu2dMesh(mat: THREE.ShaderMaterial, d: { xmin: number; xmax: nu
   m.raycast = () => {} // カーソルの下の点は、隠したメッシュの線で求める
   m.frustumCulled = false
   m.renderOrder = 2
-  m.onBeforeRender = (renderer) => {
-    ;(mat.uniforms as Gpu2dUniforms).uRatio.value = renderer.getPixelRatio()
+  const vp = new THREE.Vector4()
+  const ray = new THREE.Vector3()
+  // 画素 (fx, fy)（gl_FragCoord と同じ。左下が原点）を通る光線と、平面 z = 0 の交点（JS の 64 ビットで計算する）
+  const onPlane = (cam: THREE.Camera, fx: number, fy: number): [number, number] => {
+    ray.set(((fx - vp.x) / vp.z) * 2 - 1, ((fy - vp.y) / vp.w) * 2 - 1, 0.5).unproject(cam)
+    const o = cam.position
+    const t = -o.z / (ray.z - o.z)
+    return [o.x + t * (ray.x - o.x), o.y + t * (ray.y - o.y)]
+  }
+  m.onBeforeRender = (renderer, _scene, camera) => {
+    const u = mat.uniforms as Gpu2dUniforms
+    u.uRatio.value = renderer.getPixelRatio()
+    renderer.getCurrentViewport(vp)
+    const cx = vp.x + vp.z / 2
+    const cy = vp.y + vp.w / 2
+    const q0 = onPlane(camera, cx, cy)
+    const qx = onPlane(camera, cx + 1, cy)
+    const qy = onPlane(camera, cx, cy + 1)
+    u.uQ0.value.set(q0[0], q0[1])
+    u.uC.value.set(cx, cy)
+    u.uDx.value.set(qx[0] - q0[0], qx[1] - q0[1])
+    u.uDy.value.set(qy[0] - q0[0], qy[1] - q0[1])
   }
   return m
 }
