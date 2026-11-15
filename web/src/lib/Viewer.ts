@@ -125,8 +125,12 @@ type PlotObject =
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
 /** 拡大で中心の点にここまで（図形の大きさに対する割合）近づいたら、そこからは一定の速さで前に進む（通り抜けられる） */
 const NEAR_FRACTION = 0.08
-/** 2D 表示で近づける下限（表示範囲の大きさに対する、カメラから平面までの距離の割合）。これより先は 32 ビットの精度で線が崩れる */
-const FLAT_MIN_DIST = 2e-4
+/**
+ * 2D 表示で拡大できる下限: 1 画素の大きさが、表示範囲の大きさのこの倍まで。
+ * 座標は 32 ビット（刻みは値の大きさの約 6 × 10⁻⁸）で GPU に渡るので、これより先は線・軸が何画素ずつ飛んで動く
+ * （表示範囲 ±10 なら 1 画素 3 × 10⁻⁶ で、座標 10 の近くの刻みはその 3 分の 1 画素）
+ */
+const FLAT_MIN_PIXEL = 1e-7
 const WHEEL_PER_PIXEL = 0.0022
 /** ホイールの拡大縮小をならす時間（秒） */
 const WHEEL_SMOOTH_S = 0.1
@@ -559,10 +563,11 @@ export class Viewer {
     const floor = size * NEAR_FRACTION
     // 2D 表示: 平面を通り抜けると何も見えなくなる（カメラが平面の向こうへ出て、描く奥行きの範囲からも外れる）。
     // 通り抜けずに、注視点に向かって倍率どおりに近づく。近づける下限は、32 ビットの浮動小数点数で座標の違いが
-    // 見分けられる所まで（表示範囲の大きさの FLAT_MIN_DIST 倍。1 画素がおよそ 10⁻⁶ · 表示範囲）
+    // 見分けられる所まで（1 画素が表示範囲の大きさの FLAT_MIN_PIXEL 倍）
     if (this.flat) {
       const dist = eye.distanceTo(target)
-      const next = THREE.MathUtils.clamp(dist * factor, size * FLAT_MIN_DIST, (size * 200) / this.perspective)
+      const minDist = (size * FLAT_MIN_PIXEL) / (this.pixelAt(dist) / dist)
+      const next = THREE.MathUtils.clamp(dist * factor, minDist, (size * 200) / this.perspective)
       const f = next / dist
       eye.sub(pivot).multiplyScalar(f).add(pivot)
       target.sub(pivot).multiplyScalar(f).add(pivot)
@@ -804,6 +809,10 @@ export class Viewer {
     if (this.controls.update()) this.dirty = true
     // 目に見えるほど動いたか。慣性の終わりのごくわずかな動きは「止まった」とみなす
     const dist = this.camera.position.distanceTo(this.controls.target)
+    // OrbitControls の update() は、動いた距離が決まった値（0.001）を超えたときだけ true を返す。
+    // 深く拡大すると 1 画素がそれよりずっと小さく、小さい動きが描かれずにたまって、何画素もまとめて飛んでいた。
+    // 1 画素の 1/100 以上動いたら描き直す（遠近感が弱いとカメラはとても遠く、距離に比べた割合では粗すぎる）
+    if (this.camera.position.distanceTo(this.lastCamPos) > this.pixelAt(dist) * 0.01 || this.camera.quaternion.angleTo(this.lastCamQuat) > 1e-6) this.dirty = true
     const visible =
       this.camera.position.distanceTo(this.lastCamPos) > dist * 3e-4 ||
       this.camera.quaternion.angleTo(this.lastCamQuat) > 3e-4
@@ -988,6 +997,11 @@ export class Viewer {
   private updateLabelSizes() {
     const k = 2 / (this.container.clientHeight * this.camera.projectionMatrix.elements[5])
     for (const l of this.labels) l.sprite.scale.set(l.w * k, l.h * k, 1)
+  }
+
+  /** カメラから dist 離れた所での、1 画素（CSS の画素）の大きさ */
+  private pixelAt(dist: number): number {
+    return (2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / (this.container.clientHeight || 1)
   }
 
   /** 表示範囲の対角線の長さ */
