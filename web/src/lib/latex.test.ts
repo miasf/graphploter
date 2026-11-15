@@ -35,6 +35,12 @@ const cases: [string, string][] = [
   ['\\int_0^1t\\,dt+1', '@int(t,0,1)(t) +1'],
   ['\\int_{0}^{\\infty}e^{-t}\\mathrm{d}t', '@int(t,0,∞)(e^(-t))'],
   ['\\int_{-\\infty}^{\\infty}\\frac{1}{1+u^2}du', '@int(u,-∞,∞)(((1)/(1+u^(2))))'],
+  // 不定積分・重積分
+  ['y=\\int x^2\\,dx', 'y= @int(x)(x^(2))'],
+  ['\\int_0^1\\int_0^x xy\\,dy\\,dx', '@int(x,0,1)(@int(y,0,x)(xy))'],
+  ['\\iint_{\\left\\{\\left(x,y\\right)\\mid0\\le x\\le1,0\\le y\\le x\\right\\}}xy\\,dA', '@intset((x,y),0<=x<=1,0<=y<=x)(xy)'],
+  ['\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}xy\\,dx\\,dy', '@intset((x,y),0<=x<=1,0<=y<=2)(xy)'],
+  ['\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x\\le1,0\\le y\\le1,0\\le z\\le1\\right\\}}1\\,dV', '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1)(1)'],
   // 微分（M3）
   ['\\frac{d}{dx}\\sin\\left(x\\right)', '@diff(x) sin (x)'],
   ['z=\\frac{\\partial}{\\partial x}\\sin\\left(xy\\right)', 'z= @diff(x) sin (xy)'],

@@ -286,7 +286,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
         "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
-        "cases" => OpKind::Func,
+        "cases" | "intset" => OpKind::Func,
         _ => return None,
     })
 }
@@ -720,6 +720,41 @@ impl Parser<'_> {
         Ok(args)
     }
 
+    /// 関係の連鎖 `a ≤ b < c` を 1 つ読む（`Expr::Op { op: "rel:≤<", args: [a, b, c] }`。関係が無ければ誤り）
+    fn relation_chain(&mut self, what: &str) -> Result<Expr, ParseError> {
+        let mut exprs = vec![self.expr()?];
+        let mut rels = String::new();
+        while let Tok::Rel(r) = *self.peek() {
+            self.next();
+            rels.push(match r {
+                Rel::Eq => '=',
+                Rel::Lt => '<',
+                Rel::Le => '≤',
+                Rel::Gt => '>',
+                Rel::Ge => '≥',
+            });
+            exprs.push(self.expr()?);
+        }
+        if rels.is_empty() {
+            return err(format!("{what}には、0 ≤ x ≤ 1 のように ≤・< などを書いてください"), self.pos());
+        }
+        Ok(Expr::Op { op: format!("rel:{rels}"), args: exprs })
+    }
+
+    /// 領域の上の積分 `@intset((x, y), 条件, 条件, …)(中身)`（`@intset(` は読んだ後）。中身は直後の項。
+    /// `Expr::Op { op: "intset", args: [変数の組, 関係の連鎖…, 中身] }`
+    fn intset(&mut self) -> Result<Expr, ParseError> {
+        let vars = self.expr()?;
+        let mut args = vec![vars];
+        while *self.peek() == Tok::Comma {
+            self.next();
+            args.push(self.relation_chain("積分する領域の条件")?);
+        }
+        self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+        args.push(self.term()?);
+        Ok(Expr::Op { op: "intset".into(), args })
+    }
+
     /// 場合分け `@cases(値, 条件, 条件; 値, 条件; それ以外の値)`（`@cases(` は読んだ後）。
     /// 場合ごとに `Expr::Op { op: "case", args: [値, 関係の連鎖, …] }`、関係の連鎖は `Expr::Op { op: "rel:<≤", args: [式, 式, 式] }`
     /// （`rel:` の後に関係を 1 文字ずつ。`=` `<` `≤` `>` `≥`）
@@ -767,6 +802,10 @@ impl Parser<'_> {
         if name == "cases" {
             self.expect(Tok::LParen, "@cases の後の '('")?;
             return self.cases();
+        }
+        if name == "intset" {
+            self.expect(Tok::LParen, "@intset の後の '('")?;
+            return self.intset();
         }
         match op_kind(&name) {
             Some(OpKind::Binder) => {

@@ -230,6 +230,12 @@ fn latex_outputs_are_readable() {
     assert!((value("@int(t,0,1)(t) +1") - 1.5).abs() < 1e-14);
     assert!(run("f(x)= @cases(x^(2), x<0; x)", "f(x)= @cases(x^(2), x<0; x)", &[]).is_ok());
     assert_eq!(value("@cases(1, 0<=0.5<1; 0, 0.5>=1; -1)"), 1.0);
+    // 不定積分・重積分（latex.test.ts の変換結果）
+    assert!(graph_core::equation::compile_with("y= @int(x)(x^(2))", &ps, &sp).is_ok());
+    assert!((value("@int(x,0,1)(@int(y,0,x)(xy))") - 0.125).abs() < 1e-12);
+    assert!((value("@intset((x,y),0<=x<=1,0<=y<=x)(xy)") - 0.125).abs() < 1e-12);
+    assert!((value("@intset((x,y),0<=x<=1,0<=y<=2)(xy)") - 1.0).abs() < 1e-12);
+    assert!((value("@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1)(1)") - 1.0).abs() < 1e-12);
 }
 
 // ---- M3: 記号微分 ----
@@ -331,7 +337,7 @@ fn integral_values() {
     close("@int(s,0,1)(@int(t,0,s)(1))", 0.5, 1e-13);
     // 中身は直後の項。+1 は積分の外
     close("@int(t,0,1)(t) + 1", 1.5, 1e-14);
-    assert!(error_of("z = @int(a,0,1)(@int(b,0,1)(@int(c,0,1)(x)))", "").contains("2 重まで"));
+    assert!(error_of("z = @int(a,0,1)(@int(b,0,1)(@int(c,0,1)(@int(d,0,1)(x))))", "").contains("3 重まで"));
 }
 
 #[test]
@@ -404,4 +410,58 @@ fn derivatives_inside_definitions_and_sums() {
     // Σ・積分の中の微分
     assert_eq!(value("@sum(n,1,3) @diff(n) n^2"), 12.0);
     assert!((value("@int(t,0,1)(@diff(t) t^3)") - 1.0).abs() < 1e-12);
+}
+
+// ---- 不定積分・重積分 ----
+
+#[test]
+fn indefinite_integrals() {
+    // 表で扱える形は記号で（積分定数を省いた形）
+    assert!(max_diff("y = @int(x)(x^2)", "y = x^3/3", "") < 1e-4);
+    assert!(max_diff("y = @int(x)(cos(2x + 1))", "y = sin(2x + 1)/2", "") < 1e-4);
+    assert!(max_diff("y = @int(x)(1/x)", "y = ln(abs(x))", "") < 1e-4);
+    assert!(max_diff("y = @int(x)(f)", "y = x^3/3", "f(t) = t^2") < 1e-4);
+    // 2 変数の式の x での不定積分（y は定数として扱う）
+    assert!(max_diff("z = @int(x)(x y)", "z = x^2/2 y", "") < 1e-3);
+    // 表に無い形は数値で ∫₀ˣ（F(0) = 0）: ∫ e^{−x²} dx = (√π/2) erf(x)
+    assert!(max_diff("y = @int(x)(exp(-x^2))", "y = sqrt(pi)/2 erf(x)", "") < 1e-5);
+    // 微分すると元に戻る
+    assert!(max_diff("y = @diff(x) @int(x)(x sin(x))", "y = x sin(x)", "") < 1e-4);
+}
+
+#[test]
+fn region_integrals() {
+    // 範囲の形の条件は累次積分（順番は自動）: 三角形 0 ≤ x ≤ 1, 0 ≤ y ≤ x の面積 1/2
+    close("@intset((x, y), 0 ≤ x ≤ 1, 0 ≤ y ≤ x)(1)", 0.5, 1e-12);
+    // 条件の書く順番・向きによらない
+    close("@intset((x, y), y ≤ x, x ≤ 1, y ≥ 0, 0 ≤ x)(1)", 0.5, 1e-12);
+    // 長方形の上の x y: ∫₀¹∫₀² x y dy dx = 1
+    close("@intset((x, y), 0 ≤ x ≤ 1, 0 ≤ y ≤ 2)(x y)", 1.0, 1e-12);
+    // 円の面積（範囲の形で書いたもの）: 端で √ の傾きが無限大なので、精度は 10⁻³ ほど
+    close("@intset((x, y), -1 ≤ x ≤ 1, -sqrt(1 - x^2) ≤ y ≤ sqrt(1 - x^2))(1)", std::f64::consts::PI, 2e-3);
+    // 3 重: 四面体の体積 1/6、立方体の上の x y z = 1/8
+    close("@intset((x, y, z), 0 ≤ x ≤ 1, 0 ≤ y ≤ 1 - x, 0 ≤ z ≤ 1 - x - y)(1)", 1.0 / 6.0, 1e-12);
+    close("@intset((x, y, z), 0 ≤ x ≤ 1, 0 ≤ y ≤ 1, 0 ≤ z ≤ 1)(x y z)", 0.125, 1e-12);
+    // 範囲の形にならない条件は、条件の外で 0 にした近似（円の面積 π を 5 % 以内）
+    close("@intset((x, y), -1 ≤ x ≤ 1, -1 ≤ y ≤ 1, x^2 + y^2 ≤ 1)(1)", std::f64::consts::PI, 0.05 * std::f64::consts::PI);
+    // 範囲が書かれていない変数があれば誤り
+    assert!(error_of("z = @intset((s, t), 0 ≤ s ≤ 1, s + t ≤ 1)(1)", "").contains("範囲"));
+}
+
+#[test]
+fn region_integrals_with_outer_variables() {
+    // 外の変数を範囲に使う: ∬_{0≤s≤x, 0≤t≤y} 1 = x y（x, y > 0）
+    let m = run("z = @intset((s, t), 0 ≤ s ≤ x, 0 ≤ t ≤ y)(1)", "", &[]).unwrap();
+    let mut n = 0;
+    for v in m.positions().chunks_exact(3) {
+        let (x, y, z) = (v[0] as f64, v[1] as f64, v[2] as f64);
+        if x.is_finite() && x > 0.0 && y > 0.0 && z.is_finite() {
+            assert!((z - x * y).abs() < 1e-4, "({x}, {y}): {z}");
+            n += 1;
+        }
+    }
+    assert!(n > 50);
+    // 近似を使ったら説明に出す
+    let m = run("z = @intset((s, t), -1 ≤ s ≤ 1, -1 ≤ t ≤ 1, s^2 + t^2 ≤ 1)(1) + x", "", &[]).unwrap();
+    assert!(m.kind().contains("積分は近似"), "{}", m.kind());
 }

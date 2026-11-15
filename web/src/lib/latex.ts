@@ -361,46 +361,35 @@ class Converter {
       }
       case 'int':
       case 'intop':
-      case 'smallint': {
-        // \int_{a}^{b} 中身 dt → @int(t,a,b)(中身)。中身は、同じ深さで最初に出てくる「d + 文字 1 つ」の手前まで
-        let lo: string | null = null
+      case 'smallint':
+      case 'iint':
+      case 'iiint': {
+        // 定積分 \int_{a}^{b} … dt → @int(t,a,b)(…)、不定積分 \int … dx → @int(x)(…)、
+        // 領域の上の積分 \iint_{\{(x,y)\mid …\}} … dA・\int_{[0,1]\times[0,2]} … dx\,dy → @intset((x,y),条件…)(…)
+        const multi = name === 'iint' ? 2 : name === 'iiint' ? 3 : 1
+        let subToks: Token[] | null = null
         let hi: string | null = null
         while (this.peek() === '_' || this.peek() === '^' || this.peek() === '\\limits' || this.peek() === '\\nolimits') {
           const t2 = this.toks[this.i++]
-          if (t2 === '_') lo = this.arg()
+          if (t2 === '_') subToks = this.rawTokens()
           else if (t2 === '^') hi = this.arg()
         }
-        if (lo === null || hi === null || lo.trim() === '' || hi.trim() === '') throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
-        const start = this.i
-        let depth = 0
-        for (let p = this.i; p < this.toks.length; p++) {
-          const t2 = this.toks[p]
-          if (t2 === '{' || t2 === '\\left') depth++
-          else if (t2 === '}' || t2 === '\\right') {
-            if (depth === 0) break
-            depth--
-          }
-          if (depth !== 0) continue
-          // d・\differentialD・\mathrm{d}・\operatorname{d} の後に文字 1 つ
-          let len = 0
-          if ((t2 === 'd' || t2 === '\\differentialD') && /^[A-Za-z]$/.test(this.toks[p + 1] ?? '')) len = 1
-          else if (
-            (t2 === '\\mathrm' || t2 === '\\operatorname') &&
-            this.toks[p + 1] === '{' &&
-            this.toks[p + 2] === 'd' &&
-            this.toks[p + 3] === '}' &&
-            /^[A-Za-z]$/.test(this.toks[p + 4] ?? '')
-          )
-            len = 4
-          if (len === 0) continue
-          const v = this.toks[p + len]
-          const body = new Converter(this.toks.slice(start, p)).run()
-          if (body === '') throw new LatexError('積分する式を書いてください')
-          this.i = p + len + 1
-          this.out += ` @int(${v},${lo.trim()},${hi.trim()})(${body}) `
+        const { body, vars } = this.integrand(multi)
+        if (subToks === null && hi === null) {
+          if (multi > 1 || vars.length !== 1) throw new LatexError('不定積分は 1 変数で、∫ … dx の形で書いてください')
+          this.out += ` @int(${vars[0]})(${body}) `
           return
         }
-        throw new LatexError('積分の変数を dt のように書いてください')
+        if (subToks !== null && hi !== null) {
+          if (multi > 1) throw new LatexError('重積分は、∬ の下に領域を書いてください（{(x,y) | …} か [0,1]×[0,2]）')
+          const lo = new Converter(subToks).run()
+          if (lo === '' || hi.trim() === '') throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
+          this.out += ` @int(${vars[0]},${lo},${hi.trim()})(${body}) `
+          return
+        }
+        if (subToks === null) throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
+        this.out += ` @intset(${regionOf(subToks, vars)})(${body}) `
+        return
       }
       case 'begin': {
         const env = this.rawGroup(true)
@@ -455,6 +444,66 @@ class Converter {
     throw new LatexError(`\\end{${env}} がありません`)
   }
 
+  /** 引数 1 つ分（{…} か 1 トークン）を、変換せずにトークンのまま返す */
+  private rawTokens(): Token[] {
+    const t = this.toks[this.i++]
+    if (t === undefined) throw new LatexError('式が途中で終わっています')
+    if (t !== '{') return [t]
+    const out: Token[] = []
+    let depth = 1
+    while (this.i < this.toks.length) {
+      const u = this.toks[this.i++]
+      if (u === '{') depth++
+      if (u === '}' && --depth === 0) return out
+      out.push(u)
+    }
+    throw new LatexError('括弧が閉じていません')
+  }
+
+  /**
+   * 積分の中身と、その後の「d + 文字」の並び（dx\,dy など）を読む。中身は、同じ深さで最初に出てくる「d + 文字」の手前まで。
+   * 中身の中の積分（入れ子）の「d + 文字」は、その積分のものとして飛ばす（∫∫ … dy dx の内側の dy を、外側の物と取り違えない）
+   */
+  private integrand(multi: number): { body: string; vars: string[] } {
+    const start = this.i
+    let depth = 0
+    let pending = 0
+    for (let p = this.i; p < this.toks.length; p++) {
+      const t2 = this.toks[p]
+      if (t2 === '{' || t2 === '\\left') depth++
+      else if (t2 === '}' || t2 === '\\right') {
+        if (depth === 0) break
+        depth--
+      }
+      if (depth !== 0) continue
+      if (t2 === '\\int' || t2 === '\\intop' || t2 === '\\smallint') pending += 1
+      else if (t2 === '\\iint') pending += 2
+      else if (t2 === '\\iiint') pending += 3
+      const d = differentialAt(this.toks, p)
+      if (!d) continue
+      if (pending > 0) {
+        pending--
+        p += d.len
+        continue
+      }
+      const body = new Converter(this.toks.slice(start, p)).run()
+      if (body === '') throw new LatexError('積分する式を書いてください')
+      // 続く「d + 文字」をまとめて読む（間の \, などの空白は飛ばす）
+      const vars: string[] = []
+      let q = p
+      for (;;) {
+        while (SPACES.has(this.toks[q] ?? '')) q++
+        const e = differentialAt(this.toks, q)
+        if (!e || vars.length >= Math.max(multi, 3)) break
+        vars.push(e.v)
+        q += e.len + 1
+      }
+      this.i = q
+      return { body, vars }
+    }
+    throw new LatexError('積分の変数を dx のように書いてください')
+  }
+
   /** '{' を読んだ直後から、対応する '}' までを変換して返す */
   private argFromOpenBrace(): string {
     const saved = this.out
@@ -483,6 +532,63 @@ function derivative(a: string, b: string): string | null {
   if (order !== total) throw new LatexError('微分の分子と分母の階数をそろえてください')
   const ops = parts.map((m) => (m[3] && m[3] !== '1' ? `@diff(${m[2]},${m[3]}) ` : `@diff(${m[2]}) `)).join('')
   return ` ${ops}${num[3] ?? ''} `
+}
+
+/** 間に入ってよい空白の命令 */
+const SPACES = new Set(['\\,', '\;', '\\:', '\\ ', '\\!', '\\quad', '\\qquad'])
+
+/** 位置 p から「d + 文字 1 つ」（\mathrm{d}x・\differentialD x も）なら、変数と、d の部分のトークンの数（変数の手前まで） */
+function differentialAt(toks: Token[], p: number): { v: string; len: number } | null {
+  const letter = (k: number) => (/^[A-Za-z]$/.test(toks[k] ?? '') ? toks[k] : null)
+  const t = toks[p]
+  if ((t === 'd' || t === '\\differentialD') && letter(p + 1)) return { v: toks[p + 1], len: 1 }
+  if ((t === '\\mathrm' || t === '\\operatorname') && toks[p + 1] === '{' && toks[p + 2] === 'd' && toks[p + 3] === '}' && letter(p + 4)) {
+    return { v: toks[p + 4], len: 4 }
+  }
+  return null
+}
+
+/**
+ * 積分する領域（∬ の下）を、計算エンジンの @intset の引数「(x,y),条件,…」にする。
+ * 集合 \{(x,y) \mid 条件\}（\mid・|・: で区切る）と、区間の直積 [0,1]\times[0,2]（変数は dx\,dy の順）を読む
+ */
+function regionOf(toks: Token[], vars: string[]): string {
+  // 集合の括弧を外す
+  let inner = toks
+  const strip = (open: Token[], close: Token[]) => {
+    if (open.every((t, k) => inner[k] === t) && close.every((t, k) => inner[inner.length - close.length + k] === t)) {
+      inner = inner.slice(open.length, inner.length - close.length)
+      return true
+    }
+    return false
+  }
+  const isSet = strip(['\\left', '\\{'], ['\\right', '\\}']) || strip(['\\{'], ['\\}']) || strip(['\\lbrace'], ['\\rbrace'])
+  if (isSet) {
+    let depth = 0
+    for (let k = 0; k < inner.length; k++) {
+      const t = inner[k]
+      if (t === '{' || t === '\\left') depth++
+      else if (t === '}' || t === '\\right') depth--
+      if (depth === 0 && (t === '\\mid' || t === '|' || t === ':' || t === '\\vert')) {
+        const point = new Converter(inner.slice(0, k)).run()
+        const cond = new Converter(inner.slice(k + 1)).run()
+        if (point === '' || cond === '') break
+        return `${point},${cond}`
+      }
+    }
+    throw new LatexError('積分する領域の集合は {(x,y) | 条件} の形で書いてください')
+  }
+  // 区間の直積 [a,b]×[c,d]
+  const text = new Converter(toks).run()
+  const boxes = text.split(/[*×]/).map((p) => p.trim())
+  const ranges = boxes.map((b) => b.match(/^\[(.+),(.+)\]$/))
+  if (ranges.every((m) => m) && ranges.length > 0) {
+    if (ranges.length !== vars.length) throw new LatexError(`区間が ${ranges.length} 個あるので、dx\\,dy のように変数を ${ranges.length} 個書いてください`)
+    const conds = ranges.map((m, k) => `${m![1].trim()}<=${vars[k]}<=${m![2].trim()}`)
+    const point = vars.length === 1 ? vars[0] : `(${vars.join(',')})`
+    return `${point},${conds.join(',')}`
+  }
+  throw new LatexError('積分する領域は、{(x,y) | 条件} か [0,1]×[0,2] の形で書いてください')
 }
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */

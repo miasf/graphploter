@@ -10,7 +10,11 @@
 //! - 場合分け `@cases(値, 条件; 値, 条件; それ以外の値)`（M2。[`crate::functions::Func::Piece`] にする）
 //! - 差分 `@fdiff(x) 項`（前進 Δ）・`@bdiff`（後退 ∇）・`@cdiff`（中心 δ）。`@fdiff(x, h) 項` で幅 h（既定 1。式でよく、x を使ってもよい）、
 //!   `@fdiff(x, h, k) 項` で k 階（総和 Σ の逆。M4 の続き）
-//! - 定積分 `@int(t, a, b)(式)`（M5。ガウス・ルジャンドルの 16 点 × 2 区間の重み付きの和にする。端は式でも ∞ でもよい）
+//! - 定積分 `@int(t, a, b)(式)`（M5。ガウス・ルジャンドルの 16 点 × 2 区間の重み付きの和にする。端は式でも ∞ でもよい）。
+//!   3 重まで（入れ子の 2 重目は 8 点、3 重目は 4 点 × 2 区間）
+//! - 不定積分 `@int(x)(式)`（積分定数を省いた形。表で扱える形は記号で `integrate.rs`、扱えなければ数値で $\int_0^x$）
+//! - 領域の上の重積分 `@intset((x, y), 0 ≤ x ≤ 1, x^2 ≤ y ≤ x)(式)`（条件から累次積分の順番と範囲を見つける。
+//!   範囲の形にならない条件は、条件の外を 0 にした近似）
 //!
 //! 定義は、ほかの行（式の一覧）から [`Defs::parse`] で作り、[`install`] で入れておく（`lib.rs` が `plot` の間だけ入れる）。
 //! 計算エンジンの式の文法は `parser.rs` の先頭の説明。展開した後の式には、新しい節を残さない（残れば内部エラー）
@@ -153,6 +157,8 @@ thread_local! {
     static CURRENT: RefCell<Rc<Defs>> = RefCell::new(Rc::new(Defs::default()));
     /// 展開で使った定義の名前（画面が、定義が変わったときに描き直す式を決めるのに使う）
     static USED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 近似を使った（範囲の形にならない条件で切り取った領域の積分）。画面の説明に「（積分は近似）」と出す
+    static APPROX: RefCell<bool> = const { RefCell::new(false) };
     /// 展開の途中で値を使ったパラメータ（Σ の範囲の N など。展開した式には残らないので、別に覚えておく）
     static USED_PARAMS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 直前にコンパイルした行が定義の行なら、その名前と、描いたものの説明（`y = f(x)` など。描かないなら None）
@@ -174,6 +180,7 @@ impl Drop for Installed {
 pub fn install(defs: Defs) -> Installed {
     USED.with(|u| u.borrow_mut().clear());
     USED_PARAMS.with(|u| u.borrow_mut().clear());
+    APPROX.with(|a| *a.borrow_mut() = false);
     DEF_LINE.with(|d| *d.borrow_mut() = None);
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
@@ -190,6 +197,11 @@ pub fn names() -> Vec<String> {
 /// 展開で使った定義の名前（重複なし、出てきた順）
 pub fn used() -> Vec<String> {
     USED.with(|u| u.borrow().clone())
+}
+
+/// 近似を使ったか（[`install`] の後。範囲の形にならない条件で切り取った領域の積分）
+pub fn approximate() -> bool {
+    APPROX.with(|a| *a.borrow())
 }
 
 /// 展開の途中で値を使ったパラメータ（[`install`] の後。Σ の範囲など、展開した式に残らないもの）
@@ -428,6 +440,7 @@ impl Expander<'_> {
                 }
             }
             Expr::Op { op, args } if op == "cases" => Val::S(self.cases(args)?),
+            Expr::Op { op, args } if op == "intset" => Val::S(self.region_integral(args)?),
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
@@ -572,9 +585,12 @@ impl Expander<'_> {
     /// $[a, \infty)$ は $t = a + \frac{s}{1-s}$、$(-\infty, b]$ は $t = b - \frac{s}{1-s}$（$s \in [0, 1)$）、
     /// $(-\infty, \infty)$ は $(-\infty, 0]$ と $[0, \infty)$ に分ける
     fn integral(&mut self, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        if args.is_empty() {
+            return self.indefinite(var, body);
+        }
         let [lo, hi] = args else { return Err("積分の範囲を書いてください（∫_0^1 の形）".into()) };
-        if self.int_depth >= 2 {
-            return Err("積分の入れ子は 2 重までにしてください".into());
+        if self.int_depth >= 3 {
+            return Err("積分の入れ子は 3 重までにしてください".into());
         }
         let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
         let inf = |e: &Expr| match e {
@@ -586,7 +602,14 @@ impl Expander<'_> {
             _ => None,
         };
         let num = Expr::Num;
-        let b = |op: BinOp, x: Expr, y: Expr| Expr::Bin(op, Box::new(x), Box::new(y));
+        // 節を作るときに定数をその場で計算する（端が数なら、積分の点の位置が数 1 つになる。3 重積分の式の大きさを抑える）
+        let b = |op: BinOp, x: Expr, y: Expr| match op {
+            BinOp::Add => crate::diff::add(x, y),
+            BinOp::Sub => crate::diff::sub(x, y),
+            BinOp::Mul => crate::diff::mul(x, y),
+            BinOp::Div => crate::diff::div(x, y),
+            BinOp::Pow => crate::diff::pow(x, y),
+        };
         let s = Expr::Var("#s".into());
         let one_minus_s = b(BinOp::Sub, num(1.0), s.clone());
         // 置き換え: t = φ(s)、dt = φ'(s) ds。s の範囲 [s0, s1]
@@ -611,7 +634,8 @@ impl Expander<'_> {
             }
             _ => return Err("積分の範囲を確かめてください".into()),
         };
-        let (nodes, weights) = gauss_legendre(if self.int_depth == 0 { 16 } else { 8 });
+        // 入れ子の深さごとの点の数（2 区間それぞれ）。3 重積分で被積分関数を 32 × 16 × 8 = 4,096 回計算する
+        let (nodes, weights) = gauss_legendre([16, 8, 4][self.int_depth.min(2)]);
         // 区間 [s0, s1] を 2 つに分ける: 幅の半分 h、j 番目の中点 m_j
         let h = b(BinOp::Div, b(BinOp::Sub, s1, s0.clone()), num(2.0));
         let half_h = b(BinOp::Div, h.clone(), num(2.0));
@@ -648,6 +672,124 @@ impl Expander<'_> {
         }
         self.int_depth -= 1;
         Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
+    }
+
+    /// 不定積分（積分定数を省いた形）: 表で扱える形は記号で（`integrate.rs`）、扱えなければ数値で $\int_0^x f(t)\,dt$
+    /// （そのときの積分定数は F(0) = 0 になるもの）
+    fn indefinite(&mut self, var: &str, body: &Expr) -> Result<Expr, String> {
+        let f = match self.val(body)? {
+            Val::S(s) => s,
+            Val::Fn { arity: 1, body } => apply_body(&body, &[Expr::Var(var.to_string())]),
+            Val::Fn { .. } => return Err(fn_as_value_error(body)),
+        };
+        if let Some(big_f) = crate::integrate::antiderivative(&f, var) {
+            return Ok(big_f);
+        }
+        // 数値: 0 から x まで（中身はもう展開済みなので、そのまま積分の変数を入れる）
+        self.integral(var, &[Expr::Num(0.0), Expr::Var(var.to_string())], &f)
+    }
+
+    /// 領域の上の重積分 `@intset((x, y), 条件…)(中身)`。条件を「変数 ≤ 式」の形の範囲に分け、
+    /// 内側の変数の範囲が外側の変数だけで決まる順番を探して、累次積分にする。範囲の形にならない条件（x² + y² ≤ 1 など）は、
+    /// 中身に「条件の外では 0」を掛けた近似にする（境目で値が飛ぶので、誤差は 10⁻² ほど）
+    fn region_integral(&mut self, args: &[Expr]) -> Result<Expr, String> {
+        use crate::functions::Func;
+        let (Some(vars_e), Some(body)) = (args.first(), args.last()) else { return Err("内部エラー: 領域の積分の形".into()) };
+        let vars: Vec<String> = match vars_e {
+            Expr::Var(v) => vec![v.clone()],
+            Expr::Tuple(items) => items
+                .iter()
+                .map(|e| match e {
+                    Expr::Var(v) => Ok(v.clone()),
+                    _ => Err("積分する領域の点は、(x, y) のように変数の組で書いてください".to_string()),
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err("積分する領域の点は、(x, y) のように変数の組で書いてください".into()),
+        };
+        if vars.len() > 3 {
+            return Err("領域の積分は 3 重までにしてください".into());
+        }
+        // 条件を「左 関係 右」の組に分ける（関係は '<' か '≤'。'>'・'≥' は左右を入れ替える）
+        let mut pairs: Vec<(Expr, bool, Expr)> = Vec::new();
+        for chain in &args[1..args.len() - 1] {
+            let Expr::Op { op, args: exprs } = chain else { return Err("内部エラー: 条件の形".into()) };
+            let rels: Vec<char> = op.trim_start_matches("rel:").chars().collect();
+            let exprs = exprs.iter().map(|e| self.scalar(e)).collect::<Result<Vec<_>, _>>()?;
+            for (j, r) in rels.iter().enumerate() {
+                let (l, rr) = (exprs[j].clone(), exprs[j + 1].clone());
+                match r {
+                    '<' => pairs.push((l, true, rr)),
+                    '≤' => pairs.push((l, false, rr)),
+                    '>' => pairs.push((rr, true, l)),
+                    '≥' => pairs.push((rr, false, l)),
+                    _ => return Err("積分する領域の条件に = は使えません（面積・体積が 0 になります）".into()),
+                }
+            }
+        }
+        // 順番（外側から内側）ごとに、範囲に使える組を内側の変数から順に割り当てる
+        let is_var = |e: &Expr, v: &str| matches!(e, Expr::Var(n) if n == v);
+        let mut best: Option<(Vec<String>, Vec<(Vec<Expr>, Vec<Expr>)>, Vec<usize>)> = None;
+        for order in permutations(&vars) {
+            let mut used = vec![false; pairs.len()];
+            let mut bounds: Vec<(Vec<Expr>, Vec<Expr>)> = vec![(Vec::new(), Vec::new()); order.len()];
+            for i in (0..order.len()).rev() {
+                let v = &order[i];
+                let inner = &order[i..];
+                for (k, (l, _, r)) in pairs.iter().enumerate() {
+                    if used[k] {
+                        continue;
+                    }
+                    // 反対側が v と内側の変数を使わない
+                    let free = |e: &Expr| !inner.iter().any(|w| e.uses_var(w));
+                    if is_var(r, v) && free(l) {
+                        bounds[i].0.push(l.clone());
+                        used[k] = true;
+                    } else if is_var(l, v) && free(r) {
+                        bounds[i].1.push(r.clone());
+                        used[k] = true;
+                    }
+                }
+            }
+            if bounds.iter().any(|(lo, hi)| lo.is_empty() || hi.is_empty()) {
+                continue;
+            }
+            let rest: Vec<usize> = (0..pairs.len()).filter(|&k| !used[k]).collect();
+            if best.as_ref().is_none_or(|b| rest.len() < b.2.len()) {
+                best = Some((order, bounds, rest));
+            }
+        }
+        let Some((order, bounds, rest)) = best else {
+            return Err(format!(
+                "積分する領域は、それぞれの変数の範囲を書いてください（例: 0 ≤ {0} ≤ 1, 0 ≤ {1} ≤ {0}）",
+                vars[0],
+                vars.get(1).cloned().unwrap_or_else(|| "y".into())
+            ));
+        };
+        // 範囲の形にならない条件: 条件の外で 0 になる因子を掛ける（近似）
+        let mut f = body.clone();
+        if !rest.is_empty() {
+            APPROX.with(|a| *a.borrow_mut() = true);
+            let mut piece = vec![Expr::Num(rest.len() as f64), Expr::Num(0.0)];
+            let mut strict: u64 = 0;
+            for (j, &k) in rest.iter().enumerate() {
+                let (l, s, r) = &pairs[k];
+                if *s {
+                    strict |= 1 << j;
+                }
+                piece.push(Expr::Bin(BinOp::Sub, Box::new(r.clone()), Box::new(l.clone())));
+            }
+            piece[1] = Expr::Num(strict as f64);
+            piece.extend([Expr::Num(1.0), Expr::Num(0.0), Expr::Num(0.0), Expr::Num(0.0)]);
+            f = Expr::Bin(BinOp::Mul, Box::new(f), Box::new(Expr::Call(Func::Piece, piece)));
+        }
+        // 内側から積分で包む。下の端は max、上の端は min
+        let fold = |es: &[Expr], g: Func| {
+            es[1..].iter().fold(es[0].clone(), |acc, e| Expr::Call(g, vec![acc, e.clone()]))
+        };
+        for (v, (lo, hi)) in order.iter().zip(&bounds).rev() {
+            f = Expr::Binder { op: "int".into(), var: v.clone(), args: vec![fold(lo, Func::Max), fold(hi, Func::Min)], body: Box::new(f) };
+        }
+        self.scalar(&f)
     }
 
     /// 式の値（数）。`what` はエラーの文に入れる名前（「Σ の範囲」など）。座標・媒介変数を含めばエラー
@@ -803,6 +945,23 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
         ws[i] = 2.0 / ((1.0 - x * x) * dp * dp);
     }
     (xs, ws)
+}
+
+/// 並び替えの全部（3 つまで）
+fn permutations(v: &[String]) -> Vec<Vec<String>> {
+    if v.len() <= 1 {
+        return vec![v.to_vec()];
+    }
+    let mut out = Vec::new();
+    for i in 0..v.len() {
+        let mut rest = v.to_vec();
+        let first = rest.remove(i);
+        for mut p in permutations(&rest) {
+            p.insert(0, first.clone());
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn is_ellipsis(e: &Expr) -> bool {

@@ -17,6 +17,7 @@ pub mod diff;
 pub mod equation;
 pub mod eval;
 pub mod expand;
+pub mod integrate;
 pub mod functions;
 pub mod interval;
 pub mod mesh;
@@ -652,7 +653,10 @@ pub fn plot(
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
-        kind: expand::def_line_label().unwrap_or_else(|| equation::rename_kind(&built.kind, &space)),
+        kind: {
+            let k = expand::def_line_label().unwrap_or_else(|| equation::rename_kind(&built.kind, &space));
+            if expand::approximate() { format!("{k}（積分は近似）") } else { k }
+        },
         params: plot.param_vars(),
         curve,
         shape_curve: built.curve,
