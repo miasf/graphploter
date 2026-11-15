@@ -531,6 +531,16 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
   媒介変数は、条件で範囲を書いた名前のうち点の式に出てくるもの（流束の向き $\mathbf r_u \times \mathbf r_v$ は、点の式に出てくる順）。
   `\oint`・`\oiint` は `\int`・`\iint` と同じ（閉じているかは調べない）。式を全部書き並べてから計算するので、3 重の積分の
   式が大きくなりすぎるとエラーになる（球座標の球の体積は計算できるが、範囲が外側の変数の式（$\sqrt{1-x^2-y^2}$）の 3 重積分は大きすぎる）
+- 集合と論理: 内包的表記 `\left\{(x,y,z) \mid x^2+y^2<1,\ 0 \le z \le 2\right\}`（点の名前は自由。表示中の座標に順に読み替える）、
+  論理 `\land`・`\lor`・`\neg`・`\Rightarrow`・`\Leftarrow`・`\Leftrightarrow`、排他的論理和（XOR）`\oplus`・`\veebar`・`\nleftrightarrow`、
+  否定論理積（NAND）`\barwedge`・`\uparrow`、否定論理和（NOR）`\downarrow`・`\nor`、集合 `\cap`・`\cup`・`\setminus`・対称差 `\triangle`・`\ominus`・
+  補集合 `A^{c}`・`A^{\complement}`・`\complement A`、`\in`・`\notin`・`\ni`、区間 `[0,1)`・`(0,1]`・`[0,\infty)` とその直積 `[0,1]\times[0,2]`、
+  `\mathbb{R}`・`\mathbb{Z}`（$\sin(\pi p) = 0$）・`\mathbb{N}`（1 以上の整数）・`\top`・`\bot`・`\emptyset`・`\ne`。
+  名前を付けた集合 `A = \left\{(x,y,z) \mid \dots\right\}` は、ほかの行で `A \setminus B`・`(x,y,z) \in A` のように使える。
+  条件は「かつ」のかたまりを「または」でつないだ形（16 個まで）に直して描く。領域どうしの「または」は 1 本の不等式
+  $\min_k \max_j g_{kj} \le 0$ にまとめる（和集合の角は格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
+  `\ne` は「かつ」の中では描き方が変わらないので無視し、説明に注意を出す。$\mathbb{Q}$ は描けない。
+  点を媒介変数の式で書いた集合 `\left\{(\cos t, \sin t, 0) \mid 0 \le t \le \pi\right\}` は媒介変数表示で、条件が媒介変数の範囲になる
 - 等差のリスト: `[1, 3, \ldots, 9]` は `[1, 3, 5, 7, 9]`、`[1, \ldots, 5]` は公差 1（256 個まで）
 - 両方の符号: `y = \pm\sqrt{x}` は `y = \sqrt{x}` と `y = -\sqrt{x}` の 2 つを描く（1 つの式の中の ± はそろって動く。∓ は逆の符号）
 - 度: `30^{\circ}` は $30 \cdot \pi / 180$

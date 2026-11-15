@@ -505,12 +505,15 @@
 
   /** 計算エンジン用の式の、関数の定義の左辺 `f(x, y) =` */
   const DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*\(\s*[A-Za-z]\w*(\s*,\s*[A-Za-z]\w*)*\s*\)\s*=/
+  /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
+  const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
 
   /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
   function defNameOf(it: PlotItem): string | null {
     if (it.def) return it.def
     try {
-      const m = latexToText(it.latex).match(DEF_HEAD)
+      const text = latexToText(it.latex)
+      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD)
       return m ? m[1] : null
     } catch {
       return null

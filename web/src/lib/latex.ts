@@ -69,6 +69,53 @@ const SYMBOLS: Record<string, string> = {
   dotsc: '…',
   dotsb: '…',
   circ: '∘',
+  // 論理・集合（計画 M11）。XOR・NAND・NOR・対称差も
+  land: '∧',
+  wedge: '∧',
+  And: '∧',
+  lor: '∨',
+  vee: '∨',
+  neg: '¬',
+  lnot: '¬',
+  implies: '⇒',
+  Rightarrow: '⇒',
+  Longrightarrow: '⇒',
+  impliedby: '⇐',
+  Leftarrow: '⇐',
+  Longleftarrow: '⇐',
+  iff: '⇔',
+  Leftrightarrow: '⇔',
+  Longleftrightarrow: '⇔',
+  biconditional: '⇔',
+  oplus: '⊕',
+  veebar: '⊕',
+  nleftrightarrow: '⊕',
+  nLeftrightarrow: '⊕',
+  barwedge: '⊼',
+  uparrow: '⊼',
+  downarrow: '⊽',
+  nor: '⊽',
+  cap: '∩',
+  cup: '∪',
+  setminus: '∖',
+  smallsetminus: '∖',
+  backslash: '∖',
+  triangle: '△',
+  bigtriangleup: '△',
+  vartriangle: '△',
+  ominus: '△',
+  in: '∈',
+  notin: '∉',
+  ni: '∋',
+  owns: '∋',
+  ne: '≠',
+  neq: '≠',
+  emptyset: '∅',
+  varnothing: '∅',
+  top: '⊤',
+  bot: '⊥',
+  complement: '∁',
+  mid: '∣',
   // 微分（\frac{d}{dx} などの部品。単独では計算エンジンが読めない）とプライム
   partial: '∂',
   infty: '∞',
@@ -216,6 +263,11 @@ class Converter {
         return
       }
       const a = this.arg()
+      // 補集合 A^{\complement}
+      if (a.trim() === '∁') {
+        this.out += 'ᶜ'
+        return
+      }
       // f^{\prime} は f'（導関数）
       this.out += /^'+$/.test(a.replace(/\s+/g, '')) ? a.replace(/\s+/g, '') : '^(' + a + ')'
       return
@@ -291,11 +343,27 @@ class Converter {
       case 'left': {
         const d = this.toks[this.i++] ?? ''
         if (!(d in OPENERS)) throw new LatexError(`括弧 ${d} は使えません`)
+        // 集合の括弧 \left\{ 点 \mid 条件 \right\}
+        if (d === '\\{' && this.setBuilder('\\right')) return
         this.out += OPENERS[d]
         this.seq('\\right')
         if (this.toks[this.i] !== '\\right') throw new LatexError('括弧が閉じていません')
+        const close = this.toks[this.i + 1] ?? ''
         this.i += 2 // \right と閉じ括弧
-        this.out += OPENERS[d] === '[' ? ']' : ')'
+        // 半開区間 (0, 1]・[0, 1) は、閉じ括弧の形を残す（∈ の右で区間になる）
+        this.out += close === ']' || close === '\\rbrack' ? ']' : OPENERS[d] === '[' && close !== ')' ? ']' : ')'
+        return
+      }
+      case '{':
+      case 'lbrace':
+        // \{ 点 \mid 条件 \}（\left の無い集合の括弧）
+        if (this.setBuilder(null)) return
+        throw new LatexError('集合は \\{(x, y) \\mid 条件\\} の形で書いてください')
+      case 'mathbb': {
+        const c = this.rawGroup(true)
+        const sets: Record<string, string> = { R: 'ℝ', Z: 'ℤ', N: 'ℕ', C: 'ℂ', Q: 'ℚ' }
+        if (!(c in sets)) throw new LatexError(`\\mathbb{${c}} はまだ使えません`)
+        this.out += sets[c]
         return
       }
       case 'operatorname':
@@ -474,6 +542,38 @@ class Converter {
       else row[row.length - 1].push(t)
     }
     throw new LatexError(`\\end{${env}} がありません`)
+  }
+
+  /**
+   * 集合の括弧の中身（`{` の後）が「点 \mid 条件」なら、⦃点∣条件⦄ を出力して true。区切り（\mid・:・\colon）が無ければ、何もせず false。
+   * `end` が '\right' なら \right\} まで、null なら \} か \rbrace まで
+   */
+  private setBuilder(end: '\\right' | null): boolean {
+    let depth = 0
+    let sep = -1
+    let close = -1
+    for (let k = this.i; k < this.toks.length; k++) {
+      const t = this.toks[k]
+      if (t === '{' || t === '\\left') depth++
+      else if (t === '}' || t === '\\right') {
+        if (depth === 0 && end === '\\right' && t === '\\right') {
+          close = k
+          break
+        }
+        depth--
+      } else if (depth === 0 && end === null && (t === '\\}' || t === '\\rbrace')) {
+        close = k
+        break
+      }
+      if (depth === 0 && sep < 0 && (t === '\\mid' || t === ':' || t === '\\colon')) sep = k
+    }
+    if (sep < 0 || close < 0) return false
+    const point = new Converter(this.toks.slice(this.i, sep)).run()
+    const cond = new Converter(this.toks.slice(sep + 1, close)).run()
+    if (point === '' || cond === '') throw new LatexError('集合は {(x, y) | 条件} の形で、点と条件を書いてください')
+    this.out += ` ⦃${point}∣${cond}⦄ `
+    this.i = close + (end === '\\right' ? 2 : 1)
+    return true
   }
 
   /** 引数 1 つ分（{…} か 1 トークン）を、変換せずにトークンのまま返す */

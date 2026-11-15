@@ -243,6 +243,14 @@ fn latex_outputs_are_readable() {
     assert_eq!(value("(1,2,3)×(4,5,6)(1,0,0)"), -3.0);
     assert!((value("@intset(( cos t, sin t),0<=t<=2 pi; {vec})((-y,x))") - 2.0 * std::f64::consts::PI).abs() < 1e-9);
     assert!((value("@intset(( cos t, sin t),0<=t<=2 pi)(x^(2))") - std::f64::consts::PI).abs() < 1e-9);
+    // 集合と論理（latex.test.ts の変換結果）
+    for src in ["⦃(x,y,z)∣x^(2)+y^(2)<1,0<=z<=2⦄", "x^(2)+y^(2)+z^(2)<=4∧¬(z>1)", "x<0⊕y<0", "x<0⊼y<0", "x<0⊽y<0", "x∈[0,1)", "x∈(0,1]", "(x,y,z)∈[0,1]×[0,2]×[0,1]", "x∈ℤ", "x∉ℕ", "x≠0", "∅∨⊤"] {
+        assert!(run(src, "", &[]).is_ok(), "{src}");
+    }
+    let defs = "A= ⦃(x,y,z)∣x<0⦄\nB= ⦃(x,y,z)∣y<0⦄\nC= ⦃(x,y,z)∣z<0⦄";
+    for src in ["A∪B∖C", "A△B", "A^(c)∩Bᶜ"] {
+        assert!(run(src, defs, &[]).is_ok(), "{src}");
+    }
 }
 
 // ---- M3: 記号微分 ----
@@ -527,4 +535,79 @@ fn line_surface_volume_integrals() {
     // 平面の領域の変数変換（極座標）: 円の面積 π
     close("@intset((r cos(t), r sin(t)), 0 ≤ r ≤ 1, 0 ≤ t ≤ 2pi)(1)", PI, 1e-9);
     assert!(error_of("z = @intset((cos(t), sin(t)), 0 ≤ t ≤ 1; {vec})(x)", "").contains("ベクトル場"));
+}
+
+// ---- M11: 集合と論理 ----
+
+#[test]
+fn set_builder_and_logic_match_systems() {
+    assert_eq!(mesh("⦃(x, y, z) ∣ x^2+y^2<1, 0≤z≤2⦄", "", &[]), mesh("x^2+y^2<1, 0≤z≤2", "", &[]));
+    assert_eq!(mesh("x^2+y^2+z^2 ≤ 4 ∧ ¬(z > 1)", "", &[]), mesh("x^2+y^2+z^2 ≤ 4, z ≤ 1", "", &[]));
+    assert_eq!(mesh("(x, y, z) ∈ [0, 1] × [0, 2] × [0, 1]", "", &[]), mesh("0 ≤ x ≤ 1, 0 ≤ y ≤ 2, 0 ≤ z ≤ 1", "", &[]));
+    assert_eq!(mesh("x ∈ ℤ", "", &[]), mesh("sin(pi x) = 0", "", &[]));
+    // 点の名前は自由（(a, b, c) を表示中の座標に置き換える）
+    assert_eq!(mesh("⦃(a, b, c) ∣ a^2+b^2+c^2 ≤ 4⦄", "", &[]), mesh("x^2+y^2+z^2 ≤ 4", "", &[]));
+}
+
+#[test]
+fn named_sets_and_difference() {
+    let defs = "A = ⦃(x,y,z) ∣ x^2+y^2+z^2 ≤ 4⦄\nB = ⦃(x,y,z) ∣ z > 0⦄";
+    assert_eq!(mesh("A ∖ B", defs, &[]), mesh("x^2+y^2+z^2 ≤ 4, z ≤ 0", "", &[]));
+    assert_eq!(mesh("A ∩ Bᶜ", defs, &[]), mesh("x^2+y^2+z^2 ≤ 4, z ≤ 0", "", &[]));
+    assert_eq!(mesh("(x, y, z) ∈ A ∖ B", defs, &[]), mesh("x^2+y^2+z^2 ≤ 4, z ≤ 0", "", &[]));
+    // 定義の行そのものも描く
+    let m = run("A = ⦃(x,y,z) ∣ x^2+y^2+z^2 ≤ 4⦄", defs, &[]).unwrap();
+    assert_eq!(m.def_name(), "A");
+    assert!(!m.positions().is_empty());
+    // 使った集合の名前を返す（定義を変えたら描き直す）
+    let m = run("A ∖ B", defs, &[]).unwrap();
+    let mut used: Vec<String> = m.used_defs().split(',').map(String::from).collect();
+    used.sort();
+    assert_eq!(used, vec!["A", "B"]);
+    assert!(error_of("C ∪ A", defs).contains("集合 C は定義されていません"));
+}
+
+#[test]
+fn unions_of_regions() {
+    // 2 つの球の和集合: 面の頂点は、もう一方の球の内側（中心から 1 − 2h より内）に無い
+    let m = run("x^2+y^2+z^2 ≤ 1 ∨ (x-1)^2+y^2+z^2 ≤ 1", "", &[]).unwrap();
+    let p = m.positions();
+    assert!(p.len() > 300);
+    let h = 6.0 / 24.0;
+    for v in p.chunks_exact(3) {
+        let (x, y, z) = (v[0] as f64, v[1] as f64, v[2] as f64);
+        if !x.is_finite() {
+            continue;
+        }
+        let r0 = (x * x + y * y + z * z).sqrt();
+        let r1 = ((x - 1.0) * (x - 1.0) + y * y + z * z).sqrt();
+        assert!(r0 > 1.0 - 2.0 * h || r1 > 1.0 - 2.0 * h, "({x}, {y}, {z}) が内側");
+    }
+    // XOR（対称差）・NAND・NOR も描ける
+    for src in ["x^2+y^2+z^2 ≤ 4 ⊕ z ≤ 0", "x < 0 ⊼ y < 0", "x < 0 ⊽ y < 0", "(x < 0) ⇒ (y < 0)", "(x < 0) ⇔ (y < 0)"] {
+        assert!(!mesh(src, "", &[]).0.is_empty(), "{src}");
+    }
+    // 等式どうしの「または」は、両方を重ねて描く
+    let m = run("x^2 + y^2 = 1 ∨ z = 0", "", &[]).unwrap();
+    assert!(m.kind().contains("× 2"), "{}", m.kind());
+}
+
+#[test]
+fn not_equal_empty_and_parametric_sets() {
+    let m = run("x ≠ 0, x^2+y^2+z^2 ≤ 1", "", &[]).unwrap();
+    assert!(m.kind().contains("≠"), "{}", m.kind());
+    assert_eq!(m.positions(), mesh("x^2+y^2+z^2 ≤ 1", "", &[]).0);
+    let m = run("⊥ ∨ ∅", "", &[]).unwrap();
+    assert!(m.positions().is_empty() && m.kind().contains("空集合"), "{}", m.kind());
+    // 媒介変数で書いた集合: 条件が範囲になる（画面の範囲の欄 [0, 5] より優先。半円なので y ≥ 0）
+    let m = run("⦃(cos(t), sin(t), 0) ∣ 0 ≤ t ≤ pi⦄", "", &[]).unwrap();
+    let p = m.positions();
+    assert!(p.len() > 30);
+    for v in p.chunks_exact(3) {
+        if v[1].is_finite() {
+            assert!(v[1] >= -1e-6, "{v:?}");
+        }
+    }
+    assert!(error_of("⦃(cos(t), sin(t), 0) ∣ 0 ≤ t⦄", "").contains("上の端"));
+    assert!(error_of("x ∈ ℚ", "").contains("有理数"));
 }

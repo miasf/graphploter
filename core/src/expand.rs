@@ -48,6 +48,8 @@ pub enum Def {
     Function { args: Vec<String>, body: Expr },
     /// 引数の無い定義（関数の形 `h = f + g`・`h = f ∘ g`）
     Value(Expr),
+    /// 集合の定義 `S = {(x, y) | …}`・`S = A ∪ B`（計画 M11）
+    Set(crate::parser::SetE),
 }
 
 /// 定義の表（名前 → 定義）
@@ -108,6 +110,21 @@ impl Defs {
             }
         }
         let mut map = BTreeMap::new();
+        // 集合の定義 `S = …`（右辺に論理・集合の記号がある行）
+        for line in &lines {
+            let Some((name, rhs)) = line.split_once('=') else { continue };
+            let name = name.trim().trim_start_matches('{').trim_end_matches('}');
+            let simple = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric());
+            if !simple || !definable(name) || params.contains_key(name) || names.iter().any(|n| n == name) {
+                continue;
+            }
+            if !rhs.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
+                continue;
+            }
+            if let Some(set) = crate::parser::parse_formula(rhs, &names).ok().as_ref().and_then(crate::logic::as_set) {
+                map.insert(name.to_string(), Def::Set(set));
+            }
+        }
         for (k, name, args) in heads {
             let Ok(chains) = parse_system_with(lines[k], &names) else { continue };
             let [chain] = chains.as_slice() else { continue };
@@ -162,6 +179,10 @@ thread_local! {
     static CURRENT: RefCell<Rc<Defs>> = RefCell::new(Rc::new(Defs::default()));
     /// 展開で使った定義の名前（画面が、定義が変わったときに描き直す式を決めるのに使う）
     static USED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 式の説明に足す注意
+    static NOTES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 集合の条件で決めた媒介変数の範囲
+    static PARAM_RANGES: RefCell<Vec<(String, f64, f64)>> = const { RefCell::new(Vec::new()) };
     /// 近似を使った（範囲の形にならない条件で切り取った領域の積分）。画面の説明に「（積分は近似）」と出す
     static APPROX: RefCell<bool> = const { RefCell::new(false) };
     /// 展開の途中で値を使ったパラメータ（Σ の範囲の N など。展開した式には残らないので、別に覚えておく）
@@ -186,6 +207,8 @@ pub fn install(defs: Defs) -> Installed {
     USED.with(|u| u.borrow_mut().clear());
     USED_PARAMS.with(|u| u.borrow_mut().clear());
     APPROX.with(|a| *a.borrow_mut() = false);
+    NOTES.with(|n| n.borrow_mut().clear());
+    PARAM_RANGES.with(|r| r.borrow_mut().clear());
     DEF_LINE.with(|d| *d.borrow_mut() = None);
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
@@ -197,6 +220,42 @@ fn current() -> Rc<Defs> {
 /// 今の定義の名前
 pub fn names() -> Vec<String> {
     current().names()
+}
+
+/// 集合の定義（計画 M11）。使ったら、使った定義に数える
+pub fn set_def(name: &str) -> Option<crate::parser::SetE> {
+    match current().get(name) {
+        Some(Def::Set(s)) => {
+            note_used(name);
+            Some(s.clone())
+        }
+        _ => None,
+    }
+}
+
+/// 式の説明に足す注意（「≠ は描けないので無視」など）
+pub fn add_note(s: &str) {
+    NOTES.with(|n| {
+        let mut n = n.borrow_mut();
+        if !n.iter().any(|x| x == s) {
+            n.push(s.to_string());
+        }
+    });
+}
+
+/// 式の説明に足す注意
+pub fn notes() -> Vec<String> {
+    NOTES.with(|n| n.borrow().clone())
+}
+
+/// 媒介変数の範囲を決める（{(cos t, sin t) | 0 ≤ t ≤ π} の条件から。画面の範囲の欄より優先する）
+pub fn set_param_range(name: &str, lo: f64, hi: f64) {
+    PARAM_RANGES.with(|r| r.borrow_mut().push((name.to_string(), lo, hi)));
+}
+
+/// [`set_param_range`] で決めた媒介変数の範囲
+pub fn param_range(name: &str) -> Option<(f64, f64)> {
+    PARAM_RANGES.with(|r| r.borrow().iter().find(|(n, _, _)| n == name).map(|(_, a, b)| (*a, *b)))
 }
 
 /// 展開で使った定義の名前（重複なし、出てきた順）
@@ -355,6 +414,10 @@ impl Expander<'_> {
                 }
             }
             Def::Value(e) => self.val(&e)?,
+            Def::Set(_) => {
+                self.stack.pop();
+                return Err(format!("集合 {name} は式の中では使えません（x ∈ {name} や、{name} だけの行で使ってください）"));
+            }
         };
         self.stack.pop();
         Ok(Some(v))
@@ -1236,7 +1299,7 @@ pub fn rewrite_inverse(l: Expr, r: Expr) -> (Expr, Expr) {
         let one_arg = match defs.get(name) {
             Some(Def::Function { args, .. }) => args.len() == 1,
             Some(Def::Value(_)) => true,
-            None => false,
+            Some(Def::Set(_)) | None => false,
         };
         (minus_one && one_arg).then(|| (name.clone(), (**arg).clone()))
     };

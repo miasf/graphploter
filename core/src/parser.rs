@@ -259,6 +259,8 @@ enum Tok {
     Compose,
     /// `…`（リストの中の、等差の並びの省略）
     Ellipsis,
+    /// 論理・集合の記号（∧ ∨ ¬ ⇒ ⇐ ⇔ ⊕ ⊼ ⊽ ∩ ∪ ∖ △ ∈ ∉ ∋ ≠ ⊤ ⊥ ∅ ℝ ℤ ℕ ℂ ℚ ⦃ ∣ ⦄ ᶜ ∁。計画 M11）
+    Sym(char),
     /// `±`・`∓`（両方の符号の図形）
     PlusMinus,
     MinusPlus,
@@ -376,8 +378,10 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 
         // 英字の並び: 関数名・定数を最長一致で取り出し、残りは1文字ずつ変数にする
         // 例) "xsinx" → x, sin, x
-        if c.is_alphabetic() {
-            while i < chars.len() && chars[i].is_alphabetic() {
+        // ℝ ℤ ℕ ℂ ℚ ᶜ は文字に分類されるが、名前ではなく集合の記号
+        let letter = |c: char| c.is_alphabetic() && !"ℝℤℕℂℚᶜ".contains(c);
+        if letter(c) {
+            while i < chars.len() && letter(chars[i]) {
                 // 数字を含む名前（hyp2F1 など）は英字の並びの外まで見て探す
                 let full: String = chars[i..].iter().collect();
                 if let Some((name, tok)) =
@@ -388,7 +392,7 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     continue;
                 }
                 let mut end = i;
-                while end < chars.len() && chars[end].is_alphabetic() {
+                while end < chars.len() && letter(chars[end]) {
                     end += 1;
                 }
                 let rest: String = chars[i..end].iter().collect();
@@ -468,6 +472,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             '×' => Tok::Cross,
             '∘' => Tok::Compose,
             '…' => Tok::Ellipsis,
+            '∧' | '∨' | '¬' | '⇒' | '⇐' | '⇔' | '⊕' | '⊼' | '⊽' | '∩' | '∪' | '∖' | '△' | '∈' | '∉' | '∋' | '≠' | '⊤' | '⊥' | '∅' | 'ℝ'
+            | 'ℤ' | 'ℕ' | 'ℂ' | 'ℚ' | '⦃' | '∣' | '⦄' | 'ᶜ' | '∁' => Tok::Sym(c),
             // 無限大（積分の端など）
             '∞' => Tok::Num(f64::INFINITY),
             '±' => Tok::PlusMinus,
@@ -973,6 +979,358 @@ pub fn parse_system_with(src: &str, names: &[String]) -> Result<Vec<Chain>, Pars
             _ => return err("ここで式が終わるはずです（余分な文字があります）", p.pos()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 論理式と集合（計画 M11）
+// ---------------------------------------------------------------------------
+
+/// 論理・集合の記号（この文字を含む式は、論理式として読む）
+pub const LOGIC_CHARS: &str = "∧∨¬⇒⇐⇔⊕⊼⊽∩∪∖△∈∉∋≠⊤⊥∅ℝℤℕℂℚ⦃⦄ᶜ∁";
+
+/// 論理式
+#[derive(Debug, Clone, PartialEq)]
+pub enum Formula {
+    True,
+    False,
+    /// 関係の連鎖 a ≤ b < c
+    Chain(Chain),
+    /// a ≠ b
+    Ne(Expr, Expr),
+    Not(Box<Formula>),
+    And(Vec<Formula>),
+    Or(Vec<Formula>),
+    Xor(Box<Formula>, Box<Formula>),
+    Iff(Box<Formula>, Box<Formula>),
+    Implies(Box<Formula>, Box<Formula>),
+    Nand(Box<Formula>, Box<Formula>),
+    Nor(Box<Formula>, Box<Formula>),
+    /// 点 ∈ 集合
+    In(Expr, SetE),
+    /// 集合そのもの（その行の座標の点が属するという条件）
+    Set(SetE),
+}
+
+/// 集合
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetE {
+    /// 内包的表記 {点 | 条件}
+    Builder { point: Expr, cond: Box<Formula> },
+    /// 名前を付けた集合（定義 `S = {…}`）
+    Named(String),
+    /// 区間（端は ±∞ でもよい）
+    Interval { lo: Expr, hi: Expr, lo_open: bool, hi_open: bool },
+    /// ℝ ℤ ℕ ℂ ℚ
+    Numbers(char),
+    Product(Vec<SetE>),
+    Union(Box<SetE>, Box<SetE>),
+    Inter(Box<SetE>, Box<SetE>),
+    Diff(Box<SetE>, Box<SetE>),
+    SymDiff(Box<SetE>, Box<SetE>),
+    Complement(Box<SetE>),
+    Empty,
+}
+
+impl Parser<'_> {
+    fn sym(&self) -> Option<char> {
+        match self.peek() {
+            Tok::Sym(c) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// 論理式（弱い順に ⇔ < ⇒・⇐ < ∨・∪・⊕・△・⊽ < ∧・∩・∖・⊼・`,` < ¬ < 原子）
+    fn formula(&mut self) -> Result<Formula, ParseError> {
+        let mut f = self.implication()?;
+        while self.sym() == Some('⇔') {
+            self.next();
+            let g = self.implication()?;
+            f = Formula::Iff(Box::new(f), Box::new(g));
+        }
+        Ok(f)
+    }
+
+    fn implication(&mut self) -> Result<Formula, ParseError> {
+        let f = self.disjunction()?;
+        match self.sym() {
+            Some('⇒') => {
+                self.next();
+                Ok(Formula::Implies(Box::new(f), Box::new(self.implication()?)))
+            }
+            Some('⇐') => {
+                self.next();
+                Ok(Formula::Implies(Box::new(self.implication()?), Box::new(f)))
+            }
+            _ => Ok(f),
+        }
+    }
+
+    fn disjunction(&mut self) -> Result<Formula, ParseError> {
+        let mut f = self.conjunction(true)?;
+        loop {
+            let c = match self.sym() {
+                Some(c @ ('∨' | '∪' | '⊕' | '△' | '⊽')) => c,
+                _ => return Ok(f),
+            };
+            self.next();
+            let g = self.conjunction(true)?;
+            f = match c {
+                '∨' | '∪' => Formula::Or(vec![f, g]),
+                '⊽' => Formula::Nor(Box::new(f), Box::new(g)),
+                _ => Formula::Xor(Box::new(f), Box::new(g)),
+            };
+        }
+    }
+
+    /// `comma` が true なら、`,` も「かつ」（集合の括弧・場合分けの中では false にしない。ここでは常に true）
+    fn conjunction(&mut self, comma: bool) -> Result<Formula, ParseError> {
+        let mut f = self.negation()?;
+        loop {
+            let c = match (self.peek(), self.sym()) {
+                (Tok::Comma, _) if comma => ',',
+                (_, Some(c @ ('∧' | '∩' | '∖' | '⊼'))) => c,
+                _ => return Ok(f),
+            };
+            self.next();
+            let g = self.negation()?;
+            f = match c {
+                '∖' => Formula::And(vec![f, Formula::Not(Box::new(g))]),
+                '⊼' => Formula::Nand(Box::new(f), Box::new(g)),
+                _ => Formula::And(vec![f, g]),
+            };
+        }
+    }
+
+    fn negation(&mut self) -> Result<Formula, ParseError> {
+        if self.sym() == Some('¬') {
+            self.next();
+            return Ok(Formula::Not(Box::new(self.negation()?)));
+        }
+        let mut f = self.logic_atom()?;
+        while self.sym() == Some('ᶜ') {
+            self.next();
+            f = Formula::Not(Box::new(f));
+        }
+        Ok(f)
+    }
+
+    /// `(` の後が論理式か（対応する `)` までの深さ 1 に、関係・論理・集合の記号があるか）
+    fn paren_is_formula(&self) -> bool {
+        let mut depth = 0;
+        for t in &self.toks[self.i..] {
+            match &t.tok {
+                Tok::LParen | Tok::LBracket | Tok::LMat => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RMat => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Tok::Rel(_) | Tok::Sym(_) if depth == 1 => return true,
+                Tok::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn logic_atom(&mut self) -> Result<Formula, ParseError> {
+        match self.sym() {
+            Some('⊤') => {
+                self.next();
+                return Ok(Formula::True);
+            }
+            Some('⊥') => {
+                self.next();
+                return Ok(Formula::False);
+            }
+            Some('⦃' | '∅' | 'ℝ' | 'ℤ' | 'ℕ' | 'ℂ' | 'ℚ' | '∁') => return Ok(Formula::Set(self.set_factor()?)),
+            _ => {}
+        }
+        if *self.peek() == Tok::LParen && self.paren_is_formula() {
+            self.next();
+            let f = self.formula()?;
+            self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+            return Ok(f);
+        }
+        let pos = self.pos();
+        let e = self.expr()?;
+        match (self.peek().clone(), self.sym()) {
+            (Tok::Rel(r), _) => {
+                let mut chain = Chain { exprs: vec![e], rels: vec![], pos: vec![pos] };
+                let mut rel = Some(r);
+                while let Some(r) = rel {
+                    self.next();
+                    chain.rels.push(r);
+                    chain.pos.push(self.pos());
+                    chain.exprs.push(self.expr()?);
+                    rel = match self.peek() {
+                        Tok::Rel(r) => Some(*r),
+                        _ => None,
+                    };
+                }
+                Ok(Formula::Chain(chain))
+            }
+            (_, Some('≠')) => {
+                self.next();
+                Ok(Formula::Ne(e, self.expr()?))
+            }
+            (_, Some('∈')) => {
+                self.next();
+                Ok(Formula::In(e, self.set_expr()?))
+            }
+            (_, Some('∉')) => {
+                self.next();
+                Ok(Formula::Not(Box::new(Formula::In(e, self.set_expr()?))))
+            }
+            (_, Some('∋')) => {
+                self.next();
+                let p = self.expr()?;
+                Ok(Formula::In(p, set_of_expr(e, pos)?))
+            }
+            _ => Ok(Formula::Set(set_of_expr(e, pos)?)),
+        }
+    }
+
+    /// ∈ の右の集合（弱い順に ∪・∖・△ < ∩ < × < 原子）
+    fn set_expr(&mut self) -> Result<SetE, ParseError> {
+        let mut s = self.set_inter()?;
+        loop {
+            let c = match self.sym() {
+                Some(c @ ('∪' | '∖' | '△')) => c,
+                _ => return Ok(s),
+            };
+            self.next();
+            let t = self.set_inter()?;
+            s = match c {
+                '∪' => SetE::Union(Box::new(s), Box::new(t)),
+                '∖' => SetE::Diff(Box::new(s), Box::new(t)),
+                _ => SetE::SymDiff(Box::new(s), Box::new(t)),
+            };
+        }
+    }
+
+    fn set_inter(&mut self) -> Result<SetE, ParseError> {
+        let mut s = self.set_product()?;
+        while self.sym() == Some('∩') {
+            self.next();
+            s = SetE::Inter(Box::new(s), Box::new(self.set_product()?));
+        }
+        Ok(s)
+    }
+
+    fn set_product(&mut self) -> Result<SetE, ParseError> {
+        let first = self.set_factor()?;
+        let mut parts = vec![first];
+        while *self.peek() == Tok::Cross {
+            self.next();
+            parts.push(self.set_factor()?);
+        }
+        Ok(if parts.len() == 1 { parts.pop().unwrap_or(SetE::Empty) } else { SetE::Product(parts) })
+    }
+
+    /// `(` か `[` の後に、深さ 1 のカンマがあるか（区間）
+    fn bracket_has_comma(&self) -> bool {
+        let mut depth = 0;
+        for t in &self.toks[self.i..] {
+            match &t.tok {
+                Tok::LParen | Tok::LBracket | Tok::LMat => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RMat => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Tok::Comma if depth == 1 => return true,
+                Tok::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn set_factor(&mut self) -> Result<SetE, ParseError> {
+        let pos = self.pos();
+        let mut s = match (self.peek().clone(), self.sym()) {
+            (_, Some('⦃')) => {
+                self.next();
+                let point = self.expr()?;
+                if self.sym() != Some('∣') {
+                    return err("集合は {(x, y) | 条件} の形で書いてください", self.pos());
+                }
+                self.next();
+                let cond = self.formula()?;
+                if self.sym() != Some('⦄') {
+                    return err("集合の括弧 } が閉じていません", self.pos());
+                }
+                self.next();
+                SetE::Builder { point, cond: Box::new(cond) }
+            }
+            (_, Some('∅')) => {
+                self.next();
+                SetE::Empty
+            }
+            (_, Some(c @ ('ℝ' | 'ℤ' | 'ℕ' | 'ℂ' | 'ℚ'))) => {
+                self.next();
+                SetE::Numbers(c)
+            }
+            (_, Some('∁')) => {
+                self.next();
+                SetE::Complement(Box::new(self.set_factor()?))
+            }
+            (Tok::LParen | Tok::LBracket, _) if self.bracket_has_comma() => {
+                let lo_open = *self.peek() == Tok::LParen;
+                self.next();
+                let lo = self.expr()?;
+                self.expect(Tok::Comma, "','")?;
+                let hi = self.expr()?;
+                let hi_open = match self.next().tok {
+                    Tok::RParen => true,
+                    Tok::RBracket => false,
+                    _ => return err("区間は [a, b]・(a, b)・[a, b) の形で書いてください", pos),
+                };
+                SetE::Interval { lo, hi, lo_open, hi_open }
+            }
+            (Tok::LParen, _) => {
+                self.next();
+                let s = self.set_expr()?;
+                self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+                s
+            }
+            _ => {
+                let e = self.power()?;
+                set_of_expr(e, pos)?
+            }
+        };
+        while self.sym() == Some('ᶜ') {
+            self.next();
+            s = SetE::Complement(Box::new(s));
+        }
+        Ok(s)
+    }
+}
+
+/// 式として読んだものを集合にする（名前 `S`、補集合 `S^(c)`）
+fn set_of_expr(e: Expr, pos: usize) -> Result<SetE, ParseError> {
+    match e {
+        Expr::Var(n) => Ok(SetE::Named(n)),
+        Expr::Bin(BinOp::Pow, a, c) if matches!(&*c, Expr::Var(v) if v == "c") => Ok(SetE::Complement(Box::new(set_of_expr(*a, pos)?))),
+        _ => err("条件には、x < 1 のように =・< などを書いてください（集合なら、名前か {(x, y) | …} を書きます）", pos),
+    }
+}
+
+/// 論理式を読む（計画 M11）。`names` は定義された関数の名前
+pub fn parse_formula(src: &str, names: &[String]) -> Result<Formula, ParseError> {
+    let toks = tokenize(src)?;
+    let mut p = Parser { toks, i: 0, names };
+    if *p.peek() == Tok::Eof {
+        return err("式が空です", 0);
+    }
+    let f = p.formula()?;
+    if *p.peek() != Tok::Eof {
+        return err("ここで式が終わるはずです（余分な文字があります）", p.pos());
+    }
+    Ok(f)
 }
 
 /// 定義の行の左辺の形 `名前(変数, 変数, …) =` なら、(名前, 変数の並び)。字句だけで決める

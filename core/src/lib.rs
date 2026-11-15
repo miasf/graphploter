@@ -18,6 +18,7 @@ pub mod equation;
 pub mod eval;
 pub mod expand;
 pub mod integrate;
+pub mod logic;
 pub mod functions;
 pub mod interval;
 pub mod mesh;
@@ -564,6 +565,10 @@ pub fn plot(
     let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
     // 媒介変数の範囲（範囲で重ねるパラメータならスライダーの範囲。指定が無ければ 0〜2π）
     let range = |name: &str| {
+        // 集合の条件で決めた媒介変数の範囲（{(cos t, sin t) | 0 ≤ t ≤ π}）が最優先
+        if let Some(r) = expand::param_range(name) {
+            return r;
+        }
         space
             .param_ranges
             .iter()
@@ -654,8 +659,14 @@ pub fn plot(
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
         kind: {
-            let k = expand::def_line_label().unwrap_or_else(|| equation::rename_kind(&built.kind, &space));
-            if expand::approximate() { format!("{k}（積分は近似）") } else { k }
+            let mut k = expand::def_line_label().unwrap_or_else(|| equation::rename_kind(&built.kind, &space));
+            if expand::approximate() {
+                k.push_str("（積分は近似）");
+            }
+            for n in expand::notes() {
+                k.push_str(&format!("（{n}）"));
+            }
+            k
         },
         params: plot.param_vars(),
         curve,
