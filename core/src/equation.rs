@@ -1138,8 +1138,8 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         (l, r)
     };
 
-    // GPU の光線の描き方の F: 回転・断面を入れる前の元の座標の式（[`GpuImplicit`]）
-    let unrotated = Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()));
+    // GPU の光線の描き方の F: 回転・断面を入れる前の元の座標の式（[`GpuImplicit`]）。光線の描き方が苦手な形は、同じ解の得意な形に言い換える
+    let unrotated = gpu_friendly(&l, &r);
     // 回転していれば、元の座標 p を回転後の座標 q の式に置き換える
     let (l, r) = match &rot {
         Some(m) => (rotate_coords(&l, m, space), rotate_coords(&r, m, space)),
@@ -1365,6 +1365,31 @@ fn rotate_coords(e: &Expr, m: &[Vec<f64>], space: &Space) -> Expr {
     })
 }
 
+/// GPU の光線の描き方（区間演算で、連続な関数の符号の変化を手がかりに面を探す）に渡す F = l − r。
+/// 苦手な形を、同じ解を持つ得意な形に言い換える（メッシュ・画面に出す式はそのまま）:
+///
+/// - `mod(A, B) = 0` → `sin(π A / B) = 0`。どちらも「A / B が整数」で、B = 0 ではどちらも定義されない。
+///   `mod` の解は値が飛ぶ所にあり、符号が変わらない（B > 0 なら 0 以上）ので、光線は飛ぶ所ごとに 1/16 画素まで詰めて
+///   「0 に触れているか」を調べるしかなく、解が密な所（`mod(x y, z) = 0` の z ≈ 0）で回数を使い切っていた。
+///   `sin` は解の所で符号が変わるので、1 画素の区間の両端の符号ですぐ分かる。
+///   32 ビットの GPU では A / B が大きい所（10⁶ を超える）で sin の角度の誤差が大きくなるが、そこは解の間隔が 1 画素よりずっと細かい所
+fn gpu_friendly(l: &Expr, r: &Expr) -> Expr {
+    let zero = |e: &Expr| matches!(e, Expr::Num(v) if *v == 0.0);
+    let modulo = |e: &Expr| match e {
+        Expr::Call(crate::functions::Func::Mod, args) if args.len() == 2 => Some((args[0].clone(), args[1].clone())),
+        _ => None,
+    };
+    let pair = if zero(r) { modulo(l) } else if zero(l) { modulo(r) } else { None };
+    if let Some((a, b)) = pair {
+        let arg = Expr::Bin(
+            BinOp::Div,
+            Box::new(Expr::Bin(BinOp::Mul, Box::new(Expr::Const(crate::parser::Constant::Pi)), Box::new(a))),
+            Box::new(b),
+        );
+        return Expr::Call(crate::functions::Func::Sin, vec![arg]);
+    }
+    Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()))
+}
 /// パラメータの定義 name = rhs。右辺の値を計算する
 fn param(name: &str, rhs: &Expr, params: &Params) -> Result<Plot, String> {
     // 自分自身は使えないので、ほかのパラメータだけを渡す

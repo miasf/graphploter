@@ -145,8 +145,8 @@ const page = await browser.newPage()
 await page.goto('about:blank')
 let failed = 0
 const cam = { eye: fx.eye, fwd: fx.fwd, right: fx.right, up: fx.up, tanHalf: fx.tanHalf, lo: fx.lo, hi: fx.hi }
-console.log('| 式 | 違う画素 % | 深さの差 p95（画素） | GPU の打ち切り % | 基準の打ち切り % | コンパイル ms |')
-console.log('|---|---|---|---|---|---|')
+console.log('| 式 | 違う画素 % | 深さの差 p95（画素） | GPU の打ち切り % | 基準の打ち切り % | コンパイル ms | 当たった画素 % 基準・GPU |')
+console.log('|---|---|---|---|---|---|---|')
 for (const c of fx.cases) {
   const r = await page.evaluate(run, { glsl: c.glsl, ray: RAY_GLSL, cam, w: fx.w, h: fx.h, maxIter: +(process.env.G5_MAXITER ?? 512), timing: false })
   if (r.error) {
@@ -154,7 +154,7 @@ for (const c of fx.cases) {
     failed++
     continue
   }
-  let n = 0, wrong = 0, gpuAbort = 0, cpuAbort = 0
+  let n = 0, wrong = 0, gpuAbort = 0, cpuAbort = 0, cpuHit = 0, gpuHit = 0
   const diffs = []
   for (let k = 0; k < c.rays.length; k++) {
     const truth = c.rays[k]
@@ -169,6 +169,8 @@ for (const c of fx.cases) {
       continue
     }
     const hit = res === 1
+    if (hit) gpuHit++
+    if (truth !== null) cpuHit++
     if (hit !== (truth !== null)) wrong++
     else if (hit) diffs.push(Math.abs(t - truth) / (fx.pixel * truth))
   }
@@ -178,7 +180,7 @@ for (const c of fx.cases) {
   const ok = wrongPct <= 1
   if (!ok) failed++
   const pct = (x) => ((100 * x) / Math.max(1, n)).toFixed(2)
-  console.log(`| ${ok ? '' : '✗ '}\`${c.src}\` | ${wrongPct.toFixed(2)} | ${p95.toFixed(2)} | ${pct(gpuAbort)} | ${((100 * cpuAbort) / c.rays.length).toFixed(2)} | ${r.compile.toFixed(0)} |`)
+  console.log(`| ${ok ? '' : '✗ '}\`${c.src}\` | ${wrongPct.toFixed(2)} | ${p95.toFixed(2)} | ${pct(gpuAbort)} | ${((100 * cpuAbort) / c.rays.length).toFixed(2)} | ${r.compile.toFixed(0)} | ${pct(cpuHit)}・${pct(gpuHit)} |`)
 }
 if (speed) {
   const g0 = ['x^2+y^2+z^2 = 4', 'sin(x) = cos(y) z', 'tan(x) = z y', 'floor(x y) = z floor(z)', 'mod(x y, z) = 1', 'sin(x) cos(y) + sin(y) cos(z) + sin(z) cos(x) = 0']
