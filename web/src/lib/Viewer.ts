@@ -11,7 +11,7 @@ import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
-import { createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayTransform, type RaycastUniforms } from './raycastMaterial'
+import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
 import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
@@ -164,7 +164,7 @@ export class Viewer {
    */
   private gpu3d = new Map<
     number,
-    { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; ray: RaycastUniforms; glsl: string; key: string; ready: boolean; local: boolean; params: string[] }
+    { mesh: THREE.Mesh; mat: THREE.MeshStandardMaterial; ray: RaycastUniforms; glsl: string; key: string; ready: boolean; axes: number[]; params: string[] }
   >()
 
   /** 座標系を使う式の、計算エンジンが返した形（移す前の位置と移した先）と、継ぎ目の頂点の組（s = 1 で初めて作る） */
@@ -1476,9 +1476,9 @@ export class Viewer {
       if (old) this.removeGpu3d(id)
       return
     }
-    // 回転の 1 次式・パラメータの値（GLSL が同じなら、これだけを変える）
+    // 表示中の座標から式の座標への 1 次式（回転・断面）・パラメータの値（GLSL が同じなら、これだけを変える）
     const setUniforms = (ray: RaycastUniforms) => {
-      setRayTransform(ray, info.transform)
+      setRayAffine(ray, info.affine)
       ray.uParam.value = info.values.slice()
     }
     const key = `,,,,,`
@@ -1491,6 +1491,7 @@ export class Viewer {
         if (old.ready) this.scene.add(old.mesh)
       }
       setUniforms(old.ray)
+      old.axes = info.axes
       this.dirty = true
       return
     }
@@ -1499,9 +1500,9 @@ export class Viewer {
     setUniforms(ray)
     this.applyRayBudget(ray)
     // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
-    const mat = createRaycastMaterial(glsl, p.grid, ray)
+    const mat = createRaycastMaterial(glsl, Math.floor(info.affine.length / 4), p.grid, ray)
     const m = raycastMesh(mat, ray, d)
-    const layer = { mesh: m, mat, ray, glsl, key, ready: false, local: info.local, params: info.params }
+    const layer = { mesh: m, mat, ray, glsl, key, ready: false, axes: info.axes, params: info.params }
     this.gpu3d.set(id, layer)
     this.applyRayCut(layer.ray)
     // コンパイルは裏で行い、終わるまでは今までのメッシュの面を見せる
@@ -1529,17 +1530,10 @@ export class Viewer {
   }
 
   /**
-   * 画素ごと・光線の描き方をやめて、メッシュに戻す。回転だけが変わった結果（形は同じで、向きだけが届く）のとき:
-   * 光線の GLSL は回した後の式なので、向きが変わると合わなくなる（回転を uniform にするのは G7）
+   * 回転だけが変わった結果（形は同じで、向きだけが届く）を受け取ったとき。光線の式は回転を入れる前の元の座標の式なので、
+   * 回転は setPlotTransform で uniform を変えるだけで、捨てなくてよい（計画 G7。前は回した後の式で、ここでメッシュに戻していた）
    */
-  dropPixelLayers(id: number) {
-    const layer = this.gpu3d.get(id)
-    // 回す前の式で描いているなら、回転は setPlotTransform で uniform を変えるだけ
-    if (!layer || layer.local) return
-    this.removeGpu3d(id)
-    const st = this.styles.get(id)
-    if (st) this.setStyle(id, st)
-  }
+  dropPixelLayers(_id: number) {}
 
   /**
    * スライダーのパラメータの値（名前 → 値）を、光線で描く式の uniform に入れる。計算し直しの結果を待たずに描き直せる
@@ -1620,8 +1614,8 @@ export class Viewer {
   setPlotTransform(id: number, t: ArrayLike<number> | null) {
     // 回す前の式で描いている光線は、同じ 1 次式を uniform に入れる（GLSL は作り直さない）
     const layer = this.gpu3d.get(id)
-    if (layer?.local && t && t.length === 12) {
-      setRayTransform(layer.ray, t)
+    if (layer && t && t.length === 12) {
+      applyShownRotation(layer.ray, layer.axes, t)
       this.dirty = true
     }
     const p = this.plots.get(id)

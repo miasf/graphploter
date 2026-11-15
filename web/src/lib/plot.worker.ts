@@ -514,9 +514,14 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const outlineTarget = r.take_outline_target()
     const outlineDashedTarget = r.take_outline_dashed_target()
     const g3 = r.gpu3d_glsl()
-    const g3t = g3 ? Array.from(r.gpu3d_transform()) : []
     const gpu3d = g3
-      ? { glsl: g3, params: r.gpu3d_params().split(',').filter((s) => s !== ''), values: Array.from(r.gpu3d_values()), transform: g3t.slice(0, 12), local: g3t[12] === 1 }
+      ? {
+          glsl: g3,
+          params: r.gpu3d_params().split(',').filter((s) => s !== ''),
+          values: Array.from(r.gpu3d_values()),
+          affine: Array.from(r.gpu3d_affine()),
+          axes: Array.from(r.gpu3d_axes()),
+        }
       : undefined
     const gpuReason = r.gpu_reason
     const gi = r.gpu2d_info()

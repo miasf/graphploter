@@ -309,10 +309,10 @@ export interface Gpu3dInfo {
   /** uParam の順のパラメータの名前と、今の値 */
   params: string[]
   values: number[]
-  /** F の座標 p から表示中の座標 q への 1 次式 q = M p + t（12 個） */
-  transform: number[]
-  /** 回す前の F か（回転だけが変わったら、transform を変えるだけで描ける） */
-  local: boolean
+  /** 表示中の座標 q から式の座標（元の座標 x, y, z, w, …）P への 1 次式（座標ごとに [A_k0, A_k1, A_k2, b_k]） */
+  affine: number[]
+  /** 表示中の 3 つの座標の番号（回転だけが変わった結果で、その行を書き換える） */
+  axes: number[]
 }
 
 export interface MeshData {

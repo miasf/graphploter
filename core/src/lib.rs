@@ -92,10 +92,10 @@ struct Gpu3d {
     /// uParam の順のパラメータの名前と、今の値
     params: Vec<String>,
     values: Vec<f64>,
-    /// GLSL の F の座標 p から表示中の座標 q への 1 次式 q = M p + t（[M の 1 行目, t₀, …]。回す前の F でなければ恒等）
-    transform: [f64; 12],
-    /// 回す前の F か（回転だけが変わったら、transform を変えるだけで描ける）
-    local: bool,
+    /// 表示中の座標 q から F の座標（元の座標 x, y, z, w, …）P への 1 次式 P = A q + b（座標ごとに [A_k0, A_k1, A_k2, b_k]）
+    affine: Vec<f64>,
+    /// 表示中の 3 つの座標の番号（回転だけが変わった結果の 1 次式 q = M p + t で、その行を書き換えるため）
+    axes: [usize; 3],
 }
 
 #[wasm_bindgen]
@@ -112,13 +112,13 @@ impl MeshResult {
     pub fn gpu3d_values(&self) -> Vec<f64> {
         self.gpu3d.as_ref().map_or(Vec::new(), |g| g.values.clone())
     }
-    /// 同じく、F の座標から表示中の座標への 1 次式（12 個）と、回す前の F なら 1（13 個目）
-    pub fn gpu3d_transform(&self) -> Vec<f64> {
-        self.gpu3d.as_ref().map_or(Vec::new(), |g| {
-            let mut v = g.transform.to_vec();
-            v.push(if g.local { 1.0 } else { 0.0 });
-            v
-        })
+    /// 同じく、表示中の座標から F の座標への 1 次式（座標ごとに [A_k0, A_k1, A_k2, b_k]。座標の数 × 4 個）
+    pub fn gpu3d_affine(&self) -> Vec<f64> {
+        self.gpu3d.as_ref().map_or(Vec::new(), |g| g.affine.clone())
+    }
+    /// 同じく、表示中の 3 つの座標の番号
+    pub fn gpu3d_axes(&self) -> Vec<u32> {
+        self.gpu3d.as_ref().map_or(Vec::new(), |g| g.axes.map(|a| a as u32).to_vec())
     }
     /// GPU の描き方を使えない理由。使えるなら空
     #[wasm_bindgen(getter)]
@@ -695,7 +695,7 @@ pub fn plot(
         outline_target = (c.apply_line(&mut outline.0, flat), c.apply_line(&mut outline.1, flat));
     }
     // 3D の陰関数（回した陽関数を陰関数にしたものも）を光線で描くための GLSL と、使えないならその理由
-    let gpu3d = gpu3d_of(&plot, &consts, &space, &ctx.view, flat, hidden_on, coord.is_some(), built.gpu2d.is_some());
+    let gpu3d = gpu3d_of(&plot, &consts, &space, flat, hidden_on, coord.is_some(), built.gpu2d.is_some());
     let lod_start = timing::now_ms();
     if !curve {
         mesh::add_cluster_lod(&mut inner);
@@ -1680,7 +1680,6 @@ fn gpu3d_of(
     plot: &equation::Plot,
     consts: &eval::Params,
     space: &equation::Space,
-    view: &mesh::View,
     flat: bool,
     hidden_on: bool,
     coord: bool,
@@ -1710,17 +1709,11 @@ fn gpu3d_of(
         return (None, String::new());
     };
     let Some(g) = gpu else { return (None, prog_reason(prog)) };
-    let idx: Vec<usize> = (3..3 + g.params.len()).collect();
+    let idx: Vec<usize> = (g.dims..g.dims + g.params.len()).collect();
     match g.prog.to_glsl(&eval::GlslOptions { name: "gR".into(), params: idx, ..Default::default() }) {
         Ok(code) => {
-            let transform = if g.local {
-                let (m, t) = mesh::local_affine(view, space.dims, space.axes, &space.slice);
-                [m[0][0], m[0][1], m[0][2], t[0], m[1][0], m[1][1], m[1][2], t[1], m[2][0], m[2][1], m[2][2], t[2]]
-            } else {
-                [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-            };
             let values = g.params.iter().map(|n| consts.get(n).map_or(0.0, |c| c.re)).collect();
-            (Some(Gpu3d { glsl: code.source(), params: g.params.clone(), values, transform, local: g.local }), String::new())
+            (Some(Gpu3d { glsl: code.source(), params: g.params.clone(), values, affine: space.gpu_affine(), axes: space.axes }), String::new())
         }
         Err(e) => (None, e),
     }
@@ -1883,11 +1876,8 @@ impl Shape {
             local_available: false,
             defs: Default::default(),
             gpu2d: None,
-            // 回す前の形のメッシュ（頂点に 1 次式を掛けて描く）なら、光線も同じ 1 次式で回す。掛けないなら恒等
-            gpu3d: self.gpu3d.as_ref().filter(|g| g.local).map(|g| Gpu3d {
-                transform: transform.unwrap_or([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
-                ..g.clone()
-            }),
+            // 光線の 1 次式は、回転だけが変わったら描画側が書き換える（setPlotTransform）。ここでは形を作ったときのまま
+            gpu3d: self.gpu3d.clone(),
             gpu_reason: String::new(),
         }
     }

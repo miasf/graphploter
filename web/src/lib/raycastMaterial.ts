@@ -10,8 +10,9 @@
  *   連続で符号が同じ（接するだけの零点・かすめるだけ）なら、1/16 画素まで詰めて決める（64 回まで）
  * - 繰り返しの上限（uMaxIter）で打ち切ったら、そのときの区間の手前の端に描く（?debug=1 なら赤）
  *
- * 回転・スライダー（計画 G7）: 回転が表示中の座標どうしだけの式は、回す前の F の GLSL に、回転の 1 次式を uniform で掛ける。
- * スライダーのパラメータも uniform（uParam）。どちらも動かしたときに GLSL を作り直さない
+ * 回転・断面・スライダー（計画 G7）: 式の GLSL は、回転も断面も入れる前の元の座標 x, y, z, w, …（G_N 個）の式。
+ * 表示中の座標 q から元の座標への 1 次式 P = A q + b（uPA・uPb）と、スライダーのパラメータ（uParam）を uniform にして、
+ * どの組の回転（表示していない座標が絡むものも）・断面の値・スライダーを動かしても GLSL を作り直さない
  *
  * 見た目は曲面の材質（surfaceMaterial.ts。three.js の MeshStandardMaterial に格子線を足したもの）と同じ計算にする:
  * 光の計算が使う点の位置（vViewPosition）と法線（normal）、格子線の座標（vGridPos）を、当たった点のものに差し替える。
@@ -44,26 +45,37 @@ export interface RaycastUniforms {
   uCutOn: { value: number }
   /** 1 なら打ち切った画素を赤で塗る（?debug=1） */
   uDebug: { value: number }
-  /**
-   * 式の F の座標 p と表示中の座標 q の 1 次式 q = M p + t（回す前の F なら回転。そうでなければ恒等）。
-   * uXfM = M、uXfA = Mᵀ（M は回転なので逆行列）、uXfB = −Mᵀ t。回転が変わっても GLSL を作り直さず、これだけを変える
-   */
-  uXfM: { value: THREE.Matrix3 }
-  uXfA: { value: THREE.Matrix3 }
-  uXfB: { value: THREE.Vector3 }
+  /** 表示中の座標 q から式の座標 P への 1 次式 P_k = uPA[k] · q + uPb[k]（式の座標の数だけ） */
+  uPA: { value: THREE.Vector3[] }
+  uPb: { value: number[] }
   /** スライダーのパラメータ（GLSL の uniform float uParam[N]。式の GLSL にパラメータが無ければ使わない） */
   uParam: { value: number[] }
   /** カメラの手前の面までの距離（これより近い所は描かない） */
   uNear: { value: number }
 }
 
-/** 計算エンジンが返した 1 次式 [M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂] を uniform にする */
-export function setRayTransform(ray: RaycastUniforms, t: ArrayLike<number>) {
-  const m = new THREE.Matrix3().set(t[0], t[1], t[2], t[4], t[5], t[6], t[8], t[9], t[10])
-  ray.uXfM.value.copy(m)
-  const a = m.clone().transpose()
-  ray.uXfA.value.copy(a)
-  ray.uXfB.value.set(t[3], t[7], t[11]).applyMatrix3(a).negate()
+/** 計算エンジンが返した 1 次式（式の座標ごとに [A_k0, A_k1, A_k2, b_k]）を uniform にする */
+export function setRayAffine(ray: RaycastUniforms, affine: ArrayLike<number>) {
+  const n = Math.floor(affine.length / 4)
+  ray.uPA.value = Array.from({ length: n }, (_, k) => new THREE.Vector3(affine[4 * k], affine[4 * k + 1], affine[4 * k + 2]))
+  ray.uPb.value = Array.from({ length: n }, (_, k) => affine[4 * k + 3])
+}
+
+/**
+ * 回転だけが変わった結果（回転が表示中の座標どうしだけのとき。回す前の形 p から表示中の座標への q = M p + t。
+ * [M の 1 行目, t₀, 2 行目, t₁, 3 行目, t₂]）で、表示中の座標の行だけを書き換える: p = Mᵀ (q − t)。
+ * axes は表示中の座標の番号（p の a 番目が、式の座標 axes[a]）。表示していない座標の行（断面の値）はそのまま
+ */
+export function applyShownRotation(ray: RaycastUniforms, axes: number[], t: ArrayLike<number>) {
+  const m = (r: number, c: number) => t[4 * r + c]
+  const tv = [t[3], t[7], t[11]]
+  for (let a = 0; a < 3; a++) {
+    const k = axes[a]
+    if (k >= ray.uPA.value.length) continue
+    // p_a = Σ_b M[b][a] (q_b − t_b)
+    ray.uPA.value[k].set(m(0, a), m(1, a), m(2, a))
+    ray.uPb.value[k] = -(m(0, a) * tv[0] + m(1, a) * tv[1] + m(2, a) * tv[2])
+  }
 }
 
 
@@ -89,12 +101,12 @@ const RAY_MAIN = /* glsl */ `
     }
   }
   if (!(tr.x < tr.y)) discard;
-  // F は回す前の座標 p = Mᵀ (q − t) の式なので、光線もその座標に移して飛ばす（M は回転なので t は同じ）
+  // 光線は表示中の座標のまま。式の座標への 1 次式は gRayV・gRayI・gRayGrad の中で掛ける（勾配も表示中の座標についてのもの）
   float tHit;
-  int res = gRay(uXfA * ro + uXfB, uXfA * rd, tr.x, tr.y, tHit);
+  int res = gRay(ro, rd, tr.x, tr.y, tHit);
   if (res == 0) discard;
   vec3 hit = ro + tHit * rd;
-  vec3 g = uXfM * gRayGrad(uXfA * hit + uXfB);
+  vec3 g = gRayGrad(hit);
   gRayBack = dot(g, rd) > 0.0;
   vec3 nw = gRayBack ? -g : g;
   // 勾配が 0（式がまるごと 0 になる範囲の表面 floor(x) + floor(y) + floor(z) = 0 など）・求まらないときは、
@@ -119,9 +131,9 @@ const RAY_MAIN = /* glsl */ `
 
 /**
  * 材質を作る。grid は曲面の材質と同じ形の格子線などの値（式の ⚙ の設定がそのまま効く）。
- * glsl は計算エンジンが作った GLSL（gR・gRd・gRi と下請けの関数）
+ * glsl は計算エンジンが作った GLSL（gR・gRd・gRi と下請けの関数）、n は式の座標の数（gR の引数の配列の長さ）
  */
-export function createRaycastMaterial(glsl: string, grid: GridUniforms, ray: RaycastUniforms): THREE.MeshStandardMaterial {
+export function createRaycastMaterial(glsl: string, n: number, grid: GridUniforms, ray: RaycastUniforms): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({ side: THREE.BackSide, roughness: 0.55, metalness: 0.05 })
   m.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, grid, ray)
@@ -142,7 +154,7 @@ export function createRaycastMaterial(glsl: string, grid: GridUniforms, ray: Ray
     shader.fragmentShader = shader.fragmentShader
       // 光の計算が使う点の位置を、箱の面ではなく当たった点にする（同じ名前の変数にして、three.js の部品をそのまま使う）
       .replace('varying vec3 vViewPosition;', 'vec3 vViewPosition;')
-      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform mat3 uXfM;\nuniform mat3 uXfA;\nuniform vec3 uXfB;\nuniform float uNear;\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
+      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
       .replace('#include <clipping_planes_fragment>', RAY_MAIN)
       .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);`)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = gRayN;\nnonPerturbedNormal = gRayN;')
@@ -170,9 +182,8 @@ export function createRaycastUniforms(): RaycastUniforms {
     uCut: { value: new THREE.Vector4() },
     uCutOn: { value: 0 },
     uDebug: { value: typeof location !== 'undefined' && new URLSearchParams(location.search).get('debug') === '1' ? 1 : 0 },
-    uXfM: { value: new THREE.Matrix3() },
-    uXfA: { value: new THREE.Matrix3() },
-    uXfB: { value: new THREE.Vector3() },
+    uPA: { value: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)] },
+    uPb: { value: [0, 0, 0] },
     uParam: { value: [] },
     uNear: { value: 0 },
   }

@@ -15,35 +15,34 @@ uniform vec4 uCut;
 uniform float uCutOn;
 uniform float uDebug;
 
+// 表示中の座標 q（3 つ）から、式の座標（元の座標 x, y, z, w, … の G_N 個）P への 1 次式 P_k = uPA[k] · q + uPb[k]
+// （回転・中心・断面の値で決まる。計算エンジンの Space::gpu_affine。回転や断面のスライダーを動かしても、これだけを変える）
+uniform vec3 uPA[G_N];
+uniform float uPb[G_N];
+
 float gRayV(vec3 q) {
-  float p[3];
-  p[0] = q.x;
-  p[1] = q.y;
-  p[2] = q.z;
+  float p[G_N];
+  for (int k = 0; k < G_N; k++) p[k] = dot(uPA[k], q) + uPb[k];
   return gR(p);
 }
 
-// 光線の区間 [a, b] の上の箱
+// 光線の区間 [a, b] の上の箱（式の座標ごとに、光線の 1 次式の両端）
 Div gRayI(vec3 o, vec3 d, float a, float b) {
-  vec3 pa = o + a * d;
-  vec3 pb = o + b * d;
-  vec3 lo = min(pa, pb);
-  vec3 hi = max(pa, pb);
-  vec2 p[3];
-  p[0] = vec2(lo.x, hi.x);
-  p[1] = vec2(lo.y, hi.y);
-  p[2] = vec2(lo.z, hi.z);
+  vec2 p[G_N];
+  for (int k = 0; k < G_N; k++) {
+    float s = dot(uPA[k], o) + uPb[k];
+    float v = dot(uPA[k], d);
+    p[k] = vec2(s + min(a * v, b * v), s + max(a * v, b * v));
+  }
   return gRi(p);
 }
 
+// 表示中の座標についての勾配（式の座標の二重数に、1 次式の係数を微分として入れる）
 vec3 gRayGrad(vec3 q) {
-  vec4 p[3];
-  p[0] = vec4(q.x, 1.0, 0.0, 0.0);
-  p[1] = vec4(q.y, 0.0, 1.0, 0.0);
-  p[2] = vec4(q.z, 0.0, 0.0, 1.0);
+  vec4 p[G_N];
+  for (int k = 0; k < G_N; k++) p[k] = vec4(dot(uPA[k], q) + uPb[k], uPA[k]);
   return gRd(p).yzw;
 }
-
 // 光線 o + t d（t ∈ [t0, t1]）が F = 0 に最初に当たる所。戻り値 0: 当たらない、1: 当たった（tHit）、2: 打ち切った（tHit は手前の候補）。
 // 区間演算（gRayI）・値（gRayV）を呼ぶ所は 1 か所ずつ（呼ぶ所ごとに中身が複製されて、コンパイルが重くなるため）
 int gRay(vec3 o, vec3 d, float t0, float t1, out float tHit) {
