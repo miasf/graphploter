@@ -127,6 +127,12 @@ export function missingParam(error: string | undefined): string | null {
   return m && !isReserved(m[1]) ? m[1] : null
 }
 
+/** 数式入力欄の LaTeX で、文字 name が関数の呼び出しの形 name(…) で使われているか（name\left( か name( が続く） */
+export function calledAsFunction(latex: string, name: string): boolean {
+  const n = latexName(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^a-zA-Z\\\\])${n}\\s*(\\\\left\\(|\\()`).test(latex)
+}
+
 /**
  * 計算エンジンのエラー「次元を 5 にしてください」「次元を 5 以上にしてください」から、必要な次元を取り出す。
  * 次元のエラーでなければ null

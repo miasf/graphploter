@@ -66,6 +66,7 @@ export function requestPlot(
   hidden: { mode: number; count: number } | null = null,
   complexCoords = false,
   coord: PlotRequest['coord'] = null,
+  definitions = '',
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -99,6 +100,7 @@ export function requestPlot(
     hidden: hidden && { ...hidden },
     complexCoords,
     coord: coord && { map: coord.map, ranges: coord.ranges.map(([a, b]) => [a, b] as [string, string]), names: coord.names },
+    definitions,
   }
   return planned(req)
 }

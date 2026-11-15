@@ -5,6 +5,7 @@
 //! - `interval`  : 区間演算（箱の上で式の値が入る範囲。曲面の無い所を飛ばすのに使う）
 //! - `functions` : 組み込み関数の一覧
 //! - `special`   : 特殊関数の実装
+//! - `expand`    : 数学の記法（関数の定義・Σ・微分・行列など）を今までの式に直す（展開の段）
 //! - `equation`  : 式の種類（陽関数・陰関数）の判定
 //! - `mesh`      : 曲面のメッシュ生成
 //!
@@ -14,6 +15,7 @@ pub mod adaptive;
 pub mod coords;
 pub mod equation;
 pub mod eval;
+pub mod expand;
 pub mod functions;
 pub mod interval;
 pub mod mesh;
@@ -67,6 +69,8 @@ pub struct MeshResult {
     coord: Option<coords::CoordMap>,
     /// 座標系があるとき、`outline` の 2 本の線を移した先
     outline_target: (Vec<f32>, Vec<f32>),
+    /// 展開で使った定義の名前と、この行が定義の行ならその名前（[`definitions`]）
+    defs: (Vec<String>, Option<String>),
 }
 
 #[wasm_bindgen]
@@ -146,6 +150,16 @@ impl MeshResult {
     #[wasm_bindgen(getter)]
     pub fn used_params(&self) -> String {
         self.used_params.join(",")
+    }
+    /// この式が使った定義（関数 f など。[`definitions`]）の名前（カンマ区切り）
+    #[wasm_bindgen(getter)]
+    pub fn used_defs(&self) -> String {
+        self.defs.0.join(",")
+    }
+    /// 定義の行（`f(x) = …`）なら、その名前（そうでなければ空）
+    #[wasm_bindgen(getter)]
+    pub fn def_name(&self) -> String {
+        self.defs.1.clone().unwrap_or_default()
     }
     /// パラメータの定義なら、その名前（そうでなければ空）
     #[wasm_bindgen(getter)]
@@ -333,12 +347,14 @@ pub fn coord_grid(
         coord: None,
         value_range: None,
         volume: None,
+        defs: Default::default(),
     })
 }
 
 /// 式に誤りがないかだけを調べる。誤りがあればその説明を投げる。
 #[wasm_bindgen]
 pub fn check_expression(source: &str) -> Result<(), JsError> {
+    let _defs = take_definitions(&eval::Params::new());
     equation::compile(source).map(|_| ()).map_err(|e| JsError::new(&e))
 }
 
@@ -361,6 +377,7 @@ pub fn eval_range(source: &str, param_names: &str, param_values: &[f64]) -> Resu
         .enumerate()
         .map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1])))
         .collect();
+    let _defs = take_definitions(&consts);
     let (v, used) = equation::eval_constant_with(source, &consts).map_err(|e| JsError::new(&e))?;
     LAST_USED.with(|u| *u.borrow_mut() = used.join(","));
     Ok(v)
@@ -368,6 +385,22 @@ pub fn eval_range(source: &str, param_names: &str, param_values: &[f64]) -> Resu
 
 thread_local! {
     static LAST_USED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// 次の [`plot`]・[`check_expression`]・[`eval_range`] だけに効く、定義の行（[`definitions`]）
+    static DEFINITIONS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// 次の [`plot`]・[`check_expression`]・[`eval_range`] で使う定義（その 1 回だけ。計画 `docs/plan-math-notation.md` の M0）。
+/// `src` は式の一覧の行（計算エンジン用の文字列）を `\n` でつないだもの。定義の行（`f(x) = …`・`h = f + g`）だけが使われ、
+/// ほかの行は無視される。呼ばなければ定義なし
+#[wasm_bindgen]
+pub fn definitions(src: &str) {
+    DEFINITIONS.with(|d| *d.borrow_mut() = src.to_string());
+}
+
+/// [`definitions`] で渡された定義を取り出して入れる（戻り値を捨てるまで）
+fn take_definitions(params: &eval::Params) -> expand::Installed {
+    let src = DEFINITIONS.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    expand::install(expand::Defs::parse(&src, params))
 }
 
 /// 直前の `eval_range` で使ったパラメータの名前（カンマ区切り）
@@ -508,6 +541,7 @@ pub fn plot(
         space.coord_names = Some(names);
     }
 
+    let _defs = take_definitions(&consts);
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     let coord = if coord_src.trim().is_empty() {
         None
@@ -611,7 +645,7 @@ pub fn plot(
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
-        kind: equation::rename_kind(&built.kind, &space),
+        kind: expand::def_line_label().unwrap_or_else(|| equation::rename_kind(&built.kind, &space)),
         params: plot.param_vars(),
         curve,
         shape_curve: built.curve,
@@ -622,6 +656,7 @@ pub fn plot(
         },
         local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
         coord,
+        defs: (expand::used(), expand::def_line()),
     })
 }
 
@@ -1686,6 +1721,7 @@ impl Shape {
             used_params: self.used_params.clone(),
             param: None,
             local_available: false,
+            defs: Default::default(),
         }
     }
 }
@@ -1780,6 +1816,7 @@ impl CapSource {
             coord: None,
             value_range: None,
             volume: None,
+            defs: Default::default(),
         })
     }
 }

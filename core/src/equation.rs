@@ -25,7 +25,7 @@
 //! q = R (p − c) + c に動かしてから、断面・射影をとる。式は p = c + Rᵀ (q − c) を代入して q の式にする。
 
 use crate::eval::{Params, Program};
-use crate::parser::{parse, parse_system, BinOp, Expr, ParseError, Rel};
+use crate::parser::{parse_system_with, parse_with, BinOp, Expr, ParseError, Rel};
 use num_complex::Complex64 as C;
 
 /// 座標空間の設定
@@ -414,8 +414,64 @@ pub fn others(axis: usize) -> (usize, usize) {
 }
 
 /// `offset` 文字目から始まる部分を解析する（エラーの位置を全体の位置に直す）
-fn parse_at(src: &str, offset: usize) -> Result<Expr, String> {
-    parse(src).map_err(|e| ParseError { pos: e.pos + offset, ..e }.to_string())
+fn parse_at(src: &str, offset: usize, params: &Params) -> Result<Expr, String> {
+    let e = parse_with(src, &crate::expand::names()).map_err(|e| ParseError { pos: e.pos + offset, ..e }.to_string())?;
+    crate::expand::expand(&e, params)
+}
+
+/// 式を解析して、数学の記法を展開する（`expand.rs`）。定義の行（`f(x) = …`）は展開せずに、その印を返す
+/// （定義の行は、[`compile_with`] が「縦 = f(横, 奥)」などの形にしてから描く）
+fn parse_expanded(source: &str, params: &Params) -> Result<Vec<crate::parser::Chain>, String> {
+    let mut chains = parse_system_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    for chain in &mut chains {
+        // 逆関数 y = f⁻¹(x) → f(y) = x
+        if chain.rels == [Rel::Eq] {
+            let (l, r) = (chain.exprs[0].clone(), chain.exprs[1].clone());
+            let (l, r) = crate::expand::rewrite_inverse(l, r);
+            chain.exprs = vec![l, r];
+        }
+        for e in &mut chain.exprs {
+            *e = crate::expand::expand(e, params)?;
+        }
+    }
+    Ok(chains)
+}
+
+/// 定義の行（`f(x) = …`・`h = f + g`）を、描く形の式に置き換える。定義の行でなければ None。
+/// 引数 1 つは「奥 = f(横)」、2 つは「縦 = f(横, 奥)」。値が組の関数は媒介変数表示（引数を t / u, v / u, v, t にする）。
+/// 描けない定義（引数 3 つ以上・引数なし）は Some(None)
+fn definition_source(source: &str, space: &Space) -> Option<Option<Vec<crate::parser::Chain>>> {
+    let names = crate::expand::names();
+    if names.is_empty() {
+        return None;
+    }
+    let chains = parse_system_with(source, &names).ok()?;
+    let [chain] = chains.as_slice() else { return None };
+    if chain.rels != [Rel::Eq] {
+        return None;
+    }
+    let (name, arity, tuple) = crate::expand::definition_line(&chain.exprs[0])?;
+    let shown = space.shown();
+    let drawn = match (arity, tuple) {
+        (1, true) => Some(format!("曲線 {name}(t)")),
+        (2, true) => Some(format!("曲面 {name}(u, v)")),
+        (3, true) => Some(format!("立体 {name}(u, v, t)")),
+        (1, false) => Some(format!("{} = {name}({})", shown[1], shown[0])),
+        (2, false) => Some(format!("{} = {name}({}, {})", shown[2], shown[0], shown[1])),
+        _ => None,
+    };
+    crate::expand::mark_def_line(&name, drawn);
+    let call = |args: Vec<&str>| Expr::Apply { name: name.clone(), primes: 0, args: args.into_iter().map(|a| Expr::Var(a.into())).collect() };
+    let one = |e: Expr| crate::parser::Chain { exprs: vec![e], rels: vec![], pos: vec![0] };
+    let eq = |l: Expr, r: Expr| crate::parser::Chain { exprs: vec![l, r], rels: vec![Rel::Eq], pos: vec![0, 0] };
+    Some(match (arity, tuple) {
+        (1, true) => Some(vec![one(call(vec!["t"]))]),
+        (2, true) => Some(vec![one(call(vec!["u", "v"]))]),
+        (3, true) => Some(vec![one(call(vec!["u", "v", "t"]))]),
+        (1, false) => Some(vec![eq(Expr::Var(shown[1].clone()), call(vec![&shown[0]]))]),
+        (2, false) => Some(vec![eq(Expr::Var(shown[2].clone()), call(vec![&shown[0], &shown[1]]))]),
+        _ => None,
+    })
 }
 
 /// 次元より先の座標（3次元なのに w を使った など）を使っていたらエラーにする
@@ -441,7 +497,19 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
 
-    let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    let mut chains = match definition_source(source, space) {
+        // 定義の行: 描く形の式に置き換えて展開する（描けない定義は、図形なし）
+        Some(Some(mut chains)) => {
+            for chain in &mut chains {
+                for e in &mut chain.exprs {
+                    *e = crate::expand::expand(e, params)?;
+                }
+            }
+            chains
+        }
+        Some(None) => return Ok(Plot::Multi(Vec::new())),
+        None => parse_expanded(source, params)?,
+    };
     for chain in &mut chains {
         for e in &mut chain.exprs {
             *e = rename_coords(e, space);
@@ -599,7 +667,7 @@ pub fn compile_coord_map(source: &str, params: &Params, space: &Space) -> Result
             format!("座標系の式は、{} の式を 3 つ書いてください", shown.join(", "))
         }
     };
-    let e = rename_coords(&crate::parser::parse(source).map_err(|e| e.to_string())?, space);
+    let e = rename_coords(&parse_at(source, 0, params)?, space);
     let Expr::Tuple(items) = e else { return Err(msg()) };
     if items.len() != 3 {
         return Err(msg());
@@ -622,7 +690,7 @@ pub fn compile_coord_map(source: &str, params: &Params, space: &Space) -> Result
 /// この形でない式・h が絡む回転をしている式はエラー
 pub fn hidden_field(source: &str, params: &Params, space: &Space) -> Result<(Program, usize), String> {
     let shape_err = || "断面の塗り分け・伝達関数は、w = f(x, y, z) の形（表示していない座標 = 式）で使えます".to_string();
-    let mut chains = parse_system(source).map_err(|e| e.to_string())?;
+    let mut chains = parse_expanded(source, params)?;
     for chain in &mut chains {
         for e in &mut chain.exprs {
             *e = rename_coords(e, space);
@@ -1232,6 +1300,8 @@ fn uses_i(e: &Expr) -> bool {
         Expr::Neg(a) => uses_i(a),
         Expr::Bin(_, a, b) => uses_i(a) || uses_i(b),
         Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(uses_i),
+        // 展開の段（expand.rs）で消える節は、ここには来ない
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => false,
     }
 }
 
@@ -1249,6 +1319,7 @@ fn first_list(e: &Expr) -> Option<&Vec<Expr>> {
         Expr::Neg(a) => first_list(a),
         Expr::Bin(_, a, b) => first_list(a).or_else(|| first_list(b)),
         Expr::Call(_, args) | Expr::Tuple(args) => args.iter().find_map(first_list),
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => None,
     }
 }
 
@@ -1271,6 +1342,7 @@ fn replace_first_list(e: &Expr, with: &Expr, done: &mut bool) -> Expr {
         }
         Expr::Call(f, args) => Expr::Call(*f, args.iter().map(|a| replace_first_list(a, with, done)).collect()),
         Expr::Tuple(args) => Expr::Tuple(args.iter().map(|a| replace_first_list(a, with, done)).collect()),
+        Expr::Apply { .. } | Expr::Binder { .. } | Expr::Op { .. } | Expr::Matrix { .. } | Expr::Index { .. } | Expr::Prime { .. } => e.clone(),
     }
 }
 
@@ -1308,7 +1380,7 @@ pub fn eval_constant(source: &str) -> Result<f64, String> {
 /// パラメータを使ってよい式の値を計算する（媒介変数の範囲 0 ≤ t ≤ b など）。
 /// 値と、使ったパラメータの名前を返す
 pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<String>), String> {
-    let e = parse_at(source, 0)?;
+    let e = parse_at(source, 0, params)?;
     let prog = Program::compile_with(&e, &[], params).map_err(|err| {
         // 未定義の文字なら、その名前を残す（画面側で「a のスライダーを追加」ボタンを出すのに使う）
         match err.strip_prefix("変数 '").and_then(|r| r.split_once('\'')) {
