@@ -495,9 +495,7 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
-    let shown = space.shown();
-
-    let mut chains = match definition_source(source, space) {
+    let chains = match definition_source(source, space) {
         // 定義の行: 描く形の式に置き換えて展開する（描けない定義は、図形なし）
         Some(Some(mut chains)) => {
             for chain in &mut chains {
@@ -510,6 +508,30 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         Some(None) => return Ok(Plot::Multi(Vec::new())),
         None => parse_expanded(source, params)?,
     };
+    // ± があれば、符号を +1 と −1 にした 2 つの図形（全部の ± がそろって動く）
+    let pm = crate::expand::PM_SIGN;
+    if chains.iter().any(|c| c.exprs.iter().any(|e| e.uses_var(pm))) {
+        let mut plots = Vec::with_capacity(2);
+        for s in [1.0, -1.0] {
+            let mut cs = chains.clone();
+            for c in &mut cs {
+                for e in &mut c.exprs {
+                    *e = e.substitute(&|v: &str| (v == pm).then_some(Expr::Num(s)));
+                }
+            }
+            plots.push(compile_chains(cs, params, space)?);
+        }
+        if plots.iter().any(|p| matches!(p, Plot::Param { .. })) {
+            return Err("± はパラメータの定義には使えません".into());
+        }
+        return Ok(Plot::Multi(plots));
+    }
+    compile_chains(chains, params, space)
+}
+
+/// 解析・展開した式（[`compile_with`]）をコンパイルする
+fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
+    let shown = space.shown();
     for chain in &mut chains {
         for e in &mut chain.exprs {
             *e = rename_coords(e, space);

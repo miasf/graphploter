@@ -59,6 +59,17 @@ const SYMBOLS: Record<string, string> = {
   geqq: '>=',
   lt: '<',
   gt: '>',
+  // 数学の記法（計画 docs/plan-math-notation.md）。計算エンジンが読む文字に置き換える
+  pm: '±',
+  mp: '∓',
+  ldots: '…',
+  cdots: '…',
+  dots: '…',
+  dotsc: '…',
+  dotsb: '…',
+  circ: '∘',
+  limits: '',
+  nolimits: '',
   lfloor: ' floor(',
   rfloor: ')',
   lceil: ' ceil(',
@@ -191,6 +202,12 @@ class Converter {
       return
     }
     if (t === '^') {
+      // 度: x^{\circ} → x·(π/180)
+      if (this.peek() === '\\circ' || (this.peek() === '{' && this.toks[this.i + 1] === '\\circ' && this.toks[this.i + 2] === '}')) {
+        this.i += this.peek() === '{' ? 3 : 1
+        this.out += '*(pi/180)'
+        return
+      }
       this.out += '^(' + this.arg() + ')'
       return
     }
@@ -282,6 +299,23 @@ class Converter {
         this.out += s === 'e' || s === 'i' ? s : ` ${s} `
         return
       }
+      case 'sum':
+      case 'prod': {
+        // \sum_{n=1}^{10} → @sum(n,1,10)。中身は直後の項（計算エンジンの解析器が決める）
+        let lo: string | null = null
+        let hi: string | null = null
+        while (this.peek() === '_' || this.peek() === '^' || this.peek() === '\\limits' || this.peek() === '\\nolimits') {
+          const t2 = this.toks[this.i++]
+          if (t2 === '_') lo = this.arg()
+          else if (t2 === '^') hi = this.arg()
+        }
+        const sym = name === 'sum' ? 'Σ' : 'Π'
+        const m = lo?.match(/^\s*([A-Za-z]\w*)\s*=(.+)$/)
+        if (!m) throw new LatexError(`${sym} の下に n=1 の形で書いてください`)
+        if (hi === null || hi.trim() === '') throw new LatexError(`${sym} の上に終わりの値を書いてください`)
+        this.out += ` @${name}(${m[1]},${m[2].trim()},${hi.trim()}) `
+        return
+      }
       case 'placeholder':
         this.rawGroup()
         if (this.peek() === '{') this.rawGroup()
@@ -307,6 +341,9 @@ class Converter {
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */
 export function latexToText(latex: string): string {
+  // 写像の書き方 f\colon x\mapsto x^2 は、関数の定義 f(x)=x^2 と同じ
+  const map = latex.match(/^\s*([A-Za-z])\s*(?:\\colon|:)\s*([A-Za-z])\s*\\mapsto(.*)$/s)
+  if (map) latex = `${map[1]}\\left(${map[2]}\\right)=${map[3]}`
   return new Converter(tokenize(latex)).run()
 }
 

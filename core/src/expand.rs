@@ -5,6 +5,7 @@
 //! ```
 //!
 //! - 関数の定義 `f(x) = x^2` と、その呼び出し `f(2x)`・合成 `g(f(x))`・関数どうしの演算 `(f + g)(x)`・`(f ∘ g)(x)`（M1）
+//! - 総和 `@sum(n, 1, N) 項`・総積 `@prod(…)`、等差のリスト `[1, 3, …, 9]`、両方の符号 `±`・`∓`（M4）
 //!
 //! 定義は、ほかの行（式の一覧）から [`Defs::parse`] で作り、[`install`] で入れておく（`lib.rs` が `plot` の間だけ入れる）。
 //! 計算エンジンの式の文法は `parser.rs` の先頭の説明。展開した後の式には、新しい節を残さない（残れば内部エラー）
@@ -17,6 +18,12 @@ use std::rc::Rc;
 
 /// 展開した式の節の数の上限（計画 2.5）
 pub const MAX_NODES: usize = 200_000;
+/// Σ・Π の項の数の上限
+const MAX_TERMS: usize = 2_000;
+/// `[a, …, c]` の要素の数の上限（リストの組み合わせの上限と同じ）
+const MAX_LIST: usize = 256;
+/// `±` の符号を表す変数（展開の後、[`crate::equation::compile_with`] が +1 と −1 の 2 つの図形にする。利用者は書けない名前）
+pub const PM_SIGN: &str = "#pm";
 /// 関数の呼び出しの入れ子の深さの上限
 const MAX_DEPTH: usize = 64;
 
@@ -141,6 +148,8 @@ thread_local! {
     static CURRENT: RefCell<Rc<Defs>> = RefCell::new(Rc::new(Defs::default()));
     /// 展開で使った定義の名前（画面が、定義が変わったときに描き直す式を決めるのに使う）
     static USED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 展開の途中で値を使ったパラメータ（Σ の範囲の N など。展開した式には残らないので、別に覚えておく）
+    static USED_PARAMS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 直前にコンパイルした行が定義の行なら、その名前と、描いたものの説明（`y = f(x)` など。描かないなら None）
     static DEF_LINE: RefCell<Option<(String, Option<String>)>> = const { RefCell::new(None) };
 }
@@ -159,6 +168,7 @@ impl Drop for Installed {
 /// 定義を入れる（戻り値を捨てるまで）。使った定義の名前と、定義の行の印も空にする
 pub fn install(defs: Defs) -> Installed {
     USED.with(|u| u.borrow_mut().clear());
+    USED_PARAMS.with(|u| u.borrow_mut().clear());
     DEF_LINE.with(|d| *d.borrow_mut() = None);
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
@@ -175,6 +185,11 @@ pub fn names() -> Vec<String> {
 /// 展開で使った定義の名前（重複なし、出てきた順）
 pub fn used() -> Vec<String> {
     USED.with(|u| u.borrow().clone())
+}
+
+/// 展開の途中で値を使ったパラメータ（[`install`] の後。Σ の範囲など、展開した式に残らないもの）
+pub fn used_params() -> Vec<String> {
+    USED_PARAMS.with(|u| u.borrow().clone())
 }
 
 /// 直前にコンパイルした行が定義の行なら、その名前
@@ -231,17 +246,18 @@ fn apply_body(body: &Expr, args: &[Expr]) -> Expr {
 
 struct Expander<'a> {
     defs: &'a Defs,
+    params: &'a Params,
     /// 展開中の定義の名前（自分自身を使う定義を見つける）
     stack: Vec<String>,
 }
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
-pub fn expand(e: &Expr, _params: &Params) -> Result<Expr, String> {
+pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
     if !e.has_notation() && !mentions_defs(e) {
         return Ok(e.clone());
     }
     let defs = current();
-    let mut x = Expander { defs: &defs, stack: Vec::new() };
+    let mut x = Expander { defs: &defs, params, stack: Vec::new() };
     let out = match x.val(e)? {
         Val::S(s) => s,
         Val::Fn { .. } => return Err(fn_as_value_error(e)),
@@ -377,7 +393,27 @@ impl Expander<'_> {
                 Val::S(Expr::Call(*f, out))
             }
             Expr::Tuple(items) => Val::S(Expr::Tuple(items.iter().map(|a| self.scalar(a)).collect::<Result<_, _>>()?)),
+            Expr::List(items) if items.iter().any(is_ellipsis) => Val::S(self.arithmetic_list(items)?),
             Expr::List(items) => Val::S(Expr::List(items.iter().map(|a| self.scalar(a)).collect::<Result<_, _>>()?)),
+            Expr::Op { op, args } if op == "pm" || op == "mp" => {
+                // a ± b → a + s b、∓ は a − s b（s は +1 と −1。全部の ± がそろって動く）
+                let sign = Expr::Var(PM_SIGN.into());
+                let signed = |b: Expr| Expr::Bin(BinOp::Mul, Box::new(sign.clone()), Box::new(b));
+                let minus = op == "mp";
+                match args.as_slice() {
+                    [b] => {
+                        let b = signed(self.scalar(b)?);
+                        Val::S(if minus { Expr::Neg(Box::new(b)) } else { b })
+                    }
+                    [a, b] => {
+                        let (a, b) = (self.scalar(a)?, signed(self.scalar(b)?));
+                        Val::S(Expr::Bin(if minus { BinOp::Sub } else { BinOp::Add }, Box::new(a), Box::new(b)))
+                    }
+                    _ => return Err("内部エラー: ± の形".into()),
+                }
+            }
+            Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
+            Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Op { op, args } if op == "cross" => {
                 // 外積はベクトル・行列の段階で入る。それまではスカラーの掛け算
                 let (va, vb) = (self.val(&args[0])?, self.val(&args[1])?);
@@ -402,6 +438,93 @@ impl Expander<'_> {
             Expr::Index { name, .. } => return Err(format!("{name}_(…) の添字はまだ使えません")),
             Expr::Prime { name, order } => return Err(format!("{name}{} はまだ使えません", "'".repeat(*order as usize))),
         })
+    }
+
+    /// 式の値（数）。`what` はエラーの文に入れる名前（「Σ の範囲」など）。座標・媒介変数を含めばエラー
+    fn number(&mut self, e: &Expr, what: &str) -> Result<f64, String> {
+        let s = self.scalar(e)?;
+        let prog = crate::eval::Program::compile_with(&s, &[], self.params).map_err(|err| {
+            match err.strip_prefix("変数 '").and_then(|r| r.split_once('\'')) {
+                Some((name, _)) if self.params.contains_key(name) || !definable(name) => format!("{what}に {name} は使えません"),
+                // 未定義の文字は、画面側の「スライダーを追加」ボタンが読める文言のままにする
+                Some(_) => err,
+                None => format!("{what}は、数とパラメータだけで書いてください"),
+            }
+        })?;
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            for p in prog.used_params() {
+                if !u.contains(p) {
+                    u.push(p.clone());
+                }
+            }
+        });
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        prog.eval_batch(&[], &mut out);
+        let v = crate::eval::as_real(out[0]);
+        if !v.is_finite() {
+            return Err(format!("{what}が実数の値になりません"));
+        }
+        Ok(v)
+    }
+
+    /// 整数の値（整数から 10⁻⁹ より離れていればエラー）
+    fn integer(&mut self, e: &Expr, what: &str) -> Result<i64, String> {
+        let v = self.number(e, what)?;
+        let r = v.round();
+        if (v - r).abs() > 1e-9 {
+            return Err(format!("{what}は整数にしてください（今は {v}。スライダーなら、刻みを 1 にしてください）"));
+        }
+        Ok(r as i64)
+    }
+
+    /// Σ・Π: 束縛する変数に a, a + 1, …, b を入れた中身を、平衡のとれた木で足す・掛ける。b < a なら 0（Π は 1）
+    fn sum_or_prod(&mut self, sum: bool, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        let sym = if sum { "Σ" } else { "Π" };
+        let [lo, hi] = args else {
+            return Err(format!("{sym} は、範囲を {sym}_{{{var}=1}}^{{10}} の形で書いてください"));
+        };
+        let what = format!("{sym} の範囲");
+        let (a, b) = (self.integer(lo, &what)?, self.integer(hi, &what)?);
+        if b < a {
+            return Ok(Expr::Num(if sum { 0.0 } else { 1.0 }));
+        }
+        if (b - a) as u64 >= MAX_TERMS as u64 {
+            return Err(format!("{sym} の項が多すぎます（{} 個。{MAX_TERMS} 個まで）", b - a + 1));
+        }
+        let mut terms = Vec::with_capacity((b - a + 1) as usize);
+        let mut nodes = 0;
+        for k in a..=b {
+            let t = body.substitute(&|v: &str| (v == var).then_some(Expr::Num(k as f64)));
+            let t = self.scalar(&t)?;
+            nodes += t.node_count();
+            if nodes > MAX_NODES {
+                return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));
+            }
+            terms.push(t);
+        }
+        Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
+    }
+
+    /// `[a, …, c]`（公差 1）・`[a, b, …, c]`（公差 b − a）を、数の並びにする
+    fn arithmetic_list(&mut self, items: &[Expr]) -> Result<Expr, String> {
+        let what = "… のリストの値";
+        let (first, step, last) = match items {
+            [a, e, c] if is_ellipsis(e) && !is_ellipsis(a) && !is_ellipsis(c) => (self.number(a, what)?, 1.0, self.number(c, what)?),
+            [a, b, e, c] if is_ellipsis(e) && ![a, b, c].iter().any(|x| is_ellipsis(x)) => {
+                let (a, b) = (self.number(a, what)?, self.number(b, what)?);
+                (a, b - a, self.number(c, what)?)
+            }
+            _ => return Err("… は [1, 2, …, 10] か [1, …, 10] の形で使ってください".into()),
+        };
+        if step == 0.0 || (last - first) / step < -1e-9 {
+            return Err("… のリストが終わりません（並びの向きと最後の値を確かめてください）".into());
+        }
+        let n = ((last - first) / step + 1e-9).floor() as usize + 1;
+        if n > MAX_LIST {
+            return Err(format!("リストの要素が多すぎます（{n} 個。{MAX_LIST} 個まで）"));
+        }
+        Ok(Expr::List((0..n).map(|k| Expr::Num(first + step * k as f64)).collect()))
     }
 
     /// 2 項の演算。関数どうしは点ごと、関数 × 式は当てはめ（`(f + g)(x)`・`f x`）
@@ -435,6 +558,26 @@ impl Expander<'_> {
             }
         })
     }
+}
+
+fn is_ellipsis(e: &Expr) -> bool {
+    matches!(e, Expr::Op { op, .. } if op == "ellipsis")
+}
+
+/// 項を、深さが log₂ になるように組んで足す・掛ける（左に偏った木にしない）
+fn balanced(mut terms: Vec<Expr>, op: BinOp) -> Expr {
+    while terms.len() > 1 {
+        let mut next = Vec::with_capacity(terms.len().div_ceil(2));
+        let mut it = terms.into_iter();
+        while let Some(a) = it.next() {
+            next.push(match it.next() {
+                Some(b) => Expr::Bin(op, Box::new(a), Box::new(b)),
+                None => a,
+            });
+        }
+        terms = next;
+    }
+    terms.pop().unwrap_or(Expr::Num(0.0))
 }
 
 /// 等式の片側が `f^(-1)(式)`（f は引数 1 つの関数）だけなら、`f(反対側) = 式` に書き換える（逆関数）
@@ -477,7 +620,8 @@ pub fn definition_line(l: &Expr) -> Option<(String, usize, bool)> {
         Expr::Var(name) if matches!(defs.get(name), Some(Def::Value(_))) => name,
         _ => return None,
     };
-    let mut x = Expander { defs: &defs, stack: Vec::new() };
+    let params = Params::new();
+    let mut x = Expander { defs: &defs, params: &params, stack: Vec::new() };
     Some(match x.def_value(name) {
         Ok(Some(Val::Fn { arity, body })) => (name.clone(), arity, matches!(body, Expr::Tuple(_))),
         _ => (

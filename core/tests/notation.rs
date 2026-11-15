@@ -146,3 +146,84 @@ fn existing_expressions_do_not_change() {
         same(src, src, FG);
     }
 }
+
+// ---- M4: Σ・Π・等差のリスト・± ----
+
+/// パラメータの無い式の値
+fn value(src: &str) -> f64 {
+    graph_core::equation::eval_constant(src).unwrap_or_else(|e| panic!("{src}: {e}"))
+}
+
+#[test]
+fn sums_and_products() {
+    same("z = @sum(n,1,3) n x", "z = 1 x + 2 x + 3 x", "");
+    same("z = @prod(k,1,3) (x-k)", "z = (x-1)(x-2)(x-3)", "");
+    assert_eq!(value("@sum(n,1,2) @sum(m,1,n) m"), 4.0);
+    assert_eq!(value("@sum(n,1,10) n"), 55.0);
+    assert_eq!(value("@prod(n,1,5) n"), 120.0);
+    // 範囲が逆なら 0（Π は 1）
+    assert_eq!(value("@sum(n,3,1) n"), 0.0);
+    assert_eq!(value("@prod(n,3,1) n"), 1.0);
+    // 中身は直後の項
+    assert_eq!(value("@sum(n,1,3) n + 1"), 7.0);
+}
+
+#[test]
+fn sum_range_errors() {
+    let e = error_of("z = @sum(n,1,x) n", "");
+    assert!(e.contains("Σ の範囲に x は使えません"), "{e}");
+    let mut ps = std::collections::BTreeMap::new();
+    ps.insert("N".to_string(), num_complex::Complex64::new(2.5, 0.0));
+    let e = graph_core::equation::compile_with("z = @sum(n,1,N) n", &ps, &graph_core::equation::Space::standard()).err().unwrap_or_default();
+    assert!(e.contains("整数"), "{e}");
+    assert!(error_of("z = @sum(n,1,5000) n x", "").contains("項が多すぎます"));
+}
+
+#[test]
+fn sum_range_parameter_is_reported() {
+    // 範囲だけに使ったパラメータ N も、使ったパラメータとして返す（スライダーを動かしたら描き直す）
+    let m = run("z = @sum(n,1,N) sin(n x)/n", "", &[("N", 3.0)]).unwrap();
+    assert!(m.used_params().split(',').any(|p| p == "N"), "{}", m.used_params());
+    // 項の数がパラメータで変わる
+    let (p3, _) = mesh("z = @sum(n,1,N) sin(n x)/n", "", &[("N", 3.0)]);
+    let (p1, _) = mesh("z = @sum(n,1,N) sin(n x)/n", "", &[("N", 1.0)]);
+    assert_ne!(p3, p1);
+}
+
+#[test]
+fn sums_inside_functions() {
+    same("z = s(x)", "z = 1 sin(1 x) / 1 + 2 sin(2 x) / 2", "s(x) = @sum(k,1,2) k sin(k x) / k");
+}
+
+#[test]
+fn arithmetic_lists() {
+    let a = mesh("z = [1, 3, …, 9] x", "", &[]);
+    let b = mesh("z = [1, 3, 5, 7, 9] x", "", &[]);
+    assert_eq!(a, b);
+    assert_eq!(mesh("z = [1, …, 3] x", "", &[]), mesh("z = [1, 2, 3] x", "", &[]));
+    assert_eq!(mesh("z = [1, ..., 3] x", "", &[]), mesh("z = [1, 2, 3] x", "", &[]));
+    assert!(error_of("z = [1, 0, …, 3] x", "").contains("終わりません"));
+}
+
+#[test]
+fn plus_minus() {
+    assert_eq!(mesh("y = ±sqrt(x)", "", &[]), mesh("y = [1, -1] sqrt(x)", "", &[]));
+    // 全部の ± はそろって動く（4 通りではなく 2 通り）
+    let m = run("z = ±x ± y", "", &[]).unwrap();
+    assert!(m.kind().ends_with("× 2"), "{}", m.kind());
+    assert_eq!(mesh("z = x ∓ y", "", &[]).0.len(), mesh("z = [x - y, x + y]", "", &[]).0.len());
+}
+
+#[test]
+fn latex_outputs_are_readable() {
+    // web/src/lib/latex.test.ts の変換結果を、計算エンジンがそのまま読めること
+    assert_eq!(value("@sum(n,1,10) n^(2)"), 385.0);
+    let mut ps = std::collections::BTreeMap::new();
+    ps.insert("N".to_string(), num_complex::Complex64::new(3.0, 0.0));
+    let sp = graph_core::equation::Space::standard();
+    assert!(graph_core::equation::compile_with("z=@sum(k,1,N) ((sin (kx))/(k))+1", &ps, &sp).is_ok());
+    assert!(graph_core::equation::compile_with("z=@prod(k,1,5) (x-k)", &ps, &sp).is_ok());
+    assert!(graph_core::equation::compile_with("y=± sqrt(x)", &ps, &sp).is_ok());
+    assert!(graph_core::equation::compile_with("z=[1,3,…,9] x", &ps, &sp).is_ok());
+    assert!((value("30*(pi/180)") - std::f64::consts::PI / 6.0).abs() < 1e-15);
+}

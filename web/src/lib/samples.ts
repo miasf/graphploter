@@ -177,6 +177,29 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     ],
   },
   {
+    title: '関数・Σ',
+    samples: [
+      {
+        label: '関数の定義と合成 f(x) = x²、z = f(x) − f(y)',
+        items: [
+          { latex: 'f\\left(x\\right)=\\frac{x^2}{4}', options: { color: '#c74440', visible: false } },
+          { latex: 'z=f\\left(x\\right)-f\\left(y\\right)', options: { color: '#2d70b3' } },
+        ],
+      },
+      {
+        label: '矩形波のフーリエ級数（N を再生）',
+        play: 'N',
+        items: [
+          { latex: 'N=1', param: 'N', options: { slider: { min: 1, max: 30, complex: false, stack: false, stepExpr: '1', step: 1 } } },
+          {
+            latex: 'y=\\frac{4}{\\pi}\\sum_{n=1}^{N}\\frac{\\sin\\left(\\left(2n-1\\right)x\\right)}{2n-1}',
+            options: { color: '#388c46' },
+          },
+        ],
+      },
+    ],
+  },
+  {
     title: '連立方程式・不等式',
     samples: [
       {

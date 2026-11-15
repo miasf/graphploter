@@ -378,7 +378,12 @@ pub fn eval_range(source: &str, param_names: &str, param_values: &[f64]) -> Resu
         .map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1])))
         .collect();
     let _defs = take_definitions(&consts);
-    let (v, used) = equation::eval_constant_with(source, &consts).map_err(|e| JsError::new(&e))?;
+    let (v, mut used) = equation::eval_constant_with(source, &consts).map_err(|e| JsError::new(&e))?;
+    for p in expand::used_params() {
+        if !used.contains(&p) {
+            used.push(p);
+        }
+    }
     LAST_USED.with(|u| *u.borrow_mut() = used.join(","));
     Ok(v)
 }
@@ -649,7 +654,16 @@ pub fn plot(
         params: plot.param_vars(),
         curve,
         shape_curve: built.curve,
-        used_params: plot.used_params(),
+        // Σ の範囲などで使ったパラメータは、展開した式に残らないので足す（値が変わったら計算し直すため）
+        used_params: {
+            let mut u = plot.used_params();
+            for p in expand::used_params() {
+                if !u.contains(&p) {
+                    u.push(p);
+                }
+            }
+            u
+        },
         param: match &plot {
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
             _ => None,

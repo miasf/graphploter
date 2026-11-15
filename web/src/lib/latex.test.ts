@@ -11,6 +11,16 @@ function check(name: string, got: unknown, want: unknown) {
 
 // LaTeX → 計算エンジン用の式
 const cases: [string, string][] = [
+  // 数学の記法（計画 docs/plan-math-notation.md の M1・M4）
+  ['\\sum_{n=1}^{10}n^2', '@sum(n,1,10) n^(2)'],
+  ['\\sum_{k=1}^{N}\\frac{\\sin\\left(kx\\right)}{k}+1', '@sum(k,1,N) ((sin (kx))/(k))+1'],
+  ['\\prod\\limits_{k=1}^{5}\\left(x-k\\right)', '@prod(k,1,5) (x-k)'],
+  ['y=\\pm\\sqrt{x}', 'y=± sqrt(x)'],
+  ['x\\mp y', 'x∓y'],
+  ['\\left[1,3,\\ldots,9\\right]', '[1,3,…,9]'],
+  ['\\left(f\\circ g\\right)\\left(x\\right)', '(f∘g)(x)'],
+  ['f\\colon x\\mapsto x^2', 'f(x)=x^(2)'],
+  ['30^{\\circ}', '30*(pi/180)'],
   // 座標の名前（座標系。計画 S38）
   ['r=\\cos\\left(2\\theta\\right)', 'r= cos (2 theta )'],
   ['\\rho\\sin\\varphi+\\vartheta', 'rho sin phi + theta'],

@@ -235,6 +235,11 @@ enum Tok {
     Cross,
     /// `∘`（関数の合成）
     Compose,
+    /// `…`（リストの中の、等差の並びの省略）
+    Ellipsis,
+    /// `±`・`∓`（両方の符号の図形）
+    PlusMinus,
+    MinusPlus,
     Eof,
 }
 
@@ -431,6 +436,14 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             '*' | '·' => Tok::Star,
             '×' => Tok::Cross,
             '∘' => Tok::Compose,
+            '…' => Tok::Ellipsis,
+            '±' => Tok::PlusMinus,
+            '∓' => Tok::MinusPlus,
+            '.' if chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'.') => {
+                out.push(Token { tok: Tok::Ellipsis, pos: i });
+                i += 3;
+                continue;
+            }
             '\'' | '′' => Tok::Prime,
             ';' => Tok::Semi,
             '⟦' => Tok::LMat,
@@ -513,6 +526,13 @@ impl Parser<'_> {
             let op = match self.peek() {
                 Tok::Plus => BinOp::Add,
                 Tok::Minus => BinOp::Sub,
+                Tok::PlusMinus | Tok::MinusPlus => {
+                    let op = if *self.peek() == Tok::PlusMinus { "pm" } else { "mp" };
+                    self.next();
+                    let rhs = self.term()?;
+                    lhs = Expr::Op { op: op.into(), args: vec![lhs, rhs] };
+                    continue;
+                }
                 _ => return Ok(lhs),
             };
             self.next();
@@ -561,6 +581,11 @@ impl Parser<'_> {
                 self.next();
                 self.unary()
             }
+            Tok::PlusMinus | Tok::MinusPlus => {
+                let op = if *self.peek() == Tok::PlusMinus { "pm" } else { "mp" };
+                self.next();
+                Ok(Expr::Op { op: op.into(), args: vec![self.unary()?] })
+            }
             _ => self.power(),
         }
     }
@@ -590,10 +615,19 @@ impl Parser<'_> {
             Tok::LMat => self.matrix(t.pos),
             Tok::Const(c) => Ok(Expr::Const(c)),
             Tok::LBracket => {
-                let mut items = vec![self.expr()?];
+                // 要素の代わりに … を書ける（等差の並びの省略。展開の段で並べる）
+                let item = |p: &mut Self| -> Result<Expr, ParseError> {
+                    if *p.peek() == Tok::Ellipsis {
+                        p.next();
+                        Ok(Expr::Op { op: "ellipsis".into(), args: Vec::new() })
+                    } else {
+                        p.expr()
+                    }
+                };
+                let mut items = vec![item(self)?];
                 while *self.peek() == Tok::Comma {
                     self.next();
-                    items.push(self.expr()?);
+                    items.push(item(self)?);
                 }
                 self.expect(Tok::RBracket, "閉じ括弧 ']'")?;
                 Ok(Expr::List(items))
