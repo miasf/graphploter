@@ -64,6 +64,7 @@ ${frag.replace('#include <colorspace_fragment>', '')}`
   gl.uniform2f(u('uC'), n / 2, n / 2)
   gl.uniform2f(u('uDx'), (dom[2] - dom[0]) / n, 0)
   gl.uniform2f(u('uDy'), 0, (dom[3] - dom[1]) / n)
+  gl.uniform1i(u('uIters'), 400)
   gl.uniform3f(u('uColor'), 1, 1, 1)
   gl.uniform1f(u('uWidth'), width)
   gl.uniform1f(u('uRatio'), 1)

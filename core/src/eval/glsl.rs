@@ -363,6 +363,11 @@ fn to_glsl_used(code: &Code, nvars: usize, opts: &GlslOptions) -> Result<(GlslCo
                 need("gi_neg");
                 format!("gi_neg(r{a})")
             }
+            // 定数の整数乗は、小さい専用の関数（実数乗・指数も動く累乗の場合分けを含まない。シェーダーのコンパイルが軽い）
+            Op::Bin(BinOp::Pow, a, b) if int_exp(*b).is_some() => {
+                need("gi_powi");
+                format!("gi_powi(r{a}, {})", int_exp(*b).unwrap())
+            }
             Op::Bin(o, a, b) => {
                 let n = match o {
                     BinOp::Add => "gi_add",
@@ -572,8 +577,15 @@ float gp_cos(float x) { return gp_sc(x).y; }
 float gp_tan(float x) { vec2 o = gp_sc(x); return o.x / o.y; }"#,
         ),
         // --- 値（実数だけの道と同じ: 実数にならない所は NaN） ---
-        snip("gf_asin", &["gp_nan"], "float gf_asin(float x) { return abs(x) <= 1.0 ? asin(x) : gp_nan(); }"),
-        snip("gf_acos", &["gp_nan"], "float gf_acos(float x) { return abs(x) <= 1.0 ? acos(x) : gp_nan(); }"),
+        // asin・acos は組み込みを使わない（Direct3D の組み込みは近似で、相対誤差 10⁻⁴ ほど。RTX 2060・Chrome で区間の見落としが出た）。
+        // 精度の良い atan(y, x) で、asin x = atan(x, √((1 − x)(1 + x)))、acos x = atan(√((1 − x)(1 + x)), x)
+        snip(
+            "gp_asin",
+            &[],
+            "float gp_asin(float x) { return atan(x, sqrt(max((1.0 - x) * (1.0 + x), 0.0))); }\nfloat gp_acos(float x) { return atan(sqrt(max((1.0 - x) * (1.0 + x), 0.0)), x); }",
+        ),
+        snip("gf_asin", &["gp_nan", "gp_asin"], "float gf_asin(float x) { return abs(x) <= 1.0 ? gp_asin(x) : gp_nan(); }"),
+        snip("gf_acos", &["gp_nan", "gp_asin"], "float gf_acos(float x) { return abs(x) <= 1.0 ? gp_acos(x) : gp_nan(); }"),
         snip("gf_acosh", &["gp_nan"], "float gf_acosh(float x) { return x >= 1.0 ? acosh(x) : gp_nan(); }"),
         snip(
             "gf_atanh",
@@ -751,6 +763,19 @@ Div gi_neg(Div a) {
         dec2("gi_sub", &["gi_core"], "gi_entire(2)", "  return gi_wk(gi_of(gw_sub(x, y), 3, 2), inh);"),
         dec2("gi_mul", &["gi_core"], "gi_entire(2)", "  return gi_wk(gi_of(gw_mul(x, y), 3, 2), inh);"),
         dec2("gi_div", &["gi_core"], "gi_entire(0)", "  if (gw_has(y, 0.0)) return gi_wk(gi_entire(0), inh);\n  return gi_wk(gi_of(gw_div(x, y), 3, 2), inh);"),
+        // 定数の整数乗（gi_pow の整数乗の場合と同じ決まり。指数は定数なので、飾りは底のまま）
+        snip(
+            "gi_powi",
+            &["gi_core", "gw_pow"],
+            r#"
+Div gi_powi(Div a, int e) {
+  if (gi_none(a)) return gi_empty();
+  if (!gi_bd(a)) return gi_wk(gi_entire(0), a.d);
+  vec2 x = vec2(a.lo, a.hi);
+  if (e < 0 && gw_has(x, 0.0)) return gi_wk(gi_entire(0), a.d);
+  return gi_wk(gi_of(gw_powi(x, e), 3, 2), a.d);
+}"#,
+        ),
         dec2(
             "gi_pow",
             &["gi_core", "gw_pow"],
@@ -832,21 +857,21 @@ Div gi_neg(Div a) {
         dec1("gi_sinc", &["gi_core"], "gi_entire(2)", "  return gi_wk(Div(-0.22, 1.0, 3), a.d);"),
         dec1(
             "gi_asin",
-            &["gi_core"],
+            &["gi_core", "gp_asin"],
             "gi_entire(0)",
             r#"  if (x.y < -1.0 || x.x > 1.0) return gi_empty();
   bool part = x.x < -1.0 || x.y > 1.0;
   vec2 c = clamp(x, -1.0, 1.0);
-  return gi_wk(gi_of(gw_w(asin(c.x), asin(c.y), GP_PT), part ? 0 : 3, part ? 0 : 2), a.d);"#,
+  return gi_wk(gi_of(gw_w(gp_asin(c.x), gp_asin(c.y), GP_PT), part ? 0 : 3, part ? 0 : 2), a.d);"#,
         ),
         dec1(
             "gi_acos",
-            &["gi_core"],
+            &["gi_core", "gp_asin"],
             "gi_entire(0)",
             r#"  if (x.y < -1.0 || x.x > 1.0) return gi_empty();
   bool part = x.x < -1.0 || x.y > 1.0;
   vec2 c = clamp(x, -1.0, 1.0);
-  return gi_wk(gi_of(gw_w(acos(c.y), acos(c.x), GP_PT), part ? 0 : 3, part ? 0 : 2), a.d);"#,
+  return gi_wk(gi_of(gw_w(gp_acos(c.y), gp_acos(c.x), GP_PT), part ? 0 : 3, part ? 0 : 2), a.d);"#,
         ),
         dec1(
             "gi_acosh",
