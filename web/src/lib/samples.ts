@@ -20,6 +20,8 @@ export interface Sample {
   view?: SampleView
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
   play?: string
+  /** 2D 表示にする */
+  flat?: boolean
   /**
    * 座標系で描く例（計画 9 章）。追加する式を、この座標系（用意した座標系。同じものがあれば使い回す）で描く。
    * morph は移行のスライダーの値、play なら移行を再生する、flat なら 2D 表示にする
@@ -237,6 +239,29 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         items: [{ latex: '\\left(-y,x,0.3\\right)', options: { color: '#2d70b3', field: { stream: 3 } } }],
       },
       { label: '零空間 ker (1 1 1)（平面）', items: [{ latex: '\\ker\\begin{pmatrix}1 & 1 & 1\\end{pmatrix}', options: { color: '#6042a6' } }] },
+    ],
+  },
+  {
+    title: '数列',
+    samples: [
+      {
+        label: '収束する数列 aₙ₊₁ = aₙ/2 + 1（a₁ を動かす）',
+        view: { dims: 3, half: 12 },
+        items: [
+          { latex: 'a_1=8', param: 'a1', options: { slider: { min: -10, max: 10, complex: false, stack: false } } },
+          { latex: 'a_{n+1}=\\frac{a_n}{2}+1', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: 'マンデルブロ集合の縁 |z₂₀| = 2（2D）',
+        flat: true,
+        view: { dims: 3, half: 2 },
+        items: [
+          { latex: 'z_0=0', param: 'z0' },
+          { latex: 'z_{n+1}=z_n^2+x+iy', options: { color: '#888888' } },
+          { latex: '\\left|z_{20}\\right|=2', options: { color: '#2d70b3' } },
+        ],
+      },
     ],
   },
   {

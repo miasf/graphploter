@@ -586,12 +586,15 @@
   /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
   const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
 
+  /** 計算エンジン用の式の、数列の定義 `a_(n) = …`・`a_(n+1) = …`（計画 M10） */
+  const SEQ_DEF_HEAD = /^\s*([A-Za-z])_\(\s*[A-Za-z]\w*\s*([+-]\s*\d+\s*)?\)\s*=/
+
   /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
   function defNameOf(it: PlotItem): string | null {
     if (it.def) return it.def
     try {
       const text = latexToText(it.latex)
-      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD)
+      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD) ?? text.match(SEQ_DEF_HEAD)
       return m ? m[1] : null
     } catch {
       return null
@@ -2096,6 +2099,7 @@
       if (play) togglePlayMorph(coordSys)
       if (toFlat && !flat) setFlat(true)
     }
+    if (sample.flat && !flat) setFlat(true)
     for (const si of adding) {
       // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
       pushItem(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))

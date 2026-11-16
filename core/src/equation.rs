@@ -315,6 +315,8 @@ pub enum Plot {
     Field { progs: Vec<Program>, rot: Option<[[f64; 3]; 3]> },
     /// 原点からのベクトルの矢印（行列の列ベクトル・ベクトルの定義。計画 M7・M8）
     Arrows { vectors: Vec<[f64; 3]> },
+    /// 点（数列の点 (n, aₙ)。`line` なら順に線で結ぶ: 複素数の数列の軌道）。表示中の座標の空間の点
+    Points { points: Vec<[f64; 3]>, line: bool },
     /// 常微分方程式（計画 M9）。状態 $\mathbf y$ の右辺 `rhs`（変数は状態の名前と独立変数）、初期値の組（組み合わせの数だけ解く）
     Ode(Box<Ode>),
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
@@ -369,6 +371,8 @@ impl Plot {
             Plot::Ode(o) if o.one.is_some() => "常微分方程式の解曲線".into(),
             Plot::Ode(_) => "常微分方程式の解曲線".into(),
             Plot::Arrows { .. } => "ベクトル".into(),
+            Plot::Points { line: true, .. } => "数列の軌道（複素平面）".into(),
+            Plot::Points { .. } => "数列の点".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
             Plot::ComplexPlane { label, .. } => label.clone(),
             Plot::System { base, eqs, cuts, .. } => {
@@ -429,7 +433,7 @@ impl Plot {
                 }
                 return out;
             }
-            Plot::Arrows { .. } => return Vec::new(),
+            Plot::Arrows { .. } | Plot::Points { .. } => return Vec::new(),
             Plot::ComplexPlane { inner, .. } => return inner.used_params(),
             Plot::System { base, eqs, cuts, .. } => {
                 let mut out: Vec<String> = base.as_ref().map_or(Vec::new(), |b| b.used_params());
@@ -488,7 +492,12 @@ fn parse_expanded(source: &str, params: &Params) -> Result<Vec<crate::parser::Ch
             let (l, r) = crate::expand::rewrite_inverse(l, r);
             chain.exprs = vec![l, r];
         }
-        for e in &mut chain.exprs {
+        // 初項の行 `a_1 = 8`（字句では a1 = 8）の左辺は、数列の項ではなくパラメータの名前のまま
+        let first_term = chain.rels == [Rel::Eq] && matches!(&chain.exprs[0], Expr::Var(v) if crate::expand::is_term_name(v));
+        for (k, e) in chain.exprs.iter_mut().enumerate() {
+            if k == 0 && first_term {
+                continue;
+            }
             *e = crate::expand::expand(e, params)?;
         }
     }
@@ -564,6 +573,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
+    }
+    // 数列の定義の行（計画 M10）
+    if let Some(p) = sequence_line(source, params)? {
+        return Ok(p);
     }
     // 常微分方程式（計画 M9）
     if let Some(p) = ode_line(source, params, space)? {
@@ -1111,6 +1124,50 @@ pub fn rename_kind(kind: &str, space: &Space) -> String {
     }
     flush(&mut word, &mut out);
     out
+}
+
+/// 数列の定義の行 `a_(n) = …` を、点 (n, aₙ) にする（n は横の表示範囲の中の整数で、初項の添字以上。2,000 点まで）。
+/// 値が実数でない項があれば、複素平面の点 (Re aₙ, Im aₙ) を順に結んだ軌道。項が座標を含めば、図形なし
+fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> {
+    if !source.contains("_(") {
+        return Ok(None);
+    }
+    let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
+    let [chain] = chains.as_slice() else { return Ok(None) };
+    let Some((name, _, _)) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
+    if chain.rels != [Rel::Eq] || crate::expand::seq_def(&name).is_none() {
+        return Ok(None);
+    }
+    let (lo, hi) = crate::expand::view_x();
+    let first = if crate::expand::is_recurrence(&name) {
+        match crate::expand::first_term(&name, params) {
+            Some(k) => k,
+            None => return Err(format!("変数 '{name}1' はここでは使えません（初項 {name}_1 を定義してください）")),
+        }
+    } else {
+        0
+    };
+    let from = (lo.ceil() as i64).max(first);
+    let to = (hi.floor() as i64).min(from + 1999);
+    crate::expand::mark_def_line(&name, Some("数列の点".into()));
+    if to < from {
+        return Ok(Some(Plot::Multi(Vec::new())));
+    }
+    let Some(terms) = crate::expand::sequence_terms(&name, from, to, params)? else {
+        // 項が座標を含む（関数の列）: 点は描かない
+        crate::expand::mark_def_line(&name, None);
+        return Ok(Some(Plot::Multi(Vec::new())));
+    };
+    let complex = terms.iter().any(|(_, v)| v.im.abs() > 1e-12 * v.re.abs().max(1.0) && v.im.is_finite());
+    let points = terms
+        .iter()
+        .filter(|(_, v)| v.re.is_finite() && v.im.is_finite())
+        .map(|(k, v)| if complex { [v.re, v.im, 0.0] } else { [*k as f64, v.re, 0.0] })
+        .collect();
+    if complex {
+        crate::expand::mark_def_line(&name, Some("数列の軌道（複素平面）".into()));
+    }
+    Ok(Some(Plot::Points { points, line: complex }))
 }
 
 /// 常微分方程式（[`Plot::Ode`]）

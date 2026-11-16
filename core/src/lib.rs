@@ -627,6 +627,7 @@ pub fn plot(
     let _defs = take_definitions(&consts);
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
+    expand::set_view_x(domain[0], domain[1]);
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     if !coord_src.trim().is_empty() && matches!(plot, equation::Plot::Field { .. }) {
@@ -974,6 +975,15 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
         }
         equation::Plot::Arrows { vectors } => Some(arrows_built(field::vectors(vectors, ctx.flat), "ベクトル".into())),
         equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
+        equation::Plot::Points { points, line } => {
+            let pts: Vec<[f64; 3]> = points.iter().map(|p| if ctx.flat { [p[0], p[1], 0.0] } else { *p }).collect();
+            let inner = if *line {
+                mesh::Mesh { positions: pts.iter().flat_map(|p| p.map(|v| v as f32)).collect(), ..Default::default() }
+            } else {
+                system::points_mesh(&pts)
+            };
+            Some(Built { inner, curve: true, kind: plot.kind_label(), ..Default::default() })
+        }
         _ => None,
     }
 }
@@ -1629,7 +1639,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
         P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
@@ -1836,7 +1846,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
         P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };

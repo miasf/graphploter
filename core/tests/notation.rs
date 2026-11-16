@@ -1028,3 +1028,77 @@ fn ode_single_equations() {
     // 定義した関数の導関数 f'(x) は、今までどおり
     assert!(max_diff("y = f'(x)", "y = 2x", "f(x) = x^2") < 1e-9);
 }
+
+// ---- M10: 数列 ----
+
+fn ps(list: &[(&str, f64)]) -> graph_core::eval::Params {
+    list.iter().map(|(n, v)| (n.to_string(), num_complex::Complex64::new(*v, 0.0))).collect()
+}
+
+/// 定義とパラメータを入れたうえでの値
+fn seq_value(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<f64, String> {
+    let p = ps(params);
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse(defs, &p));
+    graph_core::equation::eval_constant_with(src, &p).map(|v| v.0)
+}
+
+#[test]
+fn sequences() {
+    assert!((seq_value("a_(3)", "a_(n) = 1/n^2", &[]).unwrap() - 1.0 / 9.0).abs() < 1e-15);
+    assert_eq!(seq_value("a_(10)", "a_(n+1) = a_(n) + 2", &[("a1", 1.0)]).unwrap(), 19.0);
+    // 数字の添字 a_10（字句では a10）も項
+    assert_eq!(seq_value("a_10 + a_1", "a_(n+1) = a_(n) + 2", &[("a1", 1.0)]).unwrap(), 20.0);
+    // フィボナッチの a₈₀
+    let start = std::time::Instant::now();
+    let f80 = seq_value("a_(80)", "a_(n) = a_(n-1) + a_(n-2)", &[("a1", 1.0), ("a2", 1.0)]).unwrap();
+    assert_eq!(f80, 23416728348467685.0);
+    eprintln!("フィボナッチ a₈₀: {:.3} ms", start.elapsed().as_secs_f64() * 1e3);
+    // 部分和は Σ と組み合わせる
+    assert!((seq_value("s_(4)", "a_(n) = 1/n\ns_(n) = @sum(k,1,n) a_(k)", &[]).unwrap() - 25.0 / 12.0).abs() < 1e-14);
+    // 初項が無ければ、スライダーを足せる形のエラー
+    let e = seq_value("a_(5)", "a_(n+1) = 2 a_(n)", &[]).unwrap_err();
+    assert!(e.contains("変数 'a1' はここでは使えません"), "{e}");
+    // 添字が数字の名前は今までどおり（パラメータ a1・座標 w₂）
+    assert_eq!(seq_value("a_1 + 1", "", &[("a1", 2.0)]).unwrap(), 3.0);
+}
+
+#[test]
+fn sequence_terms_with_coordinates() {
+    // z = a_(3)（a_(n) = x^n）と z = x^3 が同じメッシュ
+    same("z = a_(3)", "z = x^3", "a_(n) = x^n");
+    // マンデルブロ: z_(n+1) = z_(n)^2 + x + i y、z0 = 0 のもとで |z₈| = 2 を、手で 8 回入れ子にした式と比べる
+    let defs = "z_(n+1) = z_(n)^2 + x + i y";
+    let mut hand = "0".to_string();
+    for _ in 0..8 {
+        hand = format!("({hand})^2 + x + i y");
+    }
+    let (a, b) = (mesh_p(&format!("abs(z_(8)) = 2 + 0 z"), defs, &[("z0", 0.0)]), mesh_p(&format!("abs({hand}) = 2 + 0 z"), "", &[("z0", 0.0)]));
+    assert!(!a.0.is_empty());
+    assert_eq!(a, b);
+}
+
+fn mesh_p(src: &str, defs: &str, params: &[(&str, f64)]) -> (Vec<f32>, Vec<u32>) {
+    mesh(src, defs, params)
+}
+
+#[test]
+fn sequence_lines_draw_points() {
+    // a_(n) = 1/n の点 (n, 1/n, 0)（n は横の表示範囲 [−3, 3] の中の 0 以上の整数。n = 0 は無限大なので描かない）
+    let m = run("a_(n) = 1/n", "a_(n) = 1/n", &[]).unwrap();
+    assert!(m.kind().contains("a の定義（数列の点）"), "{}", m.kind());
+    let p: Vec<[f32; 3]> = m.positions().chunks_exact(3).filter(|v| v[0].is_finite()).map(|v| [v[0], v[1], v[2]]).collect();
+    for n in [1, 2, 3] {
+        assert!(p.iter().any(|v| *v == [n as f32, 1.0 / n as f32, 0.0]), "{n}: {p:?}");
+    }
+    // 初項の行 a_1 = 8 そのものは、今までどおりパラメータの定義
+    let m = run("a_1 = 8", "a_(n+1) = a_(n) / 2\na_1 = 8", &[]).unwrap();
+    assert_eq!(m.param_name(), "a1");
+    // 漸化式は初項の添字から
+    let m = run("a_(n+1) = a_(n) / 2", "a_(n+1) = a_(n) / 2", &[("a1", 2.0)]).unwrap();
+    let p: Vec<f32> = m.positions().chunks_exact(3).filter(|v| v[0].is_finite()).map(|v| v[0]).collect();
+    assert!(p.iter().all(|n| *n >= 1.0) && p.contains(&3.0));
+    assert!(m.used_params().split(',').any(|n| n == "a1"), "{}", m.used_params());
+    // 複素数の数列は、複素平面の軌道
+    let m = run("w_(n+1) = w_(n) (0.8 + 0.5 i)", "w_(n+1) = w_(n) (0.8 + 0.5 i)", &[("w0", 1.0)]).unwrap();
+    assert!(m.kind().contains("軌道"), "{}", m.kind());
+}
