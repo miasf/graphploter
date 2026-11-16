@@ -1142,7 +1142,7 @@
   function addSlider(item: PlotItem, name: string) {
     const k = items.indexOf(item)
     // f(…) の形で使われていれば、スライダーではなく関数の定義 f(x) = x を足す
-    const line = calledAsFunction(item.latex, name) ? `${latexName(name)}\\left(x\\right)=x` : `${name}=1`
+    const line = calledAsFunction(item.latex, name) ? `${latexName(name)}\\left(x\\right)=x` : `${latexName(name)}=1`
     items.splice(k, 0, newItem(line, { folder: item.folder }))
     schedule(items[k], 0) // items[k] は Svelte の状態に入ったもの（元のオブジェクトではない）
   }
@@ -2118,7 +2118,14 @@
 
   /** 「a=1」のような式なら、そのパラメータの名前（まだ計算していない式のため、文字の形だけで調べる） */
   function latexParamName(latex: string): string | undefined {
-    return /^([a-zA-Z])\s*=/.exec(latex)?.[1]
+    const one = /^([a-zA-Z])\s*=/.exec(latex)?.[1]
+    if (one) return one
+    // 名前に使える文字（\alpha=1・\hat{x}=1。計画 M13）
+    try {
+      return /^\s*\{(\w+)\}\s*=/.exec(latexToText(latex))?.[1]
+    } catch {
+      return undefined
+    }
   }
 
   /** サンプルの見え方（次元・回転・4次元の遠近感・表示範囲・回転の再生）にして、すべて計算し直す */

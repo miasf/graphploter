@@ -630,6 +630,26 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
     （例: `A = \begin{pmatrix}1 & a\\ 0 & 1\end{pmatrix}` を座標系にして `x^2 + y^2 = 1` を描くと、$a$ で円がせん断される）
   - 大きさが合わない演算は、「2×3 の行列と 2 成分のベクトルは掛けられません」のように、大きさの入ったエラーになる
   - 固有値・固有ベクトルは、まだ求められない
+- **名前に使える文字**: 英字 1 文字のほかに、ギリシャ文字（`\alpha`・`\beta`・`\lambda`・`\Omega` など）、
+  アクセントを付けた文字（`\hat{x}`・`\tilde{\alpha}` など。元の文字とは別の名前）、書体を付けた文字（`\mathcal{A}`・`\mathbb{K}`・
+  `\mathfrak{g}`・`\mathsf{A}`・`\mathtt{a}`）、文字の形の記号（`\ell`・`\hbar`・`\aleph` など）をスライダー・定義の名前に使える
+  （「α のスライダーを追加」ボタンも出る）。$\theta, \varphi, \rho, \sigma, \tau, \mu, \nu$ は座標系の名前として今までどおり。
+  $\pi$（定数）・$\Gamma$・$\zeta$・$\psi$（関数）・$\Delta$・$\nabla$（演算子）は名前にしない。関数の `beta(x, y)` と名前の `\beta` は両方使える
+- **小さな記号**
+
+  | 書いたもの | 意味 |
+  |---|---|
+  | `a\equiv b`、`a\equiv b\pmod{n}` | `a = b`、$\operatorname{mod}(a - b, n) = 0$ |
+  | `a\bmod b` | $\operatorname{mod}(a, b)$（掛け算と同じ強さ） |
+  | `a\mid b`（集合の括弧の外）・`\divides` | $b$ が $a$ で割り切れる |
+  | `u\perp v`・`u\parallel v` | $\mathbf u \cdot \mathbf v = 0$・$\mathbf u \times \mathbf v = \mathbf 0$ |
+  | `\nless`・`\ngtr`・`\nleq`・`\ngeq`・`\lneq`・`\gneq` など | 逆の不等号 |
+  | `x^{\circ}`・`x\degree`、`50\%` | $x \cdot \pi / 180$、$50 / 100$ |
+  | `z^{\ast}`・`\overline{z}`・`\bar{z}` | 共役 $\bar z$（行列なら成分ごと） |
+  | `\binom{n}{k}`・`\cfrac`・`\gcd`・`\operatorname{lcm}` | `nCr(n, k)`・分数・最大公約数・最小公倍数（引数は四捨五入した整数） |
+  | `\angle\left(u,v\right)` | 2 つのベクトルのなす角 |
+  | `\boxed{…}`・`\underbrace{…}_{…}`・`\overbrace{…}^{…}` | 中身だけ読む |
+  | `\star`・`\bullet`・`\centerdot`、`\Re`・`\Im` | 掛け算、実部・虚部 |
 - **数列**: `a_{n}=\frac{1}{n^2}`（一般項）・`a_{n+1}=a_n+2`（漸化式。`a_{n}=a_{n-1}+a_{n-2}` の形も）。
   初項はパラメータの行 `a_1=1`（スライダーになる。無ければ「a₁ のスライダーを追加」ボタンが出る）。
   式の中では `a_{10}`・`a_{N}` の形で項を使える（添字は整数。漸化式は初項から順に作り、項が数なら数にしてから進むので、

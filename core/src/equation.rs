@@ -574,6 +574,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
     }
+    // 直交 u ⟂ v（u · v = 0）・平行 u ∥ v（u × v = 0）。計画 M13
+    if let Some(p) = perp_line(source, params, space)? {
+        return Ok(p);
+    }
     // 数列の定義の行（計画 M10）
     if let Some(p) = sequence_line(source, params)? {
         return Ok(p);
@@ -1124,6 +1128,30 @@ pub fn rename_kind(kind: &str, space: &Space) -> String {
     }
     flush(&mut word, &mut out);
     out
+}
+
+/// `u ⟂ v`・`u ∥ v` の行を、`u · v = 0`・`u × v = 0`（3 成分なら成分ごとの連立）にして描く。そうでなければ None
+fn perp_line(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    let (op, at) = match (source.find('⟂'), source.find('∥')) {
+        (Some(k), None) => ('⟂', k),
+        (None, Some(k)) => ('∥', k),
+        (None, None) => return Ok(None),
+        _ => return Err("⟂ と ∥ は、1 行に 1 つだけ書いてください".into()),
+    };
+    let (l, r) = (&source[..at], &source[at + op.len_utf8()..]);
+    let offset = l.chars().count() + 1;
+    let (u, v) = (parse_at(l, 0, params)?, parse_at(r, offset, params)?);
+    let lhs = if op == '⟂' {
+        crate::expand::expand(&Expr::Op { op: "dot".into(), args: vec![u, v] }, params)?
+    } else {
+        crate::expand::expand(&Expr::Op { op: "cross".into(), args: vec![u, v] }, params)?
+    };
+    let rhs = match &lhs {
+        Expr::Tuple(items) => Expr::Tuple(vec![Expr::Num(0.0); items.len()]),
+        _ => Expr::Num(0.0),
+    };
+    let chain = crate::parser::Chain { exprs: vec![lhs, rhs], rels: vec![Rel::Eq], pos: vec![0, offset] };
+    compile_chains(vec![chain], params, space).map(Some)
 }
 
 /// 数列の定義の行 `a_(n) = …` を、点 (n, aₙ) にする（n は横の表示範囲の中の整数で、初項の添字以上。2,000 点まで）。

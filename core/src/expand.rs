@@ -575,7 +575,7 @@ struct Expander<'a> {
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
 pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
-    if !e.has_notation() && !mentions_defs(e) && !nested_tuple(e, true) {
+    if !e.has_notation() && !mentions_defs(e) && !nested_tuple(e, true) && !e.uses_var("∗") {
         return Ok(e.clone());
     }
     let defs = current();
@@ -739,6 +739,9 @@ impl Expander<'_> {
                         // T がパラメータでも、行列の ^T は転置を優先する
                         Expr::Var(t) if t == "T" => return Ok(Val::S(m.transpose().into_expr())),
                         Expr::Var(t) if t == "†" => return Ok(Val::S(m.dagger().into_expr())),
+                        Expr::Var(t) if t == "∗" => {
+                            return Ok(Val::S(Mat { rows: m.rows, cols: m.cols, items: m.items.iter().map(|c| Expr::Call(crate::functions::Func::Conj, vec![c.clone()])).collect() }.into_expr()))
+                        }
                         _ => {}
                     }
                     if m.cols == 1 {
@@ -746,6 +749,13 @@ impl Expander<'_> {
                     }
                     let k = self.integer(b, "行列のべき")?;
                     return Ok(Val::S(m.power(k, MAX_NODES)?.into_expr()));
+                }
+                // 共役 z^∗
+                if matches!(&**b, Expr::Var(t) if t == "∗") {
+                    return match va {
+                        Val::S(s) => Ok(Val::S(Expr::Call(crate::functions::Func::Conj, vec![s]))),
+                        Val::Fn { .. } => Err(fn_as_value_error(a)),
+                    };
                 }
                 let vb = self.val(b)?;
                 self.bin(BinOp::Pow, va, vb, e)?

@@ -1102,3 +1102,29 @@ fn sequence_lines_draw_points() {
     let m = run("w_(n+1) = w_(n) (0.8 + 0.5 i)", "w_(n+1) = w_(n) (0.8 + 0.5 i)", &[("w0", 1.0)]).unwrap();
     assert!(m.kind().contains("軌道"), "{}", m.kind());
 }
+
+// ---- M13: 名前に使える文字と、小さな記号 ----
+
+#[test]
+fn names_and_small_symbols() {
+    // 名前 {alpha} のスライダー、関数 beta と名前 {beta} が同じ式の中で両方使える
+    assert_eq!(mesh("z = {alpha} x", "", &[("alpha", 2.0)]), mesh("z = 2 x", "", &[]));
+    // 2 文字以上の名前の値の行は、パラメータの定義
+    assert_eq!(run("{alpha} = 2", "", &[]).unwrap().param_name(), "alpha");
+    let p = ps(&[("alpha", 2.0), ("beta", 3.0)]);
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse("", &p));
+    let (v, _) = graph_core::equation::eval_constant_with("beta(2, 3) + {beta}", &p).unwrap();
+    assert!((v - (1.0 / 12.0 + 3.0)).abs() < 1e-12, "{v}");
+    drop(_d);
+    // a ≡ b (mod n) は latex.ts が mod(a − b, n) = 0 にする。a mod b（%%）
+    assert_eq!(value("7 %% 3"), 1.0);
+    assert_eq!(value("2 + 7 %% 3 * 2"), 4.0);
+    assert_eq!(value("gcd(12, 18) + lcm(4, 6)"), 18.0);
+    // 直交・平行
+    let p = points("(x, y, z) ⟂ (1, 1, 1)", "");
+    assert!(p.len() > 100 && p.iter().all(|v| (v[0] + v[1] + v[2]).abs() < 1e-4));
+    let p = points("(x, y, z) ∥ (1, 1, 1)", "");
+    assert!(!p.is_empty() && p.iter().all(|v| (v[0] - v[1]).abs() < 1e-3 && (v[1] - v[2]).abs() < 1e-3), "{:?}", &p[..p.len().min(4)]);
+    // 共役 z^∗
+    assert!(max_diff("z = Re((x + i y)^∗ (x + i y))", "z = x^2 + y^2", "") < 1e-9);
+}

@@ -302,6 +302,8 @@ enum Tok {
     Cross,
     /// `∘`（関数の合成）
     Compose,
+    /// `%%`（a mod b。掛け算と同じ強さ。LaTeX の `\bmod`）
+    Mod,
     /// `…`（リストの中の、等差の並びの省略）
     Ellipsis,
     /// 論理・集合の記号（∧ ∨ ¬ ⇒ ⇐ ⇔ ⊕ ⊼ ⊽ ∩ ∪ ∖ △ ∈ ∉ ∋ ≠ ⊤ ⊥ ∅ ℝ ℤ ℕ ℂ ℚ ⦃ ∣ ⦄ ᶜ ∁。計画 M11）
@@ -549,6 +551,13 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 continue;
             }
             '\'' | '′' => Tok::Prime,
+            '%' if chars.get(i + 1) == Some(&'%') => {
+                out.push(Token { tok: Tok::Mod, pos: i });
+                i += 2;
+                continue;
+            }
+            // 共役 z^∗（LaTeX の `^{\ast}`。展開の段で conj にする）
+            '∗' => Tok::Var("∗".into()),
             // 転置 Aᵀ は A^T と同じ。† は ^† の形で使う（共役転置）
             'ᵀ' => {
                 out.push(Token { tok: Tok::Caret, pos: i });
@@ -662,6 +671,12 @@ impl Parser<'_> {
                 Tok::Slash => {
                     self.next();
                     BinOp::Div
+                }
+                Tok::Mod => {
+                    self.next();
+                    let rhs = self.unary()?;
+                    lhs = Expr::Call(Func::Mod, vec![lhs, rhs]);
+                    continue;
                 }
                 Tok::Cross | Tok::Compose => {
                     let op = if *self.peek() == Tok::Cross { "cross" } else { "compose" };
