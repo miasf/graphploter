@@ -16,7 +16,7 @@ export interface VolumeUniforms {
   /** 色を付ける値の範囲（外の値は描かない） */
   uRange: { value: THREE.Vector2 }
   uColormap: { value: number }
-  /** 不透明度の形（0: 一様, 1: 値が大きいほど濃い, 2: 小さいほど濃い, 3: 何枚かの値の所だけ濃い, 4: 値 0 の近くだけ濃い） */
+  /** 不透明度の形（0: 一様, 1: 値が大きいほど濃い, 2: 小さいほど濃い, 3: 何枚かの値の所だけ濃い, 4: 値 0 の近くだけ濃い, 5: |値| が大きいほど濃い） */
   uShape: { value: number }
   /** 濃さ（0〜1） */
   uDensity: { value: number }
@@ -100,6 +100,12 @@ float shape(float t) {
     float f = fract(t * uBands) - 0.5;
     return 4.0 * exp(-f * f / (2.0 * 0.07 * 0.07));
   }
+  if (uShape > 4.5) {
+    // |値| が大きいほど濃い（値 0 の位置からの離れ具合の 2 乗。正負どちらも同じように）
+    float c = uRange.y > uRange.x ? -uRange.x / (uRange.y - uRange.x) : 0.5;
+    float d = (t - c) / max(max(c, 1.0 - c), 1e-6);
+    return 2.0 * d * d;
+  }
   float t0 = uRange.y > uRange.x ? -uRange.x / (uRange.y - uRange.x) : 0.5;
   float d = (t - t0) / (0.02 * uWidth);
   return 4.0 * exp(-0.5 * d * d);
@@ -126,7 +132,7 @@ vec3 argColor(vec2 z) {
 // 点 q での値（複素数なら |f|。実部・虚部を補間してから大きさにする。偏角や |f| を補間すると、偏角が ±π をまたぐ所や 0 の近くで崩れる）
 float valueAt(vec3 q) {
   vec4 t = texture(uTex, q);
-  return uComplex > 0.5 ? length(t.rg) : t.r;
+  return uComplex > 0.5 ? length(t.rg) : t.r / max(t.g, 1e-3);
 }
 
 // 値の勾配（表示範囲の座標あたり）。格子の 1 マスの幅の中心差分
@@ -219,8 +225,15 @@ void main() {
     vec3 p = cameraPosition + dir * t;
     vec3 q = (p - uBoxMin) / size;
     vec2 z = texture(uTex, q).rg;
-    float v = uComplex > 0.5 ? length(z) : z.x;
-    if (!(v == v)) continue;
+    float v;
+    if (uComplex > 0.5) {
+      v = length(z);
+      if (!(v == v)) continue;
+    } else {
+      // g は定義される所の割合（補間した値）。半分より少なければ、定義されない所とみなす
+      if (!(z.y >= 0.5)) continue;
+      v = z.x / z.y;
+    }
     if (uRegion > 0.5) {
       // 境目からの距離（格子の 1.5 マスを 1 とする）。中身は薄く、境目は濃く塗る（中身だけだと形の縁が分からず、ただの色の塊に見える）。
       // 境目の幅が視線の 1 歩より細いと、歩く所によって境目を踏んだり外したりして、点々のムラになる
@@ -251,7 +264,7 @@ void main() {
       cnt += 1.0;
       continue;
     }
-    bool sh = uShape > 3.5;
+    bool sh = uShape > 3.5 && uShape < 4.5;
     float a = 1.0 - exp(-k * (sh ? shell(v, q, size) : shapeAt(s, v)) * dt);
     vec3 c = uComplex > 0.5 ? argColor(z) : colormap(s, uColormap, uBase);
     if (uLit > 0.5) {
@@ -272,7 +285,7 @@ void main() {
     float s = uBlend > 2.5 ? sum / cnt : best;
     // 不透明度は、まとめた値での濃さの形を最大 1 にそろえて 1.5 乗したもの × 濃さの 2 倍（濃さ 50% で、形の最大の所が不透明）。
     // 最大値は視線ごとに大きめの値になりやすいので、急に上げないと中くらいの値まで濃くなり、箱全体が塗りつぶされる
-    float peak = uShape < 0.5 ? 1.0 : uShape < 2.5 ? 2.0 : 4.0;
+    float peak = uShape < 0.5 ? 1.0 : uShape < 2.5 || uShape > 4.5 ? 2.0 : 4.0;
     vec2 z = uBlend > 2.5 ? sumZ / cnt : bestZ;
     float a = min(1.0, 2.0 * uDensity * pow(shapeAt(s, length(z)) / peak, 1.5));
     acc = vec4((uComplex > 0.5 ? argColor(z) : colormap(s, uColormap, uBase)) * a, a);
@@ -285,14 +298,31 @@ void main() {
 `
 
 /**
- * 値の格子（1 辺 n 点。x が最も速く変わる）から 3 次元のテクスチャを作る。定義されない所は NaN のまま（描かない）。
+ * 値の格子（1 辺 n 点。x が最も速く変わる）から 3 次元のテクスチャを作る。定義されない所は描かない。
  * 長さが 2n³ なら複素数（実部・虚部の組）として、2 チャンネル（r, g）にする
  */
 export function volumeTexture(values: Float32Array, n: number): THREE.Data3DTexture {
-  const half = new Uint16Array(values.length)
-  for (let i = 0; i < values.length; i++) half[i] = THREE.DataUtils.toHalfFloat(values[i])
+  const complex = values.length === 2 * n * n * n
+  let half: Uint16Array
+  if (complex) {
+    half = new Uint16Array(values.length)
+    for (let i = 0; i < values.length; i++) half[i] = THREE.DataUtils.toHalfFloat(values[i])
+  } else {
+    // 実数は (値, 1)、定義されない所は (0, 0) にする。NaN のまま入れると、スマホの GPU の多くは補間や比較で NaN を正しく扱わず
+    // （0 や任意の値になる）、描かないはずの所（場合分けで値の無い所）が塗られる。補間した (値 · m, m) を m で割れば、
+    // 定義される所と無い所の境目の近くでも、定義される所の値になる
+    half = new Uint16Array(2 * values.length)
+    const one = THREE.DataUtils.toHalfFloat(1)
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i]
+      if (Number.isFinite(v)) {
+        half[2 * i] = THREE.DataUtils.toHalfFloat(v)
+        half[2 * i + 1] = one
+      }
+    }
+  }
   const tex = new THREE.Data3DTexture(half, n, n, n)
-  tex.format = values.length === 2 * n * n * n ? THREE.RGFormat : THREE.RedFormat
+  tex.format = THREE.RGFormat
   tex.type = THREE.HalfFloatType
   tex.minFilter = THREE.LinearFilter
   tex.magFilter = THREE.LinearFilter
@@ -373,7 +403,7 @@ export function createVolumeUniforms(tex: THREE.Data3DTexture): VolumeUniforms {
 /** 見せ方の設定を、材質の値にする */
 export function applyVolumeStyle(u: VolumeUniforms, h: HiddenStyle | undefined, color: THREE.Color, opacity: number) {
   u.uColormap.value = ['viridis', 'turbo', 'shade'].indexOf(h?.colormap ?? 'viridis')
-  u.uShape.value = Math.max(0, ['flat', 'high', 'low', 'bands', 'zero'].indexOf(h?.opacity ?? 'flat'))
+  u.uShape.value = Math.max(0, ['flat', 'high', 'low', 'bands', 'zero', 'abs'].indexOf(h?.opacity ?? 'flat'))
   u.uDensity.value = h?.density ?? 0.5
   u.uBands.value = Math.max(1, h?.count ?? 5)
   u.uBlend.value = Math.max(0, ['over', 'max', 'min', 'mean'].indexOf(h?.blend ?? 'over'))

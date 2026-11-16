@@ -229,6 +229,11 @@ for (const [def, want] of shown) {
   check(`範囲を描く式 ${def}`, latex === null ? null : latexToText(latex), want)
 }
 
+// 条件の並びの省略形 a ≤ x, y, z ≤ b
+check('省略形（集合）', latexToText('\\left\\{\\left(x,y,z\\right)\\mid-1\\le x,y,z\\le1\\right\\}'), '⦃(x,y,z)∣-1<=x<=1,-1<=y<=1,-1<=z<=1⦄')
+check('省略形（積分）', latexToText('\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x,y,z\\le1,x+y\\le z\\right\\}}1\\,dV'), '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1,x+y<=z)(1)')
+check('省略形でない', latexToText('\\left\\{\\left(x,y\\right)\\mid0\\le x,y\\le1\\right\\}'), '⦃(x,y)∣0<=x,y<=1⦄')
+
 // 積分を描くための式（被積分関数を、積分する範囲の上に描く）
 setRegions({
   D: '\\left\\{\\left(x,y\\right)\\mid1\\le x\\le y,y\\le3\\right\\}',
@@ -258,6 +263,8 @@ const integrals: [string, string | null][] = [
   ['\\int_{0}^{x}e^{-t^2}\\,dt', 'error: 範囲か中身に、積分の変数'],
   // 3 重積分: 変数を x, y, z に直して、値を色で塗る
   ['\\iiint_{V}abc\\,dV', '[色] @cases(xyz, 0<=x<=1,0<=y<=x,0<=z<=2) =0'],
+  // 被積分関数が定数なら、領域そのもの
+  ['\\iiint_{V}2\\,dV', '⦃(a,b,c)∣0<=a<=1,0<=b<=a,0<=c<=2⦄'],
   // 線積分: 曲線の上の幕（媒介変数は u、高さの媒介変数は v）
   ['\\int_{C}x^2\\,ds', '⦃( cos u, sin u,v(( cos u)^(2)))∣0<=u<=2 pi ,0<=v<=1⦄'],
   ['\\oint_{C}\\left(-y,x\\right)\\cdot d\\mathbf{r}', '⦃( cos u, sin u,v((((-( sin u),( cos u)))*( @diff(u) ( cos u, sin u)))/(abs(( @diff(u) ( cos u, sin u))))))∣0<=u<=2 pi ,0<=v<=1⦄'],

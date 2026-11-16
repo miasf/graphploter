@@ -614,7 +614,8 @@ class Converter {
     if (sep < 0 && bars.length === 1) sep = bars[0]
     if (sep < 0 || close < 0) return false
     const point = new Converter(this.toks.slice(this.i, sep)).run()
-    const cond = new Converter(this.toks.slice(sep + 1, close)).run()
+    const condToks = this.toks.slice(sep + 1, close)
+    const cond = condToks.length === 0 ? '' : new Converter(expandListedRanges(condToks)).run()
     if (point === '' || cond === '') throw new LatexError('集合は {(x, y) | 条件} の形で、点と条件を書いてください')
     this.out += ` ⦃${point}∣${cond}⦄ `
     this.i = close + (end === '\\right' ? 2 : 1)
@@ -774,7 +775,8 @@ function regionOf(toks: Token[], vars: string[]): string {
       else if (t === '}' || t === '\\right') depth--
       if (depth === 0 && (t === '\\mid' || t === '|' || t === ':' || t === '\\vert')) {
         const point = new Converter(inner.slice(0, k)).run()
-        const cond = new Converter(inner.slice(k + 1)).run()
+        const condToks = inner.slice(k + 1)
+        const cond = condToks.length === 0 ? '' : new Converter(expandListedRanges(condToks)).run()
         if (point === '' || cond === '') break
         return `${point},${cond}`
       }
@@ -926,7 +928,7 @@ export function regionDisplayLatex(def: string): string | null {
   }
   if (sep < 1 || sep === toks.length - 1) return null
   let point = toks.slice(0, sep)
-  const cond = toks.slice(sep + 1)
+  const cond = expandListedRanges(toks.slice(sep + 1))
   if (point[0] === '\\left' && point[1] === '(' && point[point.length - 2] === '\\right') point = point.slice(2, -2)
   else if (point[0] === '(' && point[point.length - 1] === ')') point = point.slice(1, -1)
   const names = text(point).split(',').map((n) => n.trim())
@@ -948,6 +950,36 @@ export function regionDisplayLatex(def: string): string | null {
   }
   const re = (ts: Token[]) => text(ts.map((t) => rename.get(t) ?? t))
   return set(re(point), re(cond))
+}
+
+/** 不等号のトークン */
+const RELATIONS = new Set(['<', '>', '\\lt', '\\gt', '\\le', '\\leq', '\\ge', '\\geq', '\\leqslant', '\\geqslant', '\\leqq', '\\geqq'])
+
+/**
+ * 条件の並びの省略形「a ≤ x, y, z ≤ b」（x, y, z がどれも a 以上 b 以下）を、「a ≤ x ≤ b, a ≤ y ≤ b, a ≤ z ≤ b」に直す。
+ * 間に文字だけの条件（y）が 1 つ以上あるときだけ直す（「0 ≤ x, y ≤ 1」は、0 ≤ x と y ≤ 1 の 2 つの条件のまま）
+ */
+export function expandListedRanges(cond: Token[]): Token[] {
+  const items = splitTop(cond, (t) => t === ',')
+  const isVar = (it: Token[]) => it.length === 1 && /^[A-Za-z]$/.test(it[0])
+  const out: Token[][] = []
+  for (let k = 0; k < items.length; k++) {
+    const first = items[k]
+    // 先頭: 「a ≤ x」（最後の不等号の後が文字 1 つ）
+    const relAt = first.findLastIndex((t) => RELATIONS.has(t))
+    let j = k + 1
+    while (j < items.length && isVar(items[j])) j++
+    const last = items[j]
+    if (relAt > 0 && relAt === first.length - 2 && /^[A-Za-z]$/.test(first[relAt + 1]) && j > k + 1 && last && last.length > 2 && /^[A-Za-z]$/.test(last[0]) && RELATIONS.has(last[1])) {
+      const lo = first.slice(0, relAt + 1)
+      const hi = last.slice(1)
+      for (const v of [first[relAt + 1], ...items.slice(k + 1, j).map((it) => it[0]), last[0]]) out.push([...lo, v, ...hi])
+      k = j
+      continue
+    }
+    out.push(first)
+  }
+  return out.reduce((a, b) => [...a, ',', ...b])
 }
 
 // ---- 積分を描く（被積分関数を、積分する範囲の上に描く）----
@@ -1069,7 +1101,7 @@ function integralRegion(sub: Token[], vars: string[]): IntegralRegion {
   const parts = splitTop(inner, (t) => t === '\\mid' || t === '|' || t === ':' || t === '\\vert' || t === '\\colon')
   if (parts.length < 2 || parts[0].length === 0 || parts[1].length === 0) throw new LatexError('積分する範囲の集合は {(x,y) | 条件} の形で書いてください')
   // 2 本目より後の | は、条件の中の絶対値。そのまま戻す
-  const cond = parts.slice(1).reduce((a, b) => [...a, '|', ...b])
+  const cond = expandListedRanges(parts.slice(1).reduce((a, b) => [...a, '|', ...b]))
   const comps = splitTop(stripParens(parts[0]), (t) => t === ',')
   if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) return { names: comps.map((c) => c[0]), cond }
   // 媒介変数は、条件に出てくる文字のうち、点の式にも出てくるもの（点の式に出てくる順）
@@ -1187,13 +1219,20 @@ function integralView(toks: Token[], i: number): IntegralView {
         note: '領域の上の、高さが被積分関数の立体（体積が積分の値。高さ 0 より下は負）',
       }
     }
+    if (names.length === 3 && !body.some((t) => names.includes(t))) {
+      // 被積分関数が定数なら、色で塗っても一色になって形が分からない。領域そのもの（境目の面）を描く
+      return {
+        latex: set(paren(names.join(',')), joinToks(cond)),
+        note: '被積分関数が定数なので、領域を描く（体積 × 値が積分の値）',
+      }
+    }
     if (names.length === 3) {
       // 値を色で塗る描き方（陰関数の F の値）は、名前を読み替えないので、変数を x, y, z に直す
       const to = new Map(names.map((n, k) => [n, 'xyz'[k]]))
       const re = (ts: Token[]) => joinToks(ts.map((t) => to.get(t) ?? t))
       return {
         latex: `\\begin{cases}${re(body)}&${re(cond)}\\end{cases}=0`,
-        note: '領域の中を、被積分関数の値の色で塗る（明るい色ほど値が大きい）',
+        note: '領域の中を、被積分関数の値の色で塗る（赤は正・青は負、|値| が大きいほど濃い）',
         field: true,
       }
     }
