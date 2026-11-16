@@ -892,7 +892,10 @@ fn determinant_line_and_columns() {
     let m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
     assert!(m.kind().contains("A の定義（列ベクトル）"), "{}", m.kind());
     let p = points("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧");
-    assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]) && p.iter().any(|v| *v == [0.0; 3]));
+    // 矢印の先（矢じりの頂点）と、軸の線分の始点（原点）
+    assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]));
+    let mut m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
+    assert!(m.take_outline().chunks_exact(3).any(|v| v == [0.0, 0.0, 0.0]));
     // ベクトルの定義は、そのベクトル
     let p = points("{vec_b} = (1, 2, 3)", "{vec_b} = (1, 2, 3)");
     assert!(p.iter().any(|v| *v == [1.0, 2.0, 3.0]));
@@ -914,4 +917,36 @@ fn matrix_as_coordinate_system() {
     }
     assert!(m.used_params().split(',').any(|n| n == "a"), "{}", m.used_params());
     assert!(m.used_defs().split(',').any(|n| n == "A"), "{}", m.used_defs());
+}
+
+// ---- M8: ベクトル場 ----
+
+#[test]
+fn vector_fields() {
+    let mut m = run("(-y, x, 0)", "", &[]).unwrap();
+    assert!(m.kind().starts_with("ベクトル場"), "{}", m.kind());
+    let shafts = m.take_outline();
+    // 9³ − 9（z 軸の上は大きさ 0）
+    assert_eq!(shafts.len() / 9, 9 * 9 * 9 - 9);
+    assert_eq!(m.value_range().len(), 2);
+    // 勾配・回転は、手で書いた場と同じ矢印
+    let arrows = |src: &str, defs: &str| {
+        let mut m = run(src, defs, &[]).unwrap();
+        (m.positions(), m.take_outline())
+    };
+    let near = |a: (Vec<f32>, Vec<f32>), b: (Vec<f32>, Vec<f32>), what: &str| {
+        assert_eq!((a.0.len(), a.1.len()), (b.0.len(), b.1.len()), "{what}");
+        let close = |x: &f32, y: &f32| (x.is_nan() && y.is_nan()) || (x - y).abs() < 1e-5;
+        assert!(a.0.iter().zip(&b.0).all(|(x, y)| close(x, y)) && a.1.iter().zip(&b.1).all(|(x, y)| close(x, y)), "{what}");
+    };
+    near(arrows("@grad(x^2 + y^2 - z)", ""), arrows("(2x, 2y, -1)", ""), "勾配");
+    near(arrows("@rot((-y, x, 0)) + (0 x, 0, 0)", ""), arrows("(0 x, 0, 2)", ""), "回転");
+    // 成分が 2 つなら、縦の成分は 0
+    near(arrows("(-y, x)", ""), arrows("(-y, x, 0)", ""), "2 成分");
+    // 関数の定義の行 F(x, y, z) = (…) も、ベクトル場として描く
+    let m = run("F(x, y, z) = (-y, x, 0)", "F(x, y, z) = (-y, x, 0)", &[]).unwrap();
+    assert!(m.kind().contains("F の定義（ベクトル場）"), "{}", m.kind());
+    // 媒介変数表示は今までどおり。座標と媒介変数が混ざった組は、今までと同じエラー
+    assert!(run("(cos(t), sin(t), t)", "", &[]).unwrap().kind().contains("媒介変数表示"));
+    assert!(!error_of("(x, t, 0)", "").is_empty());
 }

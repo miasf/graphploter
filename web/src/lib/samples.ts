@@ -213,6 +213,29 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     ],
   },
   {
+    title: 'ベクトル・行列',
+    samples: [
+      { label: '回転する場 (−y, x, 0)', items: [{ latex: '\\left(-y,x,0\\right)', options: { color: '#2d70b3' } }] },
+      {
+        label: '勾配の場 ∇(x² + y² − z) と等位面',
+        items: [
+          { latex: '\\nabla\\left(x^2+y^2-z\\right)', options: { color: '#c74440' } },
+          { latex: 'x^2+y^2-z=0', options: { color: '#2d70b3', opacity: 0.4 } },
+        ],
+      },
+      {
+        label: '行列のせん断で円を変形（a を再生）',
+        play: 'a',
+        items: [
+          { latex: 'a=1', param: 'a', options: { slider: { min: -2, max: 2, complex: false, stack: false } } },
+          { latex: 'A=\\begin{pmatrix}1 & a\\\\ 0 & 1\\end{pmatrix}', options: { color: '#c74440' } },
+          { latex: 'A\\left(\\cos t,\\sin t\\right)', options: { color: '#2d70b3' } },
+        ],
+      },
+      { label: '零空間 ker (1 1 1)（平面）', items: [{ latex: '\\ker\\begin{pmatrix}1 & 1 & 1\\end{pmatrix}', options: { color: '#6042a6' } }] },
+    ],
+  },
+  {
     title: '連立方程式・不等式',
     samples: [
       {

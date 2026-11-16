@@ -9,6 +9,7 @@ import init, {
   field_mode_plan,
   field_mode_reset,
   hidden_style,
+  field_style,
   complex_coords,
   coord_system,
   coord_grid,
@@ -321,6 +322,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         : new Float64Array(0)
     const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
       hidden_style(hiddenStyle)
+      field_style(req.arrows?.count ?? 0, req.arrows?.unit ?? false)
       complex_coords(req.complexCoords)
       coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
       // ほかの行の定義と、この式そのもの（定義の行なら、自分の定義が要る）

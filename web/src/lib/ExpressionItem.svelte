@@ -48,6 +48,10 @@
     /** この式だけの断面の値を決める（null なら全体の値に戻す） */
     onSlice: (name: string, value: number | null) => void
     onWalls: (on: boolean) => void
+    /** ベクトル場の矢印の数・長さをそろえるか */
+    onField?: (patch: { count?: number; unit?: boolean }) => void
+    /** 2D 表示か（矢印の数の既定が変わる） */
+    flatView?: boolean
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
     onEdges: (on: boolean) => void
@@ -131,6 +135,8 @@
     sliceMax,
     onSlice,
     onWalls,
+    onField,
+    flatView = false,
     onLayers,
     onEdges,
     onRender,
@@ -327,6 +333,8 @@
     !isComplexPlane && (/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off'),
   )
   /** 段差の壁を描けるか（陽関数をそのまま描くときだけ） */
+  /** ベクトル場の行か（計画 M8） */
+  const isField = $derived(/ベクトル場/.test(item.kind ?? ''))
   const canWall = $derived(isExplicit && /^[^陰]* = f\(/.test(item.kind ?? '') && !/塗り分け/.test(item.kind ?? ''))
   const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
     { mode: 'off', label: 'しない' },
@@ -684,6 +692,26 @@
               媒介変数を2つずつ動かした面を描いています（残りは固定）。1 等分なら、固定する値は範囲の両端だけ。
               増やすと、範囲の途中の値に固定した面（中を通る面）も描きます。
             </p>
+          {/if}
+          {#if isField && onField}
+            <!-- ベクトル場の矢印（計画 M8）。色は大きさ（色の対応表は「見せ方」と同じ） -->
+            <div class="sliders">
+              <span class="label">矢印の数</span>
+              <input
+                type="range"
+                min="4"
+                max="24"
+                step="1"
+                value={item.field?.count ?? (flatView ? 18 : 9)}
+                aria-label="各軸の矢印の数"
+                onchange={(e) => onField({ count: e.currentTarget.valueAsNumber })}
+              />
+              <span class="value">{item.field?.count ?? (flatView ? 18 : 9)}</span>
+            </div>
+            <label class="check">
+              <input type="checkbox" checked={item.field?.unit ?? false} onchange={(e) => onField({ unit: e.currentTarget.checked })} />
+              矢印の長さをそろえる（向きだけを見る。色は大きさ）
+            </label>
           {/if}
           {#if canWall}
             <label class="check">

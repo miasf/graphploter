@@ -310,6 +310,11 @@ pub enum Plot {
     /// 媒介変数が4つ以上の媒介変数表示。変数は `vars`（4つ以上）。
     /// 媒介変数を2つずつ動かした面（残りは固定）をたくさん描いて表す
     Sheets { sets: Vec<Vec<Program>>, vars: Vec<String> },
+    /// ベクトル場（計画 M8）。`progs` は 3 つの成分（変数は表示中の 3 つの座標。回転していれば、回した後の座標の式）。
+    /// `rot` は、場の向きに掛ける行列（表示中の座標どうしの回転）
+    Field { progs: Vec<Program>, rot: Option<[[f64; 3]; 3]> },
+    /// 原点からのベクトルの矢印（行列の列ベクトル・ベクトルの定義。計画 M7・M8）
+    Arrows { vectors: Vec<[f64; 3]> },
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
     /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
@@ -358,6 +363,8 @@ impl Plot {
             Plot::Volume { .. } => "媒介変数表示の立体".into(),
             Plot::Sheets { vars, .. } => format!("媒介変数表示の多変数の図形（{} 変数）", vars.len()),
             Plot::Param { .. } => "パラメータ".into(),
+            Plot::Field { .. } => "ベクトル場".into(),
+            Plot::Arrows { .. } => "ベクトル".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
             Plot::ComplexPlane { label, .. } => label.clone(),
             Plot::System { base, eqs, cuts, .. } => {
@@ -407,6 +414,8 @@ impl Plot {
             | Plot::Volume { sets, .. }
             | Plot::Sheets { sets, .. } => sets.iter().flatten().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
+            Plot::Field { progs, .. } => progs.iter().collect(),
+            Plot::Arrows { .. } => return Vec::new(),
             Plot::ComplexPlane { inner, .. } => return inner.used_params(),
             Plot::System { base, eqs, cuts, .. } => {
                 let mut out: Vec<String> = base.as_ref().map_or(Vec::new(), |b| b.used_params());
@@ -487,6 +496,14 @@ fn definition_source(source: &str, space: &Space) -> Option<Option<Vec<crate::pa
     }
     let (name, arity, tuple) = crate::expand::definition_line(&chain.exprs[0])?;
     let shown = space.shown();
+    // 値が組で、仮引数が全部座標の名前（F(x, y, z) = (…)）なら、ベクトル場（計画 M8）
+    if let (true, Expr::Apply { args, .. }) = (tuple, &chain.exprs[0]) {
+        let coords = args.iter().all(|a| matches!(a, Expr::Var(v) if coord_index(v).is_some_and(|k| k < space.dims)));
+        if coords && (2..=3).contains(&arity) {
+            crate::expand::mark_def_line(&name, Some("ベクトル場".into()));
+            return Some(Some(vec![crate::parser::Chain { exprs: vec![chain.exprs[0].clone()], rels: vec![], pos: vec![0] }]));
+        }
+    }
     let drawn = match (arity, tuple) {
         (1, true) => Some(format!("曲線 {name}(t)")),
         (2, true) => Some(format!("曲面 {name}(u, v)")),
@@ -645,6 +662,10 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         _ => {
             let Some(m) = numeric(expr)? else { return Ok(None) };
             // 行列: 正方の 2×2・3×3 の列ベクトル。ベクトル: 2・3 成分
+            // 名前の無い数の組 (1, 2, 3) は、今までどおり点（媒介変数表示）
+            if m.cols == 1 && def.is_none() {
+                return Ok(None);
+            }
             let vectors: Vec<Vec<f64>> = if m.cols == 1 && (2..=3).contains(&m.rows) {
                 vec![m.a.clone()]
             } else if m.rows == m.cols && (2..=3).contains(&m.rows) {
@@ -663,6 +684,11 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
             match def {
                 Some(name) => crate::expand::mark_def_line(&name, Some(what.into())),
                 None => crate::expand::set_kind(format!("行列の{what}")),
+            }
+            // ふつうの 3 次元・回転なしなら矢印。それ以外（4 次元以上・回転あり）は、射影できる線分のまま
+            if n == 3 && space.axes == [0, 1, 2] && space.rotation_matrix().is_none() && !space.complex_coords {
+                let vectors = vectors.iter().map(|v| [v[0], v[1], v.get(2).copied().unwrap_or(0.0)]).collect();
+                return Ok(Some(Plot::Arrows { vectors }));
             }
             segments(&vectors, params, space).map(Some)
         }
@@ -914,6 +940,9 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             let e = chain.exprs.into_iter().next().unwrap_or(Expr::Num(0.0));
             check_dims(&e, space)?;
             if let Expr::Tuple(items) = e {
+                if is_field(&items, space) {
+                    return field(items, params, space);
+                }
                 return parametric(items, params, space);
             }
             if let Expr::Matrix { rows, cols, .. } = &e {
@@ -1678,6 +1707,51 @@ fn param(name: &str, rhs: &Expr, params: &Params) -> Result<Plot, String> {
         return Err(format!("{name} の値が計算できません"));
     }
     Ok(Plot::Param { name: name.to_string(), value: out[0], uses: prog.used_params().to_vec() })
+}
+
+/// 組が、ベクトル場か（成分が座標を使い、媒介変数 t, u, v, t₁, … を使わない）。座標と媒介変数が混ざった組は、
+/// 今までどおり媒介変数表示の道でエラーにする
+fn is_field(items: &[Expr], space: &Space) -> bool {
+    let mut vars = Vec::new();
+    items.iter().for_each(|e| e.collect_vars(&mut vars));
+    let coord = vars.iter().any(|v| coord_index(v).is_some_and(|k| k < space.dims));
+    coord && !vars.iter().any(|v| is_param_var(v)) && items.len() <= 3
+}
+
+/// ベクトル場（[`Plot::Field`]）。成分は x, y, z の順（2 つなら、縦の成分は 0）。表示していない座標は断面の値
+fn field(mut items: Vec<Expr>, params: &Params, space: &Space) -> Result<Plot, String> {
+    if space.axes != [0, 1, 2] {
+        return Err("ベクトル場は、x, y, z を表示しているときに描けます（表示する座標を x, y, z にしてください）".into());
+    }
+    if space.complex_coords {
+        return Err("座標を複素数にしている間は、ベクトル場は描けません".into());
+    }
+    if items.iter().any(|e| first_list(e).is_some()) {
+        return Err("ベクトル場の成分には、リストは使えません".into());
+    }
+    let ranged = space.ranged();
+    if ranged.iter().any(|(n, _, _)| items.iter().any(|e| e.uses_var(n))) {
+        return Err("ベクトル場では、範囲で重ねられません（断面にしてください）".into());
+    }
+    while items.len() < 3 {
+        items.push(Expr::Num(0.0));
+    }
+    let shown = space.shown();
+    let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+    let consts = space.with_hidden(params);
+    // 回転: 表示中の座標どうしだけなら、点と向きを回す
+    let mut rot = None;
+    if let Some(m) = space.rotation_matrix() {
+        let n = rot_dims(space.dims);
+        let only_shown = (0..n).all(|i| (0..n).all(|j| i == j || (i < 3 && j < 3) || m[i][j].abs() < 1e-12));
+        if !only_shown {
+            return Err("この回転ではベクトル場を描けません（表示中の座標どうしの回転だけにしてください）".into());
+        }
+        items = items.iter().map(|e| rotate_coords(e, &m, space)).collect();
+        rot = Some([0, 1, 2].map(|i| [0, 1, 2].map(|j| m[i][j])));
+    }
+    let progs = items.iter().map(|e| Program::compile_with(e, &shown_refs, &consts)).collect::<Result<Vec<_>, _>>()?;
+    Ok(Plot::Field { progs, rot })
 }
 
 /// 組 (a, b, c, …) を媒介変数表示としてコンパイルする。

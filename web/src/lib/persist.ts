@@ -23,6 +23,8 @@ export interface SavedItem {
   /** この式だけの断面の値（古い保存データには無い） */
   slice?: Record<string, number>
   walls?: boolean
+  /** ベクトル場の矢印の設定（古い保存データには無い） */
+  field?: { count?: number; unit?: boolean }
   /** 回転のグループの番号（無ければこの式だけの回転。ただし rotOwn の無い古い保存データでは全体の回転） */
   rotGroup?: number
   /** この式だけの回転角と中心（古い保存データには無い） */

@@ -17,6 +17,7 @@ pub mod diff;
 pub mod equation;
 pub mod eval;
 pub mod expand;
+pub mod field;
 pub mod integrate;
 pub mod logic;
 pub mod functions;
@@ -551,6 +552,7 @@ pub fn plot(
     let start = timing::now_ms();
     timing::reset();
     let hidden = HIDDEN_STYLE.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    let _field_style = FieldStyleReset;
     let complex_coords = COMPLEX_COORDS.with(|c| c.replace(false));
     let (coord_src, coord_names) = COORD_MAP.with(|c| std::mem::take(&mut *c.borrow_mut()));
     let err = |m: &str| JsError::new(m);
@@ -616,6 +618,9 @@ pub fn plot(
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
+    if !coord_src.trim().is_empty() && matches!(plot, equation::Plot::Field { .. }) {
+        return Err(err("座標系を選んだ式では、ベクトル場は描けません（成分をどの向きで読むかが決まらないため）"));
+    }
     let coord = if coord_src.trim().is_empty() {
         None
     } else {
@@ -784,6 +789,47 @@ thread_local! {
 #[wasm_bindgen]
 pub fn coord_system(map: &str, names: &str) {
     COORD_MAP.with(|c| *c.borrow_mut() = (map.to_string(), names.to_string()));
+}
+
+// ---- ベクトル場の矢印（計画 M8） ----
+
+thread_local! {
+    /// 次の [`plot`] だけに効く、ベクトル場の矢印の数と、長さをそろえるか（[`field_style`]）
+    static FIELD_STYLE: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
+}
+
+/// 次の [`plot`] で、ベクトル場の矢印をどう描くかを決める（その 1 回だけ）。`count` は各軸の矢印の数（0 なら既定: 3D で 9、2D で 18）、
+/// `unit` なら長さをそろえる
+#[wasm_bindgen]
+pub fn field_style(count: u32, unit: bool) {
+    FIELD_STYLE.with(|f| f.set((count, unit)));
+}
+
+/// [`plot`] の終わりに、矢印の設定を既定に戻す（その 1 回だけ効くように）
+struct FieldStyleReset;
+impl Drop for FieldStyleReset {
+    fn drop(&mut self) {
+        FIELD_STYLE.with(|f| f.set((0, false)));
+    }
+}
+
+/// 矢印を作り、`Built` にする（矢じりはメッシュ、軸は境目の線と同じ道で返す）
+fn arrows_built(a: field::Arrows, kind: String) -> Built {
+    Built { inner: a.mesh, outline: (a.shafts, Vec::new()), value_range: a.range, kind, ..Default::default() }
+}
+
+fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
+    match plot {
+        equation::Plot::Field { progs, rot } => {
+            let (count, unit) = FIELD_STYLE.with(|f| f.get());
+            let count = if count == 0 { if ctx.flat { 18 } else { 9 } } else { count.clamp(4, 24) as usize };
+            let a = field::field(progs, *rot, ctx.dom, field::Style { count, unit, flat: ctx.flat });
+            let n = a.count;
+            Some(arrows_built(a, format!("ベクトル場 · {n} 本の矢印")))
+        }
+        equation::Plot::Arrows { vectors } => Some(arrows_built(field::vectors(vectors, ctx.flat), "ベクトル".into())),
+        _ => None,
+    }
 }
 
 // ---- 表示していない座標（w 以降）の見せ方 ----
@@ -1306,6 +1352,9 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             .collect();
         return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
     }
+    if let Some(b) = field_built(plot, ctx) {
+        return Ok(b);
+    }
     if ctx.flat {
         return build_2d(plot, ctx);
     }
@@ -1434,7 +1483,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } => {}
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
         P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
@@ -1641,7 +1690,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
         P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };

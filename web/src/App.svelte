@@ -185,6 +185,7 @@
         complexCoords: it.complexCoords || undefined,
         slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
         walls: it.walls,
+        field: it.field && (it.field.count !== undefined || it.field.unit) ? it.field : undefined,
         layers: it.layers,
         edges: it.edges || undefined,
         render: it.render && it.render !== 'auto' ? it.render : undefined,
@@ -806,6 +807,7 @@
       item.complexCoords ?? false,
       coord,
       currentDefinitions(item),
+      { count: item.field?.count ?? 0, unit: item.field?.unit ?? false },
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1328,6 +1330,12 @@
 
   function setEdges(item: PlotItem, on: boolean) {
     item.edges = on
+    schedule(item, 0)
+  }
+
+  /** ベクトル場の矢印の数・長さをそろえるか（計画 M8） */
+  function setField(item: PlotItem, patch: { count?: number; unit?: boolean }) {
+    item.field = { ...item.field, ...patch }
     schedule(item, 0)
   }
 
@@ -2280,6 +2288,8 @@
             sliceMax={space.sliceMax}
             onSlice={(name, v) => setItemSlice(item, name, v)}
             onWalls={(on) => setWalls(item, on)}
+            onField={(patch) => setField(item, patch)}
+            flatView={flat}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}
             onRender={(mode) => setRender(item, mode)}
