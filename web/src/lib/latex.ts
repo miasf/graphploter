@@ -113,6 +113,7 @@ const SYMBOLS: Record<string, string> = {
   emptyset: '∅',
   varnothing: '∅',
   top: '⊤',
+  intercal: '⊺',
   bot: '⊥',
   complement: '∁',
   mid: '∣',
@@ -120,6 +121,13 @@ const SYMBOLS: Record<string, string> = {
   partial: '∂',
   infty: '∞',
   differentialD: 'd',
+  // 共役転置 A^{\dagger}（転置 ^{\top}・^{\intercal} は ^ の所で T にする）
+  dagger: '†',
+  dag: '†',
+  // 行列の演算子（括弧なしで直後の 1 つに掛かる。計算エンジンの解析器が決める）
+  det: ' @det ',
+  ker: ' @ker ',
+  dim: ' @dim ',
   prime: "'",
   doubleprime: "''",
   limits: '',
@@ -268,6 +276,11 @@ class Converter {
         this.out += 'ᶜ'
         return
       }
+      // 転置 A^{\top}・A^{\intercal} は A^T と同じ（底が行列かどうかは、計算エンジンの展開の段が決める）
+      if (a.trim() === '⊤' || a.trim() === '⊺') {
+        this.out += '^(T)'
+        return
+      }
       // f^{\prime} は f'（導関数）
       this.out += /^'+$/.test(a.replace(/\s+/g, '')) ? a.replace(/\s+/g, '') : '^(' + a + ')'
       return
@@ -275,9 +288,11 @@ class Converter {
     if (t === '_') {
       // 添字: w_{2} → w_2、t_1 → t_1（文字の後ろに数字だけを付けられる）
       const sub = this.arg()
-      if (!/^\d+$/.test(sub)) throw new LatexError('添字には数字だけを書いてください（例: w₂）')
-      if (!/[a-zA-Z]$/.test(this.out)) throw new LatexError('添字は文字の後ろに付けてください（例: w₂）')
-      this.out += `_${sub}`
+      // \vec{v}_{2}: 名前 {vec_v} の後の空白を詰める
+      if (/\}\s+$/.test(this.out)) this.out = this.out.trimEnd()
+      if (!/[a-zA-Z}]$/.test(this.out)) throw new LatexError('添字は文字の後ろに付けてください（例: w₂）')
+      // 数字でない添字（行列の成分 A_{1,2}・数列の項 a_{n+1}）は _( ) の形
+      this.out += /^\d+$/.test(sub) ? `_${sub}` : `_(${sub})`
       return
     }
     // [ ] はリスト（媒介変数表示の中で、要素ごとに図形をまとめて描く）
@@ -342,6 +357,17 @@ class Converter {
       }
       case 'left': {
         const d = this.toks[this.i++] ?? ''
+        // 内積 ⟨a, b⟩ と、ノルム ‖a‖
+        if (d === '\\langle' || d === '<' || d === '\\Vert' || d === '\\|' || d === '\\lVert') {
+          const saved = this.out
+          this.out = ''
+          this.seq('\\right')
+          if (this.toks[this.i] !== '\\right') throw new LatexError('括弧が閉じていません')
+          this.i += 2
+          const inner = this.out.trim()
+          this.out = `${saved} @${d === '\\langle' || d === '<' ? 'dot' : 'norm'}(${inner}) `
+          return
+        }
         if (!(d in OPENERS)) throw new LatexError(`括弧 ${d} は使えません`)
         // 集合の括弧 \left\{ 点 \mid 条件 \right\}
         if (d === '\\{' && this.setBuilder('\\right')) return
@@ -385,6 +411,11 @@ class Converter {
         // 中身は名前の文字だけを取り出す。数式キーボードから入れると
         // \operatorname{\mathrm{Im}} のように命令が入れ子になることがあるため、命令名と {} を取り除く
         const s = this.rawGroup(true)
+        // 行列の演算子の名前
+        if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
+          this.out += ` @${s} `
+          return
+        }
         // ベクトル場の演算子の名前
         if (name === 'operatorname' && ['grad', 'div', 'rot', 'curl'].includes(s)) {
           this.out += ` @${s === 'curl' ? 'rot' : s} `
@@ -542,7 +573,36 @@ class Converter {
           this.out += ` @cases(${parts.join('; ')}) `
           return
         }
+        if (/^(p|b|B|v|V|small)?matrix\*?$/.test(env)) {
+          // 行列: 空欄は 0 として読む（大きさを変えている途中でも、エラーにしない）
+          if (rows.length === 0) throw new LatexError('行列の成分を書いてください')
+          const cols = Math.max(...rows.map((r) => r.length))
+          const body = rows.map((r) => Array.from({ length: cols }, (_, k) => (r[k] ?? '') || '0').join(',')).join(';')
+          this.out += env.startsWith('v') ? ` @det(⟦${body}⟧) ` : ` ⟦${body}⟧ `
+          return
+        }
         throw new LatexError(`${env} はまだ使えません`)
+      }
+      case 'vec':
+      case 'overrightarrow': {
+        // \vec{v} は、v とは別の名前 {vec_v}（ベクトルの名前）
+        const v = this.rawGroup(true)
+        if (!/^[A-Za-z]\w*$/.test(v)) throw new LatexError('\\vec{ } の中には、名前を 1 つ書いてください')
+        this.out += ` {vec_${v}} `
+        return
+      }
+      case 'lVert':
+      case 'Vert':
+      case '|': {
+        // \lVert a \rVert・\| a \|（\left の無いノルム）
+        const saved = this.out
+        this.out = ''
+        while (this.i < this.toks.length && !['\\rVert', '\\Vert', '\\|'].includes(this.toks[this.i])) this.token(this.toks[this.i++])
+        if (this.i >= this.toks.length) throw new LatexError('ノルムの ‖ が閉じていません')
+        this.i++
+        const inner = this.out.trim()
+        this.out = `${saved} @norm(${inner}) `
+        return
       }
       case 'placeholder':
         this.rawGroup()
@@ -560,6 +620,7 @@ class Converter {
    * 入れ子の \\begin … \\end の中の & と \\\\ は区切りにしない
    */
   private environment(env: string): string[][] {
+    const keepEmpty = /matrix\*?$/.test(env)
     const rows: Token[][][] = [[[]]]
     let depth = 0
     while (this.i < this.toks.length) {
@@ -568,7 +629,7 @@ class Converter {
         this.rawGroup()
         const out = rows
           .map((cells) => cells.map((c) => (c.length ? new Converter(c).run() : '')))
-          .filter((cells) => cells.some((c) => c !== ''))
+          .filter((cells) => keepEmpty || cells.some((c) => c !== ''))
         return out
       }
       if (t === '\\begin') depth++

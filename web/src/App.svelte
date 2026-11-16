@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { blankMatrix, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
@@ -950,6 +951,23 @@
 
   function addItem() {
     pushItem(newItem(''))
+  }
+
+  /** 「＋ 行列」のマス目を開いているか、指しているマス */
+  let matrixPicker = $state(false)
+  let matrixHover = $state<[number, number] | null>(null)
+
+  /** 行列の定義の行 `A = (…)` を足す（名前は、使っていない大文字の最初のもの）。計画 M6 */
+  async function addMatrix(rows: number, cols: number) {
+    matrixPicker = false
+    matrixHover = null
+    const used = new Set(items.map((it) => /^\s*([A-Z])\s*=/.exec(it.latex)?.[1]).filter(Boolean))
+    const name = 'ABCDEFGHIJKLMNOPQRSUVWXYZ'.split('').find((c) => !used.has(c)) ?? 'A'
+    const item = newItem(`${name}=${blankMatrix(rows, cols)}`, { autofocus: true })
+    pushItem(item)
+    await tick()
+    const added = items.find((it) => it.id === item.id)
+    if (added) added.autofocus = false
   }
 
   /** エンター: その式のすぐ下に空の式を足して、そこに入力を始める */
@@ -2277,6 +2295,24 @@
       <div class="add-row">
         <button class="add" onclick={addItem}>＋ 式を追加</button>
         <button class="add" onclick={() => addFolder()}>＋ フォルダ</button>
+        <button class="add" aria-expanded={matrixPicker} onclick={() => (matrixPicker = !matrixPicker)}>＋ 行列</button>
+        {#if matrixPicker}
+          <!-- 行列の大きさを選ぶマス目（押したマスの大きさの行列の定義の行ができる） -->
+          <div class="matrix-grid" role="group" aria-label="行列の大きさ" onpointerleave={() => (matrixHover = null)}>
+            {#each Array(MATRIX_MAX) as _, r}
+              {#each Array(MATRIX_MAX) as _, c}
+                <button
+                  class="cell"
+                  class:on={matrixHover ? r <= matrixHover[0] && c <= matrixHover[1] : false}
+                  aria-label="{r + 1} × {c + 1}"
+                  onpointerenter={() => (matrixHover = [r, c])}
+                  onclick={() => addMatrix(r + 1, c + 1)}
+                ></button>
+              {/each}
+            {/each}
+            <span class="label">{matrixHover ? `${matrixHover[0] + 1} × ${matrixHover[1] + 1}` : '大きさを選ぶ'}</span>
+          </div>
+        {/if}
       </div>
       <details class="samples" open>
         <summary>サンプル（タップで追加）</summary>
@@ -2853,11 +2889,13 @@
     padding: 0;
   }
   .add-row {
+    position: relative;
+    flex-wrap: wrap;
     display: flex;
     gap: 8px;
     margin: 8px 16px;
   }
-  .add-row .add:last-child {
+  .add-row .add:not(:first-child) {
     flex: 0 0 auto;
     padding: 8px 14px;
   }
@@ -2910,6 +2948,33 @@
   }
   .folder-count.has-error {
     color: var(--error);
+  }
+  .matrix-grid {
+    flex-basis: 100%;
+    display: grid;
+    grid-template-columns: repeat(6, 28px);
+    gap: 3px;
+    justify-content: end;
+    padding: 4px 0;
+  }
+  .matrix-grid .cell {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    background: var(--bg);
+    cursor: pointer;
+  }
+  .matrix-grid .cell.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .matrix-grid .label {
+    grid-column: 1 / -1;
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
   }
   .add {
     display: block;

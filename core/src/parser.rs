@@ -897,6 +897,10 @@ impl Parser<'_> {
                 Ok(Expr::Binder { op: name, var, args, body: Box::new(body) })
             }
             Some(OpKind::Prefix) => Ok(Expr::Op { op: name, args: vec![self.term()?] }),
+            // 行列の演算子は、括弧が無ければ直後の 1 つに掛かる（det A・dim ker A。sin x と同じ読み方）
+            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank") && *self.peek() != Tok::LParen => {
+                Ok(Expr::Op { op: name, args: vec![self.power()?] })
+            }
             Some(OpKind::Func) => {
                 self.expect(Tok::LParen, &format!("@{name} の後の '('"))?;
                 let args = self.args_until(Tok::RParen, "閉じ括弧 ')'")?;
