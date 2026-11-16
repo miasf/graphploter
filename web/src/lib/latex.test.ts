@@ -68,6 +68,11 @@ const cases: [string, string][] = [
   ['z=\\boxed{x}+\\underbrace{y}_{a}+\\overbrace{x}^{b}', 'z=(x)+(y)+(x)'],
   ['z=x\\star y\\bullet x\\centerdot y', 'z=x*y*x*y'],
   ['z=\\Re x+\\Im y', 'z= Re x+ Im y'],
+  // ∃・∀・添字つきの max（M12）
+  ['\\exists a\\in\\left[0,1\\right],x^2+y^2+\\left(z-a\\right)^2=1', '@exists(a,0,1) x^(2)+y^(2)+(z-a)^(2)=1'],
+  ['\\forall a\\in\\left[-1,1\\right],z\\ge ax', '@forall(a,-1,1) z>=ax'],
+  ['z=\\max_{t\\in\\left[0,1\\right]}\\sin\\left(xt\\right)y', 'z= @max(t,0,1) sin (xt)y'],
+  ['z=\\inf_{t\\in\\left[0,1\\right]}tx', 'z= @min(t,0,1) tx'],
   // 場合分け（M2）
   ['f\\left(x\\right)=\\begin{cases}x^2 & x<0\\\\ x & \\text{otherwise}\\end{cases}', 'f(x)= @cases(x^(2), x<0; x)'],
   ['\\begin{cases}1 & \\text{if } 0\\le x<1\\\\ 0 & x\\ge1\\\\ -1\\end{cases}', '@cases(1, 0<=x<1; 0, x>=1; -1)'],

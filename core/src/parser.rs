@@ -334,7 +334,10 @@ pub fn binds(op: &str) -> bool {
 pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
-        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
+        // max・min・sup・inf: 添字つきの最大・最小 `@max(t, a, b) 項`（等分点での近似。計画 M12）
+        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" | "max" | "min" | "sup" | "inf" => OpKind::Binder,
+        // ∃・∀（行の先頭だけ。equation.rs が行ごと読む。計画 M12）
+        "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
         "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" => OpKind::Func,
@@ -925,6 +928,9 @@ impl Parser<'_> {
             let (vars, cond) = self.index_set(&name)?;
             let body = self.term()?;
             return Ok(Expr::Op { op: name, args: vec![vars, Expr::Cond(Box::new(cond)), body] });
+        }
+        if matches!(name.as_str(), "exists" | "forall") {
+            return err(format!("@{name}(a, 0, 1) は、行の先頭に書いてください"), pos);
         }
         if matches!(name.as_str(), "bigcup" | "bigcap" | "bigvee" | "bigwedge") {
             return err(format!("@{name} は条件・集合の中で使ってください"), pos);

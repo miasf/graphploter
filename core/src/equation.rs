@@ -574,6 +574,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
     }
+    // ∃・∀（計画 M12）
+    if let Some(p) = quantified(source, params, space)? {
+        return Ok(p);
+    }
     // 直交 u ⟂ v（u · v = 0）・平行 u ∥ v（u × v = 0）。計画 M13
     if let Some(p) = perp_line(source, params, space)? {
         return Ok(p);
@@ -1128,6 +1132,115 @@ pub fn rename_kind(kind: &str, space: &Space) -> String {
     }
     flush(&mut word, &mut out);
     out
+}
+
+/// `@exists(a, lo, hi) 中身`・`@forall(a, lo, hi) 中身` の行（計画 M12）。そうでなければ None
+/// - ∃ で、中身が等式 1 本（と a を含まない不等式）: a を範囲で重ねる（今の「範囲で重ねる」と同じ）
+/// - ∃ で、中身が「座標 = a の式」で表示中の座標が全部決まる: a を媒介変数にした曲線
+/// - 中身が不等式だけ: ∃ は $\min_k G(\mathbf p, a_k) \le 0$、∀ は $\max_k G(\mathbf p, a_k) \le 0$（範囲を 32 等分。近似）
+fn quantified(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    let src = source.trim_start();
+    let (exists, rest) = if let Some(r) = src.strip_prefix("@exists") {
+        (true, r)
+    } else if let Some(r) = src.strip_prefix("@forall") {
+        (false, r)
+    } else {
+        return Ok(None);
+    };
+    let sym = if exists { "∃" } else { "∀" };
+    let rest = rest.trim_start();
+    // 括弧の中 (a, lo, hi)
+    let Some(inner) = rest.strip_prefix('(') else { return Err(format!("{sym} の後に (a, 0, 1) の形で、変数と範囲を書いてください")) };
+    let mut depth = 1;
+    let close = inner.char_indices().find(|&(_, c)| {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ => {}
+        }
+        depth == 0
+    });
+    let Some((close, _)) = close else { return Err(format!("{sym} の括弧が閉じていません")) };
+    let head = parse_at(&format!("({})", &inner[..close]), 0, params)?;
+    let Expr::Tuple(h) = head else { return Err(format!("{sym} の範囲を書いてください（{sym}a ∈ [0, 1], …）")) };
+    let [Expr::Var(var), lo, hi] = h.as_slice() else { return Err(format!("{sym} の範囲を書いてください（{sym}a ∈ [0, 1], …）")) };
+    let value = |e: &Expr| -> Result<f64, String> {
+        crate::expand::numbers(std::slice::from_ref(e), params)
+            .map(|v| v[0])
+            .ok_or_else(|| format!("{sym} の範囲は、数とパラメータで書いてください"))
+    };
+    let (lo, hi) = (value(lo)?, value(hi)?);
+    let body = inner[close + 1..].trim_start().trim_start_matches(',').trim();
+    if body.is_empty() {
+        return Err(format!("{sym} の後に、条件を書いてください"));
+    }
+    if coord_index(var).is_some() {
+        return Err(format!("{sym} の変数に座標 {var} は使えません"));
+    }
+    let mut ps = params.clone();
+    ps.remove(var);
+    let chains = parse_expanded(body, &ps)?;
+    let rels: Vec<(Expr, Rel, Expr)> = chains.iter().flat_map(|c| (0..c.rels.len()).map(move |k| (c.exprs[k].clone(), c.rels[k], c.exprs[k + 1].clone()))).collect();
+    if rels.len() != chains.iter().map(|c| c.rels.len()).sum::<usize>() || rels.is_empty() {
+        return Err(format!("{sym} の中身には、等式・不等式を書いてください"));
+    }
+    let eqs: Vec<&(Expr, Rel, Expr)> = rels.iter().filter(|r| r.1 == Rel::Eq).collect();
+    let shown = space.shown();
+    if exists && !eqs.is_empty() {
+        // 座標 = a の式 で、表示中の座標が全部決まる → 媒介変数の曲線
+        let mut items: Vec<Option<Expr>> = vec![None; space.dims];
+        let all_coord = eqs.len() == rels.len()
+            && eqs.iter().all(|(l, _, r)| match l {
+                Expr::Var(c) if coord_index(c).is_some_and(|k| k < space.dims) && !r.uses_var(c) && items[coord_index(c).unwrap_or(0)].is_none() => {
+                    items[coord_index(c).unwrap_or(0)] = Some(r.clone());
+                    true
+                }
+                _ => false,
+            });
+        if all_coord && shown.iter().all(|c| items[coord_index(c).unwrap_or(0)].is_some()) {
+            crate::expand::set_param_range("t", lo, hi);
+            let items: Vec<Expr> = items
+                .into_iter()
+                .enumerate()
+                .map(|(k, e)| e.unwrap_or(Expr::Num(space.slice.get(k).copied().unwrap_or(0.0))).substitute(&|v| (v == var).then(|| Expr::Var("t".into()))))
+                .collect();
+            return parametric(items, &ps, space).map(Some);
+        }
+        // 等式 1 本: a を範囲で重ねる
+        if eqs.len() == 1 && rels.iter().filter(|r| r.1 != Rel::Eq).all(|(l, _, r)| !l.uses_var(var) && !r.uses_var(var)) {
+            let mut sp = space.clone();
+            sp.param_ranges.push((var.clone(), lo, hi));
+            crate::expand::set_param_range(var, lo, hi);
+            let cs: Vec<crate::parser::Chain> = chains.into_iter().map(|c| crate::parser::Chain { exprs: c.exprs.iter().map(|e| rename_coords(e, space)).collect(), ..c }).collect();
+            return compile_chains(cs, &ps, &sp).map(Some);
+        }
+        return Err("∃ の中身は、等式 1 本（と a を含まない不等式）か、座標 = a の式・不等式だけにしてください".into());
+    }
+    if !eqs.is_empty() {
+        return Err("∀ の中身は、不等式だけにしてください".into());
+    }
+    // 不等式だけ: G_j = 左 − 右 ≤ 0 の「かつ」を、a の 33 点で ∃ なら min、∀ なら max
+    const N: usize = 32;
+    let gs: Vec<Expr> = rels
+        .iter()
+        .map(|(l, r, rr)| match r {
+            Rel::Lt | Rel::Le => crate::diff::sub(l.clone(), rr.clone()),
+            _ => crate::diff::sub(rr.clone(), l.clone()),
+        })
+        .collect();
+    let strict = rels.iter().all(|r| matches!(r.1, Rel::Lt | Rel::Gt));
+    let fold = |es: Vec<Expr>, f: crate::functions::Func| es.into_iter().reduce(|a, b| Expr::Call(f, vec![a, b])).unwrap_or(Expr::Num(0.0));
+    let samples: Vec<Expr> = (0..=N)
+        .map(|k| {
+            let a = lo + (hi - lo) * k as f64 / N as f64;
+            let put = |e: &Expr| e.substitute(&|v| (v == var).then_some(Expr::Num(a)));
+            fold(gs.iter().map(put).collect(), crate::functions::Func::Max)
+        })
+        .collect();
+    let g = fold(samples, if exists { crate::functions::Func::Min } else { crate::functions::Func::Max });
+    crate::expand::add_note(&format!("{sym} は {var} の範囲を {N} 等分した点での近似"));
+    let chain = crate::parser::Chain { exprs: vec![g, Expr::Num(0.0)], rels: vec![if strict { Rel::Lt } else { Rel::Le }], pos: vec![0, 0] };
+    compile_chains(vec![chain], &ps, space).map(Some)
 }
 
 /// `u ⟂ v`・`u ∥ v` の行を、`u · v = 0`・`u × v = 0`（3 成分なら成分ごとの連立）にして描く。そうでなければ None

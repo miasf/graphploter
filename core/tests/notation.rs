@@ -1128,3 +1128,51 @@ fn names_and_small_symbols() {
     // 共役 z^∗
     assert!(max_diff("z = Re((x + i y)^∗ (x + i y))", "z = x^2 + y^2", "") < 1e-9);
 }
+
+// ---- M12: ∃・∀・添字つきの max・min ----
+
+#[test]
+fn quantifiers() {
+    // ∃a ∈ [0, 1]: 範囲で重ねるのと同じメッシュ
+    let stacked = {
+        definitions("");
+        plot(
+            "x^2+y^2+(z-a)^2 = 1", &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3],
+            &[f64::NAN; 6], "a", &[0.0, 1.0], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+        )
+        .unwrap_or_else(|_| panic!("stack"))
+    };
+    let m = run("@exists(a,0,1) x^2+y^2+(z-a)^2 = 1", "", &[]).unwrap();
+    assert_eq!((m.positions(), m.indices()), (stacked.positions(), stacked.indices()));
+    // ∃a ∈ [0, 2π]: x = cos a, y = sin a, z = 0 は円
+    let (pa, _) = mesh("@exists(a,0,2pi) x = cos(a), y = sin(a), z = 0", "", &[]);
+    let circle = {
+        definitions("");
+        plot(
+            "(cos(t), sin(t), 0)", &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, std::f64::consts::TAU], "", &[], "", 3, &[0, 1, 2],
+            &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+        )
+        .unwrap_or_else(|_| panic!("circle"))
+    };
+    assert_eq!(pa, circle.positions());
+    // ∀a ∈ [−1, 1]: z ≥ a x は z ≥ |x|（近似）。頂点が z ≥ |x| − 少し の上
+    let p = points("@forall(a,-1,1) z ≥ a x", "");
+    assert!(p.len() > 100 && p.iter().all(|v| v[2] >= v[0].abs() - 0.1));
+    let m = run("@forall(a,-1,1) z ≥ a x", "", &[]).unwrap();
+    assert!(m.kind().contains("近似"), "{}", m.kind());
+    // ⋃（M11 で入れた書き方）: 3 つの球
+    let p = points("@bigcup(k; 1 ≤ k ≤ 3) ⦃(x, y, z) ∣ (x - k + 2)^2 + y^2 + z^2 ≤ 0.2⦄", "");
+    assert!(p.iter().any(|v| v[0] > 0.7) && p.iter().any(|v| v[0] < -0.7) && p.iter().any(|v| v[0].abs() < 0.3));
+    assert!(error_of("@forall(a,0,1) x = a", "").contains("不等式だけ"));
+}
+
+#[test]
+fn indexed_max() {
+    // max_{t ∈ [0, 1]} t x = max(0, x)（端の点も等分点に入る）
+    assert!(max_diff("z = @max(t, 0, 1) (t x)", "z = max(0, x)", "") < 1e-12);
+    assert!(max_diff("z = @min(t, 0, 1) (t x)", "z = min(0, x)", "") < 1e-12);
+    let m = run("z = @max(t, 0, 1) sin(x t) y", "", &[]).unwrap();
+    assert!(m.kind().contains("近似"), "{}", m.kind());
+    // ふつうの max(a, b) は今までどおり
+    assert!(max_diff("z = max(x, y)", "z = (x + y + abs(x - y)) / 2", "") < 1e-9);
+}

@@ -358,6 +358,37 @@ class Converter {
 
     // ---- コマンド ----
     const name = t.slice(1)
+    // 添字つきの最大・最小 \max_{t\in[a,b]} 項 → @max(t,a,b) 項（等分点での近似。計画 M12）
+    if (['max', 'min', 'sup', 'inf'].includes(name) && this.peek() === '_') {
+      this.i++
+      const sub = this.arg().replace(/\s+/g, '')
+      const m = sub.match(/^([A-Za-z]\w*|\{\w+\})∈[[(](.+),(.+)[\])]$/)
+      if (!m) throw new LatexError(`\\${name} の下には、t ∈ [0, 1] の形で変数と範囲を書いてください`)
+      const op = name === 'sup' ? 'max' : name === 'inf' ? 'min' : name
+      this.out += ` @${op}(${m[1].replace(/[{}]/g, '')},${m[2]},${m[3]}) `
+      return
+    }
+    if (name === 'exists' || name === 'forall') {
+      // ∃a∈[0,1], 中身 → @exists(a,0,1) 中身（行の先頭だけ）
+      const head: Token[] = []
+      let depth = 0
+      while (this.i < this.toks.length) {
+        const u = this.toks[this.i]
+        if (depth === 0 && u === ',') {
+          this.i++
+          break
+        }
+        if (u === '{' || u === '\\left') depth++
+        if (u === '}' || u === '\\right') depth--
+        head.push(u)
+        this.i++
+      }
+      const h = new Converter(head).run().replace(/\s+/g, '')
+      const m = h.match(/^([A-Za-z]\w*|\{\w+\})∈[[(](.+),(.+)[\])]$/)
+      if (!m) throw new LatexError(`${name === 'exists' ? '∃' : '∀'} の後には、a ∈ [0, 1], の形で変数と範囲を書いてください`)
+      this.out += ` @${name}(${m[1].replace(/[{}]/g, '')},${m[2]},${m[3]}) `
+      return
+    }
     // 名前に使える文字（ギリシャ文字・文字の形の記号。計画 M13）。計算エンジンでは {alpha} の形
     if (isNameCommand(name)) {
       this.out += ` {${name}} `

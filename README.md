@@ -630,6 +630,12 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
     （例: `A = \begin{pmatrix}1 & a\\ 0 & 1\end{pmatrix}` を座標系にして `x^2 + y^2 = 1` を描くと、$a$ で円がせん断される）
   - 大きさが合わない演算は、「2×3 の行列と 2 成分のベクトルは掛けられません」のように、大きさの入ったエラーになる
   - 固有値・固有ベクトルは、まだ求められない
+- **∃・∀・添字つきの max・min**（**近似が混ざる**）
+  - `\exists a\in\left[0,1\right],x^2+y^2+\left(z-a\right)^2=1`（球が通る領域）: 中身が等式 1 本なら、$a$ を範囲で重ねるのと同じ。
+    中身が「座標 = $a$ の式」で座標が全部決まる（`\exists a\in\left[0,2\pi\right],x=\cos a,y=\sin a,z=0`）なら、$a$ を媒介変数にした曲線
+  - 中身が不等式だけなら、$\exists$ は $\min_k G(\mathbf p, a_k) \le 0$、$\forall$ は $\max_k G(\mathbf p, a_k) \le 0$（$a$ の範囲を 32 等分した点。近似）。
+    $\forall$ の中身は不等式だけ。範囲の無い $\exists$・$\forall$ と、入れ子は使えない
+  - `z=\max_{t\in\left[0,1\right]}\sin\left(xt\right)y`（`\min`・`\sup`・`\inf` も）: 範囲を 64 等分した点での最大・最小（近似。説明に出す）
 - **名前に使える文字**: 英字 1 文字のほかに、ギリシャ文字（`\alpha`・`\beta`・`\lambda`・`\Omega` など）、
   アクセントを付けた文字（`\hat{x}`・`\tilde{\alpha}` など。元の文字とは別の名前）、書体を付けた文字（`\mathcal{A}`・`\mathbb{K}`・
   `\mathfrak{g}`・`\mathsf{A}`・`\mathtt{a}`）、文字の形の記号（`\ell`・`\hbar`・`\aleph` など）をスライダー・定義の名前に使える

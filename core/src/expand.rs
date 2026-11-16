@@ -818,6 +818,9 @@ impl Expander<'_> {
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
+            Expr::Binder { op, var, args, body } if matches!(op.as_str(), "max" | "min" | "sup" | "inf") => {
+                Val::S(self.extremum(matches!(op.as_str(), "max" | "sup"), var, args, body)?)
+            }
             Expr::Binder { op, var, args, body } if op == "fdiff" || op == "bdiff" || op == "cdiff" => {
                 Val::S(self.difference(op, var, args, body)?)
             }
@@ -1482,6 +1485,35 @@ impl Expander<'_> {
         }
         self.int_depth -= 1;
         Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
+    }
+
+    /// 添字つきの最大・最小 $\max_{t \in [a, b]} g(t)$（計画 M12）: 範囲を 64 等分した 65 点での値の max・min（近似）
+    fn extremum(&mut self, max: bool, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        const N: usize = 64;
+        let [lo, hi] = args else { return Err("max・min は、max_{t ∈ [0, 1]} の形で範囲を書いてください".into()) };
+        let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
+        let g = self.scalar(body)?;
+        let f = if max { crate::functions::Func::Max } else { crate::functions::Func::Min };
+        let mut terms = Vec::with_capacity(N + 1);
+        for k in 0..=N {
+            let s = k as f64 / N as f64;
+            let t = crate::diff::add(crate::diff::mul(Expr::Num(1.0 - s), lo.clone()), crate::diff::mul(Expr::Num(s), hi.clone()));
+            terms.push(g.substitute(&|v| (v == var).then(|| t.clone())));
+        }
+        // 平衡のとれた木で max・min をとる
+        while terms.len() > 1 {
+            let mut next = Vec::with_capacity(terms.len().div_ceil(2));
+            let mut it = terms.into_iter();
+            while let Some(a) = it.next() {
+                next.push(match it.next() {
+                    Some(b) => Expr::Call(f, vec![a, b]),
+                    None => a,
+                });
+            }
+            terms = next;
+        }
+        add_note("max・min は 64 等分の点での近似");
+        Ok(terms.pop().unwrap_or(Expr::Num(0.0)))
     }
 
     /// 不定積分（積分定数を省いた形）: 表で扱える形は記号で（`integrate.rs`）、扱えなければ数値で $\int_0^x f(t)\,dt$
