@@ -1,6 +1,6 @@
 //! 数学の記法（計画 `docs/plan-math-notation.md`）。画面と同じ入口（`graph_core::plot` と `definitions`）で確かめる
 
-use graph_core::{definitions, plot, MeshResult};
+use graph_core::{definitions, ode_init, plot, MeshResult};
 
 /// 3 次元・既定に近い範囲で描く。`defs` は式の一覧のほかの行（`\n` 区切り）、`params` は (名前, 値) の並び
 fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, String> {
@@ -892,7 +892,10 @@ fn determinant_line_and_columns() {
     let m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
     assert!(m.kind().contains("A の定義（列ベクトル）"), "{}", m.kind());
     let p = points("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧");
-    assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]) && p.iter().any(|v| *v == [0.0; 3]));
+    // 矢印の先（矢じりの頂点）と、軸の線分の始点（原点）
+    assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]));
+    let mut m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
+    assert!(m.take_outline().chunks_exact(3).any(|v| v == [0.0, 0.0, 0.0]));
     // ベクトルの定義は、そのベクトル
     let p = points("{vec_b} = (1, 2, 3)", "{vec_b} = (1, 2, 3)");
     assert!(p.iter().any(|v| *v == [1.0, 2.0, 3.0]));
@@ -914,4 +917,262 @@ fn matrix_as_coordinate_system() {
     }
     assert!(m.used_params().split(',').any(|n| n == "a"), "{}", m.used_params());
     assert!(m.used_defs().split(',').any(|n| n == "A"), "{}", m.used_defs());
+}
+
+// ---- M8: ベクトル場 ----
+
+#[test]
+fn vector_fields() {
+    let mut m = run("(-y, x, 0)", "", &[]).unwrap();
+    assert!(m.kind().starts_with("ベクトル場"), "{}", m.kind());
+    let shafts = m.take_outline();
+    // 9³ − 9（z 軸の上は大きさ 0）
+    assert_eq!(shafts.len() / 9, 9 * 9 * 9 - 9);
+    assert_eq!(m.value_range().len(), 2);
+    // 勾配・回転は、手で書いた場と同じ矢印
+    let arrows = |src: &str, defs: &str| {
+        let mut m = run(src, defs, &[]).unwrap();
+        (m.positions(), m.take_outline())
+    };
+    let near = |a: (Vec<f32>, Vec<f32>), b: (Vec<f32>, Vec<f32>), what: &str| {
+        assert_eq!((a.0.len(), a.1.len()), (b.0.len(), b.1.len()), "{what}");
+        let close = |x: &f32, y: &f32| (x.is_nan() && y.is_nan()) || (x - y).abs() < 1e-5;
+        assert!(a.0.iter().zip(&b.0).all(|(x, y)| close(x, y)) && a.1.iter().zip(&b.1).all(|(x, y)| close(x, y)), "{what}");
+    };
+    near(arrows("@grad(x^2 + y^2 - z)", ""), arrows("(2x, 2y, -1)", ""), "勾配");
+    near(arrows("@rot((-y, x, 0)) + (0 x, 0, 0)", ""), arrows("(0 x, 0, 2)", ""), "回転");
+    // 成分が 2 つなら、縦の成分は 0
+    near(arrows("(-y, x)", ""), arrows("(-y, x, 0)", ""), "2 成分");
+    // 関数の定義の行 F(x, y, z) = (…) も、ベクトル場として描く
+    let m = run("F(x, y, z) = (-y, x, 0)", "F(x, y, z) = (-y, x, 0)", &[]).unwrap();
+    assert!(m.kind().contains("F の定義（ベクトル場）"), "{}", m.kind());
+    // 媒介変数表示は今までどおり。座標と媒介変数が混ざった組は、今までと同じエラー
+    assert!(run("(cos(t), sin(t), t)", "", &[]).unwrap().kind().contains("媒介変数表示"));
+    assert!(!error_of("(x, t, 0)", "").is_empty());
+}
+
+// ---- M9: 常微分方程式 ----
+
+/// 常微分方程式を描く（t の範囲 [t0, t1]、初期値の欄 `init`）。点（NaN で切った列）を返す
+fn ode_points(src: &str, t: (f64, f64), init: &[&str], params: &[(&str, f64)]) -> (MeshResult, Vec<[f32; 3]>) {
+    ode_points_in(src, 3.0, t, init, params)
+}
+
+/// 表示範囲 [−half, half]³ で
+fn ode_points_in(src: &str, half: f64, t: (f64, f64), init: &[&str], params: &[(&str, f64)]) -> (MeshResult, Vec<[f32; 3]>) {
+    definitions("");
+    ode_init(&init.join("\n"));
+    let names: Vec<&str> = params.iter().map(|p| p.0).collect();
+    let values: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
+    let m = plot(
+        src, &[-half, half, -half, half, -half, half], 40, 24, "t", &[t.0, t.1], &names.join(","), &values, "", 3, &[0, 1, 2], &[0.0; 3],
+        &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src}: {}", error_of(src, "")));
+    let p = m.positions().chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect();
+    (m, p)
+}
+
+#[test]
+fn ode_systems() {
+    // 円 x' = −y, y' = x（(1, 0) から）
+    let (m, p) = ode_points("x' = -y, y' = x", (0.0, 20.0 * std::f64::consts::PI), &["1", "0"], &[]);
+    assert!(m.kind().contains("常微分方程式"), "{}", m.kind());
+    assert_eq!(m.ode_states(), "x,y");
+    let fin: Vec<_> = p.iter().filter(|v| v[0].is_finite()).collect();
+    assert!(fin.len() > 100 && fin.iter().all(|v| (v[0] * v[0] + v[1] * v[1] - 1.0).abs() < 1e-4 && v[2] == 0.0));
+    // 2 階: x'' = −x は同じ円（x(0) = 1, x'(0) = 0 → x = cos t）。プライムの無い y は一定
+    let (m, _) = ode_points("x'' = -x - x'/5", (0.0, 10.0), &[], &[]);
+    assert_eq!(m.ode_states(), "x,x'");
+    // ローレンツ（t ∈ [0, 40]）: 点が 3 万個以下
+    let start = std::time::Instant::now();
+    let lorenz = "x' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3";
+    let (m, p) = ode_points_in(lorenz, 30.0, (0.0, 40.0), &[], &[]);
+    // t = 40 まで解いた（箱の 8 倍を出ていない）: 最後の点は、アトラクターの上
+    assert!(p.len() > 3_000 && p.last().is_some_and(|v| v[2] > 0.0 && v[2] < 60.0));
+    let ms = start.elapsed().as_secs_f64() * 1e3;
+    assert!(p.len() <= 30_000, "{} 点", p.len());
+    assert!(!m.kind().contains("打ち切り"));
+    eprintln!("ローレンツ: {ms:.1} ms, {} 点", p.len());
+    // 同じ入力なら同じ点
+    let again = ode_points_in(lorenz, 30.0, (0.0, 40.0), &[], &[]).1;
+    assert!(p.iter().zip(&again).all(|(a, b)| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())));
+    // 初期値のリストは、組み合わせの数だけ（パラメータも使える）
+    let (m, _) = ode_points("x' = -y, y' = x", (0.0, 6.0), &["[1, 2]", "a"], &[("a", 0.5)]);
+    assert!(m.kind().contains("2 本"), "{}", m.kind());
+    assert!(m.used_params().split(',').any(|n| n == "a"));
+    // \frac{dx}{dt} の形も同じ
+    assert_eq!(ode_points("@diff(t) x = -y, @diff(t) y = x", (0.0, 6.0), &[], &[]).1.len(), ode_points("x' = -y, y' = x", (0.0, 6.0), &[], &[]).1.len());
+    assert!(error_of("x' = y, x' = 1", "").contains("2 回"));
+}
+
+#[test]
+fn ode_single_equations() {
+    // y'' + y = 0（y(0) = 0, y'(0) = 1）は y = sin x
+    let (m, p) = ode_points("y'' + y = 0", (0.0, 1.0), &["0", "1"], &[]);
+    assert_eq!(m.ode_states(), "y,y'");
+    let curve: Vec<_> = p.iter().take_while(|v| v[0].is_finite()).collect();
+    assert!(curve.len() > 50 && curve.iter().all(|v| (v[1] as f64 - (v[0] as f64).sin()).abs() < 1e-4));
+    assert!((curve[0][0] + 3.0).abs() < 1e-6 && (curve.last().unwrap()[0] - 3.0).abs() < 1e-6);
+    // 2 y' + 4 y = 8（解くと y' = (8 − 4y)/2）は y = 2 + C e^{−2x}（y(0) = 3 なら C = 1）。1 階なので傾きの場もある
+    let (m, p) = ode_points("2 y' + 4 y = 8", (0.0, 1.0), &["3"], &[]);
+    assert!(m.kind().contains("傾きの場"), "{}", m.kind());
+    let curve: Vec<_> = p.iter().take_while(|v| v[0].is_finite()).filter(|v| v[0] > -0.5).collect();
+    assert!(curve.iter().all(|v| (v[1] as f64 - (2.0 + (-2.0 * v[0] as f64).exp())).abs() < 1e-4));
+    // 解いた形にできない
+    assert!(error_of("y' y' = 1", "").contains("解いた形"));
+    // y' = y²、y(0) = 1（x = 1 で発散）は、箱を出た所で止まり、エラーにならない
+    let (_, p) = ode_points("y' = y^2", (0.0, 1.0), &["1"], &[]);
+    let curve: Vec<_> = p.iter().take_while(|v| v[0].is_finite()).collect();
+    assert!(curve.last().unwrap()[0] < 1.0);
+    // 定義した関数の導関数 f'(x) は、今までどおり
+    assert!(max_diff("y = f'(x)", "y = 2x", "f(x) = x^2") < 1e-9);
+}
+
+// ---- M10: 数列 ----
+
+fn ps(list: &[(&str, f64)]) -> graph_core::eval::Params {
+    list.iter().map(|(n, v)| (n.to_string(), num_complex::Complex64::new(*v, 0.0))).collect()
+}
+
+/// 定義とパラメータを入れたうえでの値
+fn seq_value(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<f64, String> {
+    let p = ps(params);
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse(defs, &p));
+    graph_core::equation::eval_constant_with(src, &p).map(|v| v.0)
+}
+
+#[test]
+fn sequences() {
+    assert!((seq_value("a_(3)", "a_(n) = 1/n^2", &[]).unwrap() - 1.0 / 9.0).abs() < 1e-15);
+    assert_eq!(seq_value("a_(10)", "a_(n+1) = a_(n) + 2", &[("a1", 1.0)]).unwrap(), 19.0);
+    // 数字の添字 a_10（字句では a10）も項
+    assert_eq!(seq_value("a_10 + a_1", "a_(n+1) = a_(n) + 2", &[("a1", 1.0)]).unwrap(), 20.0);
+    // フィボナッチの a₈₀
+    let start = std::time::Instant::now();
+    let f80 = seq_value("a_(80)", "a_(n) = a_(n-1) + a_(n-2)", &[("a1", 1.0), ("a2", 1.0)]).unwrap();
+    assert_eq!(f80, 23416728348467685.0);
+    eprintln!("フィボナッチ a₈₀: {:.3} ms", start.elapsed().as_secs_f64() * 1e3);
+    // 部分和は Σ と組み合わせる
+    assert!((seq_value("s_(4)", "a_(n) = 1/n\ns_(n) = @sum(k,1,n) a_(k)", &[]).unwrap() - 25.0 / 12.0).abs() < 1e-14);
+    // 初項が無ければ、スライダーを足せる形のエラー
+    let e = seq_value("a_(5)", "a_(n+1) = 2 a_(n)", &[]).unwrap_err();
+    assert!(e.contains("変数 'a1' はここでは使えません"), "{e}");
+    // 添字が数字の名前は今までどおり（パラメータ a1・座標 w₂）
+    assert_eq!(seq_value("a_1 + 1", "", &[("a1", 2.0)]).unwrap(), 3.0);
+}
+
+#[test]
+fn sequence_terms_with_coordinates() {
+    // z = a_(3)（a_(n) = x^n）と z = x^3 が同じメッシュ
+    same("z = a_(3)", "z = x^3", "a_(n) = x^n");
+    // マンデルブロ: z_(n+1) = z_(n)^2 + x + i y、z0 = 0 のもとで |z₈| = 2 を、手で 8 回入れ子にした式と比べる
+    let defs = "z_(n+1) = z_(n)^2 + x + i y";
+    let mut hand = "0".to_string();
+    for _ in 0..8 {
+        hand = format!("({hand})^2 + x + i y");
+    }
+    let (a, b) = (mesh_p(&format!("abs(z_(8)) = 2 + 0 z"), defs, &[("z0", 0.0)]), mesh_p(&format!("abs({hand}) = 2 + 0 z"), "", &[("z0", 0.0)]));
+    assert!(!a.0.is_empty());
+    assert_eq!(a, b);
+}
+
+fn mesh_p(src: &str, defs: &str, params: &[(&str, f64)]) -> (Vec<f32>, Vec<u32>) {
+    mesh(src, defs, params)
+}
+
+#[test]
+fn sequence_lines_draw_points() {
+    // a_(n) = 1/n の点 (n, 1/n, 0)（n は横の表示範囲 [−3, 3] の中の 0 以上の整数。n = 0 は無限大なので描かない）
+    let m = run("a_(n) = 1/n", "a_(n) = 1/n", &[]).unwrap();
+    assert!(m.kind().contains("a の定義（数列の点）"), "{}", m.kind());
+    let p: Vec<[f32; 3]> = m.positions().chunks_exact(3).filter(|v| v[0].is_finite()).map(|v| [v[0], v[1], v[2]]).collect();
+    for n in [1, 2, 3] {
+        assert!(p.iter().any(|v| *v == [n as f32, 1.0 / n as f32, 0.0]), "{n}: {p:?}");
+    }
+    // 初項の行 a_1 = 8 そのものは、今までどおりパラメータの定義
+    let m = run("a_1 = 8", "a_(n+1) = a_(n) / 2\na_1 = 8", &[]).unwrap();
+    assert_eq!(m.param_name(), "a1");
+    // 漸化式は初項の添字から
+    let m = run("a_(n+1) = a_(n) / 2", "a_(n+1) = a_(n) / 2", &[("a1", 2.0)]).unwrap();
+    let p: Vec<f32> = m.positions().chunks_exact(3).filter(|v| v[0].is_finite()).map(|v| v[0]).collect();
+    assert!(p.iter().all(|n| *n >= 1.0) && p.contains(&3.0));
+    assert!(m.used_params().split(',').any(|n| n == "a1"), "{}", m.used_params());
+    // 複素数の数列は、複素平面の軌道
+    let m = run("w_(n+1) = w_(n) (0.8 + 0.5 i)", "w_(n+1) = w_(n) (0.8 + 0.5 i)", &[("w0", 1.0)]).unwrap();
+    assert!(m.kind().contains("軌道"), "{}", m.kind());
+}
+
+// ---- M13: 名前に使える文字と、小さな記号 ----
+
+#[test]
+fn names_and_small_symbols() {
+    // 名前 {alpha} のスライダー、関数 beta と名前 {beta} が同じ式の中で両方使える
+    assert_eq!(mesh("z = {alpha} x", "", &[("alpha", 2.0)]), mesh("z = 2 x", "", &[]));
+    // 2 文字以上の名前の値の行は、パラメータの定義
+    assert_eq!(run("{alpha} = 2", "", &[]).unwrap().param_name(), "alpha");
+    let p = ps(&[("alpha", 2.0), ("beta", 3.0)]);
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse("", &p));
+    let (v, _) = graph_core::equation::eval_constant_with("beta(2, 3) + {beta}", &p).unwrap();
+    assert!((v - (1.0 / 12.0 + 3.0)).abs() < 1e-12, "{v}");
+    drop(_d);
+    // a ≡ b (mod n) は latex.ts が mod(a − b, n) = 0 にする。a mod b（%%）
+    assert_eq!(value("7 %% 3"), 1.0);
+    assert_eq!(value("2 + 7 %% 3 * 2"), 4.0);
+    assert_eq!(value("gcd(12, 18) + lcm(4, 6)"), 18.0);
+    // 直交・平行
+    let p = points("(x, y, z) ⟂ (1, 1, 1)", "");
+    assert!(p.len() > 100 && p.iter().all(|v| (v[0] + v[1] + v[2]).abs() < 1e-4));
+    let p = points("(x, y, z) ∥ (1, 1, 1)", "");
+    assert!(!p.is_empty() && p.iter().all(|v| (v[0] - v[1]).abs() < 1e-3 && (v[1] - v[2]).abs() < 1e-3), "{:?}", &p[..p.len().min(4)]);
+    // 共役 z^∗
+    assert!(max_diff("z = Re((x + i y)^∗ (x + i y))", "z = x^2 + y^2", "") < 1e-9);
+}
+
+// ---- M12: ∃・∀・添字つきの max・min ----
+
+#[test]
+fn quantifiers() {
+    // ∃a ∈ [0, 1]: 範囲で重ねるのと同じメッシュ
+    let stacked = {
+        definitions("");
+        plot(
+            "x^2+y^2+(z-a)^2 = 1", &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3],
+            &[f64::NAN; 6], "a", &[0.0, 1.0], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+        )
+        .unwrap_or_else(|_| panic!("stack"))
+    };
+    let m = run("@exists(a,0,1) x^2+y^2+(z-a)^2 = 1", "", &[]).unwrap();
+    assert_eq!((m.positions(), m.indices()), (stacked.positions(), stacked.indices()));
+    // ∃a ∈ [0, 2π]: x = cos a, y = sin a, z = 0 は円
+    let (pa, _) = mesh("@exists(a,0,2pi) x = cos(a), y = sin(a), z = 0", "", &[]);
+    let circle = {
+        definitions("");
+        plot(
+            "(cos(t), sin(t), 0)", &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, std::f64::consts::TAU], "", &[], "", 3, &[0, 1, 2],
+            &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+        )
+        .unwrap_or_else(|_| panic!("circle"))
+    };
+    assert_eq!(pa, circle.positions());
+    // ∀a ∈ [−1, 1]: z ≥ a x は z ≥ |x|（近似）。頂点が z ≥ |x| − 少し の上
+    let p = points("@forall(a,-1,1) z ≥ a x", "");
+    assert!(p.len() > 100 && p.iter().all(|v| v[2] >= v[0].abs() - 0.1));
+    let m = run("@forall(a,-1,1) z ≥ a x", "", &[]).unwrap();
+    assert!(m.kind().contains("近似"), "{}", m.kind());
+    // ⋃（M11 で入れた書き方）: 3 つの球
+    let p = points("@bigcup(k; 1 ≤ k ≤ 3) ⦃(x, y, z) ∣ (x - k + 2)^2 + y^2 + z^2 ≤ 0.2⦄", "");
+    assert!(p.iter().any(|v| v[0] > 0.7) && p.iter().any(|v| v[0] < -0.7) && p.iter().any(|v| v[0].abs() < 0.3));
+    assert!(error_of("@forall(a,0,1) x = a", "").contains("不等式だけ"));
+}
+
+#[test]
+fn indexed_max() {
+    // max_{t ∈ [0, 1]} t x = max(0, x)（端の点も等分点に入る）
+    assert!(max_diff("z = @max(t, 0, 1) (t x)", "z = max(0, x)", "") < 1e-12);
+    assert!(max_diff("z = @min(t, 0, 1) (t x)", "z = min(0, x)", "") < 1e-12);
+    let m = run("z = @max(t, 0, 1) sin(x t) y", "", &[]).unwrap();
+    assert!(m.kind().contains("近似"), "{}", m.kind());
+    // ふつうの max(a, b) は今までどおり
+    assert!(max_diff("z = max(x, y)", "z = (x + y + abs(x - y)) / 2", "") < 1e-9);
 }

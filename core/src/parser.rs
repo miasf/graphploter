@@ -143,6 +143,42 @@ impl Expr {
         }
     }
 
+    /// 節を置き換えた式を作る。`f` が Some を返した節は、その式に置き換える（中は見ない）。
+    /// 束縛する変数は気にしない（プライム `x'` を変数に置き換えるのに使う）
+    pub fn rewrite(&self, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
+        if let Some(e) = f(self) {
+            return e;
+        }
+        let all = |v: &[Expr]| v.iter().map(|a| a.rewrite(f)).collect::<Vec<_>>();
+        match self {
+            Expr::Num(_) | Expr::Const(_) | Expr::Var(_) | Expr::Prime { .. } | Expr::Cond(_) => self.clone(),
+            Expr::Neg(a) => Expr::Neg(Box::new(a.rewrite(f))),
+            Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(a.rewrite(f)), Box::new(b.rewrite(f))),
+            Expr::Call(g, args) => Expr::Call(*g, all(args)),
+            Expr::Tuple(args) => Expr::Tuple(all(args)),
+            Expr::List(args) => Expr::List(all(args)),
+            Expr::Apply { name, primes, args } => Expr::Apply { name: name.clone(), primes: *primes, args: all(args) },
+            Expr::Op { op, args } => Expr::Op { op: op.clone(), args: all(args) },
+            Expr::Matrix { rows, cols, items } => Expr::Matrix { rows: *rows, cols: *cols, items: all(items) },
+            Expr::Index { name, index } => Expr::Index { name: name.clone(), index: Box::new(index.rewrite(f)) },
+            Expr::Binder { op, var, args, body } => {
+                Expr::Binder { op: op.clone(), var: var.clone(), args: all(args), body: Box::new(body.rewrite(f)) }
+            }
+        }
+    }
+
+    /// 式の中のプライム `x'`・`y''` の (名前, 階数)
+    pub fn primes(&self) -> Vec<(String, u8)> {
+        let out = std::cell::RefCell::new(Vec::new());
+        self.rewrite(&|e| {
+            if let Expr::Prime { name, order } = e {
+                out.borrow_mut().push((name.clone(), *order));
+            }
+            None
+        });
+        out.into_inner()
+    }
+
     /// 式の中で使われている変数名か調べる
     pub fn uses_var(&self, name: &str) -> bool {
         match self {
@@ -266,6 +302,8 @@ enum Tok {
     Cross,
     /// `∘`（関数の合成）
     Compose,
+    /// `%%`（a mod b。掛け算と同じ強さ。LaTeX の `\bmod`）
+    Mod,
     /// `…`（リストの中の、等差の並びの省略）
     Ellipsis,
     /// 論理・集合の記号（∧ ∨ ¬ ⇒ ⇐ ⇔ ⊕ ⊼ ⊽ ∩ ∪ ∖ △ ∈ ∉ ∋ ≠ ⊤ ⊥ ∅ ℝ ℤ ℕ ℂ ℚ ⦃ ∣ ⦄ ᶜ ∁。計画 M11）
@@ -296,7 +334,10 @@ pub fn binds(op: &str) -> bool {
 pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
-        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
+        // max・min・sup・inf: 添字つきの最大・最小 `@max(t, a, b) 項`（等分点での近似。計画 M12）
+        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" | "max" | "min" | "sup" | "inf" => OpKind::Binder,
+        // ∃・∀（行の先頭だけ。equation.rs が行ごと読む。計画 M12）
+        "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
         "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" => OpKind::Func,
@@ -513,6 +554,13 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 continue;
             }
             '\'' | '′' => Tok::Prime,
+            '%' if chars.get(i + 1) == Some(&'%') => {
+                out.push(Token { tok: Tok::Mod, pos: i });
+                i += 2;
+                continue;
+            }
+            // 共役 z^∗（LaTeX の `^{\ast}`。展開の段で conj にする）
+            '∗' => Tok::Var("∗".into()),
             // 転置 Aᵀ は A^T と同じ。† は ^† の形で使う（共役転置）
             'ᵀ' => {
                 out.push(Token { tok: Tok::Caret, pos: i });
@@ -626,6 +674,12 @@ impl Parser<'_> {
                 Tok::Slash => {
                     self.next();
                     BinOp::Div
+                }
+                Tok::Mod => {
+                    self.next();
+                    let rhs = self.unary()?;
+                    lhs = Expr::Call(Func::Mod, vec![lhs, rhs]);
+                    continue;
                 }
                 Tok::Cross | Tok::Compose => {
                     let op = if *self.peek() == Tok::Cross { "cross" } else { "compose" };
@@ -874,6 +928,9 @@ impl Parser<'_> {
             let (vars, cond) = self.index_set(&name)?;
             let body = self.term()?;
             return Ok(Expr::Op { op: name, args: vec![vars, Expr::Cond(Box::new(cond)), body] });
+        }
+        if matches!(name.as_str(), "exists" | "forall") {
+            return err(format!("@{name}(a, 0, 1) は、行の先頭に書いてください"), pos);
         }
         if matches!(name.as_str(), "bigcup" | "bigcap" | "bigvee" | "bigwedge") {
             return err(format!("@{name} は条件・集合の中で使ってください"), pos);

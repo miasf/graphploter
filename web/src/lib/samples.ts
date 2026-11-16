@@ -20,6 +20,8 @@ export interface Sample {
   view?: SampleView
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
   play?: string
+  /** 2D 表示にする */
+  flat?: boolean
   /**
    * 座標系で描く例（計画 9 章）。追加する式を、この座標系（用意した座標系。同じものがあれば使い回す）で描く。
    * morph は移行のスライダーの値、play なら移行を再生する、flat なら 2D 表示にする
@@ -209,6 +211,109 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
             options: { color: '#388c46' },
           },
         ],
+      },
+    ],
+  },
+  {
+    title: '数学の記法',
+    samples: [
+      {
+        label: '場合分け',
+        items: [{ latex: 'z=\\begin{cases}x^2-y^2 & x<0\\\\ \\sin\\left(xy\\right) & \\text{otherwise}\\end{cases}', options: { color: '#c74440' } }],
+      },
+      {
+        label: '定積分で定義した関数 ∫₀ˣ e^(−t²) dt',
+        items: [{ latex: 'y=\\int_{0}^{x}e^{-t^{2}}\\,dt', options: { color: '#2d70b3' } }],
+      },
+      {
+        label: '集合 {(x, y, z) | x² + y² ≤ 4, 0 ≤ z ≤ x}',
+        items: [{ latex: '\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2\\le4,0\\le z\\le x\\right\\}', options: { color: '#388c46', opacity: 0.6 } }],
+      },
+      {
+        label: '球が通る領域 ∃a ∈ [0, 3]',
+        items: [{ latex: '\\exists a\\in\\left[0,3\\right],x^2+y^2+\\left(z-a\\right)^2=1', options: { color: '#6042a6', opacity: 0.6 } }],
+      },
+      {
+        label: '最大公約数 z = gcd(x, y)/3',
+        items: [{ latex: 'z=\\frac{\\gcd\\left(x,y\\right)}{3}', options: { color: '#fa7e19', walls: true } }],
+      },
+    ],
+  },
+  {
+    title: 'ベクトル・行列',
+    samples: [
+      { label: '回転する場 (−y, x, 0)', items: [{ latex: '\\left(-y,x,0\\right)', options: { color: '#2d70b3' } }] },
+      {
+        label: '勾配の場 ∇(x² + y² − z) と等位面',
+        items: [
+          { latex: '\\nabla\\left(x^2+y^2-z\\right)', options: { color: '#c74440' } },
+          { latex: 'x^2+y^2-z=0', options: { color: '#2d70b3', opacity: 0.4 } },
+        ],
+      },
+      {
+        label: '行列のせん断で円を変形（a を再生）',
+        play: 'a',
+        items: [
+          { latex: 'a=1', param: 'a', options: { slider: { min: -2, max: 2, complex: false, stack: false } } },
+          { latex: 'A=\\begin{pmatrix}1 & a\\\\ 0 & 1\\end{pmatrix}', options: { color: '#c74440' } },
+          { latex: 'A\\left(\\cos t,\\sin t\\right)', options: { color: '#2d70b3' } },
+        ],
+      },
+      {
+        label: '回転する場と流線',
+        items: [{ latex: '\\left(-y,x,0.3\\right)', options: { color: '#2d70b3', field: { stream: 3 } } }],
+      },
+      { label: '零空間 ker (1 1 1)（平面）', items: [{ latex: '\\ker\\begin{pmatrix}1 & 1 & 1\\end{pmatrix}', options: { color: '#6042a6' } }] },
+    ],
+  },
+  {
+    title: '数列',
+    samples: [
+      {
+        label: '収束する数列 aₙ₊₁ = aₙ/2 + 1（a₁ を動かす）',
+        view: { dims: 3, half: 12 },
+        items: [
+          { latex: 'a_1=8', param: 'a1', options: { slider: { min: -10, max: 10, complex: false, stack: false } } },
+          { latex: 'a_{n+1}=\\frac{a_n}{2}+1', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: 'マンデルブロ集合の縁 |z₂₀| = 2（2D）',
+        flat: true,
+        view: { dims: 3, half: 2 },
+        items: [
+          { latex: 'z_0=0', param: 'z0' },
+          { latex: 'z_{n+1}=z_n^2+x+iy', options: { color: '#888888' } },
+          { latex: '\\left|z_{20}\\right|=2', options: { color: '#2d70b3' } },
+        ],
+      },
+    ],
+  },
+  {
+    title: '常微分方程式',
+    samples: [
+      {
+        label: 'ローレンツ・アトラクター',
+        view: { dims: 3, half: 30 },
+        items: [
+          {
+            latex: "x'=10\\left(y-x\\right),\\ y'=x\\left(28-z\\right)-y,\\ z'=xy-\\frac{8z}{3}",
+            options: { color: '#c74440', ranges: { t: ['0', '40'] } },
+          },
+        ],
+      },
+      {
+        label: '減衰振動 x″ = −x − x′/5（初期値を 3 通り）',
+        items: [
+          {
+            latex: "x''=-x-\\frac{x'}{5},\\ y'=1",
+            options: { color: '#2d70b3', ranges: { t: ['0', '20'] }, ode: { init: ['\\left[1,2,3\\right]', '0', '-10'] } },
+          },
+        ],
+      },
+      {
+        label: "傾きの場 y′ = x − y と解曲線",
+        items: [{ latex: "y'=x-y", options: { color: '#388c46', ode: { init: ['\\left[-4,-2,0,2,4\\right]'] } } }],
       },
     ],
   },

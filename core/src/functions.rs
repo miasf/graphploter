@@ -56,6 +56,9 @@ pub enum Func {
     GammaRegP,
     GammaRegQ,
     Beta,
+    /// 最大公約数・最小公倍数（引数は四捨五入した整数。計画 M13）
+    Gcd,
+    Lcm,
     BetaReg,
     Digamma,
     Polygamma,
@@ -185,6 +188,8 @@ const TABLE: &[(Func, &[&str], &[usize])] = &[
     (Func::GammaRegP, &["gammaP"], &[2]),
     (Func::GammaRegQ, &["gammaQ"], &[2]),
     (Func::Beta, &["beta"], &[2, 3]),
+    (Func::Gcd, &["gcd"], &[2]),
+    (Func::Lcm, &["lcm"], &[2]),
     (Func::BetaReg, &["betaRegularized"], &[3]),
     (Func::Digamma, &["digamma", "psi", "ψ"], &[1]),
     (Func::Polygamma, &["polygamma"], &[2]),
@@ -347,6 +352,24 @@ impl Func {
             (Func::GammaRegP, 2) => sp::gamma_p(x[0], x[1]),
             (Func::GammaRegQ, 2) => sp::gamma_q(x[0], x[1]),
             (Func::Beta, 2) => sp::beta(x[0], x[1]),
+            (Func::Gcd, 2) | (Func::Lcm, 2) => {
+                let (a, b) = (x[0].re.round().abs(), x[1].re.round().abs());
+                if !a.is_finite() || !b.is_finite() || a > 9.0e15 || b > 9.0e15 {
+                    return C::new(f64::NAN, 0.0);
+                }
+                let (mut p, mut q) = (a as u64, b as u64);
+                while q != 0 {
+                    (p, q) = (q, p % q);
+                }
+                let g = p as f64;
+                if self == Func::Gcd {
+                    C::new(g, 0.0)
+                } else if g == 0.0 {
+                    C::new(0.0, 0.0)
+                } else {
+                    C::new(a / g * b, 0.0)
+                }
+            }
             (Func::Beta, 3) => sp::beta_incomplete(x[0], x[1], x[2]),
             (Func::BetaReg, 3) => sp::beta_regularized(x[0], x[1], x[2]),
             (Func::Digamma, 1) => sp::digamma(x[0]),

@@ -185,6 +185,8 @@
         complexCoords: it.complexCoords || undefined,
         slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
         walls: it.walls,
+        field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
+        ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
         layers: it.layers,
         edges: it.edges || undefined,
         render: it.render && it.render !== 'auto' ? it.render : undefined,
@@ -584,12 +586,15 @@
   /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
   const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
 
+  /** 計算エンジン用の式の、数列の定義 `a_(n) = …`・`a_(n+1) = …`（計画 M10） */
+  const SEQ_DEF_HEAD = /^\s*([A-Za-z])_\(\s*[A-Za-z]\w*\s*([+-]\s*\d+\s*)?\)\s*=/
+
   /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
   function defNameOf(it: PlotItem): string | null {
     if (it.def) return it.def
     try {
       const text = latexToText(it.latex)
-      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD)
+      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD) ?? text.match(SEQ_DEF_HEAD)
       return m ? m[1] : null
     } catch {
       return null
@@ -806,6 +811,8 @@
       item.complexCoords ?? false,
       coord,
       currentDefinitions(item),
+      { count: item.field?.count ?? 0, unit: item.field?.unit ?? false, stream: item.field?.stream ?? 0 },
+      odeInitFor(item),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -826,6 +833,7 @@
     item.error = undefined
     item.usedParams = res.usedParams
     item.usedDefs = res.usedDefs
+    item.odeStates = res.odeStates && res.odeStates.length > 0 ? res.odeStates : undefined
     noteDefinition(item, res.defName, source)
     budget.record(item.id, res.ms, used, res.cost, res.reprojected)
     if (res.reprojected) {
@@ -1134,7 +1142,7 @@
   function addSlider(item: PlotItem, name: string) {
     const k = items.indexOf(item)
     // f(…) の形で使われていれば、スライダーではなく関数の定義 f(x) = x を足す
-    const line = calledAsFunction(item.latex, name) ? `${latexName(name)}\\left(x\\right)=x` : `${name}=1`
+    const line = calledAsFunction(item.latex, name) ? `${latexName(name)}\\left(x\\right)=x` : `${latexName(name)}=1`
     items.splice(k, 0, newItem(line, { folder: item.folder }))
     schedule(items[k], 0) // items[k] は Svelte の状態に入ったもの（元のオブジェクトではない）
   }
@@ -1328,6 +1336,26 @@
 
   function setEdges(item: PlotItem, on: boolean) {
     item.edges = on
+    schedule(item, 0)
+  }
+
+  /** 常微分方程式の初期値の欄を、計算エンジン用の式にする（変換できない欄は空 = 既定の値。誤りは計算エンジンに任せない） */
+  function odeInitFor(item: PlotItem): string[] {
+    return (item.ode?.init ?? []).map((s) => (s.trim() === '' ? '' : latexToText(s)))
+  }
+
+  /** 常微分方程式の初期値の欄を変えた（計画 M9） */
+  function setOdeInit(item: PlotItem, k: number, latex: string) {
+    const init = [...(item.ode?.init ?? [])]
+    while (init.length <= k) init.push('')
+    init[k] = latex
+    item.ode = { init }
+    schedule(item, 0)
+  }
+
+  /** ベクトル場の矢印の数・長さをそろえるか（計画 M8） */
+  function setField(item: PlotItem, patch: { count?: number; unit?: boolean; stream?: number }) {
+    item.field = { ...item.field, ...patch }
     schedule(item, 0)
   }
 
@@ -2071,6 +2099,7 @@
       if (play) togglePlayMorph(coordSys)
       if (toFlat && !flat) setFlat(true)
     }
+    if (sample.flat && !flat) setFlat(true)
     for (const si of adding) {
       // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
       pushItem(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))
@@ -2089,7 +2118,14 @@
 
   /** 「a=1」のような式なら、そのパラメータの名前（まだ計算していない式のため、文字の形だけで調べる） */
   function latexParamName(latex: string): string | undefined {
-    return /^([a-zA-Z])\s*=/.exec(latex)?.[1]
+    const one = /^([a-zA-Z])\s*=/.exec(latex)?.[1]
+    if (one) return one
+    // 名前に使える文字（\alpha=1・\hat{x}=1。計画 M13）
+    try {
+      return /^\s*\{(\w+)\}\s*=/.exec(latexToText(latex))?.[1]
+    } catch {
+      return undefined
+    }
   }
 
   /** サンプルの見え方（次元・回転・4次元の遠近感・表示範囲・回転の再生）にして、すべて計算し直す */
@@ -2280,6 +2316,9 @@
             sliceMax={space.sliceMax}
             onSlice={(name, v) => setItemSlice(item, name, v)}
             onWalls={(on) => setWalls(item, on)}
+            onField={(patch) => setField(item, patch)}
+            onOdeInit={(k, s) => setOdeInit(item, k, s)}
+            flatView={flat}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}
             onRender={(mode) => setRender(item, mode)}
@@ -2827,6 +2866,20 @@
               <li>
                 パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
                 「複素数」を押すと、複素平面の上で点を動かして値を決められます
+              </li>
+              <li>
+                数学の記法（数式キーボードの「∑∫∈」のタブに、雛形があります。◀ ▶ で「微積」「ベクトル」「集合」「方程式」のページ）
+                <ul>
+                  <li>関数: <code>f(x) = x^2</code> と定義して <code>z = f(x) - f(y)</code>。合成 <code>(f∘g)(x)</code>、導関数 <code>f′(x)</code>、逆関数 <code>y = f^(-1)(x)</code></li>
+                  <li>微積: <code>Σ</code>・<code>Π</code>（中身は直後の項）、<code>d/dx</code>・<code>∂/∂x</code>、定積分・不定積分・重積分・線積分・面積分、差分 <code>Δₓ</code>、場合分け</li>
+                  <li>ベクトルと行列: 組は列ベクトル。行列の積・<code>det</code>・逆行列・転置・<code>ker A</code>・<code>Im A</code>（像）。行列の中にカーソルを置くと、行・列を足す・消す帯が出ます（Enter で行、<code>,</code> で列、空の行で ⌫ で消す）。行列の定義の行の ⚙ →「座標系」で、線形変換の座標系にできます</li>
+                  <li>ベクトル場: <code>(-y, x, 0)</code>・<code>∇f</code>・<code>∇×F</code> は矢印で描きます（⚙ で矢印の数・流線）</li>
+                  <li>常微分方程式: <code>x′ = 10(y - x), y′ = x(28 - z) - y, z′ = xy - 8z/3</code>（独立変数 t）、<code>y′ = x - y</code>（傾きの場も）、<code>y″ + y = 0</code>。初期値は式の下の欄（リストで何本も）</li>
+                  <li>数列: <code>a_(n+1) = a_n/2 + 1</code> と初項 <code>a_1 = 8</code>。式の中では <code>a_(10)</code>。<code>|z_(20)| = 2</code>（z_(n+1) = z_n² + x + iy）でマンデルブロ集合の縁</li>
+                  <li>集合と論理: <code>&#123;(x, y, z) | x^2 + y^2 ≤ 1, z ≥ 0&#125;</code>、<code>∧ ∨ ¬ ⇒ ∩ ∪ ∖ ∈</code>、ℤ・ℕ、<code>⋃</code>・<code>⋂</code></li>
+                  <li>∃・∀・max（近似が混ざる）: <code>∃a ∈ [0, 1], x^2 + y^2 + (z - a)^2 = 1</code>、<code>z = max_(t ∈ [0, 1]) sin(xt) y</code></li>
+                  <li>名前: ギリシャ文字 <code>α</code>・アクセント <code>x̂</code>・書体 <code>𝒜</code> もスライダーの名前にできます。小さな記号: <code>≡ (mod n)</code>・<code>mod</code>・<code>⊥</code>・<code>∥</code>・共役 <code>z^∗</code>・<code>gcd</code>・<code>lcm</code></li>
+                </ul>
               </li>
               <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
               <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は標準では式ごとに別々で、「全体と同じ」やグループを選ぶと、同じものを選んだ式が一緒に回ります（同期）</li>

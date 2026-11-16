@@ -36,6 +36,43 @@ const cases: [string, string][] = [
   ['A_{1,2}+\\vec{v}_{2}+w_{2}', 'A_(1,2)+ {vec_v}_2+w_2'],
   ['x_{a}', 'x_(a)'],
   ['\\dim\\ker A', '@dim @ker A'],
+  // 常微分方程式（M9）
+  ["x'=-y,\\ y'=x", "x'=-y, y'=x"],
+  ['\\dot{x}=10\\left(y-x\\right)', "x'=10(y-x)"],
+  ['\\ddot{x}+x=0', "x''+x=0"],
+  ['\\frac{dx}{dt}=-y', '@diff(t) x =-y'],
+  ['\\frac{d^{2}y}{dx^{2}}+y=0', '@diff(x,2) y +y=0'],
+  ['y^{\\prime}=x-y', "y'=x-y"],
+  // 名前に使える文字と、小さな記号（M13）
+  ['z=\\alpha x', 'z= {alpha} x'],
+  ['\\alpha=1', '{alpha} =1'],
+  ['z=\\hat{x}+\\tilde{\\alpha}+\\mathcal{A}+\\mathbb{K}+\\ell', 'z= {hat_x} + {tilde_alpha} + {cal_A} + {bb_K} + {ell}'],
+  ['z=\\theta+\\beta+\\delta', 'z= theta + {beta} + {delta}'],
+  ['x\\equiv1\\pmod{3}', 'mod((x)-(1),3)=0'],
+  ['x\\equiv y', 'x=y'],
+  ['z=x\\bmod 3', 'z=x%%3'],
+  ['3\\divides x', '3∣x'],
+  ['\\left(x,y,z\\right)\\perp\\left(1,1,1\\right)', '(x,y,z)⟂(1,1,1)'],
+  ['\\left(x,y,z\\right)\\parallel\\left(1,1,1\\right)', '(x,y,z)∥(1,1,1)'],
+  ['y\\nless x', 'y>=x'],
+  ['y\\ngeq x', 'y<x'],
+  ['y\\lneq x', 'y<x'],
+  ['y=x\\degree', 'y=x*(pi/180)'],
+  ['y=50\\%', 'y=50/100'],
+  ['z=w^{\\ast}', 'z=w^(∗)'],
+  ['z=\\overline{x+iy}+\\bar{y}', 'z= conj(x+iy) + conj(y)'],
+  ['z=\\binom{5}{2}', 'z= nCr(5,2)'],
+  ['z=\\cfrac{1}{x}', 'z=((1)/(x))'],
+  ['z=\\gcd\\left(x,y\\right)+\\operatorname{lcm}\\left(x,y\\right)', 'z= gcd (x,y)+ lcm (x,y)'],
+  ['z=\\angle\\left(u,v\\right)', 'z= @angle (u,v)'],
+  ['z=\\boxed{x}+\\underbrace{y}_{a}+\\overbrace{x}^{b}', 'z=(x)+(y)+(x)'],
+  ['z=x\\star y\\bullet x\\centerdot y', 'z=x*y*x*y'],
+  ['z=\\Re x+\\Im y', 'z= Re x+ Im y'],
+  // ∃・∀・添字つきの max（M12）
+  ['\\exists a\\in\\left[0,1\\right],x^2+y^2+\\left(z-a\\right)^2=1', '@exists(a,0,1) x^(2)+y^(2)+(z-a)^(2)=1'],
+  ['\\forall a\\in\\left[-1,1\\right],z\\ge ax', '@forall(a,-1,1) z>=ax'],
+  ['z=\\max_{t\\in\\left[0,1\\right]}\\sin\\left(xt\\right)y', 'z= @max(t,0,1) sin (xt)y'],
+  ['z=\\inf_{t\\in\\left[0,1\\right]}tx', 'z= @min(t,0,1) tx'],
   // 場合分け（M2）
   ['f\\left(x\\right)=\\begin{cases}x^2 & x<0\\\\ x & \\text{otherwise}\\end{cases}', 'f(x)= @cases(x^(2), x<0; x)'],
   ['\\begin{cases}1 & \\text{if } 0\\le x<1\\\\ 0 & x\\ge1\\\\ -1\\end{cases}', '@cases(1, 0<=x<1; 0, x>=1; -1)'],
@@ -156,7 +193,7 @@ for (const [input, want] of cases) check(input, latexToText(input), want)
 
 // 変換できないものはエラーになる
 // 数字でない添字 x_{a} は、計算エンジンへ x_(a) の形で渡す（行列の成分・数列の項。M6・M10）
-for (const input of ['2_{1}', '\\alpha', '\\frac{1}']) {
+for (const input of ['2_{1}', '\\frac{1}']) {
   let threw = false
   try {
     latexToText(input)

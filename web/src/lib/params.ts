@@ -1,6 +1,7 @@
 // パラメータ（スライダー）・次元まわりの小さな関数
 
 import type { Space } from './types'
+import { nameLatex, nameText } from './names.ts'
 
 /** 座標（x, y, z, w, w2, w3, …）と定数（e, i）の名前か。これらはパラメータにできない。
  *  t, u, v は組 (…, …) の外ではパラメータにできる */
@@ -73,11 +74,15 @@ export function rotDims(dims: number): number {
 
 /** 画面に出すときの名前（w2 → w₂） */
 export function prettyName(name: string): string {
+  const t = nameText(name)
+  if (t) return t
   return name.replace(/\d/g, (d) => '₀₁₂₃₄₅₆₇₈₉'[Number(d)])
 }
 
 /** 数式入力欄（LaTeX）での名前（t1 → t_{1}） */
 export function latexName(name: string): string {
+  const l = nameLatex(name)
+  if (l) return l
   return name.replace(/^([a-zA-Z])(\d+)$/, '$1_{$2}')
 }
 
@@ -123,8 +128,11 @@ export function complexLatex(re: number, im: number, step: number, base = 0): st
  * パラメータにできない文字（x など）なら null。
  */
 export function missingParam(error: string | undefined): string | null {
-  const m = error?.match(/変数 '([a-zA-Z]\d*)' はここでは使えません/)
-  return m && !isReserved(m[1]) ? m[1] : null
+  const m = error?.match(/変数 '([a-zA-Z]\d*|[A-Za-z]+(?:_[A-Za-z]+)?)' はここでは使えません/)
+  if (!m) return null
+  // 2 文字以上の名前は、名前に使える文字（\alpha・\hat{x} など。計画 M13）だけ
+  if (m[1].length > 1 && !/^[a-zA-Z]\d+$/.test(m[1]) && nameLatex(m[1]) === null) return null
+  return !isReserved(m[1]) ? m[1] : null
 }
 
 /** 数式入力欄の LaTeX で、文字 name が関数の呼び出しの形 name(…) で使われているか（name\left( か name( が続く） */

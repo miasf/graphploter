@@ -9,6 +9,8 @@ import init, {
   field_mode_plan,
   field_mode_reset,
   hidden_style,
+  field_style,
+  ode_init,
   complex_coords,
   coord_system,
   coord_grid,
@@ -98,7 +100,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord, req.definitions]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -152,7 +154,7 @@ function costOf(kind: string, curve: boolean, flat: boolean): Cost {
 }
 
 /** 式ごとの、最後に計算し直したときの「使った定義」と「定義の行の名前」（使い回して射影し直した結果には入っていないので、これを返す） */
-const lastDefs = new Map<number, { used: string[]; name: string | null }>()
+const lastDefs = new Map<number, { used: string[]; name: string | null; ode?: string[] }>()
 
 function forget(itemId: number) {
   shapes.get(itemId)?.shape.free()
@@ -321,6 +323,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         : new Float64Array(0)
     const callPlot = (flags = req.flags & ~PLOT_LOCAL) => {
       hidden_style(hiddenStyle)
+      field_style(req.arrows?.count ?? 0, req.arrows?.unit ?? false, req.arrows?.stream ?? 0)
+      ode_init((req.odeInit ?? []).join('\n'))
       complex_coords(req.complexCoords)
       coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
       // ほかの行の定義と、この式そのもの（定義の行なら、自分の定義が要る）
@@ -449,7 +453,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         cached.ires === implicitResolution &&
         cached.thorough === thorough
       r = callPlot()
-      lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null })
+      lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null, ode: r.ode_states.split(',').filter((s) => s !== '') })
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
@@ -581,7 +585,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     geom?.free()
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
-    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
+    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, odeStates: defs.ode, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     field_mode_reset()
     forget(itemId)

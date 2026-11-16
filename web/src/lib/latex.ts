@@ -7,6 +7,8 @@
 //
 // 文字が続けて書かれた部分（例: "floor"）はそのまま残し、エンジン側の「関数名の最長一致」で読ませる。
 
+import { engineNameOf, isAccentCommand, isNameCommand } from './names.ts'
+
 /** 変換できない書き方があったときのエラー */
 export class LatexError extends Error {}
 
@@ -60,6 +62,36 @@ const SYMBOLS: Record<string, string> = {
   geqq: '>=',
   lt: '<',
   gt: '>',
+  // 否定つきの不等号は、逆の不等号（計画 M13）
+  nless: '>=',
+  ngtr: '<=',
+  nleq: '>',
+  nleqslant: '>',
+  nleqq: '>',
+  ngeq: '<',
+  ngeqslant: '<',
+  ngeqq: '<',
+  lneq: '<',
+  lneqq: '<',
+  lvertneqq: '<',
+  gneq: '>',
+  gneqq: '>',
+  gvertneqq: '>',
+  // 小さな記号（計画 M13）
+  equiv: '=',
+  bmod: '%%',
+  divides: '∣',
+  perp: '⟂',
+  parallel: '∥',
+  degree: '*(pi/180)',
+  '%': '/100',
+  star: '*',
+  bullet: '*',
+  centerdot: '*',
+  Re: ' Re ',
+  Im: ' Im ',
+  angle: ' @angle ',
+  gcd: ' gcd ',
   // 数学の記法（計画 docs/plan-math-notation.md）。計算エンジンが読む文字に置き換える
   pm: '±',
   mp: '∓',
@@ -271,6 +303,11 @@ class Converter {
         return
       }
       const a = this.arg()
+      // 共役 z^{\ast}・z^{*}（行列なら成分ごと。計算エンジンの展開の段が決める）
+      if (a.trim() === '*' || a.trim() === '∗') {
+        this.out += '^(∗)'
+        return
+      }
       // 補集合 A^{\complement}
       if (a.trim() === '∁') {
         this.out += 'ᶜ'
@@ -321,6 +358,50 @@ class Converter {
 
     // ---- コマンド ----
     const name = t.slice(1)
+    // 添字つきの最大・最小 \max_{t\in[a,b]} 項 → @max(t,a,b) 項（等分点での近似。計画 M12）
+    if (['max', 'min', 'sup', 'inf'].includes(name) && this.peek() === '_') {
+      this.i++
+      const sub = this.arg().replace(/\s+/g, '')
+      const m = sub.match(/^([A-Za-z]\w*|\{\w+\})∈[[(](.+),(.+)[\])]$/)
+      if (!m) throw new LatexError(`\\${name} の下には、t ∈ [0, 1] の形で変数と範囲を書いてください`)
+      const op = name === 'sup' ? 'max' : name === 'inf' ? 'min' : name
+      this.out += ` @${op}(${m[1].replace(/[{}]/g, '')},${m[2]},${m[3]}) `
+      return
+    }
+    if (name === 'exists' || name === 'forall') {
+      // ∃a∈[0,1], 中身 → @exists(a,0,1) 中身（行の先頭だけ）
+      const head: Token[] = []
+      let depth = 0
+      while (this.i < this.toks.length) {
+        const u = this.toks[this.i]
+        if (depth === 0 && u === ',') {
+          this.i++
+          break
+        }
+        if (u === '{' || u === '\\left') depth++
+        if (u === '}' || u === '\\right') depth--
+        head.push(u)
+        this.i++
+      }
+      const h = new Converter(head).run().replace(/\s+/g, '')
+      const m = h.match(/^([A-Za-z]\w*|\{\w+\})∈[[(](.+),(.+)[\])]$/)
+      if (!m) throw new LatexError(`${name === 'exists' ? '∃' : '∀'} の後には、a ∈ [0, 1], の形で変数と範囲を書いてください`)
+      this.out += ` @${name}(${m[1].replace(/[{}]/g, '')},${m[2]},${m[3]}) `
+      return
+    }
+    // 名前に使える文字（ギリシャ文字・文字の形の記号。計画 M13）。計算エンジンでは {alpha} の形
+    if (isNameCommand(name)) {
+      this.out += ` {${name}} `
+      return
+    }
+    // アクセントを付けた 1 文字 \hat{x}（元の文字とは別の名前）
+    if (isAccentCommand(name)) {
+      const inner = this.rawGroup().trim()
+      const n = engineNameOf(name, inner)
+      if (!n) throw new LatexError(`\\${name}{ } の中には、文字を 1 つ書いてください`)
+      this.out += ` {${n}} `
+      return
+    }
     if (FUNCTIONS.has(name)) {
       this.out += ` ${name} `
       return
@@ -332,7 +413,8 @@ class Converter {
     switch (name) {
       case 'frac':
       case 'dfrac':
-      case 'tfrac': {
+      case 'tfrac':
+      case 'cfrac': {
         const a = this.arg()
         const b = this.arg()
         const d = derivative(a, b)
@@ -399,8 +481,52 @@ class Converter {
       case 'mathbb': {
         const c = this.rawGroup(true)
         const sets: Record<string, string> = { R: 'ℝ', Z: 'ℤ', N: 'ℕ', C: 'ℂ', Q: 'ℚ' }
-        if (!(c in sets)) throw new LatexError(`\\mathbb{${c}} はまだ使えません`)
-        this.out += sets[c]
+        if (c in sets) {
+          this.out += sets[c]
+          return
+        }
+        // そのほかの文字は名前（計画 M13）
+        const n = engineNameOf('mathbb', c)
+        if (!n) throw new LatexError(`\\mathbb{${c}} はまだ使えません`)
+        this.out += ` {${n}} `
+        return
+      }
+      case 'mathcal':
+      case 'mathscr':
+      case 'mathfrak':
+      case 'mathsf':
+      case 'mathtt': {
+        const c = this.rawGroup(true)
+        const n = engineNameOf(name, c)
+        if (!n) throw new LatexError(`\\${name}{ } の中には、英字を 1 つ書いてください`)
+        this.out += ` {${n}} `
+        return
+      }
+      case 'bar':
+      case 'overline':
+        // 共役（計画 M13）
+        this.out += ` conj(${this.arg()}) `
+        return
+      case 'binom':
+      case 'dbinom':
+      case 'tbinom': {
+        const n = this.arg()
+        const k = this.arg()
+        this.out += ` nCr(${n},${k}) `
+        return
+      }
+      case 'boxed':
+        this.out += `(${this.arg()})`
+        return
+      case 'underbrace':
+      case 'overbrace': {
+        // 中身だけ読む（下・上の注釈は捨てる）
+        const body = this.arg()
+        if (this.peek() === '_' || this.peek() === '^') {
+          this.i++
+          this.rawTokens()
+        }
+        this.out += `(${body})`
         return
       }
       case 'operatorname':
@@ -411,6 +537,11 @@ class Converter {
         // 中身は名前の文字だけを取り出す。数式キーボードから入れると
         // \operatorname{\mathrm{Im}} のように命令が入れ子になることがあるため、命令名と {} を取り除く
         const s = this.rawGroup(true)
+        // 最小公倍数・最大公約数（計画 M13）
+        if (s === 'lcm' || s === 'gcd') {
+          this.out += ` ${s} `
+          return
+        }
         // 行列の演算子の名前
         if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
           this.out += ` @${s} `
@@ -493,6 +624,11 @@ class Converter {
           }
           if (name === 'Delta' && sup === null) {
             this.out += ' @lap '
+            return
+          }
+          // 下付きの無い \delta は、名前（計画 M13）
+          if (name === 'delta' && sup === null) {
+            this.out += ' {delta} '
             return
           }
           throw new LatexError(`${t} はまだ使えません（差分なら ${t}_{x} のように変数を下に書いてください）`)
@@ -582,6 +718,15 @@ class Converter {
           return
         }
         throw new LatexError(`${env} はまだ使えません`)
+      }
+      case 'dot':
+      case 'ddot':
+      case 'dddot': {
+        // 時間の導関数 \dot{x} → x'、\ddot{x} → x''（常微分方程式。計画 M9）
+        const v = this.rawGroup(true)
+        if (!/^[A-Za-z]$/.test(v)) throw new LatexError(`\\${name}{ } の中には、文字を 1 つ書いてください`)
+        this.out += v + "'".repeat(name === 'dot' ? 1 : name === 'ddot' ? 2 : 3)
+        return
       }
       case 'vec':
       case 'overrightarrow': {
@@ -1349,6 +1494,12 @@ function integralView(toks: Token[], i: number): IntegralView {
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */
 export function latexToText(latex: string): string {
+  // a ≡ b \pmod{n} は、mod(a − b, n) = 0（計画 M13）
+  const pm = latex.match(/^(.*?)\\equiv(.*?)\\pmod\s*\{(.*)\}\s*$/s) ?? latex.match(/^(.*?)\\equiv(.*?)\\pmod\s*(\S)\s*$/s)
+  if (pm) {
+    const [a, b, n] = [pm[1], pm[2], pm[3]].map((x) => new Converter(tokenize(x)).run())
+    return `mod((${a})-(${b}),${n})=0`
+  }
   // 写像の書き方 f\colon x\mapsto x^2 は、関数の定義 f(x)=x^2 と同じ
   const map = latex.match(/^\s*([A-Za-z])\s*(?:\\colon|:)\s*([A-Za-z])\s*\\mapsto(.*)$/s)
   if (map) latex = `${map[1]}\\left(${map[2]}\\right)=${map[3]}`

@@ -48,6 +48,12 @@
     /** この式だけの断面の値を決める（null なら全体の値に戻す） */
     onSlice: (name: string, value: number | null) => void
     onWalls: (on: boolean) => void
+    /** ベクトル場の矢印の数・長さをそろえるか */
+    onField?: (patch: { count?: number; unit?: boolean; stream?: number }) => void
+    /** 常微分方程式の初期値の欄を変えた（成分の番号と LaTeX） */
+    onOdeInit?: (k: number, latex: string) => void
+    /** 2D 表示か（矢印の数の既定が変わる） */
+    flatView?: boolean
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
     onLayers: (layers: number) => void
     onEdges: (on: boolean) => void
@@ -131,6 +137,9 @@
     sliceMax,
     onSlice,
     onWalls,
+    onField,
+    onOdeInit,
+    flatView = false,
     onLayers,
     onEdges,
     onRender,
@@ -217,6 +226,12 @@
     DIVISIONS.reduce((best, d, k) => (Math.abs(d - n) < Math.abs(DIVISIONS[best] - n) ? k : best), 0)
 
   /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
+  /** 初期値の欄の見出し: y' → y′(0) =（初期時刻は、範囲に 0 があれば 0、無ければ範囲の始まり） */
+  function prettyOde(st: string): string {
+    const name = st.replace(/'+$/, '')
+    return `${prettyName(name)}${'′'.repeat(st.length - name.length)}(0) =`
+  }
+
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
   /** 複素平面の点（1 + 2i、複素数のパラメータ c など）。曲線と同じく線の太さ（点の大きさ）を選べる */
   const isComplexPoint = $derived(/^複素平面の点/.test(item.kind ?? ''))
@@ -327,6 +342,8 @@
     !isComplexPlane && (/ = f\(|の値で塗り分け/.test(item.kind ?? '') || (item.complexMode ?? 'off') !== 'off'),
   )
   /** 段差の壁を描けるか（陽関数をそのまま描くときだけ） */
+  /** ベクトル場の行か（計画 M8） */
+  const isField = $derived(/ベクトル場/.test(item.kind ?? ''))
   const canWall = $derived(isExplicit && /^[^陰]* = f\(/.test(item.kind ?? '') && !/塗り分け/.test(item.kind ?? ''))
   const COMPLEX_MODES: { mode: ComplexMode; label: string }[] = [
     { mode: 'off', label: 'しない' },
@@ -544,6 +561,21 @@
         />
       </div>
     {/each}
+    {#if item.odeStates && onOdeInit}
+      <!-- 常微分方程式の初期値（計画 M9）。空欄は既定の値（状態は 1、導関数は 0）。リスト [0, 1, 2] なら何本も描く -->
+      {#each item.odeStates as st, k (st)}
+        <div class="param-range">
+          <span>{prettyOde(st)}</span>
+          <MathInput
+            small
+            value={item.ode?.init[k] ?? ''}
+            placeholder={st.endsWith("'") ? '0' : '1'}
+            label="{st} の初期値"
+            onInput={(v) => onOdeInit(k, v)}
+          />
+        </div>
+      {/each}
+    {/if}
     {#if item.param && !item.error}
       <ParamControl
         name={item.param.name}
@@ -684,6 +716,49 @@
               媒介変数を2つずつ動かした面を描いています（残りは固定）。1 等分なら、固定する値は範囲の両端だけ。
               増やすと、範囲の途中の値に固定した面（中を通る面）も描きます。
             </p>
+          {/if}
+          {#if isField && onField}
+            <!-- ベクトル場の矢印（計画 M8）。色は大きさ（色の対応表は「見せ方」と同じ） -->
+            <div class="sliders">
+              <span class="label">矢印の数</span>
+              <input
+                type="range"
+                min="4"
+                max="24"
+                step="1"
+                value={item.field?.count ?? (flatView ? 18 : 9)}
+                aria-label="各軸の矢印の数"
+                onchange={(e) => onField({ count: e.currentTarget.valueAsNumber })}
+              />
+              <span class="value">{item.field?.count ?? (flatView ? 18 : 9)}</span>
+            </div>
+            <label class="check">
+              <input type="checkbox" checked={item.field?.unit ?? false} onchange={(e) => onField({ unit: e.currentTarget.checked })} />
+              矢印の長さをそろえる（向きだけを見る。色は大きさ）
+            </label>
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={(item.field?.stream ?? 0) > 0}
+                onchange={(e) => onField({ stream: e.currentTarget.checked ? 4 : 0 })}
+              />
+              流線を描く（格子の点から、場に沿って進む曲線）
+            </label>
+            {#if (item.field?.stream ?? 0) > 0}
+              <div class="sliders">
+                <span class="label">流線の始点</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="8"
+                  step="1"
+                  value={item.field?.stream ?? 4}
+                  aria-label="流線の始点の各軸の数"
+                  onchange={(e) => onField({ stream: e.currentTarget.valueAsNumber })}
+                />
+                <span class="value">{item.field?.stream}</span>
+              </div>
+            {/if}
           {/if}
           {#if canWall}
             <label class="check">
