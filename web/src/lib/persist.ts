@@ -69,6 +69,8 @@ export interface SavedState {
   regions?: Record<string, string>
   /** グラフに描いている積分の範囲の名前（古い保存データには無い） */
   regionsShown?: string[]
+  /** 積分を描いている式の番号（items の中の位置。古い保存データには無い） */
+  integralsShown?: number[]
   /** マウスの操作モード（古い保存データには無い） */
   controlMode?: 'A' | 'B'
   /** 式の回転の標準が「この式だけ」になった後の保存データか（古いものは、グループに入っていない式が全体の回転） */

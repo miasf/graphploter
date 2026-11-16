@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
@@ -215,6 +215,11 @@
         const shown = items.flatMap((it) => (it.regionName ? [it.regionName] : []))
         return shown.length > 0 ? shown : undefined
       })(),
+      integralsShown: (() => {
+        const rows = listed()
+        const shown = items.flatMap((it) => (it.integralOf === undefined ? [] : [rows.findIndex((x) => x.id === it.integralOf)])).filter((k) => k >= 0)
+        return shown.length > 0 ? shown : undefined
+      })(),
       regions: (() => {
         const used = new Set(items.flatMap((it) => regionsUsed(it.latex).map((r) => r.name)))
         const kept = Object.entries(regions).filter(([name, v]) => used.has(name) && v.trim() !== '')
@@ -262,7 +267,9 @@
     coordSystems = (s.coordSystems ?? []).map((c) => ({ ...c, morph: Math.min(1, Math.max(0, Number(c.morph) || 0)) }))
     nextCoordId = Math.max(0, ...coordSystems.map((c) => c.id)) + 1
     playingMorph = []
+    const sources = (s.integralsShown ?? []).flatMap((k) => (items[k] ? [items[k]] : []))
     for (const name of s.regionsShown ?? []) showRegion(name)
+    for (const it of sources) showIntegral(it)
   }
 
   // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
@@ -1002,7 +1009,7 @@
     const out: Row[] = []
     const seen = new Set<number>()
     items.forEach((item, index) => {
-      if (item.regionName) return // 積分の範囲を描くための行は、一覧に出さない
+      if (isAux(item)) return // 積分の範囲・積分を描くための行は、一覧に出さない
       const f = item.folder ? folders.find((f) => f.id === item.folder) : undefined
       if (f && !seen.has(f.id)) {
         seen.add(f.id)
@@ -1084,7 +1091,12 @@
     if (item.param) paramsChanged([item.param.name])
     if (item.def) defsChanged([item.def])
     lastDefSource.delete(item.id)
-    if (!item.regionName) pruneRegionItems()
+    if (!isAux(item)) {
+      pruneRegionItems()
+      // この式の積分を描いていたら、一緒に消す
+      const view = integralItem(item)
+      if (view) removeItem(view)
+    }
   }
 
   /** 「a のスライダーを追加」: その式のすぐ上に a = 1 の行を足す */
@@ -1121,6 +1133,7 @@
     }
     setRegions(regions)
     pruneRegionItems()
+    updateIntegral(item)
     schedule(item)
   }
 
@@ -1128,12 +1141,15 @@
   /** 範囲の名前 → 範囲（LaTeX）。同じ名前は、どの式でも同じ範囲 */
   let regions = $state<Record<string, string>>({})
 
-  /** 式の一覧に出す行（積分の範囲を描くための行を除く） */
-  const listed = () => items.filter((it) => !it.regionName)
+  /** 積分の範囲・積分を描くための行（式の一覧に出さず、保存もしない。一覧の最後に置く） */
+  const isAux = (it: PlotItem) => it.regionName !== undefined || it.integralOf !== undefined
+
+  /** 式の一覧に出す行（積分の範囲・積分を描くための行を除く） */
+  const listed = () => items.filter((it) => !isAux(it))
 
   /** 式を一覧の最後に足す（積分の範囲を描くための行は、いつも最後に置く） */
   function pushItem(it: PlotItem) {
-    const k = items.findIndex((x) => x.regionName)
+    const k = items.findIndex(isAux)
     if (k < 0) items.push(it)
     else items.splice(k, 0, it)
   }
@@ -1176,9 +1192,74 @@
       schedule(shown, 300)
     }
     for (const it of items) {
-      if (regionsUsed(it.latex).some((r) => r.name === name)) schedule(it, 300)
+      if (!regionsUsed(it.latex).some((r) => r.name === name)) continue
+      schedule(it, 300)
+      updateIntegral(it, 300)
     }
   }
+
+  // ---- 積分を描く（被積分関数を、積分する範囲の上に描く）----
+  /** 式 item の積分を描くための行（描いていなければ undefined） */
+  const integralItem = (item: PlotItem) => items.find((it) => it.integralOf === item.id)
+
+  /** 積分を描くための行 view の中身を、元の式 item から作り直す */
+  function fillIntegral(view: PlotItem, item: PlotItem) {
+    const d = integralDisplay(item.latex)
+    const failed = d === null ? '積分がありません' : 'error' in d ? d.error : undefined
+    const ok = d !== null && !('error' in d) ? d : null
+    const field = ok?.field ?? false
+    const wasField = view.hidden?.mode === 'field'
+    view.latex = ok?.latex ?? ''
+    view.auxNote = ok?.note
+    view.auxError = failed
+    // 3 重積分は、領域の中を値の色で塗る（陰関数の F の値の伝達関数）。それ以外は半透明の面
+    if (field !== wasField || view.hidden === undefined) {
+      view.hidden = field ? { ...DEFAULT_HIDDEN, mode: 'field', opacity: 'flat', colormap: 'viridis', density: 0.6, lit: false } : { ...DEFAULT_HIDDEN }
+      view.opacity = field ? 1 : 0.55
+    }
+  }
+
+  /** 式 item の積分をグラフに描く */
+  function showIntegral(item: PlotItem) {
+    if (integralItem(item) || isAux(item)) return
+    const view = newItem('', { integralOf: item.id, vertical: false })
+    fillIntegral(view, item)
+    items.push(view)
+    schedule(items[items.length - 1], 0)
+  }
+
+  /** 「積分を描く」ボタン: 描く・消す */
+  function toggleIntegral(item: PlotItem) {
+    const view = integralItem(item)
+    if (view) {
+      removeItem(view)
+      return
+    }
+    showIntegral(item)
+    // 積分だけの式（値が 1 つの数）は、高さがその値の平面として描かれていて、積分の図を隠す（∫_0^{2π} sin x dx = 0 の平面は、
+    // 面積の図とちょうど重なる）。図を出すときに、平面のほうを非表示にする（● でいつでも戻せる）
+    if (item.visible && /^\s*\\(?:o?i{1,3}nt|intop|smallint)(?![A-Za-z])/.test(item.latex)) toggle(item)
+  }
+
+  /** 元の式・範囲の欄が書き換えられたとき: 描いている積分を作り直す（積分が無くなったら消す） */
+  function updateIntegral(item: PlotItem, delay = 200) {
+    const view = integralItem(item)
+    if (!view) return
+    if (integralDisplay(item.latex) === null) {
+      removeItem(view)
+      return
+    }
+    fillIntegral(view, item)
+    if (view.latex === '') viewer?.removePlot(view.id)
+    schedule(view, delay)
+  }
+
+  /** 式の id → 描いている積分の色・説明・誤り（描いていない式は入れない） */
+  const integralViews = $derived(
+    Object.fromEntries(
+      items.flatMap((it) => (it.integralOf === undefined ? [] : [[it.integralOf, { color: it.color, note: it.auxNote, error: it.auxError ?? it.error }]])),
+    ) as Record<number, { color: string; note?: string; error?: string }>,
+  )
 
   function setColor(item: PlotItem, color: string) {
     item.color = color
@@ -1486,7 +1567,7 @@
   })
 
   /** グラフを描く式（パラメータの行でないもの） */
-  const plotItems = $derived(items.filter((it) => !it.param && !it.regionName))
+  const plotItems = $derived(items.filter((it) => !it.param && !isAux(it)))
 
   // ---- 座標系（計画 9 章の S37） ----
 
@@ -2124,6 +2205,8 @@
             onRegion={setRegion}
             {regionViews}
             onRegionShow={toggleRegion}
+            integralView={integralViews[item.id]}
+            onIntegralShow={() => toggleIntegral(item)}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}

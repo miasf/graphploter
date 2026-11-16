@@ -642,54 +642,11 @@ class Converter {
    * 中身の中の積分（入れ子）の「d + 文字」は、その積分のものとして飛ばす（∫∫ … dy dx の内側の dy を、外側の物と取り違えない）
    */
   private integrand(multi: number): { body: string; vars: string[]; vector: boolean } {
-    const start = this.i
-    let depth = 0
-    let pending = 0
-    for (let p = this.i; p < this.toks.length; p++) {
-      const t2 = this.toks[p]
-      if (t2 === '{' || t2 === '\\left') depth++
-      else if (t2 === '}' || t2 === '\\right') {
-        if (depth === 0) break
-        depth--
-      }
-      if (depth !== 0) continue
-      if (t2 === '\\int' || t2 === '\\intop' || t2 === '\\smallint') pending += 1
-      else if (t2 === '\\iint') pending += 2
-      else if (t2 === '\\iiint') pending += 3
-      const d = differentialAt(this.toks, p)
-      if (!d) continue
-      if (pending > 0) {
-        pending--
-        p += d.len
-        continue
-      }
-      // F · dr の形なら、中身の最後の · は内積の印（中身に入れない）
-      let end = p
-      while (end > start && SPACES.has(this.toks[end - 1])) end--
-      if (d.vector) {
-        if (this.toks[end - 1] !== '\\cdot') throw new LatexError('ベクトル場の積分は F \\cdot d\\mathbf{r} の形で書いてください')
-        end--
-      }
-      const body = new Converter(this.toks.slice(start, end)).run()
-      if (body === '') throw new LatexError('積分する式を書いてください')
-      if (d.vector) {
-        this.i = p + d.len + 1
-        return { body, vars: [d.v], vector: true }
-      }
-      // 続く「d + 文字」をまとめて読む（間の \, などの空白は飛ばす）
-      const vars: string[] = []
-      let q = p
-      for (;;) {
-        while (SPACES.has(this.toks[q] ?? '')) q++
-        const e = differentialAt(this.toks, q)
-        if (!e || vars.length >= Math.max(multi, 3)) break
-        vars.push(e.v)
-        q += e.len + 1
-      }
-      this.i = q
-      return { body, vars, vector: false }
-    }
-    throw new LatexError('積分の変数を dx のように書いてください')
+    const span = integrandSpan(this.toks, this.i, multi)
+    const body = new Converter(this.toks.slice(this.i, span.end)).run()
+    if (body === '') throw new LatexError('積分する式を書いてください')
+    this.i = span.next
+    return { body, vars: span.vars, vector: span.vector }
   }
 
   /** '{' を読んだ直後から、対応する '}' までを変換して返す */
@@ -738,6 +695,53 @@ function differentialAt(toks: Token[], p: number): { v: string; len: number; vec
     return { v: toks[p + 4], len: 4 }
   }
   return null
+}
+
+/**
+ * 積分の中身の範囲。toks[start..end) が中身、vars はその後の「d + 文字」の変数、next は読み終わった位置。
+ * 中身は、同じ深さで最初に出てくる「d + 文字」の手前まで。中身の中の積分（入れ子）の「d + 文字」は、その積分のものとして飛ばす
+ */
+function integrandSpan(toks: Token[], start: number, multi: number): { end: number; vars: string[]; vector: boolean; next: number } {
+  let depth = 0
+  let pending = 0
+  for (let p = start; p < toks.length; p++) {
+    const t2 = toks[p]
+    if (t2 === '{' || t2 === '\\left') depth++
+    else if (t2 === '}' || t2 === '\\right') {
+      if (depth === 0) break
+      depth--
+    }
+    if (depth !== 0) continue
+    if (t2 === '\\int' || t2 === '\\intop' || t2 === '\\smallint') pending += 1
+    else if (t2 === '\\iint') pending += 2
+    else if (t2 === '\\iiint') pending += 3
+    const d = differentialAt(toks, p)
+    if (!d) continue
+    if (pending > 0) {
+      pending--
+      p += d.len
+      continue
+    }
+    // F · dr の形なら、中身の最後の · は内積の印（中身に入れない）
+    let end = p
+    while (end > start && SPACES.has(toks[end - 1])) end--
+    if (d.vector) {
+      if (toks[end - 1] !== '\\cdot') throw new LatexError('ベクトル場の積分は F \\cdot d\\mathbf{r} の形で書いてください')
+      return { end: end - 1, vars: [d.v], vector: true, next: p + d.len + 1 }
+    }
+    // 続く「d + 文字」をまとめて読む（間の \, などの空白は飛ばす）
+    const vars: string[] = []
+    let q = p
+    for (;;) {
+      while (SPACES.has(toks[q] ?? '')) q++
+      const e = differentialAt(toks, q)
+      if (!e || vars.length >= Math.max(multi, 3)) break
+      vars.push(e.v)
+      q += e.len + 1
+    }
+    return { end, vars, vector: false, next: q }
+  }
+  throw new LatexError('積分の変数を dx のように書いてください')
 }
 
 /**
@@ -944,6 +948,303 @@ export function regionDisplayLatex(def: string): string | null {
   }
   const re = (ts: Token[]) => text(ts.map((t) => rename.get(t) ?? t))
   return set(re(point), re(cond))
+}
+
+// ---- 積分を描く（被積分関数を、積分する範囲の上に描く）----
+// 計算エンジンには手を入れず、積分の式から「描くための式」（LaTeX）を作って、ふつうの式と同じ道で描く
+
+/** 積分を描くための式 */
+export interface IntegralView {
+  /** 描くための式（LaTeX） */
+  latex: string
+  /** 何を描いているかの説明 */
+  note: string
+  /** 3 重積分: 被積分関数の値を、領域の中の色（伝達関数）で描く */
+  field?: boolean
+}
+
+/** 式に積分記号があるか（「積分を描く」のボタンを出すかどうか） */
+export function hasIntegral(latex: string): boolean {
+  return /\\(?:o?i{1,3}nt|intop|smallint)(?![A-Za-z])/.test(latex)
+}
+
+/** トークンを LaTeX に戻す（コマンドの後に空白を入れる） */
+const joinToks = (ts: Token[]) => ts.map((t) => (/^\\[A-Za-z]+$/.test(t) ? `${t} ` : t)).join('')
+
+/** 同じ深さの区切り sep で分ける（括弧・{ }・\left \right の中では分けない） */
+function splitTop(toks: Token[], sep: (t: Token) => boolean): Token[][] {
+  const out: Token[][] = [[]]
+  let depth = 0
+  for (let k = 0; k < toks.length; k++) {
+    const t = toks[k]
+    if (t === '\\left' || t === '\\right') {
+      depth += t === '\\left' ? 1 : -1
+      out[out.length - 1].push(t)
+      if (k + 1 < toks.length) out[out.length - 1].push(toks[++k]) // 括弧そのものは深さに数えない
+      continue
+    }
+    if (t === '{' || t === '(' || t === '[') depth++
+    else if (t === '}' || t === ')' || t === ']') depth--
+    if (depth === 0 && sep(t)) out.push([])
+    else out[out.length - 1].push(t)
+  }
+  return out
+}
+
+/** 外側の括弧 \left( … \right)・( … ) を 1 組外す */
+function stripParens(toks: Token[]): Token[] {
+  const pairs: [Token[], Token[]][] = [
+    [['\\left', '('], ['\\right', ')']],
+    [['('], [')']],
+  ]
+  for (const [open, close] of pairs) {
+    if (toks.length < open.length + close.length) continue
+    if (!open.every((t, k) => toks[k] === t) || !close.every((t, k) => toks[toks.length - close.length + k] === t)) continue
+    // 先頭の括弧が最後の括弧と対になっているか（(a)+(b) を外さない）
+    let depth = 0
+    let ok = true
+    for (let k = 0; k < toks.length - 1 && ok; k++) {
+      if (toks[k] === '(') depth++
+      else if (toks[k] === ')') depth--
+      if (depth === 0 && k >= open.length - 1) ok = false
+    }
+    if (ok) return toks.slice(open.length, toks.length - close.length)
+  }
+  return toks
+}
+
+/** 積分記号の後の下付き・上付き（無ければ null）と、その後の位置 */
+function limitsAt(toks: Token[], i: number): { sub: Token[] | null; sup: Token[] | null; k: number } {
+  const group = (k: number): [Token[], number] => {
+    if (toks[k] !== '{') return [toks[k] === undefined ? [] : [toks[k]], k + 1]
+    let depth = 1
+    let j = k + 1
+    for (; j < toks.length && depth > 0; j++) {
+      if (toks[j] === '{') depth++
+      else if (toks[j] === '}') depth--
+    }
+    return [toks.slice(k + 1, j - 1), j]
+  }
+  let k = i + 1
+  let sub: Token[] | null = null
+  let sup: Token[] | null = null
+  while (toks[k] === '_' || toks[k] === '^' || toks[k] === '\\limits' || toks[k] === '\\nolimits') {
+    const t = toks[k++]
+    if (t === '_') [sub, k] = group(k)
+    else if (t === '^') [sup, k] = group(k)
+  }
+  return { sub, sup, k }
+}
+
+/** 積分する範囲: 変数の組と条件（{(x, y) | 条件}）か、点を式で書いた集合（{(r cos θ, r sin θ) | 範囲}） */
+type IntegralRegion = { names: string[]; cond: Token[] } | { comps: Token[][]; params: Token[]; cond: Token[] }
+
+/** 積分記号の下の範囲（名前なら範囲の欄の中身）を読む。vars は dx\,dy の変数（区間の直積の変数の名前に使う） */
+function integralRegion(sub: Token[], vars: string[]): IntegralRegion {
+  let toks = sub
+  const name = regionNameOf(sub)
+  if (name !== null) {
+    toks = tokenize(REGIONS[name] ?? '')
+    if (toks.length === 0 || toks.includes('\\placeholder')) throw new LatexError(`${regionLabel(name)} の範囲を、下の欄に書いてください`)
+  }
+  const fenced = (open: Token[], close: Token[]) => open.every((t, k) => toks[k] === t) && close.every((t, k) => toks[toks.length - close.length + k] === t)
+  const set = fenced(['\\left', '\\{'], ['\\right', '\\}']) ? 2 : fenced(['\\{'], ['\\}']) || fenced(['\\lbrace'], ['\\rbrace']) ? 1 : 0
+  if (set === 0) {
+    // 区間の直積 [a,b]×[c,d]。変数は dx\,dy の順（dA・dV なら x, y, z）
+    const boxes = splitTop(toks, (t) => t === '\\times')
+    const names = vars.length === boxes.length && vars.every((v) => /^[a-z]$/.test(v)) ? vars : ['x', 'y', 'z'].slice(0, boxes.length)
+    const cond: Token[] = []
+    for (const [k, box] of boxes.entries()) {
+      const inner = box[0] === '\\left' ? box.slice(2, -2) : box.slice(1, -1)
+      const ends = splitTop(inner, (t) => t === ',')
+      if ((box[0] === '\\left' ? box[1] : box[0]) !== '[' || ends.length !== 2 || ends.some((e) => e.length === 0) || k > 2) {
+        throw new LatexError('積分する範囲は、{(x,y) | 条件} か [0,1]×[0,2] の形で書いてください')
+      }
+      if (k > 0) cond.push(',')
+      cond.push(...ends[0], '\\le', names[k], '\\le', ...ends[1])
+    }
+    return { names, cond }
+  }
+  const inner = toks.slice(set, toks.length - set)
+  const parts = splitTop(inner, (t) => t === '\\mid' || t === '|' || t === ':' || t === '\\vert' || t === '\\colon')
+  if (parts.length < 2 || parts[0].length === 0 || parts[1].length === 0) throw new LatexError('積分する範囲の集合は {(x,y) | 条件} の形で書いてください')
+  // 2 本目より後の | は、条件の中の絶対値。そのまま戻す
+  const cond = parts.slice(1).reduce((a, b) => [...a, '|', ...b])
+  const comps = splitTop(stripParens(parts[0]), (t) => t === ',')
+  if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) return { names: comps.map((c) => c[0]), cond }
+  // 媒介変数は、条件に出てくる文字のうち、点の式にも出てくるもの（点の式に出てくる順）
+  const isName = (t: Token) => (/^[A-Za-z]$/.test(t) && t !== 'e' && t !== 'i' && t !== 'd') || PARAM_GREEK.has(t)
+  const inCond = new Set(cond.filter(isName))
+  const params = [...new Set(comps.flat().filter((t) => inCond.has(t)))]
+  return { comps, params, cond }
+}
+
+/** 中身の x, y, z に点の成分を入れる（\operatorname{max} などの名前の中の文字は変えない） */
+function substitute(body: Token[], comps: Token[][]): Token[] {
+  const out: Token[] = []
+  for (let k = 0; k < body.length; k++) {
+    const t = body[k]
+    if ((t === '\\operatorname' || t === '\\mathrm' || t === '\\text' || t === '\\mathbf') && body[k + 1] === '{') {
+      const end = body.indexOf('}', k)
+      out.push(...body.slice(k, end < 0 ? body.length : end + 1))
+      k = end < 0 ? body.length : end
+      continue
+    }
+    const c = comps['xyz'.indexOf(t)]
+    if (t.length === 1 && c) out.push('\\left', '(', ...c, '\\right', ')')
+    else out.push(t)
+  }
+  return out
+}
+
+/**
+ * 式の最初の積分を、グラフに描くための式にする。積分が無ければ null、描けない形なら error（理由）。
+ * - 1 変数の定積分: 曲線と軸の間の面積（高さ 0 の面）
+ * - 2 重積分（累次積分・領域の上の積分）: 領域の上の、高さが被積分関数の立体（体積が積分の値）。
+ *   範囲が変数の式（1 ≤ x ≤ y）でも、条件をそのまま不等式として描くので、そのまま描ける
+ * - 3 重積分: 領域の中を、被積分関数の値の色で塗る
+ * - 平面の曲線の上の線積分: 曲線の上に立てた、高さが被積分関数の幕（F · dr は接線の成分）
+ * - 曲面の上の面積分: 曲面を、法線の向きに被積分関数の分だけ厚くした立体（F · dS は法線の成分）
+ */
+export function integralDisplay(latex: string): IntegralView | { error: string } | null {
+  if (!hasIntegral(latex)) return null
+  const toks = tokenize(latex)
+  const i = toks.findIndex((t) => INTEGRALS.has(t))
+  if (i < 0) return null
+  try {
+    return integralView(toks, i)
+  } catch (e) {
+    if (e instanceof LatexError) return { error: e.message }
+    throw e
+  }
+}
+
+function integralView(toks: Token[], i: number): IntegralView {
+  const multi = toks[i] === '\\iint' || toks[i] === '\\oiint' ? 2 : toks[i] === '\\iiint' ? 3 : 1
+  const head = limitsAt(toks, i)
+  let span = integrandSpan(toks, head.k, multi)
+  let body = toks.slice(head.k, span.end)
+  let region: IntegralRegion
+  if (head.sub !== null && head.sup !== null) {
+    // 上下の端のある積分（入れ子なら累次積分）: 外側の変数から順に、範囲を条件にする
+    const names: string[] = []
+    const cond: Token[] = []
+    let lim = head
+    for (;;) {
+      if (span.vector || lim.sub === null || lim.sup === null || lim.sub.length === 0 || lim.sup.length === 0) throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
+      if (names.length > 0) cond.push(',')
+      names.push(span.vars[0])
+      cond.push(...lim.sub, '\\le', span.vars[0], '\\le', ...lim.sup)
+      // 中身が丸ごと、上下の端のある積分なら、その中へ進む
+      if (!INTEGRALS.has(body[0]) || body[0] !== '\\int') break
+      const inner = limitsAt(body, 0)
+      if (inner.sub === null || inner.sup === null) break
+      let innerSpan
+      try {
+        innerSpan = integrandSpan(body, inner.k, 1)
+      } catch {
+        break
+      }
+      let rest = innerSpan.next
+      while (SPACES.has(body[rest] ?? '')) rest++
+      if (rest < body.length || innerSpan.vector) break
+      lim = inner
+      span = innerSpan
+      body = body.slice(inner.k, innerSpan.end)
+    }
+    region = { names, cond }
+  } else if (head.sub !== null) {
+    region = integralRegion(head.sub, span.vars)
+  } else {
+    throw new LatexError('不定積分は描けません（範囲のある積分を描きます）')
+  }
+  if (body.length === 0) throw new LatexError('積分する式を書いてください')
+  const paren = (ts: Token[] | string) => `\\left(${typeof ts === 'string' ? ts : joinToks(ts)}\\right)`
+  const set = (point: string, cond: string) => `\\left\\{${point}\\mid ${cond}\\right\\}`
+
+  if ('names' in region) {
+    const { names, cond } = region
+    if (span.vector) throw new LatexError('F · dr・F · dS の積分は、曲線・曲面を {(cos t, sin t) | 0 ≤ t ≤ 2π} の形で書いたものを描けます')
+    if (new Set(names).size !== names.length) throw new LatexError('積分の変数の名前が重なっています')
+    // 積分の変数でない座標 x, y, z が残っていると、1 つの図形にならない（∫_0^x … dt は x ごとに違う図形）
+    const used = new Set([...body, ...cond].filter((t) => /^[A-Za-z]$/.test(t)))
+    const free = ['x', 'y', 'z'].find((n) => used.has(n) && !names.includes(n))
+    if (free) throw new LatexError(`範囲か中身に、積分の変数でない ${free} があるので描けません（${free} が数なら描けます）`)
+    /** 積分の変数でも式の中の文字でもない、足す座標の名前 */
+    const extra = ['z', 'y', 'x', 'w', 'h', 'k', 'q', 'p'].filter((n) => !names.includes(n) && !used.has(n))
+    const f = joinToks(body)
+    const between = (h: string) => `\\min\\left(0,${f}\\right)\\le ${h}\\le\\max\\left(0,${f}\\right)`
+    if (names.length === 1) {
+      const [h, k] = [extra.find((n) => n !== 'z') ?? extra[0], extra.find((n) => n === 'z') ?? extra[1]]
+      return {
+        latex: set(paren(`${names[0]},${h},${k}`), `${joinToks(cond)},${between(h)},${k}=0`),
+        note: '曲線と軸の間（面積が積分の値。軸より下は負）',
+      }
+    }
+    if (names.length === 2) {
+      return {
+        latex: set(paren(`${names.join(',')},${extra[0]}`), `${joinToks(cond)},${between(extra[0])}`),
+        note: '領域の上の、高さが被積分関数の立体（体積が積分の値。高さ 0 より下は負）',
+      }
+    }
+    if (names.length === 3) {
+      // 値を色で塗る描き方（陰関数の F の値）は、名前を読み替えないので、変数を x, y, z に直す
+      const to = new Map(names.map((n, k) => [n, 'xyz'[k]]))
+      const re = (ts: Token[]) => joinToks(ts.map((t) => to.get(t) ?? t))
+      return {
+        latex: `\\begin{cases}${re(body)}&${re(cond)}\\end{cases}=0`,
+        note: '領域の中を、被積分関数の値の色で塗る（明るい色ほど値が大きい）',
+        field: true,
+      }
+    }
+    throw new LatexError('4 重以上の積分は描けません')
+  }
+
+  const { comps, params, cond } = region
+  const dim = comps.length
+  if (params.length === 0) throw new LatexError('範囲の条件に、媒介変数の範囲（0 ≤ t ≤ 2π など）を書いてください')
+  if (params.length === 3) throw new LatexError('媒介変数 3 つの立体の上の積分は、まだ描けません')
+  if (params.length > 3 || dim < 2 || dim > 3) throw new LatexError('この形の範囲の上の積分は描けません')
+  if (params.length === 1 && dim === 3) throw new LatexError('空間の曲線の上の積分は、まだ描けません（平面の曲線なら、高さが被積分関数の幕を描けます）')
+  // 媒介変数を、計算エンジンが読める u・v・t に付け替える（足す 1 つは、残った名前）
+  // 曲線の幕は媒介変数 2 つの曲面なので u・v（t と u を混ぜると、計算エンジンは 3 つの媒介変数の立体として読む）
+  const targets = params.length === 1 ? ['u', 'v'] : ['u', 'v', 't']
+  const free = targets.filter((n) => !params.includes(n))
+  const rename = new Map<Token, Token>()
+  for (const p of params) {
+    if (!targets.includes(p)) rename.set(p, free.shift()!)
+  }
+  const s = free.shift()!
+  const r = paren(comps.map(joinToks).join(','))
+  /** 被積分関数に点を入れたもの。F だけ（定義した関数の名前）なら F(点) */
+  const value = body.length === 1 && /^[A-Za-z]$/.test(body[0]) && span.vector ? `${body[0]}${r}` : paren(substitute(body, comps))
+  const range = `${joinToks(cond)},0\\le ${s}\\le 1`
+  const finish = (latex: string) => joinToks(tokenize(latex).map((t) => rename.get(t) ?? t))
+  if (params.length === 1) {
+    // 平面の曲線: 高さが被積分関数の幕。F · dr は接線の向きの成分 F · r′ / |r′|
+    const d = `\\left(\\frac{d}{d${joinToks([params[0]])}}${r}\\right)`
+    const height = span.vector ? `\\frac{${value}\\cdot ${d}}{\\left|${d}\\right|}` : value
+    return {
+      latex: finish(set(paren(`${comps.map(joinToks).join(',')},${s}${height}`), range)),
+      note: span.vector ? '曲線の上の幕（高さは F の接線の向きの成分。面積が積分の値）' : '曲線の上の幕（高さが被積分関数。面積が積分の値）',
+    }
+  }
+  if (dim === 2) {
+    if (span.vector) throw new LatexError('平面の領域の上の F · dS は描けません')
+    return {
+      latex: finish(set(paren(`${comps.map(joinToks).join(',')},${s}${value}`), range)),
+      note: '領域の上の、高さが被積分関数の立体（体積が積分の値）',
+    }
+  }
+  // 曲面: 法線 n = r_u × r_v / |r_u × r_v| の向きに、被積分関数の分だけ厚くする。F · dS は法線の向きの成分 F · n
+  const du = (p: Token) => `\\left(\\frac{\\partial}{\\partial ${joinToks([p])}}${r}\\right)`
+  const cross = `${du(params[0])}\\times ${du(params[1])}`
+  const normal = `\\frac{${cross}}{\\left|${cross}\\right|}`
+  const thick = span.vector ? paren(`${value}\\cdot ${paren(normal)}`) : value
+  return {
+    latex: finish(set(`${r}+${s}${thick}${normal}`, range)),
+    note: span.vector ? '曲面を、法線の向きに F の法線の成分だけ厚くした立体（体積が積分の値）' : '曲面を、法線の向きに被積分関数の分だけ厚くした立体（体積が積分の値）',
+  }
 }
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */

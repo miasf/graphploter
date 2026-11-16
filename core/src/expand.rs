@@ -1280,21 +1280,35 @@ impl Expander<'_> {
         for order in permutations(&vars) {
             let mut used = vec![false; pairs.len()];
             let mut bounds: Vec<(Vec<Expr>, Vec<Expr>)> = vec![(Vec::new(), Vec::new()); order.len()];
+            // 内側の変数の範囲「下の端 ≤ 上の端」から決まる、外側の変数の条件（1 ≤ x ≤ y なら 1 ≤ y）。
+            // 外側の変数に範囲の端が書かれていないとき（1 ≤ x ≤ y, y ≤ 3 の y の下の端）だけ使う
+            let mut implied: Vec<(Expr, Expr)> = Vec::new();
             for i in (0..order.len()).rev() {
                 let v = &order[i];
                 let inner = &order[i..];
+                // 反対側が v と内側の変数を使わない
+                let free = |e: &Expr| !inner.iter().any(|w| e.uses_var(w));
                 for (k, (l, _, r)) in pairs.iter().enumerate() {
                     if used[k] {
                         continue;
                     }
-                    // 反対側が v と内側の変数を使わない
-                    let free = |e: &Expr| !inner.iter().any(|w| e.uses_var(w));
                     if is_var(r, v) && free(l) {
                         bounds[i].0.push(l.clone());
                         used[k] = true;
                     } else if is_var(l, v) && free(r) {
                         bounds[i].1.push(r.clone());
                         used[k] = true;
+                    }
+                }
+                if bounds[i].0.is_empty() {
+                    bounds[i].0.extend(implied.iter().filter(|(l, r)| is_var(r, v) && free(l)).map(|(l, _)| l.clone()));
+                }
+                if bounds[i].1.is_empty() {
+                    bounds[i].1.extend(implied.iter().filter(|(l, r)| is_var(l, v) && free(r)).map(|(_, r)| r.clone()));
+                }
+                for lo in &bounds[i].0 {
+                    for hi in &bounds[i].1 {
+                        implied.push((lo.clone(), hi.clone()));
                     }
                 }
             }
