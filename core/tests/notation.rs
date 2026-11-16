@@ -701,3 +701,117 @@ fn finite_sets_and_big_unions() {
     // ⋂: 3 つの半空間の共通部分
     assert_eq!(mesh("@bigcap(k; k ∈ ⦃0, 1⦄) (x + k ≥ 0)", "", &[]), mesh("x + 0 ≥ 0 ∧ x + 1 ≥ 0", "", &[]));
 }
+
+// ---- M6: ベクトルと行列の計算 ----
+
+/// 定義を入れたうえでの、パラメータの無い式の値
+fn value_with(src: &str, defs: &str) -> f64 {
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse(defs, &Default::default()));
+    graph_core::equation::eval_constant(src).unwrap_or_else(|e| panic!("{src}: {e}"))
+}
+
+#[test]
+fn matrix_products_and_determinants() {
+    // ⟦1,2;3,4⟧ ⟦5,6;7,8⟧ = ⟦19,22;43,50⟧
+    let ab = "(⟦1,2;3,4⟧ ⟦5,6;7,8⟧)";
+    let want = [[19.0, 22.0], [43.0, 50.0]];
+    for (i, row) in want.iter().enumerate() {
+        for (j, w) in row.iter().enumerate() {
+            let e_i = if i == 0 { "⟦1,0⟧" } else { "⟦0,1⟧" };
+            let e_j = if j == 0 { "(1,0)" } else { "(0,1)" };
+            assert_eq!(value(&format!("{e_i} {ab} {e_j}")), *w);
+        }
+    }
+    assert_eq!(value("@det(⟦1,2;3,4⟧)"), -2.0);
+    assert_eq!(value("abs(⟦1,2;3,4⟧)"), -2.0);
+    assert_eq!(value("@tr(⟦1,2;3,4⟧)"), 5.0);
+    // 逆行列 ⟦-2, 1; 1.5, -0.5⟧
+    assert_eq!(value("⟦1,0⟧ ⟦1,2;3,4⟧^(-1) (1,0)"), -2.0);
+    assert_eq!(value("⟦0,1⟧ ⟦1,2;3,4⟧^(-1) (1,0)"), 1.5);
+    assert_eq!(value("⟦0,1⟧ @inv(⟦1,2;3,4⟧) (0,1)"), -0.5);
+    // 外積・内積・ノルム・なす角
+    assert_eq!(value("((1,2,3)×(4,5,6))(1,0,0)"), -3.0);
+    assert_eq!(value("@cross((1,2,3),(4,5,6)) (0,1,0)"), 6.0);
+    assert_eq!(value("@cross((1,2,3),(4,5,6)) (0,0,1)"), -3.0);
+    assert_eq!(value("(1,2,3)(4,5,6)"), 32.0);
+    assert_eq!(value("@dot((1,2,3),(4,5,6))"), 32.0);
+    assert_eq!(value("@norm((3,4))"), 5.0);
+    assert!((value("@angle((1,0),(0,2))") - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    // 転置・べき
+    assert_eq!(value("(1,2,3)^T (4,5,6)"), 32.0);
+    assert_eq!(value("⟦1,0⟧ ⟦1,2;3,4⟧ᵀ (0,1)"), 3.0);
+    assert_eq!(value("@tr(⟦1,2;3,4⟧^3)"), value("@tr(⟦1,2;3,4⟧ ⟦1,2;3,4⟧ ⟦1,2;3,4⟧)"));
+    assert_eq!(value("@det(⟦1,2;3,4⟧^0)"), 1.0);
+    assert_eq!(value("@det(⟦2,i;0,1⟧^†)"), 2.0);
+}
+
+#[test]
+fn determinant_5x5_matches_lu() {
+    // 決まった乱数の 5×5 の行列で、余因子展開と数値の LU を比べる
+    let mut seed = 12345u64;
+    let mut next = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as f64 / (1u64 << 31) as f64) * 4.0 - 2.0
+    };
+    let n = 5;
+    let a: Vec<Vec<f64>> = (0..n).map(|_| (0..n).map(|_| (next() * 100.0).round() / 100.0).collect()).collect();
+    let src = format!("@det(⟦{}⟧)", a.iter().map(|r| r.iter().map(|v| format!("({v})")).collect::<Vec<_>>().join(",")).collect::<Vec<_>>().join(";"));
+    let mut m = a.clone();
+    let mut det = 1.0;
+    for c in 0..n {
+        let p = (c..n).max_by(|&i, &j| m[i][c].abs().total_cmp(&m[j][c].abs())).unwrap();
+        if p != c {
+            m.swap(p, c);
+            det = -det;
+        }
+        det *= m[c][c];
+        for r in c + 1..n {
+            let f = m[r][c] / m[c][c];
+            for k in c..n {
+                m[r][k] -= f * m[c][k];
+            }
+        }
+    }
+    assert!((value(&src) - det).abs() < 1e-9, "{} と {det}", value(&src));
+}
+
+#[test]
+fn matrices_draw_the_same_mesh() {
+    assert_eq!(
+        mesh("⟦cos(a), -sin(a); sin(a), cos(a)⟧ (cos(t), 2 sin(t))", "", &[("a", 0.5)]),
+        mesh("(cos(a) cos(t) + (-sin(a)) (2 sin(t)), sin(a) cos(t) + cos(a) (2 sin(t)))", "", &[("a", 0.5)])
+    );
+    assert!(max_diff("z = @det(⟦x, y; y, x⟧)", "z = x^2 - y^2", "") < 1e-6);
+    // ベクトルの等式は、成分ごとの連立
+    let bits = |src: &str| mesh(src, "", &[]).0.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits("(x, y, z) = (1, 2, 3)"), bits("x = 1, y = 2, z = 3"));
+    // 定義したベクトル・行列
+    let defs = "{vec_b} = (1, 2, 3)\nA = ⟦2, 0; 0, 3⟧\nB = A^T A";
+    assert_eq!(mesh("{vec_b} + t (0, 1, 1)", defs, &[]), mesh("(1, 2 + t, 3 + t)", "", &[]));
+    assert_eq!(value_with("@det(A)", defs), 6.0);
+    assert_eq!(value_with("@tr(B)", defs), 13.0);
+    assert_eq!(value_with("{vec_b}_2 + {vec_b}_(3)", defs), 5.0);
+    assert_eq!(value_with("A_(2,2)", defs), 3.0);
+    assert_eq!(value_with("p_1 + p_2", "p = (10, 20)"), 30.0);
+    assert_eq!(mesh("A (cos(t), sin(t))", defs, &[]), mesh("(2 cos(t), 3 sin(t))", "", &[]));
+    let m = run("A (cos(t), sin(t))", defs, &[]).unwrap();
+    assert_eq!(m.used_defs(), "A");
+}
+
+#[test]
+fn matrix_errors_and_sizes() {
+    assert!(error_of("z = @det(⟦1,2,3;4,5,6⟧ ⟦1,2;3,4⟧) + x", "").contains("2×3 の行列と 2×2 の行列は掛けられません"));
+    assert!(error_of("z = @det(⟦1,2,3;4,5,6⟧) + x", "").contains("正方行列"));
+    assert!(error_of("⟦1,2;3,4⟧", "").contains("行列だけの行"));
+    assert!(error_of("z = @tr(⟦1,2;2,4⟧^(-1)) + x", "").contains("逆行列はありません"));
+    assert!(error_of("z = A_(3,1) + x", "A = ⟦1,2;3,4⟧").contains("成分はありません"));
+    // 6×6 の行列式（成分が全部違う式）が、節の数の上限の中
+    let names = ["x", "y", "z"];
+    let rows: Vec<String> = (0..6)
+        .map(|i| (0..6).map(|j| format!("({}+{})", names[(i + j) % 3], i * 6 + j + 1)).collect::<Vec<_>>().join(","))
+        .collect();
+    let src = format!("z = @det(⟦{}⟧)", rows.join(";"));
+    let chains = graph_core::parser::parse_system(&src).unwrap();
+    let e = graph_core::expand::expand(&chains[0].exprs[1], &Default::default()).unwrap();
+    assert!(e.node_count() < 200_000, "{}", e.node_count());
+}

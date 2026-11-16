@@ -733,6 +733,8 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             }
         }
     }
+    // ベクトル = ベクトルは、成分ごとの等式の連立（(x, y, z) = (1, 2, 3) は x = 1, y = 2, z = 3）。計画 M6
+    chains = split_vector_relations(chains)?;
     // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
     let single = chains.len() == 1 && (chains[0].rels.is_empty() || chains[0].rels == [Rel::Eq]);
     if !single {
@@ -745,6 +747,9 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             check_dims(&e, space)?;
             if let Expr::Tuple(items) = e {
                 return parametric(items, params, space);
+            }
+            if let Expr::Matrix { rows, cols, .. } = &e {
+                return Err(format!("{rows}×{cols} の行列だけの行は描けません（A = … と名前を付けるか、ベクトルに掛けてください）"));
             }
             if let Some(p) = complex_plane(&e, params, space)? {
                 return Ok(p);
@@ -799,6 +804,34 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
         return Ok(Plot::Multi(plots));
     }
     compile_pair(l, r, params, space)
+}
+
+/// 関係の両側が全部ベクトル（組）の行を、成分ごとの行に分ける。ベクトルとスカラーが混ざっていればエラー。
+/// 関係の無い行（媒介変数表示の組）と、ベクトルの無い行はそのまま
+fn split_vector_relations(chains: Vec<crate::parser::Chain>) -> Result<Vec<crate::parser::Chain>, String> {
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        if let Some(Expr::Matrix { rows, cols, .. }) = chain.exprs.iter().find(|e| matches!(e, Expr::Matrix { .. })) {
+            if !chain.rels.is_empty() {
+                return Err(format!("{rows}×{cols} の行列どうしの等式は描けません（成分ごとに書いてください）"));
+            }
+        }
+        let tuples = chain.exprs.iter().filter(|e| matches!(e, Expr::Tuple(_))).count();
+        if chain.rels.is_empty() || tuples == 0 {
+            out.push(chain);
+            continue;
+        }
+        let len = |e: &Expr| if let Expr::Tuple(items) = e { items.len() } else { 0 };
+        let n = len(&chain.exprs[0]);
+        if tuples != chain.exprs.len() || chain.exprs.iter().any(|e| len(e) != n) {
+            return Err("ベクトルの等式・不等式は、両側を同じ成分の数のベクトルにしてください".into());
+        }
+        for k in 0..n {
+            let exprs = chain.exprs.iter().map(|e| if let Expr::Tuple(items) = e { items[k].clone() } else { e.clone() }).collect();
+            out.push(crate::parser::Chain { exprs, rels: chain.rels.clone(), pos: chain.pos.clone() });
+        }
+    }
+    Ok(out)
 }
 
 /// 座標を複素数にする（[`Space::complex_coords`]）: 式の x, y, z を、x + i w, y + i w₂, z + i w₃ に置き換える。

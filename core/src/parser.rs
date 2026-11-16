@@ -298,6 +298,8 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
         "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" => OpKind::Binder,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
+        // ベクトルと行列（計画 M6・M7）
+        "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
         "grad" | "div" | "rot" | "curl" | "lap" => OpKind::Prefix,
         _ => return None,
@@ -388,7 +390,7 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
         // 英字の並び: 関数名・定数を最長一致で取り出し、残りは1文字ずつ変数にする
         // 例) "xsinx" → x, sin, x
         // ℝ ℤ ℕ ℂ ℚ ᶜ は文字に分類されるが、名前ではなく集合の記号
-        let letter = |c: char| c.is_alphabetic() && !"ℝℤℕℂℚᶜ".contains(c);
+        let letter = |c: char| c.is_alphabetic() && !"ℝℤℕℂℚᶜᵀ".contains(c);
         if letter(c) {
             while i < chars.len() && letter(chars[i]) {
                 // 数字を含む名前（hyp2F1 など）は英字の並びの外まで見て探す
@@ -471,6 +473,24 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             let name: String = chars[i + 1..end].iter().collect();
             out.push(Token { tok: Tok::Var(name), pos: i });
             i = end + 1;
+            // 添字: `{vec_b}_(k)`・`{vec_b}_2`（成分の取り出し。数字だけでも、名前には足さない）
+            if chars.get(i) == Some(&'_') {
+                let mut d = i + 1;
+                while d < chars.len() && chars[d].is_ascii_digit() {
+                    d += 1;
+                }
+                if chars.get(i + 1) == Some(&'(') {
+                    out.push(Token { tok: Tok::Sub, pos: i });
+                    i += 1;
+                } else if d > i + 1 {
+                    let digits: String = chars[i + 1..d].iter().collect();
+                    out.push(Token { tok: Tok::Sub, pos: i });
+                    out.push(Token { tok: Tok::LParen, pos: i });
+                    out.push(Token { tok: Tok::Num(digits.parse().unwrap_or(0.0)), pos: i + 1 });
+                    out.push(Token { tok: Tok::RParen, pos: d });
+                    i = d;
+                }
+            }
             continue;
         }
 
@@ -493,6 +513,12 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 continue;
             }
             '\'' | '′' => Tok::Prime,
+            // 転置 Aᵀ は A^T と同じ。† は ^† の形で使う（共役転置）
+            'ᵀ' => {
+                out.push(Token { tok: Tok::Caret, pos: i });
+                Tok::Var("T".into())
+            }
+            '†' => Tok::Var(c.to_string()),
             ';' => Tok::Semi,
             '⟦' => Tok::LMat,
             '⟧' => Tok::RMat,
@@ -719,8 +745,9 @@ impl Parser<'_> {
         if *self.peek() == Tok::Sub {
             self.next();
             self.expect(Tok::LParen, "'('")?;
-            let index = self.expr()?;
-            self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+            // 添字が 2 つなら組（行列の成分 A_(1, 2)）
+            let mut ix = self.args_until(Tok::RParen, "閉じ括弧 ')'")?;
+            let index = if ix.len() == 1 { ix.remove(0) } else { Expr::Tuple(ix) };
             return Ok(Expr::Index { name, index: Box::new(index) });
         }
         Ok(Expr::Var(name))
