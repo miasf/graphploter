@@ -25,6 +25,7 @@ pub mod gpu2d;
 pub mod interval;
 pub mod linalg;
 pub mod mesh;
+pub mod ode;
 pub mod pixel;
 mod region;
 pub mod parser;
@@ -85,6 +86,8 @@ pub struct MeshResult {
     gpu3d: Option<Gpu3d>,
     /// GPU の描き方を使えない理由（画面の ⚙ に出す）。使えるなら空
     gpu_reason: String,
+    /// 常微分方程式なら、状態の成分の名前（`x`・`y'`。初期値の欄の見出し）
+    ode_states: Vec<String>,
 }
 
 /// 3D の陰関数を光線で描くための GLSL と、uniform の値
@@ -213,6 +216,12 @@ impl MeshResult {
         self.used_params.join(",")
     }
     /// この式が使った定義（関数 f など。[`definitions`]）の名前（カンマ区切り）
+    /// 常微分方程式の状態の成分の名前（カンマ区切り。常微分方程式でなければ空）
+    #[wasm_bindgen(getter)]
+    pub fn ode_states(&self) -> String {
+        self.ode_states.join(",")
+    }
+
     #[wasm_bindgen(getter)]
     pub fn used_defs(&self) -> String {
         self.defs.0.join(",")
@@ -415,6 +424,7 @@ pub fn coord_grid(
         gpu2d: None,
         gpu3d: None,
         gpu_reason: String::new(),
+        ode_states: Vec::new(),
     })
 }
 
@@ -615,6 +625,7 @@ pub fn plot(
     }
 
     let _defs = take_definitions(&consts);
+    expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
@@ -771,6 +782,7 @@ pub fn plot(
         gpu_reason: gpu3d.1,
         coord,
         defs: (expand::used(), expand::def_line()),
+        ode_states: expand::ode_states(),
     })
 }
 
@@ -791,25 +803,147 @@ pub fn coord_system(map: &str, names: &str) {
     COORD_MAP.with(|c| *c.borrow_mut() = (map.to_string(), names.to_string()));
 }
 
+// ---- 常微分方程式の初期値（計画 M9） ----
+
+thread_local! {
+    static ODE_INIT_SRC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// 次の [`plot`] だけに効く、常微分方程式の初期値の欄（状態の成分ごとの式を `\n` でつないだもの。空の行は既定の値）
+#[wasm_bindgen]
+pub fn ode_init(src: &str) {
+    ODE_INIT_SRC.with(|s| *s.borrow_mut() = src.to_string());
+}
+
 // ---- ベクトル場の矢印（計画 M8） ----
 
 thread_local! {
     /// 次の [`plot`] だけに効く、ベクトル場の矢印の数と、長さをそろえるか（[`field_style`]）
-    static FIELD_STYLE: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
+    static FIELD_STYLE: std::cell::Cell<(u32, bool, u32)> = const { std::cell::Cell::new((0, false, 0)) };
 }
 
 /// 次の [`plot`] で、ベクトル場の矢印をどう描くかを決める（その 1 回だけ）。`count` は各軸の矢印の数（0 なら既定: 3D で 9、2D で 18）、
-/// `unit` なら長さをそろえる
+/// `unit` なら長さをそろえる。`stream` は流線の始点の各軸の数（0 なら流線なし。計画 M9）
 #[wasm_bindgen]
-pub fn field_style(count: u32, unit: bool) {
-    FIELD_STYLE.with(|f| f.set((count, unit)));
+pub fn field_style(count: u32, unit: bool, stream: u32) {
+    FIELD_STYLE.with(|f| f.set((count, unit, stream)));
+}
+
+/// 1 つの点での右辺（状態と独立変数 → 状態の導関数）
+fn ode_rhs(rhs: &[eval::Program]) -> impl FnMut(f64, &[f64], &mut [f64]) + '_ {
+    let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+    move |t, y, dy| {
+        let mut cols: Vec<[f64; 1]> = y.iter().map(|v| [*v]).collect();
+        cols.push([t]);
+        let inputs: Vec<&[f64]> = cols.iter().map(|c| &c[..]).collect();
+        for (k, p) in rhs.iter().enumerate() {
+            let used: Vec<&[f64]> = inputs[..p.vars().len()].to_vec();
+            p.eval_batch(&used, &mut out);
+            dy[k] = eval::as_real(out[0]);
+        }
+    }
+}
+
+/// 常微分方程式の解曲線（計画 M9）。初期値の組ごとに、初期時刻から前と後ろへ解いて、点の列（n 次元の曲線）にする。
+/// 1 本の 1 階なら、傾きの場（同じ長さの短い線分）も足す
+fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
+    const TOTAL_STEPS: usize = 1_000_000;
+    let space = ctx.space;
+    let dims = space.dims;
+    let dom = ctx.dom;
+    let reach = (0..3).map(|a| dom.lo[a].abs().max(dom.hi[a].abs())).fold(0.0, f64::max);
+    // 独立変数の範囲と初期時刻（範囲に 0 があれば 0、無ければ始まり）
+    let (lo, hi) = match o.one {
+        Some(_) => (dom.lo[0], dom.hi[0]),
+        None => (ctx.range)("t"),
+    };
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let t0 = if lo <= 0.0 && 0.0 <= hi { 0.0 } else { lo };
+    let opt = ode::Options { limit: 8.0 * reach.max(1.0), chord: ctx.size / 400.0, max_arc: f64::INFINITY, arc_dims: o.rhs.len(), max_steps: ode::MAX_STEPS };
+    let base: Vec<f64> = (0..dims).map(|k| space.slice.get(k).copied().unwrap_or(0.0)).collect();
+    let mut points: Vec<f64> = Vec::new();
+    let mut steps = 0;
+    let mut truncated = false;
+    for init in &o.inits {
+        if steps >= TOTAL_STEPS {
+            truncated = true;
+            break;
+        }
+        let left = TOTAL_STEPS - steps;
+        let mut f = ode_rhs(&o.rhs);
+        let back = ode::solve(&mut f, t0, init, lo, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
+        let fwd = ode::solve(&mut f, t0, init, hi, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
+        steps += back.points.len() + fwd.points.len();
+        truncated |= back.truncated || fwd.truncated;
+        if !points.is_empty() {
+            points.extend(std::iter::repeat_n(f64::NAN, dims));
+        }
+        for (t, y) in back.points.iter().rev().chain(fwd.points.iter().skip(1)) {
+            let mut p = base.clone();
+            for (k, c) in o.coords.iter().enumerate() {
+                if let Some(c) = c {
+                    p[*c] = y[k];
+                }
+            }
+            if let Some((x, _)) = o.one {
+                p[x] = *t;
+            }
+            points.extend(p);
+        }
+    }
+    // 傾きの場（1 本の 1 階）: 格子の点に、向き (1, f) の同じ長さの線分
+    if let (Some((x, u)), 1) = (o.one, o.rhs.len()) {
+        let ax = |c: usize| space.axes.iter().position(|&a| a == c).unwrap_or(0);
+        let (ix, iu) = (ax(x), ax(u));
+        let m = 20;
+        let (wx, wu) = ((dom.hi[ix] - dom.lo[ix]) / m as f64, (dom.hi[iu] - dom.lo[iu]) / m as f64);
+        let half = 0.35 * wx.min(wu);
+        let mut f = ode_rhs(&o.rhs);
+        let mut d = [0.0];
+        for i in 0..m {
+            for j in 0..m {
+                let (px, pu) = (dom.lo[ix] + (i as f64 + 0.5) * wx, dom.lo[iu] + (j as f64 + 0.5) * wu);
+                f(px, &[pu], &mut d);
+                let slope = d[0];
+                if !slope.is_finite() {
+                    continue;
+                }
+                // 画面の上の長さをそろえる（縦横の目盛りの比は気にしない）
+                let l = (1.0 + slope * slope).sqrt();
+                let (dx, du) = (half / l, half * slope / l);
+                if !points.is_empty() {
+                    points.extend(std::iter::repeat_n(f64::NAN, dims));
+                }
+                for sgn in [-1.0, 1.0] {
+                    let mut p = base.clone();
+                    p[x] = px + sgn * dx;
+                    p[u] = pu + sgn * du;
+                    points.extend(p);
+                }
+            }
+        }
+    }
+    let n = o.inits.len();
+    let mut kind = match o.one {
+        Some(_) if o.rhs.len() == 1 => "常微分方程式の解曲線と傾きの場".to_string(),
+        Some(_) => "常微分方程式の解曲線".to_string(),
+        None => "常微分方程式の解曲線".to_string(),
+    };
+    if n > 1 {
+        kind.push_str(&format!("（{n} 本）"));
+    }
+    if truncated {
+        kind.push_str("（途中で打ち切り）");
+    }
+    let shape = mesh::NdShape { dims, points, grid: None, solid: false, complex: Vec::new(), tris: None, keep_full: false, keep_far: true };
+    Built { shape: Some(shape), curve: true, kind, ..Default::default() }
 }
 
 /// [`plot`] の終わりに、矢印の設定を既定に戻す（その 1 回だけ効くように）
 struct FieldStyleReset;
 impl Drop for FieldStyleReset {
     fn drop(&mut self) {
-        FIELD_STYLE.with(|f| f.set((0, false)));
+        FIELD_STYLE.with(|f| f.set((0, false, 0)));
     }
 }
 
@@ -821,13 +955,25 @@ fn arrows_built(a: field::Arrows, kind: String) -> Built {
 fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
     match plot {
         equation::Plot::Field { progs, rot } => {
-            let (count, unit) = FIELD_STYLE.with(|f| f.get());
+            let (count, unit, stream) = FIELD_STYLE.with(|f| f.get());
             let count = if count == 0 { if ctx.flat { 18 } else { 9 } } else { count.clamp(4, 24) as usize };
             let a = field::field(progs, *rot, ctx.dom, field::Style { count, unit, flat: ctx.flat });
             let n = a.count;
-            Some(arrows_built(a, format!("ベクトル場 · {n} 本の矢印")))
+            let mut b = arrows_built(a, format!("ベクトル場 · {n} 本の矢印"));
+            if stream > 0 {
+                let lines = field::streamlines(progs, *rot, ctx.dom, stream as usize, ctx.flat);
+                if !lines.is_empty() {
+                    if !b.outline.0.is_empty() {
+                        b.outline.0.extend([f32::NAN; 3]);
+                    }
+                    b.outline.0.extend(lines);
+                    b.kind.push_str("・流線");
+                }
+            }
+            Some(b)
         }
         equation::Plot::Arrows { vectors } => Some(arrows_built(field::vectors(vectors, ctx.flat), "ベクトル".into())),
+        equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
         _ => None,
     }
 }
@@ -1483,7 +1629,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) => {}
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
         P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
@@ -1690,7 +1836,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
         P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
@@ -1943,6 +2089,7 @@ impl Shape {
             // 光線の 1 次式は、回転だけが変わったら描画側が書き換える（setPlotTransform）。ここでは形を作ったときのまま
             gpu3d: self.gpu3d.clone(),
             gpu_reason: String::new(),
+            ode_states: Vec::new(),
         }
     }
 }
@@ -2041,6 +2188,7 @@ impl CapSource {
             gpu2d: None,
             gpu3d: None,
             gpu_reason: String::new(),
+            ode_states: Vec::new(),
         })
     }
 }

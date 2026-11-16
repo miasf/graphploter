@@ -143,6 +143,42 @@ impl Expr {
         }
     }
 
+    /// 節を置き換えた式を作る。`f` が Some を返した節は、その式に置き換える（中は見ない）。
+    /// 束縛する変数は気にしない（プライム `x'` を変数に置き換えるのに使う）
+    pub fn rewrite(&self, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
+        if let Some(e) = f(self) {
+            return e;
+        }
+        let all = |v: &[Expr]| v.iter().map(|a| a.rewrite(f)).collect::<Vec<_>>();
+        match self {
+            Expr::Num(_) | Expr::Const(_) | Expr::Var(_) | Expr::Prime { .. } | Expr::Cond(_) => self.clone(),
+            Expr::Neg(a) => Expr::Neg(Box::new(a.rewrite(f))),
+            Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(a.rewrite(f)), Box::new(b.rewrite(f))),
+            Expr::Call(g, args) => Expr::Call(*g, all(args)),
+            Expr::Tuple(args) => Expr::Tuple(all(args)),
+            Expr::List(args) => Expr::List(all(args)),
+            Expr::Apply { name, primes, args } => Expr::Apply { name: name.clone(), primes: *primes, args: all(args) },
+            Expr::Op { op, args } => Expr::Op { op: op.clone(), args: all(args) },
+            Expr::Matrix { rows, cols, items } => Expr::Matrix { rows: *rows, cols: *cols, items: all(items) },
+            Expr::Index { name, index } => Expr::Index { name: name.clone(), index: Box::new(index.rewrite(f)) },
+            Expr::Binder { op, var, args, body } => {
+                Expr::Binder { op: op.clone(), var: var.clone(), args: all(args), body: Box::new(body.rewrite(f)) }
+            }
+        }
+    }
+
+    /// 式の中のプライム `x'`・`y''` の (名前, 階数)
+    pub fn primes(&self) -> Vec<(String, u8)> {
+        let out = std::cell::RefCell::new(Vec::new());
+        self.rewrite(&|e| {
+            if let Expr::Prime { name, order } = e {
+                out.borrow_mut().push((name.clone(), *order));
+            }
+            None
+        });
+        out.into_inner()
+    }
+
     /// 式の中で使われている変数名か調べる
     pub fn uses_var(&self, name: &str) -> bool {
         match self {

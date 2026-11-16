@@ -67,7 +67,8 @@ export function requestPlot(
   complexCoords = false,
   coord: PlotRequest['coord'] = null,
   definitions = '',
-  field: { count: number; unit: boolean } | null = null,
+  field: { count: number; unit: boolean; stream: number } | null = null,
+  odeInit: string[] = [],
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -103,6 +104,7 @@ export function requestPlot(
     coord: coord && { map: coord.map, ranges: coord.ranges.map(([a, b]) => [a, b] as [string, string]), names: coord.names },
     definitions,
     arrows: field ? { ...field } : undefined,
+    odeInit: [...odeInit],
   }
   return planned(req)
 }

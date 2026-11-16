@@ -261,7 +261,11 @@ export interface PlotItem extends PlotStyle {
   /** 陽関数の値が飛ぶ所（floor の段差など）に縦の壁を描くか（古い保存データには無い） */
   walls?: boolean
   /** ベクトル場の矢印（計画 M8）: 各軸の数（無ければ 3D で 9、2D で 18）と、長さをそろえるか。古い保存データには無い */
-  field?: { count?: number; unit?: boolean }
+  field?: { count?: number; unit?: boolean; stream?: number }
+  /** 常微分方程式の初期値（計画 M9）: 状態の成分ごとの式（LaTeX。空なら既定: 状態は 1、導関数は 0）。古い保存データには無い */
+  ode?: { init: string[] }
+  /** 常微分方程式の状態の成分の名前（計算の結果。保存しない） */
+  odeStates?: string[]
   /** 回転のグループの番号（無ければこの式だけの回転 rotation, center、0 なら全体の回転を使う） */
   rotGroup?: number
   /** この式だけの回転角（rotGroup が無いとき使う。無ければ全部 0） */
@@ -414,7 +418,9 @@ export interface PlotRequest {
   /** 座標を複素数にする */
   complexCoords: boolean
   /** ベクトル場の矢印の数（0 なら既定）と、長さをそろえるか */
-  arrows?: { count: number; unit: boolean }
+  arrows?: { count: number; unit: boolean; stream: number }
+  /** 常微分方程式の初期値（計算エンジン用の式。成分ごと。空なら既定） */
+  odeInit?: string[]
   /**
    * 座標系（計算エンジン用の式。無ければ直交座標）。map は組 (X, Y, Z) の式、ranges は作る範囲 [最小, 最大] × 3（式）、
    * names は座標の名前 3 つ（カンマ区切り。r,theta,phi など。空なら x, y, z だけ）。
@@ -511,6 +517,8 @@ export type PlotResponse =
       usedDefs: string[]
       /** 定義の行（f(x) = …）だったときの名前 */
       defName: string | null
+      /** 常微分方程式なら、状態の成分の名前（初期値の欄の見出し） */
+      odeStates?: string[]
       /** パラメータの定義だったときの名前と値 */
       param: ({ name: string } & ParamValue) | null
       /** 切り口のふた（陰関数・範囲で重ねた立体を切っているときだけ） */

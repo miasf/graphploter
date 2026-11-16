@@ -583,6 +583,15 @@ class Converter {
         }
         throw new LatexError(`${env} はまだ使えません`)
       }
+      case 'dot':
+      case 'ddot':
+      case 'dddot': {
+        // 時間の導関数 \dot{x} → x'、\ddot{x} → x''（常微分方程式。計画 M9）
+        const v = this.rawGroup(true)
+        if (!/^[A-Za-z]$/.test(v)) throw new LatexError(`\\${name}{ } の中には、文字を 1 つ書いてください`)
+        this.out += v + "'".repeat(name === 'dot' ? 1 : name === 'ddot' ? 2 : 3)
+        return
+      }
       case 'vec':
       case 'overrightarrow': {
         // \vec{v} は、v とは別の名前 {vec_v}（ベクトルの名前）

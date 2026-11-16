@@ -232,7 +232,39 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           { latex: 'A\\left(\\cos t,\\sin t\\right)', options: { color: '#2d70b3' } },
         ],
       },
+      {
+        label: '回転する場と流線',
+        items: [{ latex: '\\left(-y,x,0.3\\right)', options: { color: '#2d70b3', field: { stream: 3 } } }],
+      },
       { label: '零空間 ker (1 1 1)（平面）', items: [{ latex: '\\ker\\begin{pmatrix}1 & 1 & 1\\end{pmatrix}', options: { color: '#6042a6' } }] },
+    ],
+  },
+  {
+    title: '常微分方程式',
+    samples: [
+      {
+        label: 'ローレンツ・アトラクター',
+        view: { dims: 3, half: 30 },
+        items: [
+          {
+            latex: "x'=10\\left(y-x\\right),\\ y'=x\\left(28-z\\right)-y,\\ z'=xy-\\frac{8z}{3}",
+            options: { color: '#c74440', ranges: { t: ['0', '40'] } },
+          },
+        ],
+      },
+      {
+        label: '減衰振動 x″ = −x − x′/5（初期値を 3 通り）',
+        items: [
+          {
+            latex: "x''=-x-\\frac{x'}{5},\\ y'=1",
+            options: { color: '#2d70b3', ranges: { t: ['0', '20'] }, ode: { init: ['\\left[1,2,3\\right]', '0', '-10'] } },
+          },
+        ],
+      },
+      {
+        label: "傾きの場 y′ = x − y と解曲線",
+        items: [{ latex: "y'=x-y", options: { color: '#388c46', ode: { init: ['\\left[-4,-2,0,2,4\\right]'] } } }],
+      },
     ],
   },
   {

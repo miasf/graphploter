@@ -185,7 +185,8 @@
         complexCoords: it.complexCoords || undefined,
         slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
         walls: it.walls,
-        field: it.field && (it.field.count !== undefined || it.field.unit) ? it.field : undefined,
+        field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
+        ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
         layers: it.layers,
         edges: it.edges || undefined,
         render: it.render && it.render !== 'auto' ? it.render : undefined,
@@ -807,7 +808,8 @@
       item.complexCoords ?? false,
       coord,
       currentDefinitions(item),
-      { count: item.field?.count ?? 0, unit: item.field?.unit ?? false },
+      { count: item.field?.count ?? 0, unit: item.field?.unit ?? false, stream: item.field?.stream ?? 0 },
+      odeInitFor(item),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -828,6 +830,7 @@
     item.error = undefined
     item.usedParams = res.usedParams
     item.usedDefs = res.usedDefs
+    item.odeStates = res.odeStates && res.odeStates.length > 0 ? res.odeStates : undefined
     noteDefinition(item, res.defName, source)
     budget.record(item.id, res.ms, used, res.cost, res.reprojected)
     if (res.reprojected) {
@@ -1333,8 +1336,22 @@
     schedule(item, 0)
   }
 
+  /** 常微分方程式の初期値の欄を、計算エンジン用の式にする（変換できない欄は空 = 既定の値。誤りは計算エンジンに任せない） */
+  function odeInitFor(item: PlotItem): string[] {
+    return (item.ode?.init ?? []).map((s) => (s.trim() === '' ? '' : latexToText(s)))
+  }
+
+  /** 常微分方程式の初期値の欄を変えた（計画 M9） */
+  function setOdeInit(item: PlotItem, k: number, latex: string) {
+    const init = [...(item.ode?.init ?? [])]
+    while (init.length <= k) init.push('')
+    init[k] = latex
+    item.ode = { init }
+    schedule(item, 0)
+  }
+
   /** ベクトル場の矢印の数・長さをそろえるか（計画 M8） */
-  function setField(item: PlotItem, patch: { count?: number; unit?: boolean }) {
+  function setField(item: PlotItem, patch: { count?: number; unit?: boolean; stream?: number }) {
     item.field = { ...item.field, ...patch }
     schedule(item, 0)
   }
@@ -2289,6 +2306,7 @@
             onSlice={(name, v) => setItemSlice(item, name, v)}
             onWalls={(on) => setWalls(item, on)}
             onField={(patch) => setField(item, patch)}
+            onOdeInit={(k, s) => setOdeInit(item, k, s)}
             flatView={flat}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}

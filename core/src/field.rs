@@ -181,6 +181,60 @@ pub fn field(progs: &[Program], rot: Option<[[f64; 3]; 3]>, dom: Domain, style: 
     b.finish(Some((if min < max { min } else { 0.0 }, max)), count)
 }
 
+/// 流線（計画 M9）: 各軸 `m` 個の格子の点を始点に、$\mathbf x' = \mathbf F(\mathbf x)$ を前と後ろへ解いた曲線。
+/// 弧長は、それぞれの向きに表示範囲の対角線の 2 倍まで。表示範囲を出たら止める。点の列を NaN で区切って返す
+pub fn streamlines(progs: &[Program], rot: Option<[[f64; 3]; 3]>, dom: Domain, m: usize, flat: bool) -> Vec<f32> {
+    let m = m.clamp(1, 12);
+    let diag = len(sub(dom.hi, dom.lo));
+    let mut buf = [C::new(0.0, 0.0)];
+    let mut f = |_: f64, y: &[f64], dy: &mut [f64]| {
+        let p = [[y[0]], [y[1]], [if flat { 0.0 } else { y[2] }]];
+        let inputs: [&[f64]; 3] = [&p[0], &p[1], &p[2]];
+        let mut v = [0.0; 3];
+        for (k, prog) in progs.iter().take(3).enumerate() {
+            prog.eval_batch(&inputs, &mut buf);
+            v[k] = as_real(buf[0]);
+        }
+        let v = match rot {
+            Some(r) => [0, 1, 2].map(|i| r[i][0] * v[0] + r[i][1] * v[1] + r[i][2] * v[2]),
+            None => v,
+        };
+        dy.copy_from_slice(&v);
+        if flat {
+            dy[2] = 0.0;
+        }
+        // 表示範囲の外では止める（右辺を有限でなくすと、解法がそこで止まる）
+        let pad: [f64; 3] = [0, 1, 2].map(|a| 1e-9 * (dom.hi[a] - dom.lo[a]).abs());
+        if (0..if flat { 2 } else { 3 }).any(|a| y[a] < dom.lo[a] - pad[a] || y[a] > dom.hi[a] + pad[a]) {
+            dy.iter_mut().for_each(|d| *d = f64::NAN);
+        }
+    };
+    let opt = crate::ode::Options { limit: f64::INFINITY, chord: diag / 300.0, max_arc: 2.0 * diag, arc_dims: 3, max_steps: 4_000 };
+    let mut out: Vec<f32> = Vec::new();
+    let mz = if flat { 1 } else { m };
+    for k in 0..mz {
+        for j in 0..m {
+            for i in 0..m {
+                let at = |a: usize, q: usize, n: usize| dom.lo[a] + (q as f64 + 0.5) / n as f64 * (dom.hi[a] - dom.lo[a]);
+                let p0 = [at(0, i, m), at(1, j, m), if flat { 0.0 } else { at(2, k, mz) }];
+                // 時間の範囲は、弧長の上限で止まるように十分長く
+                let back = crate::ode::solve(&mut f, 0.0, &p0, -1e6, opt);
+                let fwd = crate::ode::solve(&mut f, 0.0, &p0, 1e6, opt);
+                if back.points.len() + fwd.points.len() < 3 {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.extend([f32::NAN; 3]);
+                }
+                for (_, y) in back.points.iter().rev().chain(fwd.points.iter().skip(1)) {
+                    out.extend([y[0] as f32, y[1] as f32, if flat { 0.0 } else { y[2] as f32 }]);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 原点からのベクトル（行列の列ベクトル・ベクトルの定義）の矢印。色にする値は、ベクトルの番号
 pub fn vectors(vs: &[[f64; 3]], flat: bool) -> Arrows {
     let mut b = Builder { mesh: Mesh::default(), shafts: Vec::new(), flat };
@@ -228,6 +282,30 @@ mod tests {
         assert_eq!(a.mesh.indices.len(), a.count * 18);
         let big = field(&rotation_field(), None, dom, Style { count: 24, unit: true, flat: false });
         assert!(big.mesh.indices.len() / 3 <= 100_000);
+    }
+
+    #[test]
+    fn streamlines_of_rotation_are_circles() {
+        let dom = Domain { lo: [-3.0; 3], hi: [3.0; 3] };
+        let pts = streamlines(&rotation_field(), None, dom, 3, false);
+        assert!(pts.len() > 300);
+        // 1 本ずつ: 半径が変わらない（円）
+        let mut cur: Vec<[f32; 3]> = Vec::new();
+        let mut check = |c: &Vec<[f32; 3]>| {
+            if let Some(f) = c.first() {
+                let r0 = (f[0] * f[0] + f[1] * f[1]).sqrt();
+                assert!(c.iter().all(|p| ((p[0] * p[0] + p[1] * p[1]).sqrt() - r0).abs() < 1e-3 && p[2] == f[2]));
+            }
+        };
+        for p in pts.chunks_exact(3) {
+            if p[0].is_nan() {
+                check(&cur);
+                cur.clear();
+            } else {
+                cur.push([p[0], p[1], p[2]]);
+            }
+        }
+        check(&cur);
     }
 
     #[test]

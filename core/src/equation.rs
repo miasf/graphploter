@@ -315,6 +315,8 @@ pub enum Plot {
     Field { progs: Vec<Program>, rot: Option<[[f64; 3]; 3]> },
     /// 原点からのベクトルの矢印（行列の列ベクトル・ベクトルの定義。計画 M7・M8）
     Arrows { vectors: Vec<[f64; 3]> },
+    /// 常微分方程式（計画 M9）。状態 $\mathbf y$ の右辺 `rhs`（変数は状態の名前と独立変数）、初期値の組（組み合わせの数だけ解く）
+    Ode(Box<Ode>),
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
     Param { name: String, value: C, uses: Vec<String> },
     /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
@@ -364,6 +366,8 @@ impl Plot {
             Plot::Sheets { vars, .. } => format!("媒介変数表示の多変数の図形（{} 変数）", vars.len()),
             Plot::Param { .. } => "パラメータ".into(),
             Plot::Field { .. } => "ベクトル場".into(),
+            Plot::Ode(o) if o.one.is_some() => "常微分方程式の解曲線".into(),
+            Plot::Ode(_) => "常微分方程式の解曲線".into(),
             Plot::Arrows { .. } => "ベクトル".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
             Plot::ComplexPlane { label, .. } => label.clone(),
@@ -385,6 +389,7 @@ impl Plot {
     /// 媒介変数の名前（媒介変数表示でなければ空）
     pub fn param_vars(&self) -> Vec<String> {
         match self {
+            Plot::Ode(o) if o.one.is_none() => vec!["t".into()],
             Plot::Curve { vars, .. }
             | Plot::Surface { vars, .. }
             | Plot::Volume { vars, .. }
@@ -415,6 +420,15 @@ impl Plot {
             | Plot::Sheets { sets, .. } => sets.iter().flatten().collect(),
             Plot::Param { uses, .. } => return uses.clone(),
             Plot::Field { progs, .. } => progs.iter().collect(),
+            Plot::Ode(o) => {
+                let mut out = o.uses.clone();
+                for n in o.rhs.iter().flat_map(|p| p.used_params()) {
+                    if !out.contains(n) {
+                        out.push(n.clone());
+                    }
+                }
+                return out;
+            }
             Plot::Arrows { .. } => return Vec::new(),
             Plot::ComplexPlane { inner, .. } => return inner.used_params(),
             Plot::System { base, eqs, cuts, .. } => {
@@ -550,6 +564,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
+    }
+    // 常微分方程式（計画 M9）
+    if let Some(p) = ode_line(source, params, space)? {
+        return Ok(p);
     }
     // 行列を描く行（ker・Im・行列式だけの行・行列だけの行・行列やベクトルの定義。計画 M7）
     if let Some(p) = matrix_line(source, params, space)? {
@@ -1093,6 +1111,243 @@ pub fn rename_kind(kind: &str, space: &Space) -> String {
     }
     flush(&mut word, &mut out);
     out
+}
+
+/// 常微分方程式（[`Plot::Ode`]）
+#[derive(Debug, Clone)]
+pub struct Ode {
+    /// 状態の各成分の右辺（変数は `vars`）
+    pub rhs: Vec<Program>,
+    /// 状態の名前と、最後に独立変数（`t` か、1 本の形では横の座標）
+    pub vars: Vec<String>,
+    /// 状態の成分ごとに、点のどの座標に入れるか（導関数の成分は None）
+    pub coords: Vec<Option<usize>>,
+    /// 初期値の組
+    pub inits: Vec<Vec<f64>>,
+    /// 1 本の形なら (独立変数の座標, 未知関数の座標)
+    pub one: Option<(usize, usize)>,
+    /// 初期値で使ったパラメータ
+    pub uses: Vec<String>,
+}
+
+/// 状態の名前: 0 階は座標の名前そのもの、j 階の導関数は `#x1` のような書けない名前
+fn state_name(c: &str, j: u8) -> String {
+    if j == 0 {
+        c.to_string()
+    } else {
+        format!("#{c}{j}")
+    }
+}
+
+/// 常微分方程式の行（計画 M9）。そうでなければ None
+/// - 連立: 全部の行が「座標′ = 式」（独立変数は t）
+/// - 1 本: 行が 1 つで、プライムの付いた座標が 1 つ（横の座標でない）。独立変数は横の座標。最も高い階の導関数について 1 次式なら解く
+fn ode_line(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    if !source.contains('\'') && !source.contains('′') && !source.contains("@diff") {
+        return Ok(None);
+    }
+    let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
+    let is_coord = |v: &str| coord_index(v).is_some_and(|k| k < space.dims);
+    // d/dt x（\frac{dx}{dt}）は x′ と同じ。d/dx y も、y′（1 本の形）
+    let to_prime = |e: &Expr| -> Expr {
+        e.rewrite(&|n| match n {
+            Expr::Binder { op, var, args, body } if op == "diff" => match (&**body, args.as_slice()) {
+                (Expr::Var(c), a) if is_coord(c) && var != c && (var == "t" || is_coord(var)) => {
+                    let order = match a {
+                        [] => 1,
+                        [Expr::Num(k)] if *k >= 1.0 && *k <= 8.0 && k.fract() == 0.0 => *k as u8,
+                        _ => return None,
+                    };
+                    Some(Expr::Prime { name: c.clone(), order })
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    let chains: Vec<crate::parser::Chain> = chains
+        .into_iter()
+        .map(|c| crate::parser::Chain { exprs: c.exprs.iter().map(&to_prime).collect(), ..c })
+        .collect();
+    let mut primed: Vec<(String, u8)> = Vec::new();
+    for c in &chains {
+        for e in &c.exprs {
+            for (n, k) in e.primes() {
+                if !is_coord(&n) {
+                    continue;
+                }
+                match primed.iter_mut().find(|p| p.0 == n) {
+                    Some(p) => p.1 = p.1.max(k),
+                    None => primed.push((n, k)),
+                }
+            }
+        }
+    }
+    if primed.is_empty() {
+        return Ok(None);
+    }
+    let shown = space.shown();
+    let one_form = chains.len() == 1 && primed.len() == 1 && primed[0].0 != shown[0];
+    // 定数: パラメータと、状態でない座標（断面の値）
+    let mut consts = space.with_hidden(params);
+    let ranged = space.ranged();
+    for k in 0..space.dims {
+        if space.axes.contains(&k) {
+            consts.insert(coord_name(k), C::new(space.slice.get(k).copied().unwrap_or(0.0), 0.0));
+        }
+    }
+    for (n, _, _) in &ranged {
+        consts.remove(n);
+    }
+    // プライムを状態の名前にする（階数が上限を超えるプライムは誤り）
+    let replace = |e: &Expr, max: &dyn Fn(&str) -> Option<u8>| -> Result<Expr, String> {
+        let bad = std::cell::RefCell::new(None);
+        let out = e.rewrite(&|n| match n {
+            Expr::Prime { name, order } => match max(name) {
+                Some(m) if *order <= m => Some(Expr::Var(state_name(name, *order))),
+                _ => {
+                    bad.borrow_mut().get_or_insert(format!("{name}{} はここでは使えません", "'".repeat(*order as usize)));
+                    Some(Expr::Num(0.0))
+                }
+            },
+            _ => None,
+        });
+        match bad.into_inner() {
+            Some(m) => Err(m),
+            None => Ok(out),
+        }
+    };
+    let (states, rhs_exprs, coords, indep, one): (Vec<String>, Vec<Expr>, Vec<Option<usize>>, String, Option<(usize, usize)>) = if one_form {
+        let (u, k) = primed[0].clone();
+        if k > 4 {
+            return Err("1 本の常微分方程式は 4 階までにしてください".into());
+        }
+        let ui = coord_index(&u).unwrap_or(0);
+        if !space.axes.contains(&ui) {
+            return Err(format!("{u} を表示してください（未知関数 {u} の解曲線を、横の座標との平面に描きます）"));
+        }
+        let c = &chains[0];
+        if c.rels != [Rel::Eq] {
+            return Err("常微分方程式は = で書いてください".into());
+        }
+        let f = Expr::Bin(BinOp::Sub, Box::new(c.exprs[0].clone()), Box::new(c.exprs[1].clone()));
+        let f = replace(&f, &|n| (n == u).then_some(k))?;
+        let f = crate::expand::expand(&f, params)?;
+        let s = state_name(&u, k);
+        let ds = crate::diff::diff(&f, &s)?;
+        if ds.uses_var(&s) {
+            return Err(format!("最も高い階の導関数 {u}{} について解いた形で書いてください", "'".repeat(k as usize)));
+        }
+        let f0 = f.substitute(&|v| (v == s).then_some(Expr::Num(0.0)));
+        let top = crate::diff::neg(crate::diff::div(f0, ds));
+        let mut rhs: Vec<Expr> = (1..k).map(|j| Expr::Var(state_name(&u, j))).collect();
+        rhs.push(top);
+        let states = (0..k).map(|j| state_name(&u, j)).collect();
+        let mut coords = vec![None; k as usize];
+        coords[0] = Some(ui);
+        let xi = space.axes[0];
+        consts.remove(&shown[0]);
+        (states, rhs, coords, shown[0].clone(), Some((xi, ui)))
+    } else {
+        let mut lines: Vec<(String, u8, Expr)> = Vec::new();
+        for c in &chains {
+            let (Expr::Prime { name, order }, [Rel::Eq]) = (&c.exprs[0], c.rels.as_slice()) else {
+                return Err("連立の常微分方程式は、行ごとに x' = 式 の形で書いてください".into());
+            };
+            if !is_coord(name) {
+                return Err(format!("{name}' の {name} は座標ではありません（x, y, z, w, … の導関数を書いてください）"));
+            }
+            if lines.iter().any(|l| l.0 == *name) {
+                return Err(format!("{name} の導関数が 2 回書かれています"));
+            }
+            lines.push((name.clone(), *order, c.exprs[1].clone()));
+        }
+        let total: usize = lines.iter().map(|l| l.1 as usize).sum();
+        if total > 12 {
+            return Err("常微分方程式の状態の成分は 12 個までにしてください".into());
+        }
+        let orders: Vec<(String, u8)> = lines.iter().map(|l| (l.0.clone(), l.1)).collect();
+        let max = |n: &str| orders.iter().find(|o| o.0 == n).map(|o| o.1 - 1);
+        let (mut states, mut rhs, mut coords) = (Vec::new(), Vec::new(), Vec::new());
+        for (c, k, e) in &lines {
+            for j in 0..*k {
+                states.push(state_name(c, j));
+                coords.push((j == 0).then(|| coord_index(c).unwrap_or(0)));
+                if j + 1 < *k {
+                    rhs.push(Expr::Var(state_name(c, j + 1)));
+                } else {
+                    rhs.push(crate::expand::expand(&replace(e, &max)?, params)?);
+                }
+            }
+        }
+        for (c, _, _) in &lines {
+            consts.remove(c);
+        }
+        if rhs.iter().any(|e| first_list(e).is_some()) {
+            return Err("常微分方程式の右辺には、リストは使えません（初期値の欄に書いてください）".into());
+        }
+        (states, rhs, coords, "t".into(), None)
+    };
+    consts.remove(&indep);
+    let mut vars = states.clone();
+    vars.push(indep);
+    let refs: Vec<&str> = vars.iter().map(String::as_str).collect();
+    let rhs = rhs_exprs.iter().map(|e| Program::compile_with(e, &refs, &consts)).collect::<Result<Vec<_>, _>>()?;
+    // 初期値（欄が無ければ、状態は 1、導関数は 0。リストは組み合わせ）
+    let given = crate::expand::ode_init();
+    let mut uses: Vec<String> = Vec::new();
+    let mut choices: Vec<Vec<f64>> = Vec::new();
+    for (k, st) in states.iter().enumerate() {
+        let label = st.strip_prefix('#').map_or(st.clone(), |r| {
+            let (c, j) = r.split_at(r.find(|ch: char| ch.is_ascii_digit()).unwrap_or(r.len()));
+            format!("{c}{}", "'".repeat(j.parse().unwrap_or(0)))
+        });
+        let src = given.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let vals = match src {
+            None => vec![if coords[k].is_some() { 1.0 } else { 0.0 }],
+            Some(src) => {
+                let e = parse_at(src, 0, params).map_err(|e| format!("{label} の初期値: {e}"))?;
+                let items = match e {
+                    Expr::List(items) => items,
+                    e => vec![e],
+                };
+                let mut vs = Vec::new();
+                for it in &items {
+                    let p = Program::compile_with(it, &[], params).map_err(|e| format!("{label} の初期値: {e}"))?;
+                    uses.extend(p.used_params().iter().filter(|n| !uses.contains(n)).cloned().collect::<Vec<_>>());
+                    let mut out = [C::new(0.0, 0.0)];
+                    p.eval_batch(&[], &mut out);
+                    let v = crate::eval::as_real(out[0]);
+                    if !v.is_finite() {
+                        return Err(format!("{label} の初期値が実数になりません"));
+                    }
+                    vs.push(v);
+                }
+                vs
+            }
+        };
+        choices.push(vals);
+    }
+    let count: usize = choices.iter().map(|c| c.len()).product();
+    if count > 64 {
+        return Err(format!("初期値の組み合わせが多すぎます（{count} 通り。64 通りまで）"));
+    }
+    let mut inits: Vec<Vec<f64>> = vec![Vec::new()];
+    for c in &choices {
+        inits = inits.into_iter().flat_map(|p| c.iter().map(move |v| [p.clone(), vec![*v]].concat())).collect();
+    }
+    let labels: Vec<String> = states
+        .iter()
+        .map(|st| match st.strip_prefix('#') {
+            None => st.clone(),
+            Some(r) => {
+                let i = r.find(|ch: char| ch.is_ascii_digit()).unwrap_or(r.len());
+                format!("{}{}", &r[..i], "'".repeat(r[i..].parse().unwrap_or(0)))
+            }
+        })
+        .collect();
+    crate::expand::set_ode_states(labels);
+    Ok(Some(Plot::Ode(Box::new(Ode { rhs, vars, coords, inits, one, uses }))))
 }
 
 /// 座標系の式（計画 9 章の S36）。組 `(X, Y, Z)` の 3 つの成分を、表示中の 3 つの座標の式としてコンパイルする。

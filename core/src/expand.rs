@@ -210,6 +210,27 @@ thread_local! {
     static TRIM: RefCell<bool> = const { RefCell::new(false) };
     /// 式の説明（「ker A（2 次元。平面）」「det = −2」）。あれば、ふつうの説明の代わりに出す
     static KIND: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// 常微分方程式の初期値の欄（状態の成分ごとの式。計画 M9。`lib.rs` が入れる）
+    static ODE_INIT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 常微分方程式の状態の名前（`x`・`y'` など。初期値の欄の見出しに使う）
+    static ODE_STATES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 常微分方程式の初期値の欄の式を入れる（[`install`] の後）
+pub fn set_ode_init(v: Vec<String>) {
+    ODE_INIT.with(|x| *x.borrow_mut() = v);
+}
+
+pub fn ode_init() -> Vec<String> {
+    ODE_INIT.with(|x| x.borrow().clone())
+}
+
+pub fn set_ode_states(v: Vec<String>) {
+    ODE_STATES.with(|x| *x.borrow_mut() = v);
+}
+
+pub fn ode_states() -> Vec<String> {
+    ODE_STATES.with(|x| x.borrow().clone())
 }
 
 /// 原点から表示範囲の箱のいちばん遠い角までの距離を入れる（[`install`] の後、コンパイルの前）
@@ -310,6 +331,8 @@ pub fn install(defs: Defs) -> Installed {
     REACH.with(|x| *x.borrow_mut() = 20.0);
     TRIM.with(|x| *x.borrow_mut() = false);
     KIND.with(|x| *x.borrow_mut() = None);
+    ODE_INIT.with(|x| x.borrow_mut().clear());
+    ODE_STATES.with(|x| x.borrow_mut().clear());
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
 

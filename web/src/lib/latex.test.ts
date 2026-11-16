@@ -36,6 +36,13 @@ const cases: [string, string][] = [
   ['A_{1,2}+\\vec{v}_{2}+w_{2}', 'A_(1,2)+ {vec_v}_2+w_2'],
   ['x_{a}', 'x_(a)'],
   ['\\dim\\ker A', '@dim @ker A'],
+  // 常微分方程式（M9）
+  ["x'=-y,\\ y'=x", "x'=-y, y'=x"],
+  ['\\dot{x}=10\\left(y-x\\right)', "x'=10(y-x)"],
+  ['\\ddot{x}+x=0', "x''+x=0"],
+  ['\\frac{dx}{dt}=-y', '@diff(t) x =-y'],
+  ['\\frac{d^{2}y}{dx^{2}}+y=0', '@diff(x,2) y +y=0'],
+  ['y^{\\prime}=x-y', "y'=x-y"],
   // 場合分け（M2）
   ['f\\left(x\\right)=\\begin{cases}x^2 & x<0\\\\ x & \\text{otherwise}\\end{cases}', 'f(x)= @cases(x^(2), x<0; x)'],
   ['\\begin{cases}1 & \\text{if } 0\\le x<1\\\\ 0 & x\\ge1\\\\ -1\\end{cases}', '@cases(1, 0<=x<1; 0, x>=1; -1)'],

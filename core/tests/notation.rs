@@ -1,6 +1,6 @@
 //! 数学の記法（計画 `docs/plan-math-notation.md`）。画面と同じ入口（`graph_core::plot` と `definitions`）で確かめる
 
-use graph_core::{definitions, plot, MeshResult};
+use graph_core::{definitions, ode_init, plot, MeshResult};
 
 /// 3 次元・既定に近い範囲で描く。`defs` は式の一覧のほかの行（`\n` 区切り）、`params` は (名前, 値) の並び
 fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, String> {
@@ -949,4 +949,82 @@ fn vector_fields() {
     // 媒介変数表示は今までどおり。座標と媒介変数が混ざった組は、今までと同じエラー
     assert!(run("(cos(t), sin(t), t)", "", &[]).unwrap().kind().contains("媒介変数表示"));
     assert!(!error_of("(x, t, 0)", "").is_empty());
+}
+
+// ---- M9: 常微分方程式 ----
+
+/// 常微分方程式を描く（t の範囲 [t0, t1]、初期値の欄 `init`）。点（NaN で切った列）を返す
+fn ode_points(src: &str, t: (f64, f64), init: &[&str], params: &[(&str, f64)]) -> (MeshResult, Vec<[f32; 3]>) {
+    ode_points_in(src, 3.0, t, init, params)
+}
+
+/// 表示範囲 [−half, half]³ で
+fn ode_points_in(src: &str, half: f64, t: (f64, f64), init: &[&str], params: &[(&str, f64)]) -> (MeshResult, Vec<[f32; 3]>) {
+    definitions("");
+    ode_init(&init.join("\n"));
+    let names: Vec<&str> = params.iter().map(|p| p.0).collect();
+    let values: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
+    let m = plot(
+        src, &[-half, half, -half, half, -half, half], 40, 24, "t", &[t.0, t.1], &names.join(","), &values, "", 3, &[0, 1, 2], &[0.0; 3],
+        &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src}: {}", error_of(src, "")));
+    let p = m.positions().chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect();
+    (m, p)
+}
+
+#[test]
+fn ode_systems() {
+    // 円 x' = −y, y' = x（(1, 0) から）
+    let (m, p) = ode_points("x' = -y, y' = x", (0.0, 20.0 * std::f64::consts::PI), &["1", "0"], &[]);
+    assert!(m.kind().contains("常微分方程式"), "{}", m.kind());
+    assert_eq!(m.ode_states(), "x,y");
+    let fin: Vec<_> = p.iter().filter(|v| v[0].is_finite()).collect();
+    assert!(fin.len() > 100 && fin.iter().all(|v| (v[0] * v[0] + v[1] * v[1] - 1.0).abs() < 1e-4 && v[2] == 0.0));
+    // 2 階: x'' = −x は同じ円（x(0) = 1, x'(0) = 0 → x = cos t）。プライムの無い y は一定
+    let (m, _) = ode_points("x'' = -x - x'/5", (0.0, 10.0), &[], &[]);
+    assert_eq!(m.ode_states(), "x,x'");
+    // ローレンツ（t ∈ [0, 40]）: 点が 3 万個以下
+    let start = std::time::Instant::now();
+    let lorenz = "x' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3";
+    let (m, p) = ode_points_in(lorenz, 30.0, (0.0, 40.0), &[], &[]);
+    // t = 40 まで解いた（箱の 8 倍を出ていない）: 最後の点は、アトラクターの上
+    assert!(p.len() > 3_000 && p.last().is_some_and(|v| v[2] > 0.0 && v[2] < 60.0));
+    let ms = start.elapsed().as_secs_f64() * 1e3;
+    assert!(p.len() <= 30_000, "{} 点", p.len());
+    assert!(!m.kind().contains("打ち切り"));
+    eprintln!("ローレンツ: {ms:.1} ms, {} 点", p.len());
+    // 同じ入力なら同じ点
+    let again = ode_points_in(lorenz, 30.0, (0.0, 40.0), &[], &[]).1;
+    assert!(p.iter().zip(&again).all(|(a, b)| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())));
+    // 初期値のリストは、組み合わせの数だけ（パラメータも使える）
+    let (m, _) = ode_points("x' = -y, y' = x", (0.0, 6.0), &["[1, 2]", "a"], &[("a", 0.5)]);
+    assert!(m.kind().contains("2 本"), "{}", m.kind());
+    assert!(m.used_params().split(',').any(|n| n == "a"));
+    // \frac{dx}{dt} の形も同じ
+    assert_eq!(ode_points("@diff(t) x = -y, @diff(t) y = x", (0.0, 6.0), &[], &[]).1.len(), ode_points("x' = -y, y' = x", (0.0, 6.0), &[], &[]).1.len());
+    assert!(error_of("x' = y, x' = 1", "").contains("2 回"));
+}
+
+#[test]
+fn ode_single_equations() {
+    // y'' + y = 0（y(0) = 0, y'(0) = 1）は y = sin x
+    let (m, p) = ode_points("y'' + y = 0", (0.0, 1.0), &["0", "1"], &[]);
+    assert_eq!(m.ode_states(), "y,y'");
+    let curve: Vec<_> = p.iter().take_while(|v| v[0].is_finite()).collect();
+    assert!(curve.len() > 50 && curve.iter().all(|v| (v[1] as f64 - (v[0] as f64).sin()).abs() < 1e-4));
+    assert!((curve[0][0] + 3.0).abs() < 1e-6 && (curve.last().unwrap()[0] - 3.0).abs() < 1e-6);
+    // 2 y' + 4 y = 8（解くと y' = (8 − 4y)/2）は y = 2 + C e^{−2x}（y(0) = 3 なら C = 1）。1 階なので傾きの場もある
+    let (m, p) = ode_points("2 y' + 4 y = 8", (0.0, 1.0), &["3"], &[]);
+    assert!(m.kind().contains("傾きの場"), "{}", m.kind());
+    let curve: Vec<_> = p.iter().take_while(|v| v[0].is_finite()).filter(|v| v[0] > -0.5).collect();
+    assert!(curve.iter().all(|v| (v[1] as f64 - (2.0 + (-2.0 * v[0] as f64).exp())).abs() < 1e-4));
+    // 解いた形にできない
+    assert!(error_of("y' y' = 1", "").contains("解いた形"));
+    // y' = y²、y(0) = 1（x = 1 で発散）は、箱を出た所で止まり、エラーにならない
+    let (_, p) = ode_points("y' = y^2", (0.0, 1.0), &["1"], &[]);
+    let curve: Vec<_> = p.iter().take_while(|v| v[0].is_finite()).collect();
+    assert!(curve.last().unwrap()[0] < 1.0);
+    // 定義した関数の導関数 f'(x) は、今までどおり
+    assert!(max_diff("y = f'(x)", "y = 2x", "f(x) = x^2") < 1e-9);
 }
