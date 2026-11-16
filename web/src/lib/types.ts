@@ -240,6 +240,11 @@ export interface PlotItem extends PlotStyle {
   stale?: boolean
   /** 積分の範囲（∬_D の D）を描くための行なら、その範囲の名前。式の一覧には出さず、保存もしない（一覧の最後に置く） */
   regionName?: string
+  /** 積分を描くための行（被積分関数を、積分する範囲の上に描く）なら、元の式の id。式の一覧には出さず、保存もしない */
+  integralOf?: number
+  /** 積分を描くための行: 何を描いているかの説明（描けない形なら、その理由を auxError に入れる） */
+  auxNote?: string
+  auxError?: string
   /** 表示されたらすぐ入力を始める（エンターで新しく足した式） */
   autofocus?: boolean
   /** 範囲で重ねた立体として描いたことがあるか（最初の1回だけ半透明にするため） */

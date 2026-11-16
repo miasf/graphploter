@@ -458,6 +458,28 @@ fn region_integrals() {
     close("@intset((x, y), 0 ≤ x ≤ 1, 0 ≤ y ≤ x)(1)", 0.5, 1e-12);
     // 条件の書く順番・向きによらない
     close("@intset((x, y), y ≤ x, x ≤ 1, y ≥ 0, 0 ≤ x)(1)", 0.5, 1e-12);
+    // 累次積分の形に書けない領域: 境目を数値で探す
+    let pi = std::f64::consts::PI;
+    close("@intset((x, y), x^2 + y^2 ≤ 1)(1)", pi, 1e-6);
+    close("@intset((x, y), x^2 + y^2 ≤ 4)(x^2 + y^2)", 8.0 * pi, 1e-5);
+    close("@intset((x, y), (x - 100)^2 + (y + 50)^2 ≤ 1)(1)", pi, 1e-6);
+    close("@intset((x, y), x^2 ≤ y ≤ x + 2)(1)", 4.5, 1e-6);
+    // 穴の端・角（切り口の長さが折れる所）で分ける
+    close("@intset((x, y), 1 ≤ x^2 + y^2 ≤ 4)(1)", 3.0 * pi, 1e-6);
+    close("@intset((x, y), abs(x) + abs(y) ≤ 1)(1)", 2.0, 1e-6);
+    close("@intset((x, y), (x^2 + y^2)^2 ≤ 2 (x^2 - y^2))(1)", 2.0, 1e-6);
+    close("@intset((x, y, z), 1 ≤ x^2 + y^2 + z^2 ≤ 4)(1)", 28.0 * pi / 3.0, 1e-4);
+    // 下の端 > 上の端になる所（sin x < 0）は空
+    close("@intset((x, y), 0 ≤ y ≤ sin(x), 0 ≤ x ≤ 2 pi)(1)", 2.0, 2e-2);
+    close("@intset((x, y), x^2 / 9 + y^2 / 4 ≤ 1, y ≥ 0)(y)", 8.0, 1e-5);
+    close("@intset((x, y, z), x^2 + y^2 + z^2 ≤ 1)(1)", 4.0 * pi / 3.0, 1e-4);
+    close("@intset((x, y, z), x^2 + y^2 ≤ z ≤ 1)(1)", pi / 2.0, 1e-4);
+    close("@intset((x, y), -1 ≤ x ≤ 1, -1 ≤ y ≤ 1, x^2 + y^2 ≤ 1)(1)", pi, 1e-6);
+    assert!(graph_core::equation::eval_constant("@intset((x, y), y ≥ x^2)(1)").unwrap_err().contains("どこまでも続いて"));
+    // 外側の変数の端が、内側の変数の範囲から決まる（1 ≤ x ≤ y なら 1 ≤ y）
+    close("@intset((x, y), 1 ≤ x ≤ y, y ≤ 3)(1)", 2.0, 1e-12);
+    close("@intset((x, y), 1 ≤ x ≤ y ≤ 3)(x y)", 8.0, 1e-10);
+    close("@intset((x, y, z), 0 ≤ x ≤ y ≤ z ≤ 1)(1)", 1.0 / 6.0, 1e-12);
     // 長方形の上の x y: ∫₀¹∫₀² x y dy dx = 1
     close("@intset((x, y), 0 ≤ x ≤ 1, 0 ≤ y ≤ 2)(x y)", 1.0, 1e-12);
     // 円の面積（範囲の形で書いたもの）: 端で √ の傾きが無限大なので、精度は 10⁻³ ほど
@@ -497,8 +519,11 @@ fn region_integrals_with_outer_variables() {
     }
     assert!(n > 50);
     // 近似を使ったら説明に出す
-    let m = run("z = @intset((s, t), -1 ≤ s ≤ 1, -1 ≤ t ≤ 1, s^2 + t^2 ≤ 1)(1) + x", "", &[]).unwrap();
+    // （領域が外の変数で変わるとき。変わらなければ、境目を数値で探すので近似ではない）
+    let m = run("z = @intset((s, t), -1 ≤ s ≤ 1, -1 ≤ t ≤ 1, s^2 + t^2 ≤ 1 + x^2)(1)", "", &[]).unwrap();
     assert!(m.kind().contains("積分は近似"), "{}", m.kind());
+    let m = run("z = @intset((s, t), -1 ≤ s ≤ 1, -1 ≤ t ≤ 1, s^2 + t^2 ≤ 1)(1) + x", "", &[]).unwrap();
+    assert!(!m.kind().contains("積分は近似"), "{}", m.kind());
 }
 
 // ---- ベクトル・grad・div・rot・線積分・面積分・体積分 ----

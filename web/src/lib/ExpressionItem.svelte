@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
+  import { hasIntegral, joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
@@ -28,6 +28,10 @@
     regionViews: Record<string, { color: string; error?: string }>
     /** 範囲の欄の「表示」ボタン（描く・消すを切り替える） */
     onRegionShow: (name: string) => void
+    /** この式の積分を描いていれば、その色・説明・誤り（描いていなければ undefined） */
+    integralView?: { color: string; note?: string; error?: string }
+    /** 「積分を描く」ボタン（描く・消すを切り替える） */
+    onIntegralShow: () => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -111,6 +115,8 @@
     onRegion,
     regionViews,
     onRegionShow,
+    integralView,
+    onIntegralShow,
     onColor,
     onGrid,
     onOpacity,
@@ -470,6 +476,23 @@
         <div class="region-error">{regionLabel(name)} を描けません: {regionViews[name].error}</div>
       {/if}
     {/each}
+    <!-- 積分を描く: 被積分関数を、積分する範囲の上に描く（面積・体積が積分の値になる図形） -->
+    {#if hasIntegral(item.latex) || integralView}
+      <div class="integral">
+        <button
+          class="region-show"
+          class:on={!!integralView}
+          style:--region-color={integralView?.color}
+          aria-pressed={!!integralView}
+          title={integralView ? '積分の図をグラフから消す' : '被積分関数を、積分する範囲の上に描く（面積・体積が積分の値になる図形）'}
+          onclick={onIntegralShow}>{integralView ? '∫ 表示中' : '∫ 積分を描く'}</button>
+        {#if integralView?.error}
+          <span class="region-error">描けません: {integralView.error}</span>
+        {:else if integralView?.note}
+          <span class="integral-note">{integralView.note}</span>
+        {/if}
+      </div>
+    {/if}
     {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
       <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
       {#each hiddenCoords.filter((n) => item.slice && n in item.slice) as name (name)}
@@ -1240,6 +1263,20 @@
   .region-error {
     margin-top: 2px;
     color: var(--error, #c0392b);
+    font-size: 12px;
+  }
+  .integral {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    margin-top: 4px;
+  }
+  .integral .region-error {
+    margin-top: 0;
+  }
+  .integral-note {
+    color: var(--muted);
     font-size: 12px;
   }
   .region {

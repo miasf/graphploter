@@ -24,6 +24,7 @@ pub mod gpu2d;
 pub mod interval;
 pub mod mesh;
 pub mod pixel;
+mod region;
 pub mod parser;
 pub mod special;
 pub mod system;
