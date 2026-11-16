@@ -2007,6 +2007,21 @@ export class Viewer {
     const box = new THREE.Mesh(geo, createVolumeMaterial(u))
     box.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
     box.renderOrder = 1 // 半透明の面より後に重ねる
+    // ふだんは箱の表の面を描く（中の不透明な図形より手前に霧を重ねる）。視点が箱の中（か、表の面が近くの切り捨ての面で
+    // 切られるほど近く）に入ると表の面が画面に無くなり、霧が消えるので、そのときは裏の面を描く（光線は視点から進める）
+    const eye = new THREE.Vector3()
+    box.onBeforeRender = (_r, _s, camera) => {
+      eye.setFromMatrixPosition(camera.matrixWorld)
+      box.worldToLocal(eye)
+      const margin = 2 * ((camera as THREE.PerspectiveCamera).near ?? 0)
+      const inside = eye.x > lo.x - margin && eye.x < hi.x + margin && eye.y > lo.y - margin && eye.y < hi.y + margin && eye.z > lo.z - margin && eye.z < hi.z + margin
+      const side = inside ? THREE.BackSide : THREE.FrontSide
+      const mat = box.material as THREE.ShaderMaterial
+      if (mat.side !== side) {
+        mat.side = side
+        mat.needsUpdate = true
+      }
+    }
     p.volume = { box, u }
     this.applyVolumeCut(p)
     p.group.add(box)
