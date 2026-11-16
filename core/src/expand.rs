@@ -1325,6 +1325,10 @@ impl Expander<'_> {
             if let Some(e) = self.linear_change(&vars, &pairs, body)? {
                 return Ok(e);
             }
+            // 累次積分の形に書けない領域（x² + y² ≤ 1・x² ≤ y ≤ x + 2）: 領域の境目を数値で探して、点を置く
+            if let Some(e) = self.general_region(&vars, &pairs, body)? {
+                return Ok(e);
+            }
             return Err(format!(
                 "積分する領域は、それぞれの変数の範囲を書いてください（例: 0 ≤ {0} ≤ 1, 0 ≤ {1} ≤ {0}）",
                 vars[0],
@@ -1334,6 +1338,10 @@ impl Expander<'_> {
         // 範囲の形にならない条件: 条件の外で 0 になる因子を掛ける（近似）
         let mut f = body.clone();
         if !rest.is_empty() {
+            // 境目を数値で探せる領域なら、そうする（条件の外を 0 にする近似より、ずっと正確）
+            if let Ok(Some(e)) = self.general_region(&vars, &pairs, body) {
+                return Ok(e);
+            }
             APPROX.with(|a| *a.borrow_mut() = true);
             let mut piece = vec![Expr::Num(rest.len() as f64), Expr::Num(0.0)];
             let mut strict: u64 = 0;
@@ -1353,9 +1361,75 @@ impl Expander<'_> {
             es[1..].iter().fold(es[0].clone(), |acc, e| Expr::Call(g, vec![acc, e.clone()]))
         };
         for (v, (lo, hi)) in order.iter().zip(&bounds).rev() {
-            f = Expr::Binder { op: "int".into(), var: v.clone(), args: vec![fold(lo, Func::Max), fold(hi, Func::Min)], body: Box::new(f) };
+            let (lo, mut hi) = (fold(lo, Func::Max), fold(hi, Func::Min));
+            // 端が外側の変数の式なら、下の端 > 上の端になる所（0 ≤ y ≤ sin x の sin x < 0 の所）は空。逆向きの積分（負の値）にしない
+            if order.iter().any(|w| lo.uses_var(w) || hi.uses_var(w)) {
+                hi = Expr::Call(Func::Max, vec![lo.clone(), hi]);
+            }
+            f = Expr::Binder { op: "int".into(), var: v.clone(), args: vec![lo, hi], body: Box::new(f) };
         }
         self.scalar(&f)
+    }
+
+    /// 累次積分の形に書けない領域の上の積分（`region.rs`）。条件が積分の変数とパラメータだけの式でなければ None
+    /// （領域がほかの座標で変わるときは、点を置く場所を前もって決められない）。結果は Σ 重み · 中身(点)
+    fn general_region(&mut self, vars: &[String], pairs: &[(Expr, bool, Expr)], body: &Expr) -> Result<Option<Expr>, String> {
+        let n = vars.len();
+        let names: Vec<&str> = vars.iter().map(|v| v.as_str()).collect();
+        let free = |e: &Expr| !vars.iter().any(|v| e.uses_var(v));
+        let mut progs = Vec::new();
+        let mut known: Vec<(Option<f64>, Option<f64>)> = vec![(None, None); n];
+        let mut used: Vec<String> = Vec::new();
+        for (l, _, r) in pairs {
+            let g = Expr::Bin(BinOp::Sub, Box::new(r.clone()), Box::new(l.clone()));
+            let Ok(prog) = crate::eval::Program::compile_with(&g, &names, self.params) else { return Ok(None) };
+            used.extend(prog.used_params().iter().cloned());
+            progs.push(prog);
+            // 数で書かれた端（0 ≤ x・x ≤ 1）は、領域を探す箱にそのまま使う
+            for (i, v) in vars.iter().enumerate() {
+                let is_v = |e: &Expr| matches!(e, Expr::Var(name) if name == v);
+                if is_v(r) && free(l) {
+                    if let Ok(a) = self.number(l, "領域の条件") {
+                        known[i].0 = Some(known[i].0.map_or(a, |b: f64| b.max(a)));
+                    }
+                } else if is_v(l) && free(r) {
+                    if let Ok(a) = self.number(r, "領域の条件") {
+                        known[i].1 = Some(known[i].1.map_or(a, |b: f64| b.min(a)));
+                    }
+                }
+            }
+        }
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            for p in used {
+                if !u.contains(&p) {
+                    u.push(p);
+                }
+            }
+        });
+        let points = crate::region::quadrature(progs, n, &known)?;
+        self.int_depth += n;
+        let result = (|| {
+            let symbolic = self.scalar(body).ok();
+            let mut terms = Vec::with_capacity(points.len());
+            let mut nodes_count = 0;
+            for (p, w) in &points {
+                let put = |e: &Expr| e.substitute(&|v: &str| vars.iter().position(|name| name == v).map(|k| Expr::Num(p[k])));
+                let g = match &symbolic {
+                    Some(s) => put(s),
+                    None => self.scalar(&put(body))?,
+                };
+                let term = Expr::Bin(BinOp::Mul, Box::new(Expr::Num(*w)), Box::new(g));
+                nodes_count += term.node_count();
+                if nodes_count > MAX_NODES {
+                    return Err("積分の式が大きくなりすぎます（入れ子を減らしてください）".to_string());
+                }
+                terms.push(term);
+            }
+            Ok(if terms.is_empty() { Expr::Num(0.0) } else { balanced(terms, BinOp::Add) })
+        })();
+        self.int_depth -= n;
+        result.map(Some)
     }
 
     /// 式の値（数）。`what` はエラーの文に入れる名前（「Σ の範囲」など）。座標・媒介変数を含めばエラー
