@@ -204,6 +204,88 @@ thread_local! {
     static USED_PARAMS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 直前にコンパイルした行が定義の行なら、その名前と、描いたものの説明（`y = f(x)` など。描かないなら None）
     static DEF_LINE: RefCell<Option<(String, Option<String>)>> = const { RefCell::new(None) };
+    /// 原点から表示範囲の箱のいちばん遠い角までの距離（ker・Im の直線・平面の長さ。`lib.rs` が入れる）
+    static REACH: RefCell<f64> = const { RefCell::new(20.0) };
+    /// 作った図形を、表示範囲の箱で切るか（ker・Im）
+    static TRIM: RefCell<bool> = const { RefCell::new(false) };
+    /// 式の説明（「ker A（2 次元。平面）」「det = −2」）。あれば、ふつうの説明の代わりに出す
+    static KIND: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// 原点から表示範囲の箱のいちばん遠い角までの距離を入れる（[`install`] の後、コンパイルの前）
+pub fn set_reach(r: f64) {
+    if r.is_finite() && r > 0.0 {
+        REACH.with(|x| *x.borrow_mut() = r);
+    }
+}
+
+pub fn reach() -> f64 {
+    REACH.with(|x| *x.borrow())
+}
+
+/// 作った図形を、表示範囲の箱で切る
+pub fn request_trim() {
+    TRIM.with(|x| *x.borrow_mut() = true);
+}
+
+pub fn trim_requested() -> bool {
+    TRIM.with(|x| *x.borrow())
+}
+
+/// 式の説明を決める（ふつうの説明の代わりに出す）
+pub fn set_kind(label: String) {
+    KIND.with(|x| *x.borrow_mut() = Some(label));
+}
+
+pub fn kind_label() -> Option<String> {
+    KIND.with(|x| x.borrow().clone())
+}
+
+/// 式を展開して、行列・ベクトルなら (行の数, 列の数, 成分の式)。そうでなければ None（計画 M7 の、行列を描く行の判定）
+pub fn matrix_value(e: &Expr, params: &Params) -> Result<Option<(usize, usize, Vec<Expr>)>, String> {
+    let defs = current();
+    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new() };
+    Ok(match x.val(e)? {
+        Val::S(v) => Mat::of(&v).map(|m| (m.rows, m.cols, m.items)),
+        Val::Fn { .. } => None,
+    })
+}
+
+/// 式が使っている、座標・媒介変数でない名前を「使ったパラメータ」に数える（まだ定義されていない文字でもよい。
+/// 行列の定義の成分の文字が後からスライダーになったときに、その行を描き直すため）
+pub fn note_names(items: &[Expr]) {
+    let mut vs = Vec::new();
+    items.iter().for_each(|e| e.collect_vars(&mut vs));
+    USED_PARAMS.with(|u| {
+        let mut u = u.borrow_mut();
+        for v in vs {
+            if definable(&v) && !u.contains(&v) {
+                u.push(v);
+            }
+        }
+    });
+}
+
+/// 成分が全部、数とパラメータだけの式なら、その値（座標・媒介変数を含めば None）
+pub fn numbers(items: &[Expr], params: &Params) -> Option<Vec<f64>> {
+    items
+        .iter()
+        .map(|e| {
+            let prog = crate::eval::Program::compile_with(e, &[], params).ok()?;
+            USED_PARAMS.with(|u| {
+                let mut u = u.borrow_mut();
+                for p in prog.used_params() {
+                    if !u.contains(p) {
+                        u.push(p.clone());
+                    }
+                }
+            });
+            let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+            prog.eval_batch(&[], &mut out);
+            let v = crate::eval::as_real(out[0]);
+            v.is_finite().then_some(v)
+        })
+        .collect()
 }
 
 /// [`install`] の戻り値。捨てると、前の定義に戻す
@@ -225,6 +307,9 @@ pub fn install(defs: Defs) -> Installed {
     NOTES.with(|n| n.borrow_mut().clear());
     PARAM_RANGES.with(|r| r.borrow_mut().clear());
     DEF_LINE.with(|d| *d.borrow_mut() = None);
+    REACH.with(|x| *x.borrow_mut() = 20.0);
+    TRIM.with(|x| *x.borrow_mut() = false);
+    KIND.with(|x| *x.borrow_mut() = None);
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
 
@@ -633,6 +718,7 @@ impl Expander<'_> {
             Expr::Op { op, args } if matches!(op.as_str(), "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "angle") => {
                 Val::S(self.matrix_op(op, args)?)
             }
+            Expr::Op { op, args } if op == "dim" || op == "rank" => Val::S(Expr::Num(self.dimension(op, args)? as f64)),
             Expr::Op { op, .. } if matches!(op.as_str(), "ker" | "im") => {
                 return Err(format!("@{op}(A) は、1 行にそれだけを書いてください（式の中では @dim(@{op}(A)) の形で使えます）"))
             }
@@ -700,6 +786,23 @@ impl Expander<'_> {
                 }
             }
         })
+    }
+
+    /// 階数 `@rank(A)` と、次元 `@dim(@ker(A))`・`@dim(Im(A))`。成分を数にして、掃き出しで求める
+    fn dimension(&mut self, op: &str, args: &[Expr]) -> Result<usize, String> {
+        let [arg] = args else { return Err(format!("@{op} の引数は 1 個です")) };
+        let (kind, inner) = match (op, arg) {
+            ("rank", a) => ("rank", a),
+            (_, Expr::Op { op: o, args: a }) if (o == "ker" || o == "im") && a.len() == 1 => (o.as_str(), &a[0]),
+            (_, Expr::Call(crate::functions::Func::Im, a)) if a.len() == 1 => ("im", &a[0]),
+            _ => return Err("@dim は、dim ker A・dim Im A の形で使ってください".into()),
+        };
+        let m = self.mat(inner, &format!("@{op}"))?;
+        let Some(a) = numbers(&m.items, self.params) else {
+            return Err("階数・次元を求める行列の成分は、数とパラメータだけで書いてください".into());
+        };
+        let rank = crate::linalg::Matrix::new(m.rows, m.cols, a).rank();
+        Ok(if kind == "ker" { m.cols - rank } else { rank })
     }
 
     /// 成分の取り出し `v_(2)`・`A_(1, 2)`（番号は 1 から）

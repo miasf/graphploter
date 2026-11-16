@@ -22,6 +22,19 @@ impl CoordMap {
         CoordMap { progs }
     }
 
+    /// 式が使っているパラメータの名前（値が変わったら、座標系を使う式を作り直すため）
+    pub fn used_params(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in &self.progs {
+            for n in p.used_params() {
+                if !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// 点の列（3 つずつ）を T で移す。有限でない点・移した先が有限でない（実数でない）点は、3 つとも NaN
     pub fn map_points(&self, pts: &[f32]) -> Vec<f32> {
         let n = pts.len() / 3;

@@ -486,6 +486,8 @@ export interface CoordGridRequest {
   /** 線を引く面（ビット a: 座標 a が範囲の最小の面） */
   faces: number
   flat: boolean
+  /** 定義の行（座標系の式が、定義した行列・関数を使えるように。計画 M7） */
+  definitions?: string
 }
 
 /** 座標系の格子: 元の位置（座標の値）と移した先（点の列。線の間は NaN）。式に誤りがあれば error */

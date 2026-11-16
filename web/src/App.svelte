@@ -3,7 +3,7 @@
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
   import { integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
-  import { blankMatrix, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
+  import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
@@ -1677,6 +1677,34 @@
     return c.id
   }
 
+  /**
+   * 行列の定義の行（2×2・3×3）を、座標系 T(q) = A q として使う（計画 M7 の線形変換）。同じ行列の座標系がもうあれば、それを開く。
+   * 成分は A_{i,j} の形で書くので、行列の成分（スライダーの文字を含む）を変えると座標系も動く
+   */
+  function useMatrixAsCoord(item: PlotItem) {
+    const m = matrixDefinition(item.latex)
+    if (!m) return
+    const { name, size } = m
+    const row = (i: number) => Array.from({ length: size }, (_, j) => `${name}_{${i + 1},${j + 1}}${'xyz'[j]}`).join('+')
+    const map: CoordSystem['map'] = [row(0), row(1), size === 3 ? row(2) : 'z']
+    const label = `行列 ${latexToText(name).replace(/[{}]/g, '').replace(/^vec_/, '')}`
+    let c = coordSystems.find((x) => x.preset === 'custom' && x.map.join('|') === map.join('|'))
+    if (!c) {
+      c = {
+        id: nextCoordId++,
+        name: label,
+        preset: 'custom',
+        map,
+        names: ['x', 'y', 'z'],
+        ranges: [['-5', '5'], ['-5', '5'], ['-5', '5']],
+        grid: { on: true, faces: 4 },
+        morph: 1,
+      }
+      coordSystems.push(c)
+    }
+    openCoord(c.id)
+  }
+
   /** 座標系の式・範囲を変えた: その座標系の式を計算し直す */
   function setCoordShape(cid: number, map: CoordSystem['map'], ranges: CoordSystem['ranges']) {
     const c = coordSystems.find((x) => x.id === cid)
@@ -1750,7 +1778,7 @@
       wanted.add(c.id)
       const token = (gridToken.get(c.id) ?? 0) + 1
       gridToken.set(c.id, token)
-      requestCoordGrid({ ...req, params, lines: 8, faces: grid.faces, flat }).then((res) => {
+      requestCoordGrid({ ...req, params, lines: 8, faces: grid.faces, flat, definitions: currentDefinitions({} as PlotItem) }).then((res) => {
         if (gridToken.get(c.id) !== token) return
         const now = coordSystems.find((x) => x.id === c.id)
         if (res.ok && now) {
@@ -1774,7 +1802,7 @@
   $effect(() => {
     const key = JSON.stringify([
       coordSystems.map((c) => [c.id, c.map, c.ranges, c.names, c.grid]),
-      items.map((it) => [it.coordSys, it.visible, !!it.param, it.param?.name, it.param?.re, it.param?.im]),
+      items.map((it) => [it.coordSys, it.visible, !!it.param, it.param?.name, it.param?.re, it.param?.im, it.def ? it.latex : '']),
       flat,
     ])
     void key
@@ -2286,6 +2314,7 @@
             onCoord={(c) => setItemCoord(item, c)}
             onOpenCoord={() => openCoord(item.coordSys)}
             onOpenRotation={() => openRotation(groupIdOf(item))}
+            onMatrixCoord={() => useMatrixAsCoord(item)}
             {folders}
             onFolder={(fid) => setItemFolder(item, fid)}
           />

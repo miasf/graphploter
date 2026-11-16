@@ -2,6 +2,7 @@
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
   import { hasIntegral, joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
+  import { matrixDefinition } from './matrixEdit'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
@@ -101,6 +102,8 @@
     onOpenCoord: () => void
     /** 設定の「回転」でグループを開く */
     onOpenRotation: () => void
+    /** この行（行列の定義）を、座標系 T(q) = A q として使う */
+    onMatrixCoord?: () => void
     /** フォルダの一覧と、この式をフォルダに入れる・出す（0 なら外へ、'new' なら新しいフォルダへ） */
     folders: Folder[]
     onFolder: (fid: number | 'new') => void
@@ -162,6 +165,7 @@
     onCoord,
     onOpenCoord,
     onOpenRotation,
+    onMatrixCoord,
     folders,
     onFolder,
   }: Props = $props()
@@ -355,6 +359,8 @@
   })
 
   /** この式の座標系（選んでいない・消えていれば undefined） */
+  /** 行列の定義の行（2×2・3×3）なら、その名前と大きさ */
+  const matrixDef = $derived(matrixDefinition(item.latex))
   const coordSys = $derived(item.coordSys === undefined ? undefined : coordSystems.find((c) => c.id === item.coordSys))
   /** 設定欄のタブ */
   type Tab = 'look' | 'grid' | 'rotate' | 'coord'
@@ -1026,6 +1032,14 @@
               : '式の x, y, z を、そのまま直交座標として描いています。'}
             <button class="link" onclick={onOpenCoord}>座標系の設定・移行のスライダー</button>
           </p>
+          {#if matrixDef && onMatrixCoord}
+            <!-- 行列の定義の行: 線形変換 T(q) = A q の座標系を作る（計画 M7） -->
+            <p class="hint">
+              <button class="link" onclick={onMatrixCoord}>この行列を座標系として使う</button>
+              （{matrixDef.size}×{matrixDef.size} の行列の線形変換 q ↦ A q。ほかの式の ⚙「座標系」で選ぶと、その式が変換されます。
+              移行のスライダー 0 で元の形）
+            </p>
+          {/if}
         {/if}
       </div>
     {/if}

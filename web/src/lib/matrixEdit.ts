@@ -186,3 +186,17 @@ export function resizeMatrix(latex: string, at: number, rows: number, cols: numb
 export function blankMatrix(rows: number, cols: number, env = 'pmatrix'): string {
   return formatMatrix(resize({ env, cells: [[]] }, rows, cols))
 }
+
+/**
+ * 式が、行列の定義の行 `A = (2×2 か 3×3 の行列)` なら、名前（LaTeX。`A`・`\vec{b}` など）と大きさ。そうでなければ null
+ * （「座標系として使う」を出すかどうかを決める）
+ */
+export function matrixDefinition(latex: string): { name: string; size: 2 | 3 } | null {
+  const k = latex.indexOf('=')
+  if (k < 0) return null
+  const name = latex.slice(0, k).trim()
+  if (!/^([A-Za-z](_\{?\d+\}?)?|\\vec\{[A-Za-z]\w*\})$/.test(name)) return null
+  const m = parseMatrix(latex.slice(k + 1))
+  if (!m || rowsOf(m) !== colsOf(m) || (rowsOf(m) !== 2 && rowsOf(m) !== 3)) return null
+  return { name, size: rowsOf(m) as 2 | 3 }
+}
