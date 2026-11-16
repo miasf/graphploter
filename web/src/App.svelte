@@ -540,6 +540,14 @@
     // 非表示の式は計算しない（表示したときに計算する）。パラメータの行は、ほかの式が使うので計算する
     if (!item.visible && !item.param) {
       item.stale = true
+      // 計算はしないが、式の書き方の誤りだけは今の式で調べ直す（範囲の欄を直したのに、前の誤りが残って見えないように）。
+      // 計算の誤りは分からないので、表示したときに計算し直すまで出さない
+      try {
+        latexToText(item.latex)
+        item.error = undefined
+      } catch (e) {
+        item.error = e instanceof Error ? e.message : String(e)
+      }
       return
     }
     if (running.has(item.id)) {
@@ -1219,7 +1227,7 @@
     view.auxError = failed
     // 3 重積分は、領域の中を値の色で塗る（陰関数の F の値の伝達関数）。それ以外は半透明の面
     if (field !== wasField || view.hidden === undefined) {
-      view.hidden = field ? { ...DEFAULT_HIDDEN, mode: 'field', opacity: 'flat', colormap: 'viridis', density: 0.6, lit: false } : { ...DEFAULT_HIDDEN }
+      view.hidden = field ? { ...DEFAULT_HIDDEN, mode: 'field', opacity: 'abs', colormap: 'turbo', density: 0.6, lit: true } : { ...DEFAULT_HIDDEN }
       view.opacity = field ? 1 : 0.55
     }
   }

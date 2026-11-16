@@ -517,7 +517,7 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
   - 1 変数の定積分 $\int_a^b f\,dx$: 曲線と軸の間（高さ 0 の面。軸より下は負）
   - 2 重積分（$\iint_D f\,dA$・累次積分 $\int\int f\,dy\,dx$）: 領域の上の、高さが $f$ の立体 $\{(x,y,z) \mid (x,y) \in D,\ \min(0,f) \le z \le \max(0,f)\}$。
     範囲が変数の式（$1 \le x \le y,\ y \le 3$）でも、条件をそのまま不等式として描くので、そのまま描ける
-  - 3 重積分: 領域の中を、$f$ の値の色の霧で塗る（陰関数の F の値の伝達関数）
+  - 3 重積分: 領域の中を、$f$ の値の色の霧で塗る（陰関数の F の値の伝達関数。赤は正・青は負で、$|f|$ が大きいほど濃い）。$f$ が定数なら、領域そのものを描く
   - 平面の曲線の上の線積分: 曲線の上に立てた、高さが $f$ の幕（$\mathbf F \cdot d\mathbf r$ は接線の成分 $\mathbf F \cdot \mathbf r' / |\mathbf r'|$）。極座標などで書いた平面の領域は、高さが $f$ の立体
   - 曲面の上の面積分: 曲面を、法線の向きに $f$ だけ厚くした立体（$\mathbf F \cdot d\mathbf S$ は法線の成分 $\mathbf F \cdot \mathbf n$）
   - まだ描けないもの: 不定積分、積分の変数でない座標が残る積分（$\int_0^x e^{-t^2}\,dt$）、空間の曲線の上の線積分、媒介変数 3 つの立体の上の積分。
@@ -597,6 +597,7 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
   `\oint`・`\oiint` は `\int`・`\iint` と同じ（閉じているかは調べない）。式を全部書き並べてから計算するので、3 重の積分の
   式が大きくなりすぎるとエラーになる（球座標の球の体積は計算できるが、範囲が外側の変数の式（$\sqrt{1-x^2-y^2}$）の 3 重積分は大きすぎる）
 - 集合と論理: 内包的表記 `\left\{(x,y,z) \mid x^2+y^2<1,\ 0 \le z \le 2\right\}`（点の名前は自由。表示中の座標に順に読み替える）、
+  条件の `-1 \le x, y, z \le 1` は、$x, y, z$ のどれもが $-1$ 以上 $1$ 以下（間に文字だけの条件があるときだけ。`0 \le x, y \le 1` は $0 \le x$ と $y \le 1$）、
   論理 `\land`・`\lor`・`\neg`・`\Rightarrow`・`\Leftarrow`・`\Leftrightarrow`、排他的論理和（XOR）`\oplus`・`\veebar`・`\nleftrightarrow`、
   否定論理積（NAND）`\barwedge`・`\uparrow`、否定論理和（NOR）`\downarrow`・`\nor`、集合 `\cap`・`\cup`・`\setminus`・対称差 `\triangle`・`\ominus`・
   補集合 `A^{c}`・`A^{\complement}`・`\complement A`、`\in`・`\notin`・`\ni`、区間 `[0,1)`・`(0,1]`・`[0,\infty)` とその直積 `[0,1]\times[0,2]`、

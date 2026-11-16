@@ -48,9 +48,10 @@ export const HIDDEN_MODE_ORDER: HiddenMode[] = ['slice', 'layers', 'planes', 'vo
 export type ColorMap = 'viridis' | 'turbo' | 'shade'
 /**
  * 伝達関数の不透明度の形。flat: 一様、high: 値が大きいほど濃い、low: 小さいほど濃い、bands: 何枚かの値の所だけ濃い（等値面風）、
- * zero: 値 0 の近くだけ濃い（ぼやけた面。幅は 0 の面からの距離 |v| / |∇v| で決めるので、式の大きさによらず一定の厚み）
+ * zero: 値 0 の近くだけ濃い（ぼやけた面。幅は 0 の面からの距離 |v| / |∇v| で決めるので、式の大きさによらず一定の厚み）、
+ * abs: |値| が大きいほど濃い（正も負も。積分の図で、積分に効いている所が濃く見える）
  */
-export type OpacityShape = 'flat' | 'high' | 'low' | 'bands' | 'zero'
+export type OpacityShape = 'flat' | 'high' | 'low' | 'bands' | 'zero' | 'abs'
 /**
  * 伝達関数の重ね方。over: 手前から重ね塗り、max: 視線上の最大値（最大値投影）、min: 最小値、mean: 平均値。
  * max・min・mean では、視線ごとに 1 つの値の色を出し、不透明度はその値で決める

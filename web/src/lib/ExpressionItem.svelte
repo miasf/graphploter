@@ -281,6 +281,7 @@
     { shape: 'low', label: '値が小さいほど濃い' },
     { shape: 'bands', label: '何枚かの値の所だけ濃い（等値面風）' },
     { shape: 'zero', label: '0 の近くだけ濃い（ぼやけた面）' },
+    { shape: 'abs', label: '|値| が大きいほど濃い（正も負も）' },
   ]
   const BLENDS: { blend: NonNullable<HiddenStyle['blend']>; label: string }[] = [
     { blend: 'over', label: '手前から重ね塗り' },
