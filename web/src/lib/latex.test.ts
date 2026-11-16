@@ -21,6 +21,21 @@ const cases: [string, string][] = [
   ['\\left(f\\circ g\\right)\\left(x\\right)', '(f∘g)(x)'],
   ['f\\colon x\\mapsto x^2', 'f(x)=x^(2)'],
   ['30^{\\circ}', '30*(pi/180)'],
+  // ベクトルと行列（M6）
+  ['A=\\begin{pmatrix}1 & 2\\\\ 3 & 4\\end{pmatrix}', 'A= ⟦1,2;3,4⟧'],
+  ['\\begin{bmatrix}\\cos a & -\\sin a\\\\ \\sin a & \\cos a\\end{bmatrix}\\left(\\cos t,2\\sin t\\right)', '⟦cos a,- sin a;sin a,cos a⟧ ( cos t,2 sin t)'],
+  ['z=\\begin{vmatrix}x & y\\\\ y & x\\end{vmatrix}', 'z= @det(⟦x,y;y,x⟧)'],
+  // 空欄は 0 として読む（大きさを変えている途中）
+  ['\\begin{pmatrix}1 & \\placeholder{}\\\\ \\placeholder{} & 1\\end{pmatrix}', '⟦1,0;0,1⟧'],
+  ['\\begin{pmatrix}1 & 2\\\\ \\placeholder{} & \\placeholder{}\\end{pmatrix}', '⟦1,2;0,0⟧'],
+  ['\\det A+\\operatorname{tr}\\left(A\\right)', '@det A+ @tr (A)'],
+  ['A^{T}B^{\\top}C^{\\dagger}', 'A^(T)B^(T)C^(†)'],
+  ['\\left\\langle a,b\\right\\rangle+\\left\\Vert a\\right\\Vert+\\lVert b\\rVert', '@dot(a,b) + @norm(a) + @norm(b)'],
+  ['\\vec{b}+t\\vec{v}', '{vec_b} +t {vec_v}'],
+  ['\\vec{a}\\times\\vec{b}', '{vec_a} × {vec_b}'],
+  ['A_{1,2}+\\vec{v}_{2}+w_{2}', 'A_(1,2)+ {vec_v}_2+w_2'],
+  ['x_{a}', 'x_(a)'],
+  ['\\dim\\ker A', '@dim @ker A'],
   // 場合分け（M2）
   ['f\\left(x\\right)=\\begin{cases}x^2 & x<0\\\\ x & \\text{otherwise}\\end{cases}', 'f(x)= @cases(x^(2), x<0; x)'],
   ['\\begin{cases}1 & \\text{if } 0\\le x<1\\\\ 0 & x\\ge1\\\\ -1\\end{cases}', '@cases(1, 0<=x<1; 0, x>=1; -1)'],
@@ -140,7 +155,8 @@ const cases: [string, string][] = [
 for (const [input, want] of cases) check(input, latexToText(input), want)
 
 // 変換できないものはエラーになる
-for (const input of ['x_{a}', '2_{1}', '\\alpha', '\\frac{1}']) {
+// 数字でない添字 x_{a} は、計算エンジンへ x_(a) の形で渡す（行列の成分・数列の項。M6・M10）
+for (const input of ['2_{1}', '\\alpha', '\\frac{1}']) {
   let threw = false
   try {
     latexToText(input)

@@ -30,6 +30,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+pub mod linalg;
+use linalg::{cross, norm, Mat};
+
 /// 展開した式の節の数の上限（計画 2.5）。球座標で書いた球の体積積分（3 重・体積要素 |det J|）が約 132 万節（展開とコンパイルで 0.4 秒ほど）。
 /// これより大きい式は、メモリ（WASM で数十 MB）と時間が重くなるので断る
 pub const MAX_NODES: usize = 1_500_000;
@@ -101,7 +104,7 @@ impl Defs {
                 if !definable(name) || params.contains_key(name) || names.contains(name) {
                     continue;
                 }
-                if uses_function_value(&chain.exprs[1], &names) {
+                if uses_function_value(&chain.exprs[1], &names) || has_vector_or_matrix(&chain.exprs[1]) {
                     names.push(name.clone());
                     values.push((k, name.clone()));
                 }
@@ -172,6 +175,17 @@ fn uses_function_value(e: &Expr, names: &[String]) -> bool {
     }
 }
 
+/// 式が、組（ベクトル）か行列を含むか（`{vec_b} = (1, 2, 3)`・`A = ⟦1, 2; 3, 4⟧` を定義として読むため）
+fn has_vector_or_matrix(e: &Expr) -> bool {
+    match e {
+        Expr::Tuple(_) | Expr::Matrix { .. } => true,
+        Expr::Neg(a) => has_vector_or_matrix(a),
+        Expr::Bin(_, a, b) => has_vector_or_matrix(a) || has_vector_or_matrix(b),
+        Expr::Call(_, args) | Expr::Op { args, .. } => args.iter().any(has_vector_or_matrix),
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 今の定義（plot の間だけ入れる）
 // ---------------------------------------------------------------------------
@@ -190,6 +204,88 @@ thread_local! {
     static USED_PARAMS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 直前にコンパイルした行が定義の行なら、その名前と、描いたものの説明（`y = f(x)` など。描かないなら None）
     static DEF_LINE: RefCell<Option<(String, Option<String>)>> = const { RefCell::new(None) };
+    /// 原点から表示範囲の箱のいちばん遠い角までの距離（ker・Im の直線・平面の長さ。`lib.rs` が入れる）
+    static REACH: RefCell<f64> = const { RefCell::new(20.0) };
+    /// 作った図形を、表示範囲の箱で切るか（ker・Im）
+    static TRIM: RefCell<bool> = const { RefCell::new(false) };
+    /// 式の説明（「ker A（2 次元。平面）」「det = −2」）。あれば、ふつうの説明の代わりに出す
+    static KIND: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// 原点から表示範囲の箱のいちばん遠い角までの距離を入れる（[`install`] の後、コンパイルの前）
+pub fn set_reach(r: f64) {
+    if r.is_finite() && r > 0.0 {
+        REACH.with(|x| *x.borrow_mut() = r);
+    }
+}
+
+pub fn reach() -> f64 {
+    REACH.with(|x| *x.borrow())
+}
+
+/// 作った図形を、表示範囲の箱で切る
+pub fn request_trim() {
+    TRIM.with(|x| *x.borrow_mut() = true);
+}
+
+pub fn trim_requested() -> bool {
+    TRIM.with(|x| *x.borrow())
+}
+
+/// 式の説明を決める（ふつうの説明の代わりに出す）
+pub fn set_kind(label: String) {
+    KIND.with(|x| *x.borrow_mut() = Some(label));
+}
+
+pub fn kind_label() -> Option<String> {
+    KIND.with(|x| x.borrow().clone())
+}
+
+/// 式を展開して、行列・ベクトルなら (行の数, 列の数, 成分の式)。そうでなければ None（計画 M7 の、行列を描く行の判定）
+pub fn matrix_value(e: &Expr, params: &Params) -> Result<Option<(usize, usize, Vec<Expr>)>, String> {
+    let defs = current();
+    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new() };
+    Ok(match x.val(e)? {
+        Val::S(v) => Mat::of(&v).map(|m| (m.rows, m.cols, m.items)),
+        Val::Fn { .. } => None,
+    })
+}
+
+/// 式が使っている、座標・媒介変数でない名前を「使ったパラメータ」に数える（まだ定義されていない文字でもよい。
+/// 行列の定義の成分の文字が後からスライダーになったときに、その行を描き直すため）
+pub fn note_names(items: &[Expr]) {
+    let mut vs = Vec::new();
+    items.iter().for_each(|e| e.collect_vars(&mut vs));
+    USED_PARAMS.with(|u| {
+        let mut u = u.borrow_mut();
+        for v in vs {
+            if definable(&v) && !u.contains(&v) {
+                u.push(v);
+            }
+        }
+    });
+}
+
+/// 成分が全部、数とパラメータだけの式なら、その値（座標・媒介変数を含めば None）
+pub fn numbers(items: &[Expr], params: &Params) -> Option<Vec<f64>> {
+    items
+        .iter()
+        .map(|e| {
+            let prog = crate::eval::Program::compile_with(e, &[], params).ok()?;
+            USED_PARAMS.with(|u| {
+                let mut u = u.borrow_mut();
+                for p in prog.used_params() {
+                    if !u.contains(p) {
+                        u.push(p.clone());
+                    }
+                }
+            });
+            let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+            prog.eval_batch(&[], &mut out);
+            let v = crate::eval::as_real(out[0]);
+            v.is_finite().then_some(v)
+        })
+        .collect()
 }
 
 /// [`install`] の戻り値。捨てると、前の定義に戻す
@@ -211,6 +307,9 @@ pub fn install(defs: Defs) -> Installed {
     NOTES.with(|n| n.borrow_mut().clear());
     PARAM_RANGES.with(|r| r.borrow_mut().clear());
     DEF_LINE.with(|d| *d.borrow_mut() = None);
+    REACH.with(|x| *x.borrow_mut() = 20.0);
+    TRIM.with(|x| *x.borrow_mut() = false);
+    KIND.with(|x| *x.borrow_mut() = None);
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
 
@@ -372,7 +471,7 @@ fn mentions_defs(e: &Expr) -> bool {
     }
     let mut vs = Vec::new();
     e.collect_vars(&mut vs);
-    vs.iter().any(|v| defs.get(v).is_some())
+    vs.iter().any(|v| defs.get(v).is_some() || split_subscript(v).is_some_and(|(h, _)| defs.get(h).is_some()))
 }
 
 fn fn_as_value_error(e: &Expr) -> String {
@@ -454,7 +553,10 @@ impl Expander<'_> {
             Expr::Num(_) | Expr::Const(_) => Val::S(e.clone()),
             Expr::Var(name) => match self.def_value(name)? {
                 Some(v) => v,
-                None => Val::S(e.clone()),
+                None => match self.component_var(name)? {
+                    Some(c) => Val::S(c),
+                    None => Val::S(e.clone()),
+                },
             },
             Expr::Apply { name, primes, args } => {
                 let Some(f) = self.def_value(name)? else {
@@ -474,14 +576,41 @@ impl Expander<'_> {
                         };
                         Val::S(self.apply(name, arity, &body, args)?)
                     }
+                    // 関数でない定義（行列・ベクトル・数）の直後の括弧は、掛け算（A (x, y, z)）
+                    Val::S(s) if *primes == 0 => {
+                        let arg = if args.len() == 1 { args.into_iter().next().unwrap_or(Expr::Num(0.0)) } else { Expr::Tuple(args) };
+                        self.bin(BinOp::Mul, Val::S(s), Val::S(arg), e)?
+                    }
                     Val::S(_) => return Err(format!("{name} は関数ではありません")),
                 }
             }
             Expr::Neg(a) => match self.val(a)? {
                 Val::S(Expr::Tuple(items)) => Val::S(Expr::Tuple(items.into_iter().map(|c| Expr::Neg(Box::new(c))).collect())),
+                Val::S(Expr::Matrix { rows, cols, items }) => {
+                    Val::S(Expr::Matrix { rows, cols, items: items.into_iter().map(|c| Expr::Neg(Box::new(c))).collect() })
+                }
                 Val::S(s) => Val::S(Expr::Neg(Box::new(s))),
                 Val::Fn { arity, body } => Val::Fn { arity, body: Expr::Neg(Box::new(body)) },
             },
+            Expr::Bin(BinOp::Pow, a, b) => {
+                let va = self.val(a)?;
+                // 行列・ベクトルのべき: ^T（転置）・^†（共役転置）・整数（負は逆行列）
+                if let Some(m) = if let Val::S(base) = &va { Mat::of(base) } else { None } {
+                    match &**b {
+                        // T がパラメータでも、行列の ^T は転置を優先する
+                        Expr::Var(t) if t == "T" => return Ok(Val::S(m.transpose().into_expr())),
+                        Expr::Var(t) if t == "†" => return Ok(Val::S(m.dagger().into_expr())),
+                        _ => {}
+                    }
+                    if m.cols == 1 {
+                        return Err("ベクトルのべきは使えません（内積 v · v か、大きさ |v|^2 と書いてください）".into());
+                    }
+                    let k = self.integer(b, "行列のべき")?;
+                    return Ok(Val::S(m.power(k, MAX_NODES)?.into_expr()));
+                }
+                let vb = self.val(b)?;
+                self.bin(BinOp::Pow, va, vb, e)?
+            }
             Expr::Bin(op, a, b) => {
                 let (va, vb) = (self.val(a)?, self.val(b)?);
                 self.bin(*op, va, vb, e)?
@@ -492,12 +621,17 @@ impl Expander<'_> {
                 if let [Val::Fn { arity, body }] = vals.as_slice() {
                     return Ok(Val::Fn { arity: *arity, body: Expr::Call(*f, vec![body.clone()]) });
                 }
-                // ベクトルの大きさ |v| = √(v · v)。ほかの関数にベクトルは渡せない
-                if let [Val::S(Expr::Tuple(items))] = vals.as_slice() {
-                    if *f == crate::functions::Func::Abs {
-                        return Ok(Val::S(norm(items)));
-                    }
-                    return Err(format!("{} にベクトルは渡せません", f.names().first().copied().unwrap_or("この関数")));
+                // ベクトルの大きさ |v| = √(v · v)、行列の |A| は行列式。Re・Im・conj は成分ごと。ほかの関数には渡せない
+                if let Some(m) = if let [Val::S(v)] = vals.as_slice() { Mat::of(v) } else { None } {
+                    use crate::functions::Func;
+                    return Ok(Val::S(match f {
+                        Func::Abs if m.cols == 1 => norm(&m.items),
+                        Func::Abs => m.det()?,
+                        Func::Re | Func::Im | Func::Conj => {
+                            Mat { rows: m.rows, cols: m.cols, items: m.items.iter().map(|c| Expr::Call(*f, vec![c.clone()])).collect() }.into_expr()
+                        }
+                        _ => return Err(format!("{} に{}は渡せません", f.names().first().copied().unwrap_or("この関数"), m.describe())),
+                    }));
                 }
                 let mut out = Vec::with_capacity(vals.len());
                 for v in vals {
@@ -561,7 +695,7 @@ impl Expander<'_> {
                 // 外積: 両方がベクトル（3 成分ならベクトル、2 成分ならスカラー）。スカラーどうしは掛け算
                 match (self.val(&args[0])?, self.val(&args[1])?) {
                     (Val::S(Expr::Tuple(u)), Val::S(Expr::Tuple(v))) => Val::S(cross(&u, &v)?),
-                    (Val::S(Expr::Tuple(_)), _) | (_, Val::S(Expr::Tuple(_))) => {
+                    (Val::S(Expr::Tuple(_)), Val::S(o)) | (Val::S(o), Val::S(Expr::Tuple(_))) if !matches!(o, Expr::Matrix { .. }) => {
                         return Err("× の両側がベクトルなら外積、スカラーなら掛け算です（ベクトルとスカラーなら · か並べて書いてください）".into())
                     }
                     (va, vb) => self.bin(BinOp::Mul, va, vb, e)?,
@@ -581,12 +715,125 @@ impl Expander<'_> {
                     _ => return Err("∘ の両側には関数を書いてください".into()),
                 }
             }
+            Expr::Op { op, args } if matches!(op.as_str(), "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "angle") => {
+                Val::S(self.matrix_op(op, args)?)
+            }
+            Expr::Op { op, args } if op == "dim" || op == "rank" => Val::S(Expr::Num(self.dimension(op, args)? as f64)),
+            Expr::Op { op, .. } if matches!(op.as_str(), "ker" | "im") => {
+                return Err(format!("@{op}(A) は、1 行にそれだけを書いてください（式の中では @dim(@{op}(A)) の形で使えます）"))
+            }
             Expr::Op { op, .. } => return Err(format!("@{op} はまだ使えません")),
             Expr::Binder { op, .. } => return Err(format!("@{op} はまだ使えません")),
-            Expr::Matrix { .. } => return Err("行列はまだ使えません".into()),
-            Expr::Index { name, .. } => return Err(format!("{name}_(…) の添字はまだ使えません")),
+            Expr::Matrix { rows, cols, items } => {
+                linalg::check_size(*rows, *cols)?;
+                let items = items.iter().map(|a| self.scalar(a)).collect::<Result<Vec<_>, _>>()?;
+                if items.iter().any(|c| Mat::of(c).is_some()) {
+                    return Err("行列の成分には、数・式を書いてください（ベクトル・行列は入れられません）".into());
+                }
+                Val::S(Mat { rows: *rows, cols: *cols, items }.into_expr())
+            }
+            Expr::Index { name, index } => match self.def_value(name)? {
+                Some(Val::S(v)) if Mat::of(&v).is_some() => Val::S(self.component(name, &v, index)?),
+                _ => return Err(format!("{name}_(…) の添字はまだ使えません")),
+            },
             Expr::Prime { name, order } => return Err(format!("{name}{} はまだ使えません", "'".repeat(*order as usize))),
         })
+    }
+
+    /// ベクトル・行列の値（そうでなければ、演算子の名前を入れたエラー）
+    fn mat(&mut self, e: &Expr, what: &str) -> Result<Mat, String> {
+        let v = self.scalar(e)?;
+        Mat::of(&v).ok_or_else(|| format!("{what} には行列・ベクトルを書いてください"))
+    }
+
+    /// 行列・ベクトルの関数の形の演算子（@det・@tr・@inv・@transpose・@norm・@dot・@angle）
+    fn matrix_op(&mut self, op: &str, args: &[Expr]) -> Result<Expr, String> {
+        let what = format!("@{op}");
+        let want = if matches!(op, "dot" | "angle") { 2 } else { 1 };
+        if args.len() != want {
+            return Err(format!("{what} の引数は {want} 個です（{} 個あります）", args.len()));
+        }
+        Ok(match op {
+            "det" => match self.scalar(&args[0])? {
+                // 1 × 1（スカラー）の行列式は、その数
+                v => match Mat::of(&v) {
+                    Some(m) => m.det()?,
+                    None => v,
+                },
+            },
+            "tr" => self.mat(&args[0], &what)?.trace()?,
+            "inv" => self.mat(&args[0], &what)?.inverse()?.into_expr(),
+            "transpose" => self.mat(&args[0], &what)?.transpose().into_expr(),
+            "norm" => {
+                let m = self.mat(&args[0], &what)?;
+                if m.cols != 1 {
+                    return Err("@norm にはベクトルを書いてください".into());
+                }
+                norm(&m.items)
+            }
+            _ => {
+                let (u, v) = (self.mat(&args[0], &what)?, self.mat(&args[1], &what)?);
+                if u.cols != 1 || v.cols != 1 {
+                    return Err(format!("{what} にはベクトルを 2 つ書いてください"));
+                }
+                let d = linalg::dot(&u.items, &v.items)?;
+                if op == "dot" {
+                    d
+                } else {
+                    // なす角 arccos(u · v / (|u| |v|))
+                    let den = crate::diff::mul(norm(&u.items), norm(&v.items));
+                    Expr::Call(crate::functions::Func::Acos, vec![crate::diff::div(d, den)])
+                }
+            }
+        })
+    }
+
+    /// 階数 `@rank(A)` と、次元 `@dim(@ker(A))`・`@dim(Im(A))`。成分を数にして、掃き出しで求める
+    fn dimension(&mut self, op: &str, args: &[Expr]) -> Result<usize, String> {
+        let [arg] = args else { return Err(format!("@{op} の引数は 1 個です")) };
+        let (kind, inner) = match (op, arg) {
+            ("rank", a) => ("rank", a),
+            (_, Expr::Op { op: o, args: a }) if (o == "ker" || o == "im") && a.len() == 1 => (o.as_str(), &a[0]),
+            (_, Expr::Call(crate::functions::Func::Im, a)) if a.len() == 1 => ("im", &a[0]),
+            _ => return Err("@dim は、dim ker A・dim Im A の形で使ってください".into()),
+        };
+        let m = self.mat(inner, &format!("@{op}"))?;
+        let Some(a) = numbers(&m.items, self.params) else {
+            return Err("階数・次元を求める行列の成分は、数とパラメータだけで書いてください".into());
+        };
+        let rank = crate::linalg::Matrix::new(m.rows, m.cols, a).rank();
+        Ok(if kind == "ker" { m.cols - rank } else { rank })
+    }
+
+    /// 成分の取り出し `v_(2)`・`A_(1, 2)`（番号は 1 から）
+    fn component(&mut self, name: &str, value: &Expr, index: &Expr) -> Result<Expr, String> {
+        let Some(m) = Mat::of(value) else { return Err(format!("{name} はベクトル・行列ではありません")) };
+        let what = format!("{name} の添字");
+        let (i, j) = match index {
+            Expr::Tuple(ix) if ix.len() == 2 => (self.integer(&ix[0], &what)?, self.integer(&ix[1], &what)?),
+            Expr::Tuple(_) => return Err(format!("{name} の添字は 1 つか 2 つにしてください")),
+            k if m.cols == 1 => (self.integer(k, &what)?, 1),
+            k if m.rows == 1 => (1, self.integer(k, &what)?),
+            _ => return Err(format!("行列 {name} の成分は {name}_(1, 2) のように、行と列の番号で書いてください")),
+        };
+        if i < 1 || j < 1 || i as usize > m.rows || j as usize > m.cols {
+            return Err(format!("{name} は{}なので、({i}, {j}) 成分はありません", m.describe()));
+        }
+        Ok(m.at(i as usize - 1, j as usize - 1).clone())
+    }
+
+    /// `v_1`（字句では変数 `v1`）: v がベクトルとして定義されていて、`v1` という名前のパラメータ・座標が無ければ、1 つ目の成分
+    fn component_var(&mut self, name: &str) -> Result<Option<Expr>, String> {
+        let Some((head, digits)) = split_subscript(name) else { return Ok(None) };
+        if self.params.contains_key(name) || crate::equation::coord_index(name).is_some() || self.defs.get(head).is_none() {
+            return Ok(None);
+        }
+        let Some(Val::S(v)) = self.def_value(head)? else { return Ok(None) };
+        if !Mat::of(&v).is_some_and(|m| m.cols == 1 || m.rows == 1) {
+            return Ok(None);
+        }
+        let k: f64 = digits.parse().map_err(|_| format!("{name} の添字を読めません"))?;
+        self.component(head, &v, &Expr::Num(k)).map(Some)
     }
 
     /// 場合分けを [`crate::functions::Func::Piece`] の呼び出しにする。条件 `L < R` の余裕は R − L（厳密）、
@@ -1529,7 +1776,7 @@ impl Expander<'_> {
     fn bin(&mut self, op: BinOp, a: Val, b: Val, whole: &Expr) -> Result<Val, String> {
         let mk = |a: Expr, b: Expr| Expr::Bin(op, Box::new(a), Box::new(b));
         Ok(match (a, b) {
-            (Val::S(a), Val::S(b)) => match vector_bin(op, &a, &b)? {
+            (Val::S(a), Val::S(b)) => match linalg::binary(op, &a, &b)? {
                 Some(v) => Val::S(v),
                 None => Val::S(mk(a, b)),
             },
@@ -1590,58 +1837,12 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
     (xs, ws)
 }
 
-/// ベクトルの大きさ √(Σ cᵢ²)
-fn norm(items: &[Expr]) -> Expr {
-    use crate::diff::{add, mul};
-    let s = items.iter().fold(Expr::Num(0.0), |s, c| add(s, mul(c.clone(), c.clone())));
-    Expr::Call(crate::functions::Func::Sqrt, vec![s])
-}
-
-/// 外積（3 成分ならベクトル、2 成分ならスカラー u₁v₂ − u₂v₁）
-fn cross(u: &[Expr], v: &[Expr]) -> Result<Expr, String> {
-    use crate::diff::{mul, sub};
-    let m = |a: &Expr, b: &Expr| mul(a.clone(), b.clone());
-    match (u, v) {
-        ([a1, a2, a3], [b1, b2, b3]) => Ok(Expr::Tuple(vec![sub(m(a2, b3), m(a3, b2)), sub(m(a3, b1), m(a1, b3)), sub(m(a1, b2), m(a2, b1))])),
-        ([a1, a2], [b1, b2]) => Ok(sub(m(a1, b2), m(a2, b1))),
-        _ => Err(format!("外積は 3 成分（か 2 成分）のベクトルどうしで使えます（{} 成分と {} 成分）", u.len(), v.len())),
-    }
-}
-
 /// 3 × 3 の行列式（列 cols[j][i]）
 fn det3(cols: &[Vec<Expr>]) -> Expr {
     use crate::diff::{add, mul, sub};
     let a = |i: usize, j: usize| cols[j][i].clone();
     let minor = |i: usize, j: usize, k: usize, l: usize| sub(mul(a(i, k), a(j, l)), mul(a(i, l), a(j, k)));
     add(sub(mul(a(0, 0), minor(1, 2, 1, 2)), mul(a(0, 1), minor(1, 2, 0, 2))), mul(a(0, 2), minor(1, 2, 0, 1)))
-}
-
-/// 組（ベクトル）の 2 項の演算: 和・差（同じ成分の数）、内積（ベクトル × ベクトル）、スカラー倍・スカラーでの割り算。
-/// ベクトルを含まなければ None（ふつうの演算）
-fn vector_bin(op: BinOp, a: &Expr, b: &Expr) -> Result<Option<Expr>, String> {
-    use crate::diff::{add, mul};
-    let bin = |x: Expr, y: Expr| Expr::Bin(op, Box::new(x), Box::new(y));
-    Ok(Some(match (a, b) {
-        (Expr::Tuple(u), Expr::Tuple(v)) => {
-            if u.len() != v.len() {
-                return Err(format!("{} 成分と {} 成分のベクトルは計算できません", u.len(), v.len()));
-            }
-            match op {
-                BinOp::Add | BinOp::Sub => Expr::Tuple(u.iter().zip(v).map(|(x, y)| bin(x.clone(), y.clone())).collect()),
-                BinOp::Mul => u.iter().zip(v).fold(Expr::Num(0.0), |s, (x, y)| add(s, mul(x.clone(), y.clone()))),
-                _ => return Err("ベクトルどうしは、和・差・内積（·）・外積（×）だけが使えます".into()),
-            }
-        }
-        (Expr::Tuple(u), s) if !matches!(s, Expr::List(_)) => match op {
-            BinOp::Mul | BinOp::Div => Expr::Tuple(u.iter().map(|x| bin(x.clone(), s.clone())).collect()),
-            _ => return Err("ベクトルとスカラーは、掛け算・割り算だけが使えます".into()),
-        },
-        (s, Expr::Tuple(v)) if !matches!(s, Expr::List(_)) => match op {
-            BinOp::Mul => Expr::Tuple(v.iter().map(|x| bin(s.clone(), x.clone())).collect()),
-            _ => return Err("スカラーとベクトルは、掛け算だけが使えます".into()),
-        },
-        _ => return Ok(None),
-    }))
 }
 
 /// 並び替えの全部（3 つまで）
@@ -1659,6 +1860,13 @@ fn permutations(v: &[String]) -> Vec<Vec<String>> {
         }
     }
     out
+}
+
+/// 数字の添字の付いた名前 `v1` を、(v, 1) に分ける（頭は 1 文字）
+fn split_subscript(name: &str) -> Option<(&str, &str)> {
+    let first = name.chars().next()?;
+    let (head, digits) = name.split_at(first.len_utf8());
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && first.is_alphabetic()).then_some((head, digits))
 }
 
 fn is_ellipsis(e: &Expr) -> bool {
@@ -1732,7 +1940,11 @@ pub fn rewrite_inverse(l: Expr, r: Expr) -> (Expr, Expr) {
         let minus_one = matches!(&**k, Expr::Neg(x) if matches!(**x, Expr::Num(n) if n == 1.0)) || matches!(**k, Expr::Num(n) if n == -1.0);
         let one_arg = match defs.get(name) {
             Some(Def::Function { args, .. }) => args.len() == 1,
-            Some(Def::Value(_)) => true,
+            Some(Def::Value(_)) => {
+                let params = Params::new();
+                let mut x = Expander { defs: &defs, params: &params, int_depth: 0, stack: Vec::new() };
+                matches!(x.def_value(name), Ok(Some(Val::Fn { arity: 1, .. })))
+            }
             Some(Def::Set(_)) | None => false,
         };
         (minus_one && one_arg).then(|| (name.clone(), (**arg).clone()))

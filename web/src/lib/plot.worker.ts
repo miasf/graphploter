@@ -240,6 +240,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         const [a, b] = range(`座標系の ${names[k]}`, r, g.params, used)
         return [a, a < b ? b : a + 1]
       })
+      definitions(g.definitions ?? '')
       const m = coord_grid(
         g.map,
         g.names,

@@ -534,6 +534,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
     }
+    // 行列を描く行（ker・Im・行列式だけの行・行列だけの行・行列やベクトルの定義。計画 M7）
+    if let Some(p) = matrix_line(source, params, space)? {
+        return Ok(p);
+    }
     let chains = match definition_source(source, space) {
         // 定義の行: 描く形の式に置き換えて展開する（描けない定義は、図形なし）
         Some(Some(mut chains)) => {
@@ -566,6 +570,170 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         return Ok(Plot::Multi(plots));
     }
     compile_chains(chains, params, space)
+}
+
+/// 行列を描く行（計画 M7 の 3.4）。そうでなければ None（今までの道へ）
+/// - `@ker(A)`・`Im(A)`: 零空間・像（原点を通る点・直線・平面・全体）。成分は数とパラメータ
+/// - `@det(A)` だけの行: 列ベクトルが張る平行六面体（2×2 は平行四辺形）。成分に座標があれば、今までどおり「縦 = 式」
+/// - 行列だけの行と、行列・ベクトルの定義 `A = …`: 列ベクトル（ベクトル）を原点からの線分で描く
+fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    use crate::functions::Func;
+    use crate::linalg::Matrix;
+    let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
+    let [chain] = chains.as_slice() else { return Ok(None) };
+    let n = space.dims;
+    let dim_word = |k: usize| match k {
+        0 => "0 次元。原点".to_string(),
+        1 => "1 次元。直線".to_string(),
+        2 => "2 次元。平面".to_string(),
+        k => format!("{k} 次元"),
+    };
+    // 定義の行 `A = …`（行列・ベクトル）: 右辺を描く
+    let (expr, def) = match (chain.rels.as_slice(), chain.exprs.as_slice()) {
+        ([], [e]) => (e, None),
+        ([Rel::Eq], [Expr::Var(name), _]) if matches!(crate::expand::definition_line(&chain.exprs[0]), Some((_, 0, _))) => {
+            (&chain.exprs[0], Some(name.clone()))
+        }
+        _ => return Ok(None),
+    };
+    let numeric = |e: &Expr| -> Result<Option<Matrix>, String> {
+        Ok(match crate::expand::matrix_value(e, params)? {
+            Some((rows, cols, items)) => {
+                crate::expand::note_names(&items);
+                crate::expand::numbers(&items, params).map(|a| Matrix::new(rows, cols, a))
+            }
+            None => None,
+        })
+    };
+    match expr {
+        Expr::Op { op, args } if (op == "ker" || op == "im") && args.len() == 1 => {
+            let name = if op == "ker" { "ker" } else { "Im" };
+            let Some(m) = numeric(&args[0])? else {
+                return Err(format!("{name} の行列の成分は、数とパラメータだけで書いてください"));
+            };
+            subspace(name, &m, op == "ker", params, space, &dim_word).map(Some)
+        }
+        // Im(行列) は像。引数がスカラーなら、今までどおり虚部
+        Expr::Call(Func::Im, args) if args.len() == 1 => match crate::expand::matrix_value(&args[0], params) {
+            Ok(Some((rows, cols, items))) if cols > 1 => {
+                let Some(a) = crate::expand::numbers(&items, params) else {
+                    return Err("Im の行列の成分は、数とパラメータだけで書いてください".into());
+                };
+                subspace("Im", &Matrix::new(rows, cols, a), false, params, space, &dim_word).map(Some)
+            }
+            _ => Ok(None),
+        },
+        Expr::Op { op, args } if op == "det" && args.len() == 1 => {
+            let Some(m) = numeric(&args[0])? else { return Ok(None) };
+            if m.rows != m.cols || !(2..=3).contains(&m.rows) || m.rows > n {
+                return Ok(None);
+            }
+            // 列ベクトル a_k の u a₁ + v a₂ + t a₃（0 ≤ u, v, t ≤ 1）
+            let names = ["u", "v", "t"];
+            let items: Vec<Expr> = (0..m.rows).map(|i| linear(0.0, (0..m.cols).map(|j| (m.at(i, j), Expr::Var(names[j].into()))).collect())).collect();
+            for v in &names[..m.cols] {
+                crate::expand::set_param_range(v, 0.0, 1.0);
+            }
+            let det = match crate::expand::expand(expr, params)? {
+                Expr::Num(v) => v,
+                e => crate::expand::numbers(&[e], params).and_then(|v| v.first().copied()).unwrap_or(f64::NAN),
+            };
+            let shape = if m.rows == 3 { "平行六面体。体積は |det|" } else { "平行四辺形。面積は |det|" };
+            crate::expand::set_kind(format!("det = {}（列ベクトルが張る{shape}）", format_number(det)));
+            parametric(items, params, space).map(Some)
+        }
+        _ => {
+            let Some(m) = numeric(expr)? else { return Ok(None) };
+            // 行列: 正方の 2×2・3×3 の列ベクトル。ベクトル: 2・3 成分
+            let vectors: Vec<Vec<f64>> = if m.cols == 1 && (2..=3).contains(&m.rows) {
+                vec![m.a.clone()]
+            } else if m.rows == m.cols && (2..=3).contains(&m.rows) {
+                (0..m.cols).map(|j| (0..m.rows).map(|i| m.at(i, j)).collect()).collect()
+            } else if let Some(name) = def {
+                // そのほかの大きさは、図形なし
+                crate::expand::mark_def_line(&name, None);
+                return Ok(Some(Plot::Multi(Vec::new())));
+            } else {
+                return Ok(None);
+            };
+            if m.rows > n {
+                return Ok(None);
+            }
+            let what = if m.cols == 1 { "ベクトル" } else { "列ベクトル" };
+            match def {
+                Some(name) => crate::expand::mark_def_line(&name, Some(what.into())),
+                None => crate::expand::set_kind(format!("行列の{what}")),
+            }
+            segments(&vectors, params, space).map(Some)
+        }
+    }
+}
+
+/// 数を、説明に出す短い文字列にする（整数はそのまま、ほかは有効 6 桁）
+fn format_number(v: f64) -> String {
+    if v.is_finite() && (v - v.round()).abs() < 1e-9 * v.abs().max(1.0) && v.abs() < 1e15 {
+        format!("{}", v.round() as i64).replace('-', "−")
+    } else {
+        let s = format!("{v:.6}");
+        s.trim_end_matches('0').trim_end_matches('.').replace('-', "−")
+    }
+}
+
+/// 原点からのベクトルを、線分（媒介変数 t ∈ [0, 1] の曲線）で描く
+fn segments(vectors: &[Vec<f64>], params: &Params, space: &Space) -> Result<Plot, String> {
+    crate::expand::set_param_range("t", 0.0, 1.0);
+    let mut all = Vec::new();
+    for v in vectors {
+        let items = v.iter().map(|c| linear(0.0, vec![(*c, Expr::Var("t".into()))])).collect();
+        match parametric(items, params, space)? {
+            Plot::Curve { sets, .. } => all.extend(sets),
+            _ => return Err("内部エラー: ベクトルの線分".into()),
+        }
+    }
+    Ok(Plot::Curve { sets: all, vars: vec!["t".into()] })
+}
+
+/// 零空間（`ker`）・像（`Im`）を、原点を通る点・直線・平面（表示範囲の箱で切る）・全体として描く
+fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, space: &Space, dim_word: &dyn Fn(usize) -> String) -> Result<Plot, String> {
+    let n = space.dims;
+    let ambient = if ker { m.cols } else { m.rows };
+    // 次元より小さい空間の集合（2 列の行列の ker など）は、最初の座標の平面・直線の中に描く（2D 表示の平面の中の直線など）
+    if ambient > n {
+        let side = if ker { "列" } else { "行" };
+        return Err(format!(
+            "{name} A は {ambient} 次元の空間の中の集合です。A の{side}を {n} つ以下にするか、次元を {ambient} にしてください"
+        ));
+    }
+    let mut basis = if ker { m.null_space() } else { m.column_space() };
+    basis.iter_mut().for_each(|b| b.resize(n, 0.0));
+    let k = basis.len();
+    crate::expand::set_kind(format!("{name} A（{}）", dim_word(k)));
+    let reach = crate::expand::reach();
+    let names = ["u", "v", "t"];
+    // 表示中の 3 つの座標を全部含む（全体）なら、表示範囲の箱
+    if k >= 3 && n == 3 {
+        let x = Expr::Var(space.shown()[0].clone());
+        let minus_one = Expr::Bin(BinOp::Sub, Box::new(Expr::Bin(BinOp::Sub, Box::new(x.clone()), Box::new(x))), Box::new(Expr::Num(1.0)));
+        let chain = crate::parser::Chain { exprs: vec![minus_one, Expr::Num(0.0)], rels: vec![Rel::Le], pos: vec![0, 0] };
+        return compile_chains(vec![chain], params, space);
+    }
+    if k > 3 {
+        return Err(format!("{name} A は {k} 次元なので、描けません（3 次元まで）"));
+    }
+    let used: Vec<&str> = match k {
+        0 => vec![],
+        1 => vec!["t"],
+        2 => vec!["u", "v"],
+        _ => names.to_vec(),
+    };
+    for v in &used {
+        crate::expand::set_param_range(v, -reach, reach);
+    }
+    let items: Vec<Expr> = (0..n).map(|i| linear(0.0, basis.iter().zip(&used).map(|(b, v)| (b[i], Expr::Var((*v).into()))).collect())).collect();
+    if k > 0 {
+        crate::expand::request_trim();
+    }
+    parametric(items, params, space)
 }
 
 /// 論理式・集合（計画 M11）を描く。選言標準形にして、かたまりが 1 つなら今の連立方程式・不等式の道で描く。
@@ -733,6 +901,8 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             }
         }
     }
+    // ベクトル = ベクトルは、成分ごとの等式の連立（(x, y, z) = (1, 2, 3) は x = 1, y = 2, z = 3）。計画 M6
+    chains = split_vector_relations(chains)?;
     // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
     let single = chains.len() == 1 && (chains[0].rels.is_empty() || chains[0].rels == [Rel::Eq]);
     if !single {
@@ -745,6 +915,9 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             check_dims(&e, space)?;
             if let Expr::Tuple(items) = e {
                 return parametric(items, params, space);
+            }
+            if let Expr::Matrix { rows, cols, .. } = &e {
+                return Err(format!("{rows}×{cols} の行列だけの行は描けません（A = … と名前を付けるか、ベクトルに掛けてください）"));
             }
             if let Some(p) = complex_plane(&e, params, space)? {
                 return Ok(p);
@@ -799,6 +972,34 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
         return Ok(Plot::Multi(plots));
     }
     compile_pair(l, r, params, space)
+}
+
+/// 関係の両側が全部ベクトル（組）の行を、成分ごとの行に分ける。ベクトルとスカラーが混ざっていればエラー。
+/// 関係の無い行（媒介変数表示の組）と、ベクトルの無い行はそのまま
+fn split_vector_relations(chains: Vec<crate::parser::Chain>) -> Result<Vec<crate::parser::Chain>, String> {
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        if let Some(Expr::Matrix { rows, cols, .. }) = chain.exprs.iter().find(|e| matches!(e, Expr::Matrix { .. })) {
+            if !chain.rels.is_empty() {
+                return Err(format!("{rows}×{cols} の行列どうしの等式は描けません（成分ごとに書いてください）"));
+            }
+        }
+        let tuples = chain.exprs.iter().filter(|e| matches!(e, Expr::Tuple(_))).count();
+        if chain.rels.is_empty() || tuples == 0 {
+            out.push(chain);
+            continue;
+        }
+        let len = |e: &Expr| if let Expr::Tuple(items) = e { items.len() } else { 0 };
+        let n = len(&chain.exprs[0]);
+        if tuples != chain.exprs.len() || chain.exprs.iter().any(|e| len(e) != n) {
+            return Err("ベクトルの等式・不等式は、両側を同じ成分の数のベクトルにしてください".into());
+        }
+        for k in 0..n {
+            let exprs = chain.exprs.iter().map(|e| if let Expr::Tuple(items) = e { items[k].clone() } else { e.clone() }).collect();
+            out.push(crate::parser::Chain { exprs, rels: chain.rels.clone(), pos: chain.pos.clone() });
+        }
+    }
+    Ok(out)
 }
 
 /// 座標を複素数にする（[`Space::complex_coords`]）: 式の x, y, z を、x + i w, y + i w₂, z + i w₃ に置き換える。
@@ -972,6 +1173,21 @@ fn system(chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> 
             rels.push((chain.exprs[k].clone(), *rel, chain.exprs[k + 1].clone()));
         }
     }
+    // 連立一次方程式（等式が 2 本以上で、全部が座標の 1 次式）は、先に掃き出して独立な等式だけにする（計画 M7）
+    if shape.is_none() {
+        if let Some(reduced) = reduce_linear(&rels, params, space)? {
+            let only_eq = reduced.len() == 1 && reduced[0].1 == Rel::Eq;
+            if reduced.is_empty() {
+                crate::expand::add_note("どの点も解（0 = 0）");
+                return Ok(Plot::Multi(Vec::new()));
+            }
+            if only_eq {
+                let (l, _, r) = reduced.into_iter().next().unwrap_or((Expr::Num(0.0), Rel::Eq, Expr::Num(0.0)));
+                return compile_pair(l, r, params, space);
+            }
+            rels = reduced;
+        }
+    }
     let m = rels.iter().filter(|(_, r, _)| *r == Rel::Eq).count();
     if shape.is_some() && m > 0 {
         return Err("媒介変数表示と等式は、一緒に使えません（不等式で切り取ることはできます）".into());
@@ -1018,6 +1234,66 @@ fn system(chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> 
         return Ok(Plot::Multi(plots));
     }
     system_of(rels, params, space)
+}
+
+/// 連立一次方程式の掃き出し。等式が 2 本以上あり、全部が全座標の 1 次式（係数は数とパラメータ）で、階数が等式の数より小さいとき、
+/// 行の簡約形の独立な等式に置き換えた関係の列を返す（不等式はそのまま後ろに付ける）。矛盾していればエラー。
+/// 1 次式でない・もう独立・回転している・リストや範囲で重ねる座標を使う、なら None（今までの道のまま）
+fn reduce_linear(rels: &[(Expr, Rel, Expr)], params: &Params, space: &Space) -> Result<Option<Vec<(Expr, Rel, Expr)>>, String> {
+    let eqs: Vec<&(Expr, Rel, Expr)> = rels.iter().filter(|r| r.1 == Rel::Eq).collect();
+    if eqs.len() < 2 || space.rotation_matrix().is_some() || space.complex_coords {
+        return Ok(None);
+    }
+    let n = space.dims;
+    let coords: Vec<String> = (0..n).map(coord_name).collect();
+    let ranged = space.ranged();
+    let value = |e: &Expr| -> Option<f64> {
+        let mut vars = Vec::new();
+        e.collect_vars(&mut vars);
+        if vars.iter().any(|v| coord_index(v).is_some()) {
+            return None;
+        }
+        crate::expand::numbers(std::slice::from_ref(e), params).and_then(|v| v.first().copied())
+    };
+    // 行ごとに [表示中の 3 つの座標の係数, 右辺]
+    let mut a = Vec::with_capacity(eqs.len() * 4);
+    for (l, _, r) in &eqs {
+        if first_list(l).is_some() || first_list(r).is_some() || ranged.iter().any(|(name, _, _)| l.uses_var(name) || r.uses_var(name)) {
+            return Ok(None);
+        }
+        let e = Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()));
+        let mut coef = vec![0.0; n];
+        for (k, name) in coords.iter().enumerate() {
+            if !e.uses_var(name) {
+                continue;
+            }
+            let Ok(d) = crate::diff::diff(&e, name) else { return Ok(None) };
+            let Some(c) = value(&d) else { return Ok(None) };
+            coef[k] = c;
+        }
+        let Some(c0) = value(&e.substitute(&|v: &str| coord_index(v).filter(|&k| k < n).map(|_| Expr::Num(0.0)))) else { return Ok(None) };
+        // 表示していない座標は、断面の値を入れて定数の側へ移す
+        let hidden: f64 = (0..n).filter(|k| !space.axes.contains(k)).map(|k| coef[k] * space.slice[k]).sum();
+        a.extend(space.axes.iter().map(|&k| coef[k]));
+        a.push(-(c0 + hidden));
+    }
+    let red = crate::linalg::Matrix::new(eqs.len(), 4, a).reduce(3);
+    let rank = red.pivots.len();
+    if (rank..eqs.len()).any(|i| red.rref.at(i, 3) != 0.0) {
+        return Err("解がありません（連立一次方程式が矛盾しています）".into());
+    }
+    if rank == eqs.len() {
+        return Ok(None);
+    }
+    let shown = space.shown();
+    let mut out: Vec<(Expr, Rel, Expr)> = (0..rank)
+        .map(|i| {
+            let terms = (0..3).filter(|&j| red.rref.at(i, j) != 0.0).map(|j| (red.rref.at(i, j), Expr::Var(shown[j].clone()))).collect();
+            (linear(0.0, terms), Rel::Eq, Expr::Num(red.rref.at(i, 3)))
+        })
+        .collect();
+    out.extend(rels.iter().filter(|r| r.1 != Rel::Eq).cloned());
+    Ok(Some(out))
 }
 
 /// 関係の列（リストを含まない）を [`Plot::System`] にする
@@ -1758,8 +2034,11 @@ mod tests {
         assert!(kind("x = y,").contains("`,` の前後に式を書いてください"));
         assert!(kind("a = 1, b = 2").contains("パラメータの定義は、1 行に 1 つだけ"));
         let four = Space::basic(4, [0, 1, 2], vec![0.0; 4]);
-        let e = compile_with("x = y = z = w = 1", &Params::new(), &four).err().unwrap();
+        let e = compile_with("x^2 = y = z = w = 1", &Params::new(), &four).err().unwrap();
         assert!(e.contains("等式が多すぎます"), "{e}");
+        // 全部が 1 次式なら、先に掃き出す（計画 M7）。断面 w = 0 では w = 1 が成り立たないので、解が無い
+        let e = compile_with("x = y = z = w = 1", &Params::new(), &four).err().unwrap();
+        assert!(e.contains("解がありません"), "{e}");
         // エラーの位置は、式全体での位置
         let e = kind("y = x, z = (");
         assert!(e.ends_with("（13文字目）"), "{e}");

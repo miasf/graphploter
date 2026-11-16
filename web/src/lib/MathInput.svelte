@@ -3,6 +3,7 @@
   import type { MathfieldElement } from 'mathlive'
   import { onMount } from 'svelte'
   import { fenceBareDelimiters } from './latex'
+  import { colBlank, colsOf, formatMatrix, insertCol, insertRow, isBlank, MAX_SIZE, parseMatrix, removeCol, removeRow, resize, rowBlank, rowsOf, type Matrix } from './matrixEdit'
   import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
   interface Props {
@@ -49,13 +50,192 @@
     const root = el.shadowRoot
     if (root && !root.adoptedStyleSheets.includes(SCRIPT_SIZE_SHEET)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, SCRIPT_SIZE_SHEET]
     if (autofocus) startEditing()
+    el.addEventListener('keydown', matrixKey, { capture: true })
     el.addEventListener('keydown', fixLayoutKey, { capture: true })
+    el.addEventListener('selection-change', updateMatrix)
+    window.mathVirtualKeyboard?.addEventListener('geometrychange', keyboardMoved)
     el.addEventListener('pointerdown', fieldDown, { capture: true })
     el.addEventListener('pointermove', fieldMove, { capture: true })
     el.addEventListener('pointerup', fieldUp, { capture: true })
     el.addEventListener('pointercancel', fieldCancel, { capture: true })
     el.addEventListener('wheel', fieldWheel, { passive: false })
   })
+
+  // ---- 行列の大きさを、その場で変える（計画 M6）----
+  // カーソルが行列の中にある間だけ、入力欄の下に小さな帯（行 ＋・行 −・列 ＋・列 −・大きさ）を出す。
+  // キー（Enter・カンマ・Tab・Backspace）も、行列の中にある間だけ意味を変える。どれも、行列の LaTeX を成分の表に分けて
+  // 書き換え（matrixEdit.ts）、行列だけを入れ替える（取り消しの 1 手になる）。成分の中身は変えない。
+  //
+  // MathLive は式を「位置 k の直前にあるもの」の列で持ち、行列は [成分の先頭, 成分の中身…, 成分の先頭, …, 行列そのもの] と並ぶ。
+  // 深さ（getElementInfo の depth）は、成分の中が行列より 1 つ深い
+
+  /** カーソルのある行列 */
+  interface MatrixAt {
+    /** 行列の直前の位置と、行列そのものの位置（この範囲を選ぶと行列 1 つ） */
+    start: number
+    end: number
+    m: Matrix
+    /** カーソルのある成分 */
+    row: number
+    col: number
+    /** カーソルが成分のすぐ中にあるか（成分の中の括弧・分数の中ではない） */
+    top: boolean
+  }
+  /** 帯に出すもの（行列の外なら null） */
+  let matrix = $state<{ rows: number; cols: number; row: number; col: number } | null>(null)
+  /** 大きさを選ぶマス目を開いているか、指しているマス */
+  let picker = $state(false)
+  let hover = $state<[number, number] | null>(null)
+  /** 画面の数式キーボードの高さ（指で操作する画面で、帯をそのすぐ上に出す） */
+  let keyboardHeight = $state(0)
+
+  const depthAt = (k: number) => el.getElementInfo(k)?.depth ?? 0
+
+  /** 範囲 (start, end) の中の、成分の先頭の位置（行の順）。`level` は成分の深さ */
+  function cellStarts(start: number, end: number, level: number): number[] {
+    const out: number[] = []
+    for (let j = start + 1; j < end; j++) {
+      // 成分の先頭は中身が空で、直前が同じ深さか浅い（分数など中身のあるものは、直前が深い）
+      if (depthAt(j) === level && atomAt(j) === '' && depthAt(j - 1) <= level) out.push(j)
+    }
+    return out
+  }
+
+  /** カーソルを含む、いちばん内側の行列。無ければ null */
+  function findMatrix(): MatrixAt | null {
+    if (!el || el.lastOffset > 800) return null
+    const pos = el.position
+    let inner = pos
+    let d = depthAt(pos)
+    while (d > 0) {
+      // inner を含むものの終わり（浅くなる最初の位置）と、その直前
+      let end = inner + 1
+      while (end <= el.lastOffset && depthAt(end) >= d) end++
+      if (end > el.lastOffset) return null
+      const outer = depthAt(end)
+      let start = inner - 1
+      while (start >= 0 && depthAt(start) > outer) start--
+      if (start < 0) return null
+      const m = parseMatrix(el.getValue(start, end, 'latex'))
+      if (m) {
+        const level = depthAt(start + 1)
+        const starts = cellStarts(start, end, level)
+        if (starts.length !== rowsOf(m) * colsOf(m)) return null
+        const k = starts.filter((j) => j <= pos).length - 1
+        if (k < 0) return null
+        return { start, end, m, row: Math.floor(k / colsOf(m)), col: k % colsOf(m), top: depthAt(pos) === level }
+      }
+      inner = end
+      d = outer
+    }
+    return null
+  }
+
+  function updateMatrix() {
+    const at = focused ? findMatrix() : null
+    matrix = at ? { rows: rowsOf(at.m), cols: colsOf(at.m), row: at.row, col: at.col } : null
+    if (!matrix) picker = false
+  }
+
+  function keyboardMoved() {
+    keyboardHeight = window.mathVirtualKeyboard?.boundingRect.height ?? 0
+  }
+
+  /** 行列を `next` に入れ替えて、カーソルを (row, col) の成分に置く（空欄ならその空欄を選ぶ。打つと置き換わる） */
+  function replaceMatrix(at: MatrixAt, next: Matrix, row: number, col: number) {
+    const level = depthAt(at.start + 1)
+    subscripting = true
+    try {
+      el.selection = { ranges: [[at.start, at.end]], direction: 'forward' }
+      el.insert(formatMatrix(next), { format: 'latex', selectionMode: 'after' })
+      placeInCell(at.start, el.position, level, next, row, col)
+    } finally {
+      subscripting = false
+    }
+    emit()
+    updateMatrix()
+  }
+
+  /** 範囲 (start, end) の行列の (row, col) の成分にカーソルを置く */
+  function placeInCell(start: number, end: number, level: number, m: Matrix, row: number, col: number) {
+    const r = Math.max(0, Math.min(rowsOf(m) - 1, row))
+    const c = Math.max(0, Math.min(colsOf(m) - 1, col))
+    const starts = cellStarts(start, end, level)
+    const k = r * colsOf(m) + c
+    if (k >= starts.length) return
+    const last = k + 1 < starts.length ? starts[k + 1] - 1 : end - 1
+    if (isBlank(m.cells[r][c]) && last > starts[k]) el.selection = { ranges: [[starts[k], last]], direction: 'forward' }
+    else el.position = last
+  }
+
+  /** 行・列を足す・消す・大きさを決める（帯のボタン・キー・マス目が呼ぶ） */
+  function editMatrix(op: 'row+' | 'row-' | 'col+' | 'col-' | 'row^' | 'size', rows = 0, cols = 0) {
+    const at = findMatrix()
+    if (!at) return false
+    const { m, row, col } = at
+    let next = m
+    let [r, c] = [row, col]
+    if (op === 'row+') [next, r] = [insertRow(m, row + 1), row + 1]
+    else if (op === 'row^') next = insertRow(m, row)
+    else if (op === 'col+') [next, c] = [insertCol(m, col + 1), col + 1]
+    else if (op === 'row-') [next, r] = [removeRow(m, row), Math.max(0, row - 1)]
+    else if (op === 'col-') [next, c] = [removeCol(m, col), Math.max(0, col - 1)]
+    else next = resize(m, rows, cols)
+    if (next === m) return false
+    replaceMatrix(at, next, r, c)
+    return true
+  }
+
+  /** 行列の中でのキー: Enter = 下に行、Shift + Enter = 上に行、カンマ = 右に列、Tab = 次の成分、空の行・列で Backspace = その行・列を消す */
+  function matrixKey(e: KeyboardEvent) {
+    if (!e.isTrusted || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
+    if (!['Enter', ',', 'Tab', 'Backspace'].includes(e.key)) return
+    const at = findMatrix()
+    if (!at) return
+    const done = () => {
+      e.stopImmediatePropagation()
+      e.preventDefault()
+    }
+    const { m, row, col } = at
+    if (e.key === 'Enter') {
+      done()
+      editMatrix(e.shiftKey ? 'row^' : 'row+')
+    } else if (e.key === ',') {
+      if (!at.top) return // 成分の中の括弧の中（max(a, b) など）では、ふつうのカンマ
+      done()
+      editMatrix('col+')
+    } else if (e.key === 'Tab') {
+      const k = row * colsOf(m) + col + (e.shiftKey ? -1 : 1)
+      if (k < 0) return
+      done()
+      if (k >= rowsOf(m) * colsOf(m)) {
+        // 最後の成分で Tab: 次の行を足して、その最初の成分へ
+        const next = insertRow(m, rowsOf(m))
+        if (next !== m) replaceMatrix(at, next, rowsOf(m), 0)
+        return
+      }
+      placeInCell(at.start, at.end, depthAt(at.start + 1), m, Math.floor(k / colsOf(m)), k % colsOf(m))
+      updateMatrix()
+    } else if (blankLineOp(at)) {
+      done()
+      removeBlankLine(at)
+    }
+  }
+
+  /** カーソルが空の行・空の列の中にあれば、消す操作（行を優先）。そうでなければ null */
+  function blankLineOp(at: MatrixAt): 'row-' | 'col-' | null {
+    const [from, to] = el.selection.ranges[0] ?? [0, 0]
+    // 範囲を選んでいる（空欄を選んだ状態は除く）なら、ふつうに消す
+    if (from !== to && !isBlank(at.m.cells[at.row][at.col])) return null
+    if (rowBlank(at.m, at.row) && rowsOf(at.m) > 1) return 'row-'
+    if (colBlank(at.m, at.col) && colsOf(at.m) > 1) return 'col-'
+    return null
+  }
+
+  function removeBlankLine(at: MatrixAt) {
+    const op = blankLineOp(at)
+    if (op) editMatrix(op)
+  }
 
   // ---- 長い式を横に送る（スクロール）----
   // 欄に収まらない式は、MathLive が中身（.ML__content）を横に送って、カーソルのある所を見せる。
@@ -315,11 +495,26 @@
   function handleBeforeInput(e: InputEvent) {
     if (subscripting) return
     const [from, to] = el.selection.ranges[0] ?? [0, 0]
+    // 行列の空欄を選んだ状態（大きさを変えた直後）で ⌫: 空の行・列ならそれを消す
+    if (e.inputType === 'deleteContentBackward' && from !== to) {
+      const at = findMatrix()
+      if (at && blankLineOp(at)) {
+        e.preventDefault()
+        removeBlankLine(at)
+        return
+      }
+    }
     if (el.selection.ranges.length !== 1 || from !== to) return // 選んだ範囲を置き換える・消す入力はそのまま
     const pos = el.position
     // 一文字消す（物理キーボードの Backspace も、数式キーボードの ⌫ もここを通る）
     if (e.inputType === 'deleteContentBackward') {
       e.preventDefault()
+      // 行列の空の行・列の中なら、その行・列を消す
+      const at = findMatrix()
+      if (at && blankLineOp(at)) {
+        removeBlankLine(at)
+        return
+      }
       subscripting = true
       try {
         deleteBackward(pos)
@@ -441,12 +636,19 @@
   function handleInput(e: Event) {
     // エンター（改行）は式には入れず、新しい式を足す合図にする
     if ((e as InputEvent).inputType === 'insertLineBreak') {
+      // 行列の中では、下に行を足す（数式キーボードの改行。物理キーボードは matrixKey）
+      if (editMatrix('row+')) return
+      if (findMatrix()) return
       onEnter?.()
       return
     }
     if (subscripting) return // 書き換えの途中の値は知らせない（終わってから emit で知らせる）
     emit()
+    updateMatrix()
   }
+
+  /** 帯のボタン: 押しても入力欄からフォーカスを外さない */
+  const keepFocus = (e: Event) => e.preventDefault()
 </script>
 
 <div class="wrap">
@@ -461,6 +663,8 @@
   onfocus={() => {
     focused = true
     keyboardOnFocus()
+    keyboardMoved()
+    updateMatrix()
     // 画面上のキーボードが出て一覧の見える部分が狭くなるので、出終わってから入力欄が見える所まで送る
     setTimeout(() => {
       if (focused) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
@@ -470,10 +674,52 @@
   onblur={() => {
     keepScroll()
     focused = false
+    matrix = null
+    picker = false
     keyboardOnBlur()
     onFocusChange?.(false)
   }}
 ></math-field>
+  {#if matrix}
+    <!-- 行列の中にカーソルがある間だけ出る帯（行・列を足す・消す、大きさを一度に決める） -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="matrix-bar"
+      class:floating={touch}
+      style:bottom={touch ? `${keyboardHeight}px` : undefined}
+      onpointerdown={keepFocus}
+      onmousedown={keepFocus}
+    >
+      <button type="button" title="カーソルの行の下に行を足す（Enter）" disabled={matrix.rows >= MAX_SIZE} onclick={() => editMatrix('row+')}>行 ＋</button>
+      <button type="button" title="カーソルの行を消す" disabled={matrix.rows <= 1} onclick={() => editMatrix('row-')}>行 −</button>
+      <button type="button" title="カーソルの列の右に列を足す（,）" disabled={matrix.cols >= MAX_SIZE} onclick={() => editMatrix('col+')}>列 ＋</button>
+      <button type="button" title="カーソルの列を消す" disabled={matrix.cols <= 1} onclick={() => editMatrix('col-')}>列 −</button>
+      <button type="button" class="size" title="大きさを選ぶ" aria-expanded={picker} onclick={() => (picker = !picker)}>
+        {matrix.rows} × {matrix.cols}
+      </button>
+      {#if picker}
+        <div class="size-grid" role="group" aria-label="行列の大きさ" onpointerleave={() => (hover = null)}>
+          {#each Array(MAX_SIZE) as _, r}
+            {#each Array(MAX_SIZE) as _, c}
+              <button
+                type="button"
+                class="cell"
+                class:on={hover ? r <= hover[0] && c <= hover[1] : r < matrix.rows && c < matrix.cols}
+                aria-label="{r + 1} × {c + 1}"
+                onpointerenter={() => (hover = [r, c])}
+                onclick={() => {
+                  picker = false
+                  hover = null
+                  editMatrix('size', r + 1, c + 1)
+                }}
+              ></button>
+            {/each}
+          {/each}
+          <span class="size-label">{hover ? `${hover[0] + 1} × ${hover[1] + 1}` : `${matrix.rows} × ${matrix.cols}`}</span>
+        </div>
+      {/if}
+    </div>
+  {/if}
   {#if touch && !focused}
     <!-- 指で操作するとき専用の透明な板（キーボード操作では入力欄に直接フォーカスが来る） -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -500,6 +746,89 @@
     touch-action: pan-y; /* 縦のスクロールはそのまま通す */
     -webkit-touch-callout: none; /* 長押しのメニューを出さない */
     user-select: none;
+  }
+  .matrix-bar {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    font-size: 12px;
+  }
+  /* 指で操作する画面: 数式キーボードのすぐ上に出す（キーボードに隠れない） */
+  .matrix-bar.floating {
+    position: fixed;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    margin: 0;
+    padding: 6px 8px;
+    background: var(--panel, var(--bg));
+    border-top: 1px solid var(--border-strong);
+  }
+  .matrix-bar button {
+    padding: 3px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .matrix-bar.floating button {
+    padding: 7px 10px;
+    font-size: 14px;
+  }
+  .matrix-bar button:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+  .matrix-bar .size {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+  .size-grid {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: repeat(6, 22px);
+    gap: 3px;
+    margin-top: 4px;
+    padding: 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--bg);
+    box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
+  }
+  .matrix-bar.floating .size-grid {
+    top: auto;
+    bottom: 100%;
+    right: 8px;
+    grid-template-columns: repeat(6, 30px);
+    margin: 0 0 4px;
+  }
+  .matrix-bar .size-grid .cell {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 3px;
+  }
+  .matrix-bar.floating .size-grid .cell {
+    width: 30px;
+    height: 30px;
+  }
+  .matrix-bar .size-grid .cell.on {
+    background: var(--accent, #4a90d9);
+    border-color: var(--accent, #4a90d9);
+  }
+  .size-label {
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
   }
   math-field {
     display: block;

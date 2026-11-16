@@ -22,6 +22,7 @@ pub mod logic;
 pub mod functions;
 pub mod gpu2d;
 pub mod interval;
+pub mod linalg;
 pub mod mesh;
 pub mod pixel;
 mod region;
@@ -380,6 +381,8 @@ pub fn coord_grid(
         pn.iter().enumerate().map(|(k, n)| (n.to_string(), num_complex::Complex64::new(param_values[2 * k], param_values[2 * k + 1]))).collect();
     let mut space = equation::Space::standard();
     space.coord_names = <[String; 3]>::try_from(names_v).ok();
+    // 座標系の式は、定義した行列・関数を使える（[`definitions`]）
+    let _defs = take_definitions(&consts);
     let c = equation::compile_coord_map(map, &consts, &space).map_err(|e| JsError::new(&e))?;
     let dom = mesh::Domain { lo: [ranges[0], ranges[2], ranges[4]], hi: [ranges[1], ranges[3], ranges[5]] };
     let mut positions = coords::grid_lines(dom, lines as usize, faces, flat);
@@ -610,6 +613,8 @@ pub fn plot(
     }
 
     let _defs = take_definitions(&consts);
+    // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
+    expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     let coord = if coord_src.trim().is_empty() {
         None
@@ -684,6 +689,11 @@ pub fn plot(
     };
     // 2D の切り口で、射影してから線にした媒介変数表示の曲面
     let curve = built.curve || (ctx.flat_slice && built.shape.is_some());
+    // 表示範囲の箱の中だけを残す図形（ker・Im の直線・平面。計画 M7）。回転が変わったら作り直すので、射影する前の形は返さない
+    let trimmed = expand::trim_requested();
+    if trimmed && coord.is_none() {
+        coords::trim_to_domain(&mut inner, dom, curve, flat);
+    }
     let mut outline = built.outline;
     let mut outline_target = (Vec::new(), Vec::new());
     if let Some(c) = &coord {
@@ -714,13 +724,15 @@ pub fn plot(
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
-        shape: built.shape,
+        shape: if trimmed { None } else { built.shape },
         local: if coord.is_some() { None } else { built.local },
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
         kind: {
-            let mut k = expand::def_line_label().unwrap_or_else(|| equation::rename_kind(&built.kind, &space));
+            let mut k = expand::kind_label()
+                .or_else(expand::def_line_label)
+                .unwrap_or_else(|| equation::rename_kind(&built.kind, &space));
             if expand::approximate() {
                 k.push_str("（積分は近似）");
             }
@@ -729,13 +741,15 @@ pub fn plot(
             }
             k
         },
-        params: plot.param_vars(),
+        // 範囲を式の側で決めた媒介変数（集合の条件・ker・行列式の立体）は、範囲の欄を出さない
+        params: plot.param_vars().into_iter().filter(|n| expand::param_range(n).is_none()).collect(),
         curve,
         shape_curve: built.curve,
         // Σ の範囲などで使ったパラメータは、展開した式に残らないので足す（値が変わったら計算し直すため）
         used_params: {
             let mut u = plot.used_params();
-            for p in expand::used_params() {
+            // 座標系の式が使うパラメータ（行列を座標系にしたときの、成分のスライダーなど）
+            for p in expand::used_params().into_iter().chain(coord.iter().flat_map(|c| c.used_params())) {
                 if !u.contains(&p) {
                     u.push(p);
                 }
