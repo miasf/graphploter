@@ -797,6 +797,105 @@ pub fn clip_segments(positions: &mut Vec<f32>, value: &mut dyn FnMut(&[[f64; 3]]
     *positions = out;
 }
 
+fn cols_of(pts: &[[f64; 3]]) -> [Vec<f64>; 3] {
+    [0, 1, 2].map(|c| pts.iter().map(|p| p[c]).collect())
+}
+
+/// 点 p での G の勾配（中心差分。幅 δ）
+fn gradients(g: &Program, pts: &[[f64; 3]], delta: f64) -> Vec<[f64; 3]> {
+    let mut out = vec![[0.0; 3]; pts.len()];
+    for a in 0..3 {
+        let shifted = |s: f64| -> Vec<f64> {
+            let q: Vec<[f64; 3]> = pts.iter().map(|p| {
+                let mut q = *p;
+                q[a] += s;
+                q
+            }).collect();
+            values_at(g, &cols_of(&q))
+        };
+        let (plus, minus) = (shifted(delta), shifted(-delta));
+        for (k, o) in out.iter_mut().enumerate() {
+            o[a] = (plus[k] - minus[k]) / (2.0 * delta);
+        }
+    }
+    out
+}
+
+/// 面 G = 0 の上の点を、G < 0 の側へ 10⁻³ マスだけずらす（勾配が 0・計算できない所は、ずらさない）
+fn shift_inward(g: &Program, pts: &[[f64; 3]], h: f64) -> Vec<[f64; 3]> {
+    let eps = 1e-3 * h;
+    gradients(g, pts, 1e-4 * h)
+        .iter()
+        .zip(pts)
+        .map(|(d, p)| {
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if !(len.is_finite() && len > 0.0) {
+                return *p;
+            }
+            [p[0] - eps * d[0] / len, p[1] - eps * d[1] / len, p[2] - eps * d[2] / len]
+        })
+        .collect()
+}
+
+/// 面 G_i = 0 の三角形のうち、重心（を中身の側へ少しずらした点）がほかの G_j > 0 の側に 10⁻² マスより離れているものを消す
+fn drop_outside(m: &mut Mesh, g: &Program, cuts: &[Program], i: usize, h: f64) {
+    if let Some(l) = m.lod_mesh.as_deref_mut() {
+        drop_outside(l, g, cuts, i, h);
+    }
+    let p = &m.positions;
+    let at = |k: u32, c: usize| p[k as usize * 3 + c] as f64;
+    let centers: Vec<[f64; 3]> = m.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|c| (at(t[0], c) + at(t[1], c) + at(t[2], c)) / 3.0)).collect();
+    if centers.is_empty() {
+        return;
+    }
+    let pts = shift_inward(g, &centers, h);
+    let mut out = vec![false; pts.len()];
+    for (j, other) in cuts.iter().enumerate() {
+        if j == i {
+            continue;
+        }
+        let vals = values_at(other, &cols_of(&pts));
+        let grads = gradients(other, &pts, 1e-4 * h);
+        for (k, o) in out.iter_mut().enumerate() {
+            let d = grads[k];
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            // 勾配が計算できない所は、値の符号だけで決める
+            let far = if len.is_finite() && len > 0.0 { vals[k] > 1e-2 * h * len } else { vals[k] > 0.0 };
+            *o |= far;
+        }
+    }
+    if !out.iter().any(|&b| b) {
+        return;
+    }
+    m.indices = m.indices.chunks_exact(3).enumerate().filter(|(k, _)| !out[*k]).flat_map(|(_, t)| t.iter().copied()).collect();
+    m.lod.clear();
+}
+
+/// 重心が面 G = 0 の上（距離の見積もり |G| / |∇G| が 10⁻³ マスより近い）にある三角形を消す
+fn drop_on_surface(m: &mut Mesh, g: &Program, h: f64) {
+    if let Some(l) = m.lod_mesh.as_deref_mut() {
+        drop_on_surface(l, g, h);
+    }
+    let p = &m.positions;
+    let at = |k: u32, c: usize| p[k as usize * 3 + c] as f64;
+    let centers: Vec<[f64; 3]> = m.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|c| (at(t[0], c) + at(t[1], c) + at(t[2], c)) / 3.0)).collect();
+    if centers.is_empty() {
+        return;
+    }
+    let vals = values_at(g, &cols_of(&centers));
+    let grads = gradients(g, &centers, 1e-4 * h);
+    let on = |k: usize| {
+        let d = grads[k];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        vals[k].is_finite() && len.is_finite() && vals[k].abs() <= 1e-3 * h * len
+    };
+    if !(0..centers.len()).any(on) {
+        return;
+    }
+    m.indices = m.indices.chunks_exact(3).enumerate().filter(|(k, _)| !on(*k)).flat_map(|(_, t)| t.iter().copied()).collect();
+    m.lod.clear();
+}
+
 /// 不等式の領域 G_1 ≤ 0, …, G_k ≤ 0 の境目の面。面 G_i = 0 ごとに今の陰関数の道で作り、ほかの全部の G_j ≤ 0 で切り取ってまとめる
 /// （角が立つ）。陰関数の粗い版も同じように切ってまとめる（どれかの面に粗い版が無ければ、全体の粗い版を作らない）
 pub fn region_faces(cuts: &[Program], dom: Domain, n: usize, refine: Refine) -> Mesh {
@@ -806,12 +905,24 @@ pub fn region_faces(cuts: &[Program], dom: Domain, n: usize, refine: Refine) -> 
     }
     let mut parts = Vec::new();
     let mut lods = Vec::new();
+    let h = cell(dom, n);
     for (i, g) in cuts.iter().enumerate() {
         let mut m = mesh::implicit_solid_opt(g, dom, n, &[], 0, refine);
         for (j, other) in cuts.iter().enumerate() {
             if j != i {
-                trim_mesh(&mut m, &mut values_of(other), 8);
+                // ほかの G_j は、面 G_i = 0 から中身の側（G_i < 0 の側）へ少しずらした点で計算する。
+                // 面の上で G_j もちょうど 0 になる所（0 ≤ xy ≤ x の x = 0 の面では、xy も x − xy も 0）は、面の上の値では
+                // 中か外かが丸めの誤差で決まり、面がまだらに残る。ずらした点なら、面の中身の側に領域があるか（その面が領域の境目か）で決まる
+                let mut inward = |pts: &[[f64; 3]]| values_at(other, &cols_of(&shift_inward(g, pts, h)));
+                trim_mesh(&mut m, &mut inward, 8);
             }
+        }
+        // 頂点が全部中でも、中身が外の三角形を消す。頂点で切り取るので、ほかの G_j が面の上の線で 0 になる所
+        // （z = 1 のふたの上の x = 0, y < 0 の線。xy が 0）では、線に沿った細い三角形が残る
+        drop_outside(&mut m, g, cuts, i, h);
+        // ほかの面 G_j = 0（j < i）と重なる所は、その面で描いてあるので消す（重ねると、半透明の濃さが変わる）
+        for other in &cuts[..i] {
+            drop_on_surface(&mut m, other, h);
         }
         lods.push(m.lod_mesh.take());
         parts.push(m);
@@ -867,6 +978,28 @@ mod tests {
         assert_eq!(parts("x^3 + y^2"), None);
         assert_eq!(parts("(x^2 + y^2) (z - 1)"), None);
         assert_eq!(parts("(x - 1)^2"), None);
+    }
+
+    #[test]
+    fn region_without_thin_walls() {
+        // 0 ≤ xy ≤ x, x ≤ 2, |z| ≤ 1: x > 0, 0 ≤ y ≤ 1 の板。x = 0 の面では xy も x − xy も 0 なので、y < 0・y > 1 の所にも
+        // 厚さ 0 の壁がある（集合としては入っている）が、描かない。x = 0, 0 ≤ y ≤ 1 の面（板の端）は 1 枚だけ描く
+        let cuts = ["-x y", "x y - x", "x - 2", "z - 1", "-z - 1"].map(prog);
+        let m = region_faces(&cuts, DOM, 40, Refine::Normal);
+        let p = &m.positions;
+        let mut wall = 0.0;
+        for t in m.indices.chunks_exact(3) {
+            let v = |k: usize, c: usize| p[t[k] as usize * 3 + c] as f64;
+            let c = [0, 1, 2].map(|a| (v(0, a) + v(1, a) + v(2, a)) / 3.0);
+            assert!(c[0] > -1e-3 && c[1] > -1e-3 && c[1] < 1.0 + 1e-3, "{c:?}");
+            if c[0].abs() < 1e-3 {
+                let e = |a: usize, b: usize| [0, 1, 2].map(|k| v(b, k) - v(a, k));
+                let (u, w) = (e(0, 1), e(0, 2));
+                wall += 0.5 * (u[1] * w[2] - u[2] * w[1]).abs();
+            }
+        }
+        // x = 0 の面: 1 × 2
+        assert!((wall - 2.0).abs() < 0.05, "{wall}");
     }
 
     #[test]

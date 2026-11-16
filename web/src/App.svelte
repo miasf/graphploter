@@ -1091,6 +1091,11 @@
     if (item.param) paramsChanged([item.param.name])
     if (item.def) defsChanged([item.def])
     lastDefSource.delete(item.id)
+    // 積分の図を消したら、図を出すときに非表示にした元の式（積分だけの式）を表示に戻す
+    if (item.integralOf !== undefined) {
+      const source = items.find((it) => it.id === item.integralOf)
+      if (source && !source.visible && onlyIntegral(source)) toggle(source)
+    }
     if (!isAux(item)) {
       pruneRegionItems()
       // この式の積分を描いていたら、一緒に消す
@@ -1237,9 +1242,12 @@
     }
     showIntegral(item)
     // 積分だけの式（値が 1 つの数）は、高さがその値の平面として描かれていて、積分の図を隠す（∫_0^{2π} sin x dx = 0 の平面は、
-    // 面積の図とちょうど重なる）。図を出すときに、平面のほうを非表示にする（● でいつでも戻せる）
-    if (item.visible && /^\s*\\(?:o?i{1,3}nt|intop|smallint)(?![A-Za-z])/.test(item.latex)) toggle(item)
+    // 面積の図とちょうど重なる）。図を出している間は、平面のほうを非表示にする（● でいつでも戻せる。図を消すと表示に戻す）
+    if (item.visible && onlyIntegral(item)) toggle(item)
   }
+
+  /** 式が積分だけ（積分記号で始まる）か */
+  const onlyIntegral = (item: PlotItem) => /^\s*\\(?:o?i{1,3}nt|intop|smallint)(?![A-Za-z])/.test(item.latex)
 
   /** 元の式・範囲の欄が書き換えられたとき: 描いている積分を作り直す（積分が無くなったら消す） */
   function updateIntegral(item: PlotItem, delay = 200) {
