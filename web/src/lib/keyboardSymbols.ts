@@ -1,7 +1,10 @@
 // 画面上の数式キーボードの「abc」タブ: 文字と、LaTeX で書ける数学記号（MathLive で表示できるもの）を全部、ページに分けて並べる。
 //
 // 1 ページは 10 個 × 4 段まで（スマホの幅でもはみ出さない数）。多い分類は「関係 1」「関係 2」のように分ける。
-// 計算エンジンが読めない記号も入れる（入れると「… はまだ使えません」と出る。数式を書きとめる用・これから使えるようにする分）。
+// 計算エンジン用の式に変換できない記号（描き方として決まった意味が無いもの。計画 docs/plan-math-notation.md の 3.7 の (c)）は、
+// キーボードに出さない（M14）。決まった形でだけ意味を持つ記号（∃・∀・↦）は、その形の例で確かめて残す。
+
+import { latexToText } from './latex.ts'
 
 /** キー 1 つ。文字列なら LaTeX（表示も入力も同じ） */
 export type SymbolKey = string | { latex: string; label?: string; insert?: string; tooltip?: string }
@@ -47,7 +50,7 @@ export const COMMON_SYMBOLS: SymbolKey[] = [
   { latex: '\\le', tooltip: '小なりイコール \\le' },
   { latex: '\\ge', tooltip: '大なりイコール \\ge' },
   { latex: '\\ne', tooltip: '等しくない \\ne' },
-  { latex: '\\approx', tooltip: 'ほぼ等しい \\approx' },
+  { latex: '\\in', tooltip: '属する \\in' },
   { latex: '\\pm', tooltip: 'プラスマイナス \\pm' },
   { latex: '\\infty', tooltip: '無限大 \\infty' },
   { latex: '\\theta', tooltip: 'シータ \\theta' },
@@ -371,7 +374,40 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
 ]
 
 /** abc タブのページ（文字のページ → 記号のページ） */
-export const SYMBOL_PAGES: SymbolPage[] = [
+/** 単独では変換できないが、決まった形で意味を持つ記号と、その形の例（keyboardSymbols.test.ts も使う） */
+export const KEEP_WITH_EXAMPLE: Record<string, string> = {
+  '\\exists': '\\exists a\\in\\left[0,1\\right],x<a',
+  '\\forall': '\\forall a\\in\\left[0,1\\right],x<a',
+  '\\mapsto': 'f\\colon x\\mapsto x^2',
+}
+
+/** キーの入力（空欄には x・1 を入れる） */
+export function keyInsert(k: SymbolKey): string {
+  const s = typeof k === 'string' ? k : (k.insert ?? k.latex)
+  let first = true
+  return s.replace(/#0|#\?|#@|\\placeholder\{\}/g, () => {
+    const v = first ? 'x' : '1'
+    first = false
+    return v
+  })
+}
+
+/** キーが計算エンジン用の式に変換できるか（関係・演算子は x と 1 の間に置いても試す） */
+export function convertible(k: SymbolKey): boolean {
+  const raw = typeof k === 'string' ? k : (k.insert ?? k.latex)
+  if (raw in KEEP_WITH_EXAMPLE) return true
+  const src = keyInsert(k)
+  return [src, `x${src}1`, `${src}x`].some((t) => {
+    try {
+      latexToText(t)
+      return true
+    } catch {
+      return false
+    }
+  })
+}
+
+const ALL_PAGES: SymbolPage[] = [
   { title: 'abc', section: 'abc', rows: [...qwerty(false), COMMON_SYMBOLS] },
   { title: 'ABC', section: 'abc', rows: [...qwerty(true), COMMON_SYMBOLS] },
   {
@@ -401,7 +437,9 @@ export const SYMBOL_PAGES: SymbolPage[] = [
   { title: '太字 𝐚', section: '𝔸 𝒜 𝔄 𝐀', keys: [...styled('mathbf', LOWER).slice(14), ...list(String.raw`\alpha \beta \gamma \delta \theta \lambda \mu \pi \sigma \phi \psi \omega \nabla`).map((g) => ({ latex: `\\boldsymbol{${g}}`, tooltip: `\\boldsymbol{${g}}` }))] },
   // 記号の分類を、10 個 × 4 段ずつのページに分ける
   // （40 個を超える分類は、同じくらいの数ずつに分ける。最後のページに 1〜2 個だけ残らないように）
-  ...SYMBOL_GROUPS.flatMap((g) => {
+  ...SYMBOL_GROUPS.flatMap((group) => {
+    const g = { ...group, keys: group.keys.filter(convertible) }
+    if (g.keys.length === 0) return []
     const n = Math.ceil(g.keys.length / PAGE_SIZE)
     const size = Math.ceil(g.keys.length / n)
     return Array.from({ length: n }, (_, k) => ({
@@ -411,3 +449,10 @@ export const SYMBOL_PAGES: SymbolPage[] = [
     }))
   }),
 ]
+
+/** キーボードのページ（変換できないキーを除き、空になったページを除いたもの） */
+export const SYMBOL_PAGES: SymbolPage[] = ALL_PAGES.flatMap((p): SymbolPage[] => {
+  if (p.rows) return [{ ...p, rows: p.rows.map((r) => r.filter(convertible)) }]
+  const keys = (p.keys ?? []).filter(convertible)
+  return keys.length > 0 ? [{ ...p, keys }] : []
+})

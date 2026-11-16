@@ -2351,6 +2351,8 @@ Worker への依頼は `type: 'grid'`（1 つ目の Worker）。描画は `Viewe
 
 ## 10. 今後の候補: キーボードに入れた記号に、描き方の意味を持たせる（ステップは `docs/plan-math-notation.md`）
 
+**済み**（`docs/plan-math-notation.md` の M0〜M14。進み具合は同じファイルの 0 章）
+
 **ステップに分けた指示書は `docs/plan-math-notation.md`（M0〜M14）にある。** 下の表は最初の見立てで、変えた所（$\exists$ は「範囲で重ねる」につなぐ、行列の描き方、除外する記号の一覧）はそちらに書いた。
 
 数式キーボードの「abc」タブ（`web/src/lib/keyboardSymbols.ts`）に、LaTeX で書ける数学記号を全部入れた。今は入力して表示できるだけで、計算エンジンは「… はまだ使えません」と返す。

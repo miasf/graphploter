@@ -2867,6 +2867,20 @@
                 パラメータ: <code>a=1</code> と書くとスライダーになり、ほかの式で <code>a</code> を使えます。
                 「複素数」を押すと、複素平面の上で点を動かして値を決められます
               </li>
+              <li>
+                数学の記法（数式キーボードの「∑∫∈」のタブに、雛形があります。◀ ▶ で「微積」「ベクトル」「集合」「方程式」のページ）
+                <ul>
+                  <li>関数: <code>f(x) = x^2</code> と定義して <code>z = f(x) - f(y)</code>。合成 <code>(f∘g)(x)</code>、導関数 <code>f′(x)</code>、逆関数 <code>y = f^(-1)(x)</code></li>
+                  <li>微積: <code>Σ</code>・<code>Π</code>（中身は直後の項）、<code>d/dx</code>・<code>∂/∂x</code>、定積分・不定積分・重積分・線積分・面積分、差分 <code>Δₓ</code>、場合分け</li>
+                  <li>ベクトルと行列: 組は列ベクトル。行列の積・<code>det</code>・逆行列・転置・<code>ker A</code>・<code>Im A</code>（像）。行列の中にカーソルを置くと、行・列を足す・消す帯が出ます（Enter で行、<code>,</code> で列、空の行で ⌫ で消す）。行列の定義の行の ⚙ →「座標系」で、線形変換の座標系にできます</li>
+                  <li>ベクトル場: <code>(-y, x, 0)</code>・<code>∇f</code>・<code>∇×F</code> は矢印で描きます（⚙ で矢印の数・流線）</li>
+                  <li>常微分方程式: <code>x′ = 10(y - x), y′ = x(28 - z) - y, z′ = xy - 8z/3</code>（独立変数 t）、<code>y′ = x - y</code>（傾きの場も）、<code>y″ + y = 0</code>。初期値は式の下の欄（リストで何本も）</li>
+                  <li>数列: <code>a_(n+1) = a_n/2 + 1</code> と初項 <code>a_1 = 8</code>。式の中では <code>a_(10)</code>。<code>|z_(20)| = 2</code>（z_(n+1) = z_n² + x + iy）でマンデルブロ集合の縁</li>
+                  <li>集合と論理: <code>&#123;(x, y, z) | x^2 + y^2 ≤ 1, z ≥ 0&#125;</code>、<code>∧ ∨ ¬ ⇒ ∩ ∪ ∖ ∈</code>、ℤ・ℕ、<code>⋃</code>・<code>⋂</code></li>
+                  <li>∃・∀・max（近似が混ざる）: <code>∃a ∈ [0, 1], x^2 + y^2 + (z - a)^2 = 1</code>、<code>z = max_(t ∈ [0, 1]) sin(xt) y</code></li>
+                  <li>名前: ギリシャ文字 <code>α</code>・アクセント <code>x̂</code>・書体 <code>𝒜</code> もスライダーの名前にできます。小さな記号: <code>≡ (mod n)</code>・<code>mod</code>・<code>⊥</code>・<code>∥</code>・共役 <code>z^∗</code>・<code>gcd</code>・<code>lcm</code></li>
+                </ul>
+              </li>
               <li>式の欄でエンター（⏎）を押すと、すぐ下に新しい式を足します。左端の番号をつまんで上下にドラッグすると並べ替えられます</li>
               <li>式の ⚙ ボタンで、色・格子線・回転を式ごとに変えられます。回転は標準では式ごとに別々で、「全体と同じ」やグループを選ぶと、同じものを選んだ式が一緒に回ります（同期）</li>
                 <li>マウスの操作は「⚙ 設定」→「マウス操作」で、操作 A（標準: 左ドラッグで回転、右ドラッグで移動）と操作 B（Google Earth 風）を切り替えられます。右上の「⟲ 視点」で最初の視点に戻ります</li>

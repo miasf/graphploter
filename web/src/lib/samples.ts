@@ -215,6 +215,31 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     ],
   },
   {
+    title: '数学の記法',
+    samples: [
+      {
+        label: '場合分け',
+        items: [{ latex: 'z=\\begin{cases}x^2-y^2 & x<0\\\\ \\sin\\left(xy\\right) & \\text{otherwise}\\end{cases}', options: { color: '#c74440' } }],
+      },
+      {
+        label: '定積分で定義した関数 ∫₀ˣ e^(−t²) dt',
+        items: [{ latex: 'y=\\int_{0}^{x}e^{-t^{2}}\\,dt', options: { color: '#2d70b3' } }],
+      },
+      {
+        label: '集合 {(x, y, z) | x² + y² ≤ 4, 0 ≤ z ≤ x}',
+        items: [{ latex: '\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2\\le4,0\\le z\\le x\\right\\}', options: { color: '#388c46', opacity: 0.6 } }],
+      },
+      {
+        label: '球が通る領域 ∃a ∈ [0, 3]',
+        items: [{ latex: '\\exists a\\in\\left[0,3\\right],x^2+y^2+\\left(z-a\\right)^2=1', options: { color: '#6042a6', opacity: 0.6 } }],
+      },
+      {
+        label: '最大公約数 z = gcd(x, y)/3',
+        items: [{ latex: 'z=\\frac{\\gcd\\left(x,y\\right)}{3}', options: { color: '#fa7e19', walls: true } }],
+      },
+    ],
+  },
+  {
     title: 'ベクトル・行列',
     samples: [
       { label: '回転する場 (−y, x, 0)', items: [{ latex: '\\left(-y,x,0\\right)', options: { color: '#2d70b3' } }] },
