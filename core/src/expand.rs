@@ -508,9 +508,13 @@ pub fn def_line() -> Option<String> {
 /// 直前にコンパイルした定義の行の説明（「f の定義（y = f(x)）」）。定義の行でなければ None
 pub fn def_line_label() -> Option<String> {
     DEF_LINE.with(|d| {
-        d.borrow().as_ref().map(|(name, drawn)| match drawn {
-            Some(l) => format!("{name} の定義（{l}）"),
-            None => format!("{name} の定義"),
+        d.borrow().as_ref().map(|(name, drawn)| {
+            // ベクトルの名前 vec_F は、F⃗ と出す
+            let name = name.strip_prefix("vec_").map_or_else(|| name.clone(), |v| format!("{v}\u{20d7}"));
+            match drawn {
+                Some(l) => format!("{name} の定義（{l}）"),
+                None => format!("{name} の定義"),
+            }
         })
     })
 }

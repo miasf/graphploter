@@ -644,10 +644,11 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           {
             latex: '#@_{#?}',
             label: 'x₂',
-            tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前 F⃗・太字の 𝐅 に',
+            tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前 F⃗・太字の 𝐅・黒板太字の 𝔽 に',
             variants: [
               { latex: '\\vec{#@}', label: 'v⃗' },
               { latex: '\\mathbf{#@}', label: '𝐯' },
+              { latex: '\\mathbb{#@}', label: '𝕧' },
             ],
           },
           '[separator-5]',
@@ -664,12 +665,13 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
           {
             latex: 'f',
-            tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場 F⃗・太字の 𝐅（F⃗ と同じ名前））',
+            tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場 F⃗・太字の 𝐅・黒板太字の 𝔽（どれも F⃗ と同じ名前））',
             variants: [
               'f\\left(x\\right)',
               'h',
               '\\vec{F}',
               '\\mathbf{F}',
+              '\\mathbb{F}',
               { latex: '\\vec{F}\\left(x,y,z\\right)', label: 'F⃗(x,y,z)' },
               { latex: '\\mathbf{F}\\left(x,y,z\\right)', label: '𝐅(x,y,z)' },
             ],

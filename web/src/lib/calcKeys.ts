@@ -180,12 +180,12 @@ export const MATRIX_ROWS: CalcKey[][] = [
   ],
   [
     {
-      ...key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（F → F⃗。F とは別の名前で、定義して積分などに使える。長押しで太字 𝐅。F⃗ と 𝐅 は同じ名前）'),
-      variants: ['\\mathbf{#@}'],
+      ...key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（F → F⃗。F とは別の名前で、定義して積分などに使える。長押しで太字 𝐅・黒板太字 𝔽。F⃗・𝐅・𝔽 は同じ名前）'),
+      variants: ['\\mathbf{#@}', '\\mathbb{#@}'],
     },
     {
-      ...key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（長押しで太字の 𝐅）'),
-      variants: ['\\mathbf{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)'],
+      ...key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（長押しで太字の 𝐅・黒板太字の 𝔽）'),
+      variants: ['\\mathbf{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', '\\mathbb{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)'],
     },
     key('a·b', '\\cdot', '内積・行列の積'),
     key('a×b', '\\times', '外積'),

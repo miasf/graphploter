@@ -46,7 +46,7 @@ const cases: [string, string][] = [
   // 名前に使える文字と、小さな記号（M13）
   ['z=\\alpha x', 'z= {alpha} x'],
   ['\\alpha=1', '{alpha} =1'],
-  ['z=\\hat{x}+\\tilde{\\alpha}+\\mathcal{A}+\\mathbb{K}+\\ell', 'z= {hat_x} + {tilde_alpha} + {cal_A} + {bb_K} + {ell}'],
+  ['z=\\hat{x}+\\tilde{\\alpha}+\\mathcal{A}+\\mathbb{K}+\\ell', 'z= {hat_x} + {tilde_alpha} + {cal_A} + {vec_K} + {ell}'],
   ['z=\\theta+\\beta+\\delta', 'z= theta + {beta} + {delta}'],
   ['x\\equiv1\\pmod{3}', 'mod((x)-(1),3)=0'],
   ['x\\equiv y', 'x=y'],
@@ -351,6 +351,8 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
 // 太字の 1 文字は、ベクトルの名前（\vec と同じ名前）
 check('太字 \\mathbf{F}', latexToText('\\mathbf{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'), latexToText('\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'))
 check('太字 \\boldsymbol{F}', latexToText('\\boldsymbol{F}'), '{vec_F}')
+check('黒板太字 \\mathbb{F}', latexToText('\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le\\pi\\right\\}}\\mathbb{F}\\cdot d\\mathbb{r}'), '@intset(( cos t, sin t),0<=t<= pi; {vec})({vec_F})')
+check('黒板太字の集合はそのまま', latexToText('x\\in\\mathbb{Z}'), 'x∈ℤ')
 check('太字の名前（2 文字以上）はそのまま', latexToText('\\mathbf{Im}'), 'Im')
 setRegions({})
 

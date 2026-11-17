@@ -508,7 +508,11 @@ class Converter {
           this.out += sets[c]
           return
         }
-        // そのほかの文字は名前（計画 M13）
+        // そのほかの 1 文字は、ベクトルの名前（\vec{F}・\mathbf{F} と同じ名前。黒板太字は、手書きの太字の書き方）
+        if (/^[A-Za-z]$/.test(c)) {
+          this.out += ` {vec_${c}} `
+          return
+        }
         const n = engineNameOf('mathbb', c)
         if (!n) throw new LatexError(`\\mathbb{${c}} はまだ使えません`)
         this.out += ` {${n}} `
@@ -923,7 +927,7 @@ function differentialAt(toks: Token[], p: number): { v: string; len: number; vec
   const letter = (k: number) => (/^[A-Za-z]$/.test(toks[k] ?? '') ? toks[k] : null)
   const t = toks[p]
   // ベクトルの微分 d\mathbf{r}・d\vec{S}（len は文字の手前まで。文字の後の } も読み飛ばすので、文字の位置に 1 足して返す）
-  if ((t === 'd' || t === '\\differentialD') && ['\\mathbf', '\\vec', '\\boldsymbol', '\\overrightarrow'].includes(toks[p + 1] ?? '') && toks[p + 2] === '{' && letter(p + 3) && toks[p + 4] === '}') {
+  if ((t === 'd' || t === '\\differentialD') && ['\\mathbf', '\\vec', '\\boldsymbol', '\\overrightarrow', '\\mathbb'].includes(toks[p + 1] ?? '') && toks[p + 2] === '{' && letter(p + 3) && toks[p + 4] === '}') {
     return { v: toks[p + 3], len: 4, vector: true }
   }
   if ((t === 'd' || t === '\\differentialD') && letter(p + 1)) return { v: toks[p + 1], len: 1 }
@@ -1452,7 +1456,7 @@ const between = (lo: Token[], hi: Token[], s: number): string => {
 function fieldOf(body: Token[], vector: boolean): Token[] | null {
   // 定義した場の名前だけ（F・F⃗）なら、定義の行がもう矢印を描いているので、重ねない
   const nameOnly = (ts: Token[]) =>
-    (ts.length === 1 && /^[A-Za-z]$/.test(ts[0])) || (ts.length === 4 && (ts[0] === '\\vec' || ts[0] === '\\mathbf' || ts[0] === '\\boldsymbol') && ts[1] === '{' && ts[3] === '}')
+    (ts.length === 1 && /^[A-Za-z]$/.test(ts[0])) || (ts.length === 4 && ['\\vec', '\\mathbf', '\\boldsymbol', '\\mathbb'].includes(ts[0]) && ts[1] === '{' && ts[3] === '}')
   if (vector) return nameOnly(body) ? null : body
   const k = body.findIndex((t, j) => t === '\\nabla' && body[j + 1] === '\\cdot')
   return k === 0 && !nameOnly(body.slice(2)) ? body.slice(2) : null
@@ -1591,7 +1595,7 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
   /** 被積分関数の、点 r での値（\left. 中身 \right|_{x = …}。∇ × F⃗ のように、展開してから点を入れる） */
   // 中身が名前だけ（定義した F・F⃗）か、∇ のように展開してはじめて x, y, z が出てくる式なら、点での値の形にする。
   // それ以外は、中身の x, y, z に点の成分を直接入れる
-  const opaque = body.some((t) => t === '\\nabla' || t === '\\vec' || t === '\\mathbf' || t === '\\boldsymbol' || t === '\\operatorname') || (body.length === 1 && /^[A-Za-z]$/.test(body[0]))
+  const opaque = body.some((t) => t === '\\nabla' || t === '\\vec' || t === '\\mathbf' || t === '\\boldsymbol' || t === '\\mathbb' || t === '\\operatorname') || (body.length === 1 && /^[A-Za-z]$/.test(body[0]))
   const valueAt = (pt: string[]) =>
     opaque
       ? `\\left.${joinToks(body)}\\right|_{${pt.map((c, k) => `${'xyz'[k]}=${c}`).join(',')}}`
