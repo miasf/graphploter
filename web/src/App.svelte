@@ -1134,7 +1134,9 @@
     // 積分の図を消したら、図を出すときに非表示にした元の式（積分だけの式）を表示に戻す
     if (item.integralOf !== undefined && item.integralRole === undefined) {
       const source = items.find((it) => it.id === item.integralOf)
-      if (source && !source.visible && onlyIntegral(source)) toggle(source)
+      // 図を出すときに非表示にした式だけを表示に戻す（もとから非表示だった式は、非表示のまま）
+      if (source && hiddenForIntegral.has(source.id) && !source.visible) toggle(source)
+      if (source) hiddenForIntegral.delete(source.id)
       // 添えて描いていた矢印・点も消す
       if (source) {
         for (const x of integralExtras(source)) removeItem(x)
@@ -1390,8 +1392,14 @@
     showIntegral(item)
     // 積分だけの式（値が 1 つの数）は、高さがその値の平面として描かれていて、積分の図を隠す（∫_0^{2π} sin x dx = 0 の平面は、
     // 面積の図とちょうど重なる）。図を出している間は、平面のほうを非表示にする（● でいつでも戻せる。図を消すと表示に戻す）
-    if (item.visible && onlyIntegral(item)) toggle(item)
+    if (item.visible && onlyIntegral(item)) {
+      toggle(item)
+      hiddenForIntegral.add(item.id)
+    }
   }
+
+  /** 積分の図を出したときに、図のほうで非表示にした元の式の id（図を消したら、これだけを表示に戻す） */
+  const hiddenForIntegral = new Set<number>()
 
   /** 式が積分だけ（積分記号で始まる）か */
   const onlyIntegral = (item: PlotItem) => /^\s*\\(?:o?i{1,3}nt|intop|smallint)(?![A-Za-z])/.test(item.latex)
@@ -2503,7 +2511,11 @@
             onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}
-            onToggle={() => toggle(item)}
+            onToggle={() => {
+              // 自分で ● を押したら、その表示・非表示に従う（積分の図を消しても戻さない）
+              hiddenForIntegral.delete(item.id)
+              toggle(item)
+            }}
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
