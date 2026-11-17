@@ -1214,3 +1214,14 @@ fn value_at_point() {
     // F⃗ を点で: (−2, 1, 0)
     assert_eq!(value_with("@at({vec_F}, x, 1, y, 2, z, 0) · (1,0,0)", defs), -2.0);
 }
+
+/// dim の書き方: 括弧があってもなくてもよい。dim A だけは、書き方を案内する
+#[test]
+fn dim_forms() {
+    let defs = "A=⟦1,2;2,4⟧";
+    for s in ["@dim @ker A", "@dim ( @ker (A))", "@dim(@ker(A))", "@dim ( @ker A)"] {
+        assert_eq!(value_with(s, defs), 1.0, "{s}");
+    }
+    assert_eq!(value_with("@dim(Im(A))", defs), 1.0);
+    assert!(error_of("@dim(A)", defs).contains("dim ker A"), "{}", error_of("@dim(A)", defs));
+}

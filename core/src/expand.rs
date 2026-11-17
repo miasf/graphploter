@@ -979,7 +979,13 @@ impl Expander<'_> {
             ("rank", a) => ("rank", a),
             (_, Expr::Op { op: o, args: a }) if (o == "ker" || o == "im") && a.len() == 1 => (o.as_str(), &a[0]),
             (_, Expr::Call(crate::functions::Func::Im, a)) if a.len() == 1 => ("im", &a[0]),
-            _ => return Err("@dim は、dim ker A・dim Im A の形で使ってください".into()),
+            // dim A（行列そのもの）: 何の次元かが決まらないので、書き方を案内する
+            (_, Expr::Var(n)) => {
+                return Err(format!(
+                    "dim の中が {n} だけです。零空間の次元なら dim ker {n}、像の次元なら dim Im {n}（= rank {n}）と書いてください"
+                ))
+            }
+            _ => return Err("dim の中を ker A か Im A にしてください（dim ker A・dim Im A の形で使います）".into()),
         };
         let m = self.mat(inner, &format!("@{op}"))?;
         let Some(a) = numbers(&m.items, self.params) else {
