@@ -894,8 +894,8 @@ fn determinant_line_and_columns() {
     let p = points("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧");
     // 矢印の先（矢じりの頂点）と、軸の線分の始点（原点）
     assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]));
-    let mut m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
-    assert!(m.take_outline().chunks_exact(3).any(|v| v == [0.0, 0.0, 0.0]));
+    // 軸の尾（太さのある軸の尾のふた）は原点のすぐそば
+    assert!(p.iter().any(|v| v.iter().map(|c| c * c).sum::<f32>().sqrt() < 0.2));
     // ベクトルの定義は、そのベクトル
     let p = points("{vec_b} = (1, 2, 3)", "{vec_b} = (1, 2, 3)");
     assert!(p.iter().any(|v| *v == [1.0, 2.0, 3.0]));
@@ -925,10 +925,12 @@ fn matrix_as_coordinate_system() {
 fn vector_fields() {
     let mut m = run("(-y, x, 0)", "", &[]).unwrap();
     assert!(m.kind().starts_with("ベクトル場"), "{}", m.kind());
-    let shafts = m.take_outline();
-    // 9³ − 9（z 軸の上は大きさ 0）
-    assert_eq!(shafts.len() / 9, 9 * 9 * 9 - 9);
+    // 9³ − 9（z 軸の上は大きさ 0）。矢印は全部メッシュ（軸も筒）で、流線を描かなければ線は無い
+    assert!(m.kind().contains(&format!("{} 本の矢印", 9 * 9 * 9 - 9)), "{}", m.kind());
+    assert!(m.take_outline().is_empty());
     assert_eq!(m.value_range().len(), 2);
+    // ベクトル場は、鮮やかな色の対応表で塗る
+    assert!(m.vivid());
     // 勾配・回転は、手で書いた場と同じ矢印
     let arrows = |src: &str, defs: &str| {
         let mut m = run(src, defs, &[]).unwrap();
