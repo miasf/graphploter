@@ -75,7 +75,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('∇·F', '\\nabla\\cdot #?', '発散 div'),
         key('∇×F', '\\nabla\\times #?', '回転 rot'),
         key('∇²f', '\\nabla^{2}#?', 'ラプラシアン'),
-        key(`${vecLabel('F')}=`, '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 𝐅(x, y, z) = (P, Q, R)（𝐅 は f とは別の名前）'),
+        key(`${vecLabel('F')}=`, '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 \\vec{F}(x, y, z) = (P, Q, R)（ベクトルの名前 F は、ふつうの f・F とは別の名前）'),
         key('∭∇·F', '\\iiint_{V}\\nabla\\cdot #?\\,dV', '体積分 ∭_V ∇ · F dV（立体 V は式の下の欄に {(x(r,u,v), …) | 範囲} で書く。値は V の表面を通る流束と同じ）'),
         key('⊥', '\\perp', '直交 u ⊥ v（u · v = 0）'),
         key('∥', '\\parallel', '平行 u ∥ v（u × v = 0）'),
@@ -188,7 +188,7 @@ export const MATRIX_ROWS: CalcKey[][] = [
       variants: ['\\mathbf{#@}', '\\mathbb{#@}'],
     },
     {
-      ...key(`${vecLabel('F')}=`, '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 𝐅(x, y, z) = (P, Q, R)（長押しで太字の 𝐅・黒板太字の 𝔽）'),
+      ...key(`${vecLabel('F')}=`, '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 \\vec{F}(x, y, z) = (P, Q, R)（長押しで太字 \\mathbf{F}・黒板太字 \\mathbb{F} の形）'),
       variants: ['\\mathbf{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', '\\mathbb{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)'],
     },
     key('a·b', '\\cdot', '内積・行列の積'),
