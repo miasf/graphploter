@@ -7538,7 +7538,14 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
             break;
         }
         let mids: Vec<f64> = cand.iter().map(|&k| 0.5 * (ts[k] + ts[k + 1])).collect();
-        let mps = split(eval(&mids));
+        // 中点だけでは、区間の幅が周期のほぼ整数倍のとき（(cos t, sin t, 0.01 t) を t ∈ [0, 10⁴] で 400 等分すると、1 歩が 25 ≈ 8π）、
+        // 中点も両端とほぼ同じ所に来て、曲がっているのを見落とす。黄金比の位置（半分の位置と周期が揃いにくい）でも調べる
+        const PROBE: f64 = 0.381_966_011_250_105;
+        let probes: Vec<f64> = cand.iter().map(|&k| ts[k] + PROBE * (ts[k + 1] - ts[k])).collect();
+        let mut both = mids.clone();
+        both.extend_from_slice(&probes);
+        let all = split(eval(&both));
+        let (mps, pps) = all.split_at(mids.len());
 
         // 中点を入れるべきか判定しながら、新しい列を作る
         let mut nts = Vec::with_capacity(ts.len() + cand.len());
@@ -7552,11 +7559,12 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
                 break;
             }
             if c < cand.len() && cand[c] == k {
-                let (a, b, m) = (&ps[k], &ps[k + 1], &mps[c]);
+                let (a, b, m, q) = (&ps[k], &ps[k + 1], &mps[c], &pps[c]);
                 let insert = if finite(a) && finite(b) && finite(m) {
-                    // 中点が、両端を結ぶ線分の中点からどれだけずれているか
+                    // 中点（と黄金比の位置の点）が、両端を結ぶ線分の同じ位置からどれだけずれているか
                     let mid: Vec<f64> = a.iter().zip(b).map(|(x, y)| (x + y) / 2.0).collect();
-                    dist(m, &mid) > tol
+                    let on: Vec<f64> = a.iter().zip(b).map(|(x, y)| x + PROBE * (y - x)).collect();
+                    dist(m, &mid) > tol || (finite(q) && dist(q, &on) > tol)
                 } else {
                     true // 定義されない点との境目を探す
                 };
@@ -10451,6 +10459,27 @@ mod tests {
         let t = std::time::Instant::now();
         let shape = parametric_surface_nd(&[torus], (0.0, tau), (0.0, tau), 400);
         println!("媒介変数表示の曲面 n = 400: {:?}, 点 {}", t.elapsed(), shape.points.len() / 3);
+    }
+    #[test]
+    fn dense_helix_is_not_aliased() {
+        // (cos t, sin t, 0.01 t)、t ∈ [0, 10⁴]（テスト表の K-01）。400 等分の 1 歩 25 は 8π に近く、中点だけで調べると
+        // 曲がっているのを見落として 401 点のまま（ゆるく波打つ線）になっていた
+        let p = |s: &str| Program::compile(&crate::parser::parse(s).unwrap(), &["t"]).unwrap();
+        let sets = vec![vec![p("cos(t)"), p("sin(t)"), p("0.01 t")]];
+        // アプリと同じ許容誤差（表示範囲の対角線 ≈ 100 の 10⁻⁴）
+        let sh = parametric_curve_nd(&sets, (0.0, 1e4), 400, 1e-2);
+        let pts: Vec<&[f64]> = sh.points.chunks_exact(3).collect();
+        assert!(pts.len() > 20_000, "点の数 {}", pts.len());
+        let mut worst: f64 = 0.0;
+        for w in pts.windows(2) {
+            let (a0, a1) = (w[0][1].atan2(w[0][0]), w[1][1].atan2(w[1][0]));
+            let mut d = (a1 - a0).abs();
+            if d > std::f64::consts::PI {
+                d = 2.0 * std::f64::consts::PI - d;
+            }
+            worst = worst.max(d);
+        }
+        assert!(worst < 0.5, "隣の点の角度の差の最大 {worst}");
     }
 }
 
