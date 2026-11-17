@@ -660,6 +660,11 @@
       const uses = it.usedParams.some((n) => names.includes(n)) || it.params.some((n) => names.includes(n))
       if (uses || it.error || running.has(it.id)) schedule(it, 0)
     }
+    // 積分の図: 途中までの積分の値は画面側で計算しているので、スライダーが変わったら計算し直す
+    // （矢印・今の点も、範囲の端がスライダーの式なら動く）
+    for (const it of items) {
+      if (it !== except && !isAux(it) && integralItem(it)) updateIntegral(it, 60)
+    }
   }
 
   /**
