@@ -337,7 +337,7 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
       tpl('\\bar{#@}', '\\bar', 'ā'),
       tpl('\\overline{#0}', '上線（共役・閉包） \\overline', 'āb'),
       tpl('\\underline{#0}', '下線 \\underline', 'a̲'),
-      tpl('\\vec{#@}', 'ベクトル \\vec', 'a⃗'),
+      tpl('\\vec{#@}', 'ベクトル \\vec', '→a'),
       tpl('\\overrightarrow{#0}', '\\overrightarrow'),
       tpl('\\overleftarrow{#0}', '\\overleftarrow'),
       tpl('\\overleftrightarrow{#0}', '\\overleftrightarrow'),

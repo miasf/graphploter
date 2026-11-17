@@ -389,6 +389,9 @@ function keyAt(target: EventTarget | null): { key: HTMLElement; name: string } |
   return name ? { key, name } : null
 }
 
+/** 矢印のベクトルの名前のキーの表示（矢印を重ねる文字 U+20D7 は字体によって □ になるので、→ を文字の上に重ねる） */
+const VEC_LABEL = (c: string) => `<span style="display:inline-flex;flex-direction:column;align-items:center;line-height:0.75"><span style="font-size:0.7em">→</span><i>${c}</i></span>`
+
 /** 長押しで出る、別の候補の欄（出ていなければ null） */
 function variantPanel(): HTMLElement | null {
   return document.querySelector<HTMLElement>('.MLK__variant-panel.is-visible')
@@ -644,9 +647,9 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           {
             latex: '#@_{#?}',
             label: 'x₂',
-            tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前 F⃗・太字の 𝐅・黒板太字の 𝔽 に',
+            tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前 𝐅・太字の 𝐅・黒板太字の 𝔽 に',
             variants: [
-              { latex: '\\vec{#@}', label: 'v⃗' },
+              { latex: '\\vec{#@}', label: VEC_LABEL('v') },
               { latex: '\\mathbf{#@}', label: '𝐯' },
               { latex: '\\mathbb{#@}', label: '𝕧' },
             ],
@@ -665,18 +668,18 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
           {
             latex: 'f',
-            tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場 F⃗・太字の 𝐅・黒板太字の 𝔽（どれも F⃗ と同じ名前））',
+            tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場 𝐅・太字の 𝐅・黒板太字の 𝔽（どれも 𝐅 と同じ名前））',
             variants: [
               'f\\left(x\\right)',
               'h',
               '\\vec{F}',
               '\\mathbf{F}',
               '\\mathbb{F}',
-              { latex: '\\vec{F}\\left(x,y,z\\right)', label: 'F⃗(x,y,z)' },
+              { latex: '\\vec{F}\\left(x,y,z\\right)', label: '𝐅(x,y,z)' },
               { latex: '\\mathbf{F}\\left(x,y,z\\right)', label: '𝐅(x,y,z)' },
             ],
           },
-          { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)・G⃗）', variants: ['g\\left(x\\right)', '\\vec{G}'] },
+          { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)・𝐆）', variants: ['g\\left(x\\right)', '\\vec{G}'] },
           '[separator-5]',
           '1',
           '2',

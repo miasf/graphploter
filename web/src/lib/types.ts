@@ -252,7 +252,7 @@ export interface PlotItem extends PlotStyle {
    * 積分を描くための行のうち、添えて描くもの（ベクトル場の矢印・今の点・接線・法線・場の向きと成分）なら、その役。
    * 積分の図そのものの行は undefined
    */
-  integralRole?: 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
+  integralRole?: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
   /** 積分を描くための行: 進み具合のスライダーで動かす積分の変数（無ければスライダーを出さない） */
   auxSweep?: string
   /** 積分の式（元の式）の、図の進み具合（0〜1。積分の範囲を下の端から途中までにする。無ければ 1）。保存しない */

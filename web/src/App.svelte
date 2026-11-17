@@ -1137,17 +1137,18 @@
       // 図を出すときに非表示にした式だけを表示に戻す（もとから非表示だった式は、非表示のまま）
       if (source && hiddenForIntegral.has(source.id) && !source.visible) toggle(source)
       if (source) hiddenForIntegral.delete(source.id)
-      // 添えて描いていた矢印・点も消す
-      if (source) {
-        for (const x of integralExtras(source)) removeItem(x)
-        playingIntegral = playingIntegral.filter((x) => x !== source.id)
-      }
+      // 添えて描いていた矢印・点も消す（元の式がもう一覧から消えていても、番号で探す）
+      for (const x of items.filter((it) => it.integralOf === item.integralOf && it.integralRole !== undefined)) removeItem(x)
+      playingIntegral = playingIntegral.filter((x) => x !== item.integralOf)
     }
     if (!isAux(item)) {
       pruneRegionItems()
-      // この式の積分を描いていたら、一緒に消す
-      const view = integralItem(item)
-      if (view) removeItem(view)
+      // この式の積分を描いていたら、図と、添えて描いていた矢印・点を全部消す
+      for (const x of items.filter((it) => it.integralOf === item.id)) removeItem(x)
+    }
+    // 念のため: 元の式が無くなった積分の図・矢印・点が残っていれば消す（どの道で消えても、グラフに残さない）
+    for (const x of items.filter((it) => it.integralOf !== undefined && !items.some((s) => s.id === it.integralOf))) {
+      removeItem(x)
     }
   }
 
@@ -1258,6 +1259,7 @@
 
   /** 添えて描くものの色 */
   const EXTRA_COLORS: Record<NonNullable<PlotItem['integralRole']>, string> = {
+    path: '#3a3a40',
     field: '#6042a6',
     point: '#222222',
     tangent: '#2d70b3',
@@ -1320,8 +1322,9 @@
           integralRole: e.role,
           vertical: false,
           color: EXTRA_COLORS[e.role],
-          lineWidth: e.role === 'point' ? 7 : e.role === 'field' ? 3 : 5,
-          opacity: e.role === 'field' ? 0.8 : 1,
+          lineWidth: e.role === 'point' ? 7 : e.role === 'field' || e.role === 'path' ? 3 : 5,
+          // 経路・領域は、積分の図の下に薄く（曲線はくっきり、面は透かす）
+          opacity: e.role === 'field' ? 0.8 : e.role === 'path' ? 0.45 : 1,
           ranges: { t: ['0', '1'], u: ['0', '1'], v: ['0', '1'] },
         })
         items.push(x)
@@ -2242,10 +2245,9 @@
     // 4次元の例などは、次元が足りなければ増やす
     if (!view && sample.dims && space.dims < sample.dims) setLayout(resizeSpace(space, sample.dims))
     // 空の式が1つだけなら、それはサンプルで置き換える
-    if (listed().length === 1 && items[0].latex === '') {
-      viewer?.removePlot(items[0].id)
-      items.splice(0, 1)
-    }
+    // （一覧に出ない行（積分の範囲・積分の図）が前にあることもあるので、一覧の行で調べる）
+    const only = listed()
+    if (only.length === 1 && only[0].latex === '') removeItem(only[0])
     const defined = new Set(items.map((it) => it.param?.name ?? latexParamName(it.latex)))
     const adding = sample.items.filter((si) => !(si.param && defined.has(si.param))) // 同じ名前のパラメータがすでにあれば足さない
     // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
