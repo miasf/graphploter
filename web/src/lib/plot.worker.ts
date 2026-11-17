@@ -515,6 +515,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const volume = volumeN > 0 ? { n: volumeN, values: r.take_volume() } : undefined
     const outline = r.take_outline()
     const outlineDashed = r.take_outline_dashed()
+    const outlineValues = r.take_outline_values()
+    const vivid = r.vivid
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
     const outlineDashedTarget = r.take_outline_dashed_target()
@@ -539,6 +541,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(volume ? { volume } : {}),
       ...(outline.length > 0 ? { outline } : {}),
       ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
+      ...(outlineValues.length > 0 ? { outlineValues } : {}),
+      ...(vivid ? { vivid } : {}),
       ...(target.length > 0 ? { target } : {}),
       ...(outlineTarget.length > 0 ? { outlineTarget } : {}),
       ...(outlineDashedTarget.length > 0 ? { outlineDashedTarget } : {}),
@@ -604,6 +608,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         ...(res.mesh.volume ? [res.mesh.volume.values.buffer] : []),
         ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
         ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),
+        ...(res.mesh.outlineValues ? [res.mesh.outlineValues.buffer] : []),
         ...(res.mesh.target ? [res.mesh.target.buffer] : []),
         ...(res.mesh.outlineTarget ? [res.mesh.outlineTarget.buffer] : []),
         ...(res.mesh.outlineDashedTarget ? [res.mesh.outlineDashedTarget.buffer] : []),

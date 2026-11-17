@@ -129,20 +129,54 @@ vec3 cmapShade(float t, vec3 base) {
   }
   return clamp(c, 0.0, 1.0);
 }
+// 鮮やか（ベクトル場の大きさ）: 青 → 水色 → 緑 → 黄緑 → 橙 → 赤紫。どの色も彩度が高く、明るい背景・暗い背景のどちらでも見える
+vec3 cmapVivid(float t) {
+  const vec3 s0 = vec3(0.16, 0.28, 1.0);
+  const vec3 s1 = vec3(0.0, 0.66, 1.0);
+  const vec3 s2 = vec3(0.0, 0.84, 0.5);
+  const vec3 s3 = vec3(0.62, 0.86, 0.0);
+  const vec3 s4 = vec3(1.0, 0.55, 0.0);
+  const vec3 s5 = vec3(1.0, 0.08, 0.38);
+  float x = t * 5.0;
+  if (x < 1.0) return mix(s0, s1, x);
+  if (x < 2.0) return mix(s1, s2, x - 1.0);
+  if (x < 3.0) return mix(s2, s3, x - 2.0);
+  if (x < 4.0) return mix(s3, s4, x - 3.0);
+  return mix(s4, s5, x - 4.0);
+}
 vec3 colormap(float t, float which, vec3 base) {
   t = clamp(t, 0.0, 1.0);
+  if (which > 2.5) return pow(cmapVivid(t), vec3(2.2));
   if (which > 1.5) return cmapShade(t, base);
   vec3 srgb = clamp(which > 0.5 ? cmapTurbo(t) : cmapViridis(t), 0.0, 1.0);
   return pow(srgb, vec3(2.2));
 }
 `
 
+/** COLORMAP_GLSL の cmapVivid の色の点（sRGB） */
+const VIVID_STOPS = [
+  [0.16, 0.28, 1.0],
+  [0.0, 0.66, 1.0],
+  [0.0, 0.84, 0.5],
+  [0.62, 0.86, 0.0],
+  [1.0, 0.55, 0.0],
+  [1.0, 0.08, 0.38],
+]
+
+/** 色の対応表の番号（シェーダーの uColormap） */
+export const COLORMAP_INDEX = { viridis: 0, turbo: 1, shade: 2, vivid: 3 } as const
+
 /** COLORMAP_GLSL の colormap と同じ色（JS 版。曲線の頂点の色に使う）。返す色は線形の色空間 */
-export function colormapColor(t: number, which: 'viridis' | 'turbo' | 'shade', base: THREE.Color, out: THREE.Color): THREE.Color {
+export function colormapColor(t: number, which: keyof typeof COLORMAP_INDEX, base: THREE.Color, out: THREE.Color): THREE.Color {
   t = Math.min(1, Math.max(0, t))
   if (which === 'shade') return shadeColor(t, base, out)
   let r: number, g: number, b: number
-  if (which === 'turbo') {
+  if (which === 'vivid') {
+    const x = t * 5
+    const k = Math.min(4, Math.floor(x))
+    const f = x - k
+    ;[r, g, b] = [0, 1, 2].map((c) => VIVID_STOPS[k][c] + (VIVID_STOPS[k + 1][c] - VIVID_STOPS[k][c]) * f)
+  } else if (which === 'turbo') {
     const v4 = [1, t, t * t, t * t * t]
     const v2 = [v4[2] * v4[2], v4[3] * v4[2]]
     const dot4 = (k: number[]) => k[0] * v4[0] + k[1] * v4[1] + k[2] * v4[2] + k[3] * v4[3]

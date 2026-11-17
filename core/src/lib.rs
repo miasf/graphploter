@@ -69,6 +69,10 @@ pub struct MeshResult {
     flat_slice: bool,
     /// 2D 表示の不等式の領域の境目の線（実線・点線。線分ごとに 2 点と NaN、または点の列）。ふつうは空
     outline: (Vec<f32>, Vec<f32>),
+    /// 実線の点ごとの値（ベクトル場の流線の大きさ）。ふつうは空
+    outline_values: Vec<f32>,
+    /// ベクトル場なら true（描画側で鮮やかな色の対応表を使う）
+    vivid: bool,
     /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
     value_range: Option<(f64, f64)>,
     /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）。
@@ -171,6 +175,15 @@ impl MeshResult {
     /// 同じく点線の分
     pub fn take_outline_dashed_target(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline_target.1)
+    }
+    /// 実線の点ごとの値（Float32Array。ベクトル場の流線の大きさ。無ければ空）
+    pub fn take_outline_values(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.outline_values)
+    }
+    /// ベクトル場か（矢印・流線を鮮やかな色の対応表で塗る）
+    #[wasm_bindgen(getter)]
+    pub fn vivid(&self) -> bool {
+        self.vivid
     }
     pub fn take_outline_dashed(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline.1)
@@ -416,6 +429,8 @@ pub fn coord_grid(
         flat,
         flat_slice: false,
         outline: Default::default(),
+        outline_values: Vec::new(),
+        vivid: false,
         outline_target: Default::default(),
         coord: None,
         value_range: None,
@@ -737,6 +752,8 @@ pub fn plot(
         flat_slice: ctx.flat_slice,
         outline,
         outline_target,
+        outline_values: built.outline_values,
+        vivid: built.vivid,
         value_range: built.value_range,
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
@@ -950,7 +967,7 @@ impl Drop for FieldStyleReset {
 
 /// 矢印を作り、`Built` にする（矢じりはメッシュ、軸は境目の線と同じ道で返す）
 fn arrows_built(a: field::Arrows, kind: String) -> Built {
-    Built { inner: a.mesh, outline: (a.shafts, Vec::new()), value_range: a.range, kind, ..Default::default() }
+    Built { inner: a.mesh, value_range: a.range, kind, ..Default::default() }
 }
 
 fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
@@ -961,13 +978,12 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
             let a = field::field(progs, *rot, ctx.dom, field::Style { count, unit, flat: ctx.flat });
             let n = a.count;
             let mut b = arrows_built(a, format!("ベクトル場 · {n} 本の矢印"));
+            b.vivid = true;
             if stream > 0 {
-                let lines = field::streamlines(progs, *rot, ctx.dom, stream as usize, ctx.flat);
+                let (lines, mags) = field::streamlines(progs, *rot, ctx.dom, stream as usize, ctx.flat);
                 if !lines.is_empty() {
-                    if !b.outline.0.is_empty() {
-                        b.outline.0.extend([f32::NAN; 3]);
-                    }
-                    b.outline.0.extend(lines);
+                    b.outline.0 = lines;
+                    b.outline_values = mags;
                     b.kind.push_str("・流線");
                 }
             }
@@ -1428,6 +1444,10 @@ struct Built {
     local: Option<(mesh::LocalMesh, Vec<String>)>,
     /// 2D 表示の不等式の領域の境目の線（実線, 点線）
     outline: (Vec<f32>, Vec<f32>),
+    /// 実線の点ごとの値（流線の大きさ ‖F‖。value_range の色の対応表で塗る）。ふつうは空
+    outline_values: Vec<f32>,
+    /// ベクトル場（矢印・流線を、鮮やかな色の対応表で塗る）
+    vivid: bool,
     /// 表示していない座標の値で色を付けるなら、その範囲
     value_range: Option<(f64, f64)>,
     /// 伝達関数の格子の値と、1 辺の点の数
@@ -2077,6 +2097,8 @@ impl Shape {
             flat: self.flat,
             flat_slice: self.flat_slice,
             outline: Default::default(),
+            outline_values: Vec::new(),
+            vivid: false,
             outline_target: Default::default(),
             coord: None,
             value_range: None,
@@ -2190,6 +2212,8 @@ impl CapSource {
             flat: false,
             flat_slice: false,
             outline: Default::default(),
+            outline_values: Vec::new(),
+            vivid: false,
             outline_target: Default::default(),
             coord: None,
             value_range: None,

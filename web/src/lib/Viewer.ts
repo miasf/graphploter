@@ -12,7 +12,7 @@ import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQua
 import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
 import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
-import { colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
+import { COLORMAP_INDEX, colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -112,8 +112,10 @@ type PlotObject =
       stencil: StencilCap | null
       /** ステンシルで描く順番を決める番号 */
       order: number
-      /** 2D 表示の不等式の領域の境目の線（実線・点線。group の子） */
+      /** 2D 表示の不等式の領域の境目の線（実線・点線。group の子）。ベクトル場では流線 */
       outlines: LineSegments2[]
+      /** ベクトル場（矢印・流線を、鮮やかな色の対応表で塗る） */
+      vivid: boolean
       /** 伝達関数（表示範囲の箱。group の子）と、その材質の値 */
       volume: { box: THREE.Mesh; u: VolumeUniforms } | null
     }
@@ -1395,6 +1397,7 @@ export class Viewer {
         this.applyLod(old)
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
         old.solid = mesh.solid
+        old.vivid = mesh.vivid === true
         this.applyValueRange(old.grid, mesh)
         old.grid.uHeat.value = mesh.heat ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = old.geo
@@ -1949,6 +1952,7 @@ export class Viewer {
       stencil: null,
       order: this.nextOrder++,
       outlines: [],
+      vivid: mesh.vivid === true,
       volume: null,
     })
     this.applyLod(this.plots.get(id)!)
@@ -2056,6 +2060,16 @@ export class Viewer {
       const line = new LineSegments2(this.curveGeometry(pts), mat)
       if (dashed) line.computeLineDistances()
       line.userData.dashed = dashed
+      // ベクトル場の流線: 点ごとの大きさで色を付ける（色は setStyle で塗る）
+      const vr = mesh.valueRange
+      const v = mesh.outlineValues
+      // （colorCurve は、曲線の頂点の値と同じく、点ごとに 3 つの並びの 1 つ目を読む）
+      let vals: Float32Array | null = null
+      if (!dashed && vr && v && v.length * 3 === pts.length) {
+        vals = new Float32Array(pts.length)
+        for (let i = 0; i < v.length; i++) vals[3 * i] = v[i]
+      }
+      line.userData.values = vals ? { pts, v: vals, range: vr } : null
       line.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
       p.outlines.push(line)
       p.group.add(line)
@@ -2133,7 +2147,7 @@ export class Viewer {
   }
 
   /** 値で色を付ける曲線なら、線分の両端の色を塗る（色の対応表・式の色が変わったときも塗り直す） */
-  private colorCurve(line: LineSegments2, style: PlotStyle): boolean {
+  private colorCurve(line: LineSegments2, style: PlotStyle, which: keyof typeof COLORMAP_INDEX = style.hidden?.colormap ?? 'viridis'): boolean {
     const d = line.userData.values as { pts: Float32Array; v: Float32Array; range: [number, number] } | null
     const m = line.material as LineMaterial
     if (!d) {
@@ -2150,7 +2164,7 @@ export class Viewer {
     for (let k = 0; k + 5 < pts.length; k += 3) {
       if (!(ok(k) && ok(k + 3))) continue
       for (const q of [k, k + 3]) {
-        colormapColor(span > 0 ? (v[q] - range[0]) / span : 0.5, style.hidden?.colormap ?? 'viridis', base, tmp)
+        colormapColor(span > 0 ? (v[q] - range[0]) / span : 0.5, which, base, tmp)
         cols.push(tmp.r, tmp.g, tmp.b)
       }
     }
@@ -2197,10 +2211,10 @@ export class Viewer {
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
-    p.grid.uColormap.value = ['viridis', 'turbo', 'shade'].indexOf(style.hidden?.colormap ?? 'viridis')
+    p.grid.uColormap.value = COLORMAP_INDEX[p.vivid ? 'vivid' : (style.hidden?.colormap ?? 'viridis')]
     if (p.volume) applyVolumeStyle(p.volume.u, style.hidden, c, style.opacity)
-    // 境目の線は、面の不透明度によらず式の色のまま
-    for (const l of p.outlines) (l.material as LineMaterial).color.copy(c)
+    // 境目の線は、面の不透明度によらず式の色のまま。値のある線（ベクトル場の流線）は、矢印と同じ色の対応表で塗る
+    for (const l of p.outlines) (l.material as LineMaterial).color.copy(this.colorCurve(l, style, p.vivid ? 'vivid' : undefined) ? new THREE.Color(1, 1, 1) : c)
     // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）
     const capColor = c.clone().lerp(new THREE.Color(0xffffff), 0.3)
     if (p.cap) (p.cap.material as THREE.MeshStandardMaterial).color.copy(capColor)
@@ -2238,7 +2252,8 @@ export class Viewer {
     // 格子線: 面が濃いときは曲面の色を暗くした色、面が薄いときは曲面の色そのもので描く。
     // 間隔が 0 以下・数値でないものは描かない
     const g = style.grid
-    const sp = (v: number) => (g.enabled && Number.isFinite(v) && v > 0 ? v : 0)
+    // ベクトル場の矢印には引かない（細い矢印の上の筋になって、色が見えにくくなる）
+    const sp = (v: number) => (g.enabled && !p.vivid && Number.isFinite(v) && v > 0 ? v : 0)
     if (p.uvSpan) {
       // 媒介変数表示: u, v の範囲をそれぞれ g.u, g.v 等分する線
       const div = (span: number, n: number) => (n > 0 ? span / n : 0)
