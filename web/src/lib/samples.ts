@@ -387,6 +387,15 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '座標系',
     samples: [
       {
+        label: 'アルキメデスのらせん r = θ（θ を使うと自動で極座標）',
+        items: [{ latex: 'r=\\theta', options: { color: '#c74440', lineWidth: 4 } }],
+        flat: true,
+      },
+      {
+        label: 'でこぼこの球 r = 1 + sin 3θ sin 4φ / 3（自動で球座標）',
+        items: [{ latex: 'r=1+\\frac{\\sin\\left(3\\theta\\right)\\sin\\left(4\\phi\\right)}{3}', options: { color: '#2d70b3' } }],
+      },
+      {
         label: '球座標の (t, t, t)（まっすぐな線がらせんに）',
         items: [{ latex: '\\left(t,t,t\\right)', options: { color: '#c74440', lineWidth: 4, ranges: { t: ['0', '5'] } } }],
         coord: { preset: 'sphere', morph: 0, play: true },

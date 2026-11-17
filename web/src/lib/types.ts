@@ -142,6 +142,9 @@ export interface RotationGroup {
   center: number[]
 }
 
+/** 自動で使う座標系の種類（極座標・円柱座標・球座標） */
+export type AutoCoordKind = 'polar' | 'cylinder' | 'sphere'
+
 /** 用意した座標系の種類（coords.ts の COORD_PRESETS。式・範囲・名前の初期値を決めるだけ） */
 export type CoordPreset = 'cylinder' | 'sphere' | 'ellipticCylinder' | 'parabolicCylinder' | 'bipolar' | 'logPolar' | 'parabolic' | 'prolate' | 'oblate' | 'toroidal' | 'twist' | 'custom'
 
@@ -299,6 +302,13 @@ export interface PlotItem extends PlotStyle {
   kind?: string
   /** 座標系の番号（CoordSystem.id。無ければ直交座標） */
   coordSys?: number
+  /**
+   * 座標系を選んでいない式が θ・φ・ρ を使うとき、自動で使う座標系（coords.ts の autoCoord。式から毎回決める。保存しない）。
+   * 2D 表示では極座標、3D では円柱座標（r, θ, z）か球座標（r または ρ, θ, φ）
+   */
+  autoCoord?: AutoCoordKind
+  /** 自動の座標系の角度の範囲（θ・φ。書き換えたものだけ。無い角度は式から決めた初期値） */
+  angleRanges?: Record<string, [string, string]>
   /** この行が定義の行（f(x) = … など）なら、その名前（計算エンジンの結果から決める。保存しなくてよい） */
   def?: string
   /** この式が使った定義の名前（定義の行が変わったら計算し直す。保存しなくてよい） */

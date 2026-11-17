@@ -928,10 +928,11 @@ impl Compiler<'_> {
                     self.b.push(Op::Const(c))
                 } else {
                     // この文言は画面側で「スライダーを追加」ボタンを出すのに使っている（変えるときは注意）
-                    return Err(format!(
-                        "変数 '{name}' はここでは使えません（使える変数: {}）",
-                        self.vars.join(", ")
-                    ));
+                    return Err(if self.vars.is_empty() {
+                        format!("変数 '{name}' はここでは使えません（この式では変数を使えません）")
+                    } else {
+                        format!("変数 '{name}' はここでは使えません（使える変数: {}）", self.vars.join(", "))
+                    });
                 }
             }
             Expr::Neg(a) => {

@@ -9,6 +9,7 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
+  import { prettyCoordName } from './coords'
   import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
   import { gpuByDefault } from './renderMode'
 
@@ -67,6 +68,11 @@
     onSetDims: (n: number) => void
     onLineWidth: (width: number) => void
     onRange: (name: string, side: 0 | 1, value: string) => void
+    /** θ・φ を使うので自動で使っている座標系の名前（極座標など。使っていなければ undefined） */
+    autoCoordName?: string
+    /** 自動の座標系の角度と、その範囲（LaTeX） */
+    autoAngles?: { name: string; range: [string, string] }[]
+    onAngleRange?: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
     onToggleSettings: () => void
     onToggleVertical: () => void
@@ -152,6 +158,9 @@
     onSetDims,
     onLineWidth,
     onRange,
+    autoCoordName,
+    autoAngles = [],
+    onAngleRange,
     onToggle,
     onToggleSettings,
     onToggleVertical,
@@ -610,6 +619,17 @@
         </div>
       {/each}
     {/if}
+    {#if autoCoordName}
+      <div class="auto-coord">{autoCoordName}で描いています（r は表示範囲に合わせます）</div>
+    {/if}
+    {#each autoAngles as a (a.name)}
+      <!-- θ・φ を使う式は、自動で極座標・円柱座標・球座標で描く。角度の範囲を変えられる（r は表示範囲に合わせる） -->
+      <div class="param-range" title="{autoCoordName}で描いています（r は表示範囲に合わせます）">
+        <MathInput small value={a.range[0]} label="{prettyCoordName(a.name)} の最小値" onInput={(v) => onAngleRange?.(a.name, 0, v)} />
+        <span>≤ {prettyCoordName(a.name)} ≤</span>
+        <MathInput small value={a.range[1]} label="{prettyCoordName(a.name)} の最大値" onInput={(v) => onAngleRange?.(a.name, 1, v)} />
+      </div>
+    {/each}
     {#each paramNames as name (name)}
       <div class="param-range">
         <MathInput
@@ -1555,6 +1575,11 @@
     gap: 6px;
     margin-top: 6px;
     font: 13px var(--mono);
+    color: var(--muted);
+  }
+  .auto-coord {
+    margin-top: 6px;
+    font-size: 12px;
     color: var(--muted);
   }
   .param-range {

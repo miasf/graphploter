@@ -286,3 +286,57 @@ fn grid_follows_the_map() {
     assert!(p.chunks_exact(3).zip(t.chunks_exact(3)).all(|(q, v)| !q[0].is_finite() || (q[2] == 0.0 && v[2] == 0.0)));
     assert_eq!(p.chunks_exact(3).filter(|q| q[0].is_finite()).count(), 2 * 9 * 64);
 }
+
+/// 極座標のらせん r = θ（座標の名前で書く）: 移した先で長い線分を細かくするので、外側（r が大きい所）でも角ばらない
+#[test]
+fn spiral_is_smooth_after_mapping() {
+    coord_system(CYLINDER, "r,theta,z");
+    let mut m = plot(
+        "r = theta", &[0.0, 40.0, 0.0, 12.0 * PI, -5.0, 5.0], 100, 60, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3],
+        &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, true, 1, false, 0,
+    )
+    .expect("r = theta が描けない");
+    assert!(m.curve());
+    let (p, t) = (m.take_positions(), m.take_target());
+    assert_eq!(p.len(), t.len());
+    let mut worst: f64 = 0.0;
+    for (a, b) in t.chunks_exact(3).zip(t.chunks_exact(3).skip(1)) {
+        if a[0].is_finite() && b[0].is_finite() {
+            worst = worst.max(((a[0] - b[0]) as f64).hypot((a[1] - b[1]) as f64));
+        }
+    }
+    // 移した先の大きさは 80 くらい。細かくしないと 1 本 3.5 くらいになる
+    assert!(worst < 0.2, "いちばん長い線分 {worst}");
+    // 点は曲線の上（|T(q)| = θ）
+    for (q, v) in p.chunks_exact(3).zip(t.chunks_exact(3)) {
+        if q[0].is_finite() {
+            let r = (v[0] as f64).hypot(v[1] as f64);
+            assert!((r - q[1] as f64).abs() < 1e-3 * (1.0 + r), "{q:?} → {v:?}");
+        }
+    }
+}
+
+/// 円柱座標の面 z = r²: 三角形を k² 個に分けても、頂点は面の上（z = x² + y²）にあり、辺の上の点は隣と共有する
+#[test]
+fn surface_refined_in_coords() {
+    coord_system(CYLINDER, "r,theta,z");
+    let mut m = plot(
+        "z = r^2 / 4", &[0.0, 4.0, 0.0, TAU, -5.0, 5.0], 40, 30, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6],
+        "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .expect("z = r^2 / 4 が描けない");
+    let (t, idx) = (m.take_target(), m.take_indices());
+    assert!(idx.len() / 3 > 2 * 40 * 40, "細かくしていない: {}", idx.len() / 3);
+    let mut longest: f64 = 0.0;
+    for tri in idx.chunks_exact(3) {
+        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let d = norm([0, 1, 2].map(|k| pt(&t, a)[k] - pt(&t, b)[k]));
+            longest = longest.max(d);
+        }
+    }
+    assert!(longest < 0.3, "いちばん長い辺 {longest}");
+    // 使われる頂点の数が、三角形の数の半分くらい（共有していなければ 3 倍）
+    let mut used = std::collections::HashSet::new();
+    used.extend(idx.iter().copied());
+    assert!(used.len() < idx.len() / 3, "頂点 {} 個・三角形 {} 個", used.len(), idx.len() / 3);
+}

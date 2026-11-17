@@ -67,6 +67,7 @@ impl CoordMap {
         if let Some(l) = m.lod_mesh.as_deref_mut() {
             self.apply(l, curve, flat);
         }
+        self.refine(m, curve, flat);
         let mut t = self.map_points(&m.positions);
         if flat {
             for v in t.iter_mut().skip(2).step_by(3) {
@@ -96,6 +97,92 @@ impl CoordMap {
             }
         }
         m.target = t;
+    }
+
+    /// 移した先で長くなる線分・三角形を、座標の値の空間で等分して細かくする（頂点を足す）。
+    /// 図形は座標の値の空間で一様な格子で作るので、極座標の r が大きい所（らせんの外側）などでは、移した先の線分が長く角ばる。
+    /// 座標の値の空間では格子の間は 1 次式で近いので、間の点を 1 次式で足してから T で移せば、移した先はなめらかになる。
+    /// 線は線分ごとに分割数を決める。面は継ぎ目にひびができないよう、全部の三角形を同じ数 k で k² 個に分ける（三角形の数の上限で k を抑える）
+    fn refine(&self, m: &mut Mesh, curve: bool, flat: bool) {
+        let t = self.map_points(&m.positions);
+        let n = t.len() / 3;
+        let len = |a: usize, b: usize| -> f64 {
+            let axes = if flat { 2 } else { 3 };
+            let d2: f64 = (0..axes).map(|c| ((t[3 * a + c] - t[3 * b + c]) as f64).powi(2)).sum();
+            d2.sqrt()
+        };
+        // 移した先の大きさ（有限な点を囲む箱の対角線）
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for i in 0..n {
+            if !t[3 * i].is_finite() {
+                continue;
+            }
+            for c in 0..3 {
+                lo[c] = lo[c].min(t[3 * i + c] as f64);
+                hi[c] = hi[c].max(t[3 * i + c] as f64);
+            }
+        }
+        let diag = (0..3).map(|c| (hi[c] - lo[c]).max(0.0).powi(2)).sum::<f64>().sqrt();
+        if !(diag > 0.0 && diag.is_finite()) {
+            return;
+        }
+        let ok = |i: usize| t[3 * i].is_finite();
+        // 頂点ごとの値（法線・格子線の座標・複素数の色）も、位置と同じく 1 次式で足す
+        let np = m.positions.len();
+        let attr_on = [m.normals.len() == np, m.grid_coords.len() == np, m.complex.len() == np];
+        if curve || m.indices.is_empty() {
+            const MAX_POINTS: usize = 120_000;
+            let limit = diag / 800.0;
+            let splits: Vec<usize> = (1..n)
+                .map(|i| if ok(i - 1) && ok(i) { ((len(i - 1, i) / limit).ceil() as usize).clamp(1, 64) } else { 1 })
+                .collect();
+            let total: usize = n + splits.iter().map(|s| s - 1).sum::<usize>();
+            if total == n || total > MAX_POINTS {
+                return;
+            }
+            let lerp_all = |v: &[f32]| -> Vec<f32> {
+                let mut out = Vec::with_capacity(3 * total);
+                out.extend_from_slice(&v[0..3]);
+                for i in 1..n {
+                    let s = splits[i - 1];
+                    for j in 1..s {
+                        let f = j as f32 / s as f32;
+                        for c in 0..3 {
+                            out.push(v[3 * (i - 1) + c] + f * (v[3 * i + c] - v[3 * (i - 1) + c]));
+                        }
+                    }
+                    out.extend_from_slice(&v[3 * i..3 * i + 3]);
+                }
+                out
+            };
+            m.positions = lerp_all(&m.positions);
+            if attr_on[0] {
+                m.normals = lerp_all(&m.normals);
+            }
+            if attr_on[1] {
+                m.grid_coords = lerp_all(&m.grid_coords);
+            }
+            if attr_on[2] {
+                m.complex = lerp_all(&m.complex);
+            }
+            return;
+        }
+        const MAX_TRIANGLES: usize = 160_000;
+        let tris = m.indices.len() / 3;
+        let limit = diag / 150.0;
+        let mut longest: f64 = 0.0;
+        for tri in m.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if ok(a) && ok(b) && ok(c) {
+                longest = longest.max(len(a, b)).max(len(b, c)).max(len(c, a));
+            }
+        }
+        let budget = ((MAX_TRIANGLES as f64 / tris.max(1) as f64).sqrt().floor() as usize).max(1);
+        let k = ((longest / limit).ceil() as usize).clamp(1, 8).min(budget);
+        if k <= 1 {
+            return;
+        }
+        subdivide(m, k, attr_on);
     }
 
     /// 点の列（線。NaN で切れ目）を移した先。移せない点は、位置も NaN にする（線を切る）
@@ -174,4 +261,102 @@ pub fn grid_lines(dom: Domain, lines: usize, faces: u32, flat: bool) -> Vec<f32>
         }
     }
     out
+}
+
+/// 全部の三角形を、辺を k 等分して k² 個の三角形に分ける（座標の値の空間で 1 次式。辺の上の点は隣の三角形と共有する）。
+/// `attr` は [法線, 格子線の座標, 複素数の色] を一緒に分けるか
+fn subdivide(m: &mut Mesh, k: usize, attr: [bool; 3]) {
+    use std::collections::HashMap;
+    // 新しい点を足す（a と b の間の f の所、または三角形の重心座標）
+    fn push(m: &mut Mesh, attr: [bool; 3], w: &[(u32, f32)]) -> u32 {
+        let id = (m.positions.len() / 3) as u32;
+        let mix = |v: &Vec<f32>| -> [f32; 3] {
+            let mut o = [0.0f32; 3];
+            for &(i, f) in w {
+                for c in 0..3 {
+                    o[c] += f * v[3 * i as usize + c];
+                }
+            }
+            o
+        };
+        let p = mix(&m.positions);
+        m.positions.extend(p);
+        if attr[0] {
+            let mut nv = mix(&m.normals);
+            let l = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]).sqrt();
+            if l > 0.0 {
+                nv.iter_mut().for_each(|v| *v /= l);
+            }
+            m.normals.extend(nv);
+        }
+        if attr[1] {
+            let g = mix(&m.grid_coords);
+            m.grid_coords.extend(g);
+        }
+        if attr[2] {
+            let c = mix(&m.complex);
+            m.complex.extend(c);
+        }
+        id
+    }
+    let old = std::mem::take(&mut m.indices);
+    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    let mut out = Vec::with_capacity(old.len() * k * k);
+    let kf = k as f32;
+    for tri in old.chunks_exact(3) {
+        let (a, b, c) = (tri[0], tri[1], tri[2]);
+        // 辺 u → v の上の j 番目（0 < j < k）の点
+        let mut edge = |m: &mut Mesh, u: u32, v: u32| -> Vec<u32> {
+            let key = (u.min(v), u.max(v));
+            let pts = edges
+                .entry(key)
+                .or_insert_with(|| {
+                    (1..k)
+                        .map(|j| {
+                            let f = j as f32 / kf;
+                            push(m, attr, &[(key.0, 1.0 - f), (key.1, f)])
+                        })
+                        .collect()
+                })
+                .clone();
+            let mut full = Vec::with_capacity(k + 1);
+            full.push(u);
+            if u < v {
+                full.extend(pts);
+            } else {
+                full.extend(pts.into_iter().rev());
+            }
+            full.push(v);
+            full
+        };
+        let ab = edge(m, a, b);
+        let ac = edge(m, a, c);
+        let bc = edge(m, b, c);
+        // 重心座標の格子 (i, j)（i が b へ、j が c へ）の点の番号
+        let mut grid = vec![0u32; (k + 1) * (k + 1)];
+        for j in 0..=k {
+            for i in 0..=(k - j) {
+                grid[j * (k + 1) + i] = if j == 0 {
+                    ab[i]
+                } else if i == 0 {
+                    ac[j]
+                } else if i + j == k {
+                    bc[j]
+                } else {
+                    let (fi, fj) = (i as f32 / kf, j as f32 / kf);
+                    push(m, attr, &[(a, 1.0 - fi - fj), (b, fi), (c, fj)])
+                };
+            }
+        }
+        let g = |i: usize, j: usize| grid[j * (k + 1) + i];
+        for j in 0..k {
+            for i in 0..(k - j) {
+                out.extend([g(i, j), g(i + 1, j), g(i, j + 1)]);
+                if i + j + 1 < k {
+                    out.extend([g(i + 1, j), g(i + 1, j + 1), g(i, j + 1)]);
+                }
+            }
+        }
+    }
+    m.indices = out;
 }
