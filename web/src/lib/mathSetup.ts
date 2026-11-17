@@ -616,7 +616,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           ...COMMON_SYMBOLS.slice(0, 7).map((k) => k as Partial<VirtualKeyboardKeycap>),
           '[separator-5]',
           ...COMMON_SYMBOLS.slice(7).map((k) => k as Partial<VirtualKeyboardKeycap>),
-          { latex: '\\alpha', tooltip: 'アルファ \\alpha' },
+          { latex: 'r', tooltip: '極座標の半径 r（θ と一緒に使うと自動で極座標。r = θ でらせん）' },
         ],
         [
           { latex: 'x', tooltip: '座標 x' },
