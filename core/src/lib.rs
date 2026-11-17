@@ -139,6 +139,17 @@ impl MeshResult {
     pub fn gpu2d_glsl(&self) -> String {
         self.gpu2d.as_ref().map_or(String::new(), |g| g.glsl.clone())
     }
+    /// 同じく、画素の座標から式の座標への 1 次式（座標ごとに [A_k0, A_k1, A_k2, b_k]。パラメータを畳み込んだ式なら空）
+    pub fn gpu2d_affine(&self) -> Vec<f64> {
+        self.gpu2d.as_ref().map_or(Vec::new(), |g| g.affine.clone())
+    }
+    /// 同じく、uniform にしたパラメータの名前（カンマ区切り）と、今の値
+    pub fn gpu2d_params(&self) -> String {
+        self.gpu2d.as_ref().map_or(String::new(), |g| g.params.join(","))
+    }
+    pub fn gpu2d_values(&self) -> Vec<f64> {
+        self.gpu2d.as_ref().map_or(Vec::new(), |g| g.values.clone())
+    }
     /// 同じく [等式の数, 不等式の数, 実線を引く不等式のビット]。無ければ空
     pub fn gpu2d_info(&self) -> Vec<u32> {
         self.gpu2d.as_ref().map_or(Vec::new(), |g| vec![g.eq as u32, g.cuts as u32, g.lines])
@@ -795,7 +806,15 @@ pub fn plot(
             _ => None,
         },
         local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
-        gpu2d: if coord.is_some() { None } else { built.gpu2d },
+        gpu2d: if coord.is_some() {
+            None
+        } else {
+            // uniform にしたパラメータの今の値
+            built.gpu2d.map(|mut s| {
+                s.values = s.params.iter().map(|n| consts.get(n).map_or(0.0, |c| c.re)).collect();
+                s
+            })
+        },
         gpu3d: gpu3d.0,
         gpu_reason: gpu3d.1,
         coord,
@@ -1830,7 +1849,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind = format!("複素数の陰関数（Re F = Im F = 0 の点、{} 個）", pts.len());
             b.inner = system::points_mesh(&pts);
         }
-        P::Implicit { prog, from, .. } => {
+        P::Implicit { prog, from, gpu, .. } => {
             b.curve = true;
             b.kind = match from {
                 // 回した陽関数（2D の切り口）: 縦の座標 = 0 の曲線
@@ -1838,7 +1857,11 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 None => "陰関数の曲線".into(),
             };
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
-            b.gpu2d = gpu2d::scene(Some(prog), &[], &[]).ok();
+            // 回転・断面・パラメータを uniform で渡せる形（元の座標の式）があればそれ、無ければ畳み込んだ式
+            b.gpu2d = match gpu {
+                Some(g) => gpu2d::scene_affine(Some(&g.prog), &[], &[], g.dims, g.params.len()).ok().map(|s| with_affine(s, space, &g.params)),
+                None => gpu2d::scene(Some(prog), &[], &[]).ok(),
+            };
         }
         P::Solid { prog, ranges, .. } => {
             b.kind = "範囲で重ねた領域".into();
@@ -1876,11 +1899,14 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = flat_finish(inner.inner, inner.curve, ctx.flat_slice);
         }
         // 縦の座標 = 0 の 2 次元の問題として描く（切り口、または縦の座標を使わない式）
-        P::System { eqs, cuts, strict, .. } => match eqs.len() {
+        P::System { eqs, cuts, strict, gpu, .. } => match eqs.len() {
             0 => {
                 b.kind = "不等式の領域（2D）".into();
                 b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
-                b.gpu2d = gpu2d::scene(None, cuts, strict).ok();
+                b.gpu2d = match gpu {
+                    Some(g) => gpu2d::scene_affine(None, &g.cuts, strict, g.dims, g.params.len()).ok().map(|s| with_affine(s, space, &g.params)),
+                    None => gpu2d::scene(None, cuts, strict).ok(),
+                };
                 // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線
                 for (i, g) in cuts.iter().enumerate() {
                     let mut line = mesh::implicit_curve_2d(g, dom, res2).positions;
@@ -1896,7 +1922,10 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 b.curve = true;
                 b.kind = "陰関数の曲線（不等式で切り取り）".into();
                 b.inner = mesh::implicit_curve_2d(&eqs[0], dom, res2);
-                b.gpu2d = gpu2d::scene(Some(&eqs[0]), cuts, strict).ok();
+                b.gpu2d = match gpu {
+                    Some(g) => gpu2d::scene_affine(g.eqs.first(), &g.cuts, strict, g.dims, g.params.len()).ok().map(|s| with_affine(s, space, &g.params)),
+                    None => gpu2d::scene(Some(&eqs[0]), cuts, strict).ok(),
+                };
                 for g in cuts {
                     system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
                 }
@@ -1962,6 +1991,13 @@ fn gpu3d_of(
 /// 式が GPU の描き方に移せない理由（移せるなら空）
 fn prog_reason(prog: &eval::Program) -> String {
     prog.to_glsl(&eval::GlslOptions::default()).err().unwrap_or_default()
+}
+
+/// [`gpu2d::scene_affine`] の図形に、画素の座標から式の座標への 1 次式とパラメータの名前を入れる（値は [`plot`] で入れる）
+fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]) -> gpu2d::Scene2d {
+    s.affine = space.gpu_affine();
+    s.params = params.to_vec();
+    s
 }
 
 /// 回した陽関数を計算する範囲（表示中の座標で）: 回転の中心から表示範囲の角までの距離 ρ の、中心の周りの立方体。

@@ -69,6 +69,11 @@ export interface HiddenStyle {
   blend?: VolumeBlend
   /** 伝達関数で、値の勾配を面の法線とみなして光を当てるか（重ね塗りのとき。無ければ当てる） */
   lit?: boolean
+  /**
+   * 色の目盛りを対数にするか（断面の塗り分け・等値面を重ねた図形の色。無ければ等間隔）。
+   * 0 の近くと大きな値の差が何桁もある式（w = 1/(x² + y² + z²) など）で、小さな値の違いも色で見分けられる
+   */
+  log?: boolean
 }
 export const DEFAULT_HIDDEN: HiddenStyle = { mode: 'slice', count: 5, colormap: 'viridis', opacity: 'flat', density: 0.5 }
 

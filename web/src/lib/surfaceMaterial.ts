@@ -31,6 +31,9 @@ export interface GridUniforms {
   /** 1 なら表示していない座標の値で色を付ける: 値 vComplex.x が uValueRange のどこにあるかを、色の対応表 uColormap で色にする */
   uValue: { value: number }
   uValueRange: { value: THREE.Vector2 }
+  /** 1 なら値の色の目盛りを対数にする（[`valueT`] と同じ式）。範囲は uValueLogRange（範囲と実際の値の範囲の重なり） */
+  uValueLog: { value: number }
+  uValueLogRange: { value: THREE.Vector2 }
   /** 色の対応表（0: viridis, 1: turbo, 2: 式の色の明暗） */
   uColormap: { value: number }
   /** 1 なら裏面を暗くしない（2D 表示では面の表裏に意味が無い） */
@@ -55,6 +58,8 @@ export function createGridUniforms(pixelScale: { value: number } = { value: 1 })
     uHeatRange: { value: new THREE.Vector2(-1, 1) },
     uValue: { value: 0 },
     uValueRange: { value: new THREE.Vector2(0, 1) },
+    uValueLog: { value: 0 },
+    uValueLogRange: { value: new THREE.Vector2(0, 1) },
     uColormap: { value: 0 },
     uNoBackShade: { value: 0 },
     uGridWorld: { value: 0 },
@@ -167,6 +172,38 @@ const VIVID_STOPS = [
 export const COLORMAP_INDEX = { viridis: 0, turbo: 1, shade: 2, vivid: 3 } as const
 
 /** COLORMAP_GLSL の colormap と同じ色（JS 版。曲線の頂点の色に使う）。返す色は線形の色空間 */
+/**
+ * 対数の目盛りの範囲: 範囲 range と、実際の値（stride おきの 1 つ目）の範囲の重なり。
+ * 範囲はスライダーの範囲（既定 −5〜5）なので、値が全部正の式（w = 1/(x² + y² + z²)）でも負の側が残り、色の半分が使われない
+ */
+export function logRange(range: [number, number], values: ArrayLike<number>, stride = 3): [number, number] {
+  let lo = Infinity
+  let hi = -Infinity
+  for (let i = 0; i < values.length; i += stride) {
+    const v = values[i]
+    if (!Number.isFinite(v)) continue
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
+  const a = Math.max(range[0], lo)
+  const b = Math.min(range[1], hi)
+  return a < b ? [a, b] : range
+}
+
+/** 値 v が範囲 range のどこにあるか（0〜1。範囲の外はそのまま外）。log なら対数の目盛り（シェーダーの gLogScale と同じ式。範囲は [`logRange`] で狭めたもの） */
+export function valueT(v: number, range: [number, number], log = false): number {
+  const span = range[1] - range[0]
+  if (!(span > 0)) return 0.5
+  if (!log) return (v - range[0]) / span
+  const f = (x: number) => {
+    if (range[0] > 0) return Math.log(Math.max(x, range[0] * 1e-6))
+    const s = Math.max(Math.max(Math.abs(range[0]), Math.abs(range[1])) * 1e-3, 1e-30)
+    return Math.sign(x) * Math.log(1 + Math.abs(x) / s)
+  }
+  const a = f(range[0])
+  return (f(v) - a) / (f(range[1]) - a)
+}
+
 export function colormapColor(t: number, which: keyof typeof COLORMAP_INDEX, base: THREE.Color, out: THREE.Color): THREE.Color {
   t = Math.min(1, Math.max(0, t))
   if (which === 'shade') return shadeColor(t, base, out)
@@ -203,7 +240,15 @@ export function colormapColor(t: number, which: keyof typeof COLORMAP_INDEX, bas
 export const FRAGMENT_HEADER = /* glsl */ `
 uniform float uValue;
 uniform vec2 uValueRange;
+uniform float uValueLog;
+uniform vec2 uValueLogRange;
 uniform float uColormap;
+// 対数の目盛り（valueT と同じ）: 範囲が正なら log v、0 や負を含めば sign(v)·log(1 + |v|/s)（s は範囲の端の大きさの 1/1000）
+float gLogScale(float v, vec2 r) {
+  if (r.x > 0.0) return log(max(v, r.x * 1e-6));
+  float s = max(max(abs(r.x), abs(r.y)) * 1e-3, 1e-30);
+  return sign(v) * log(1.0 + abs(v) / s);
+}
 ${COLORMAP_GLSL}
 varying vec3 vGridPos;
 varying vec3 vComplex;
@@ -245,6 +290,11 @@ export const FRAGMENT_APPLY = /* glsl */ `
     // 表示していない座標の値で色を付ける（範囲が 1 点なら真ん中の色）
     float span = uValueRange.y - uValueRange.x;
     float t = span > 0.0 ? (vComplex.x - uValueRange.x) / span : 0.5;
+    vec2 lr = uValueLogRange;
+    if (uValueLog > 0.5 && lr.y > lr.x) {
+      float a = gLogScale(lr.x, lr), b = gLogScale(lr.y, lr);
+      t = (gLogScale(vComplex.x, lr) - a) / (b - a);
+    }
     diffuseColor.rgb = colormap(t, uColormap, diffuseColor.rgb);
   } else if (uComplex > 0.5) {
     // 複素数の色分け: 色相 = 偏角（0 で赤、π/2 で黄緑、π で水色、−π/2 で紫）、

@@ -949,6 +949,12 @@
                 </select>
               </div>
               {/if}
+              {#if hidden.mode === 'planes' || hidden.mode === 'layers'}
+                <label class="check">
+                  <input type="checkbox" checked={hidden.log ?? false} onchange={(e) => onHidden({ log: e.currentTarget.checked })} />
+                  対数の目盛り（値の差が何桁もあるとき、小さな値の違いも色で見分けられる）
+                </label>
+              {/if}
               {#if isVolume}
                 <div class="complex-mode">
                   <span class="label">重ね方</span>

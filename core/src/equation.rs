@@ -336,7 +336,20 @@ pub enum Plot {
         cuts: Vec<Program>,
         /// 不等式ごとに、厳密（`<`・`>`）か
         strict: Vec<bool>,
+        /// GPU の画素ごとの描き方（2D）に渡す、回転・断面を入れる前の元の座標の式（[`GpuSystem`]）
+        gpu: Option<Box<GpuSystem>>,
     },
+}
+
+/// GPU の画素ごとの描き方に渡す連立方程式・不等式（[`GpuImplicit`] と同じ形。等式・不等式で変数の並びをそろえる）。
+/// 変数は元の座標 x, y, z, w, …（`dims` 個）の後に、どれかの式が使うスライダーの実数のパラメータ（`params` の順）
+#[derive(Debug, Clone)]
+pub struct GpuSystem {
+    /// 等式 F_i = 0 と不等式 G_j ≤ 0（[`Plot::System`] の `eqs`・`cuts` と同じ順）
+    pub eqs: Vec<Program>,
+    pub cuts: Vec<Program>,
+    pub params: Vec<String>,
+    pub dims: usize,
 }
 
 /// GPU の光線の描き方に渡す陰関数の F（計画 12 章の G7）。回転も断面も入れる前の、元の座標の式で、
@@ -1829,7 +1842,37 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         })),
         _ => None,
     };
-    Ok(Plot::System { base, eqs, cuts, strict })
+    let gpu = gpu_system(&rels, params, space);
+    Ok(Plot::System { base, eqs, cuts, strict, gpu })
+}
+
+/// 連立方程式・不等式の、GPU の描き方の式（[`GpuSystem`]）。どれかの式がコンパイルできなければ None（今までどおり、式に畳み込んだ形で描く）
+fn gpu_system(rels: &[(Expr, Rel, Expr)], params: &Params, space: &Space) -> Option<Box<GpuSystem>> {
+    let sides: Vec<(bool, Expr)> = rels
+        .iter()
+        .map(|(l, rel, r)| match rel {
+            Rel::Eq | Rel::Le | Rel::Lt => (*rel == Rel::Eq, Expr::Bin(BinOp::Sub, Box::new(l.clone()), Box::new(r.clone()))),
+            Rel::Ge | Rel::Gt => (false, Expr::Bin(BinOp::Sub, Box::new(r.clone()), Box::new(l.clone()))),
+        })
+        .collect();
+    let coords: Vec<String> = (0..space.dims).map(coord_name).collect();
+    let names: Vec<String> = params
+        .iter()
+        .filter(|(n, v)| v.im == 0.0 && !coords.contains(n) && sides.iter().any(|(_, e)| e.uses_var(n)))
+        .map(|(n, _)| n.clone())
+        .collect();
+    let mut cs = params.clone();
+    for n in names.iter().chain(&coords) {
+        cs.remove(n);
+    }
+    let mut vars: Vec<&str> = coords.iter().map(String::as_str).collect();
+    vars.extend(names.iter().map(String::as_str));
+    let (mut eqs, mut cuts) = (Vec::new(), Vec::new());
+    for (is_eq, e) in &sides {
+        let p = Program::compile_with(e, &vars, &cs).ok()?;
+        if *is_eq { eqs.push(p) } else { cuts.push(p) }
+    }
+    Some(Box::new(GpuSystem { eqs, cuts, params: names, dims: space.dims }))
 }
 
 /// 左辺 = 右辺（リストを含まない）の式をコンパイルする（陽関数・陰関数・範囲で重ねた立体）

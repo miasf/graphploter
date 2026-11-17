@@ -532,7 +532,18 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       : undefined
     const gpuReason = r.gpu_reason
     const gi = r.gpu2d_info()
-    const gpu2d = gi.length === 3 ? { glsl: r.gpu2d_glsl(), eq: gi[0], cuts: gi[1], lines: gi[2] } : undefined
+    const gpu2d =
+      gi.length === 3
+        ? {
+            glsl: r.gpu2d_glsl(),
+            eq: gi[0],
+            cuts: gi[1],
+            lines: gi[2],
+            affine: Array.from(r.gpu2d_affine()),
+            params: r.gpu2d_params().split(',').filter((s) => s !== ''),
+            values: Array.from(r.gpu2d_values()),
+          }
+        : undefined
     const mesh = {
       ...(gpu2d ? { gpu2d } : {}),
       ...(gpu3d ? { gpu3d } : {}),

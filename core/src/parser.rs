@@ -1020,7 +1020,21 @@ impl Parser<'_> {
         } else {
             // 括弧なし: 直後の1項（累乗を含む）だけを引数にする。
             // 例) sin x^2 = sin(x^2)、 sin x y = sin(x)·y
-            vec![self.power()?]
+            // ただし数で始まるときは、続く定数（π・e）と文字 1 つまでを係数つきの 1 項とみなす（数学の書き方どおり
+            // sin 2t = sin(2t)、sin 2πx = sin(2πx)、cos 3x^2 = cos(3x^2)）。LaTeX の \sin2t がこの形で届く。
+            // 前は sin(2)·t と読み、三葉結び目 (sin t + 2 sin 2t, …) が直線に、ローマ曲面が別の形になっていた
+            let mut arg = self.power()?;
+            if matches!(arg, Expr::Num(_)) {
+                while matches!(self.peek(), Tok::Const(_)) {
+                    let c = self.power()?;
+                    arg = Expr::Bin(BinOp::Mul, Box::new(arg), Box::new(c));
+                }
+                if matches!(self.peek(), Tok::Var(_)) {
+                    let v = self.power()?;
+                    arg = Expr::Bin(BinOp::Mul, Box::new(arg), Box::new(v));
+                }
+            }
+            vec![arg]
         };
 
         // max・min は 3 つ以上の引数も受け付け、2 つずつの入れ子にする（max(a, b, c) = max(a, max(b, c))）
@@ -1603,6 +1617,19 @@ pub fn definition_head(src: &str) -> Option<(String, Vec<String>)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn function_with_numeric_coefficient_argument() {
+        // sin 2t = sin(2t)（三葉結び目・ローマ曲面のテスト表の式。LaTeX の \sin2t がこの形で届く）
+        assert_eq!(parse("sin 2t").unwrap(), parse("sin(2t)").unwrap());
+        assert_eq!(parse("sin 2pi x").unwrap(), parse("sin(2 pi x)").unwrap());
+        assert_eq!(parse("cos 3x^2").unwrap(), parse("cos(3 x^2)").unwrap());
+        assert_eq!(parse("sin t + 2 sin 2t").unwrap(), parse("sin(t) + 2 sin(2t)").unwrap());
+        // 今までどおり: 文字の後の文字は引数に入れない、数だけなら数だけ
+        assert_eq!(parse("sin x y").unwrap(), parse("sin(x) y").unwrap());
+        assert_eq!(parse("sin 2").unwrap(), parse("sin(2)").unwrap());
+        assert_eq!(parse("sin 2 cos x").unwrap(), parse("sin(2) cos(x)").unwrap());
+        assert_eq!(parse("sin 2t y").unwrap(), parse("sin(2t) y").unwrap());
+    }
     #[test]
     fn max_min_with_many_arguments_nest() {
         // max(a, b, c) = max(a, max(b, c))（計画 12 章の表の S-11: max(|x|, |y|, |z|) = 1）
