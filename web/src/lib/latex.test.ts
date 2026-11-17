@@ -341,6 +341,12 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.141593; {vec})({vec_F})')
   check('添えるもの', ok?.extras?.map((e) => e.role), ['point', 'tangent', 'vector', 'component'])
   check('今の点', ok && latexToText(ok.extras![0].latex), '( cos (3.141593), sin (3.141593),(3.141593))')
+  // 被積分関数が媒介変数そのもの（(t + 1, t²)）: 場の矢印は添えず、F の矢印には今の t を入れる
+  setRegions({ C: '\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}' })
+  const q = integralDisplay('\\oint_{C}\\left(t+1,t^2\\right)\\cdot d\\mathbf{r}', 0.25, 2)
+  const okq = q !== null && !('error' in q) ? q : null
+  check('媒介変数の被積分関数: 添えるもの', okq?.extras?.map((e) => e.role), ['point', 'tangent', 'vector', 'component'])
+  check('媒介変数の被積分関数: F の矢印', okq && /\bt\+1/.test(latexToText(okq.extras![2].latex)), false)
   // ∇ · F⃗ の体積分（媒介変数 3 つ）: 立体を描く
   setRegions({ W: '\\left\\{\\left(r\\cos v,r\\sin v,h\\right)\\mid0\\le r\\le2,0\\le v\\le2\\pi,0\\le h\\le1\\right\\}' })
   const w = integralDisplay('\\iiint_{W}\\nabla\\cdot\\left(x,y,z\\right)\\,dV', 0.5)

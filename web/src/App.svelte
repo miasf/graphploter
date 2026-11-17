@@ -1375,10 +1375,11 @@
   /** 式 item の積分をグラフに描く */
   function showIntegral(item: PlotItem) {
     if (integralItem(item) || isAux(item)) return
-    const view = newItem('', { integralOf: item.id, vertical: false })
-    items.push(view)
-    fillIntegral(items[items.length - 1], item)
-    schedule(items[items.length - 1], 0)
+    items.push(newItem('', { integralOf: item.id, vertical: false }))
+    // 添えて描く行は fillIntegral が後ろに足すので、図の行は足した直後に取っておく（最後の行ではない）
+    const view = items[items.length - 1]
+    fillIntegral(view, item)
+    schedule(view, 0)
   }
 
   /** 「積分を描く」ボタン: 描く・消す */

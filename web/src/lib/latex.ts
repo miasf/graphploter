@@ -1504,7 +1504,9 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
   if (body.length === 0) throw new LatexError('積分する式を書いてください')
   const paren = (ts: Token[] | string) => `\\left(${typeof ts === 'string' ? ts : joinToks(ts)}\\right)`
   const set = (point: string, cond: string) => `\\left\\{${point}\\mid ${cond}\\right\\}`
-  const field = fieldOf(body, span.vector)
+  // 媒介変数そのものを使う被積分関数（(t + 1, t²)）は、空間の場ではないので矢印の場を添えない
+  const usesParams = !('names' in region) && body.some((t) => region.params.includes(t))
+  const field = usesParams ? null : fieldOf(body, span.vector)
   const fieldExtra = (): IntegralExtra[] => (field ? [{ role: 'field', latex: joinToks(field), label: 'ベクトル場' }] : [])
 
   if ('names' in region) {
@@ -1622,7 +1624,8 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
       const arrow = (v: string) => `${P}+t${paren(v)}`
       const unit = (v: string) => `\\frac{${numTex(scale)}${paren(v)}}{\\left|${paren(v)}\\right|}`
       const deriv = (p: string) => `\\left.\\frac{\\partial}{\\partial ${p}}${r}\\right|_{${params.map((q) => `${q}=${at.get(q)}`).join(',')}}`
-      const fAt = valueAt(point)
+      // 被積分関数に媒介変数そのもの（F = (t + 1, t²)）があれば、それにも今の値を入れる
+      const fAt = put(valueAt(point))
       if (params.length === 1) {
         const T = deriv(params[0])
         extras.push({ role: 'tangent', latex: arrow(unit(T)), label: '接線の向き r′' })
