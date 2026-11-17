@@ -191,6 +191,19 @@
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
   const missing = $derived(missingParam(item.error))
+  /**
+   * 積分の範囲の欄・積分の図にだけ出ている、未定義の文字（式そのものは、積分の図を出すと非表示になって計算し直さないことがある）。
+   * 式のエラーで出しているときは出さない
+   */
+  const auxMissing = $derived.by(() => {
+    if (missing) return null
+    const errors = [integralView?.error, integralView?.valueError, ...regionNames.map((n) => regionViews[n]?.error)]
+    for (const e of errors) {
+      const m = missingParam(e)
+      if (m) return m
+    }
+    return null
+  })
   /** 未定義の文字が、関数の呼び出しの形 f(…) で使われているか（そうなら、スライダーの代わりに関数の定義を足す） */
   const missingCall = $derived(missing !== null && calledAsFunction(item.latex, missing))
   /** 次元が足りなくてエラーになっているなら、必要な次元（その次元にするボタンを出す） */
@@ -628,6 +641,11 @@
           />
         </div>
       {/each}
+    {/if}
+    {#if auxMissing}
+      <button class="add-slider" onmousedown={(e) => e.preventDefault()} onclick={() => onAddSlider(auxMissing)}
+        >＋ {prettyName(auxMissing)} のスライダーを追加</button
+      >
     {/if}
     {#if item.param && !item.error}
       <ParamControl
