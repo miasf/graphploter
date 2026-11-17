@@ -339,20 +339,25 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   const ok = v !== null && !('error' in v) ? v : null
   check('進み具合の変数', ok?.sweep, 't')
   check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.141593; {vec})({vec_F})')
-  check('添えるもの', ok?.extras?.map((e) => e.role), ['point', 'tangent', 'vector', 'component'])
-  check('今の点', ok && latexToText(ok.extras![0].latex), '( cos (3.141593), sin (3.141593),(3.141593))')
+  check('添えるもの', ok?.extras?.map((e) => e.role), ['path', 'point', 'tangent', 'vector', 'component'])
+  check('今の点', ok && latexToText(ok.extras![1].latex), '( cos (3.141593), sin (3.141593),(3.141593))')
   // 被積分関数が媒介変数そのもの（(t + 1, t²)）: 場の矢印は添えず、F の矢印には今の t を入れる
   setRegions({ C: '\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}' })
   const q = integralDisplay('\\oint_{C}\\left(t+1,t^2\\right)\\cdot d\\mathbf{r}', 0.25, 2)
   const okq = q !== null && !('error' in q) ? q : null
-  check('媒介変数の被積分関数: 添えるもの', okq?.extras?.map((e) => e.role), ['point', 'tangent', 'vector', 'component'])
-  check('媒介変数の被積分関数: F の矢印', okq && /\bt\+1/.test(latexToText(okq.extras![2].latex)), false)
+  check('媒介変数の被積分関数: 添えるもの', okq?.extras?.map((e) => e.role), ['path', 'point', 'tangent', 'vector', 'component'])
+  check('媒介変数の被積分関数: F の矢印', okq && /\bt\+1/.test(latexToText(okq.extras![3].latex)), false)
+  // 経路は、積分記号の下に直接書いた範囲でも、範囲全体を描く（進み具合に関係なく）
+  const inl = integralDisplay('\\oint_{\\left\\{\\left(2\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', 0.3)
+  const oki = inl !== null && !('error' in inl) ? inl : null
+  check('直書きの経路', oki && latexToText(oki.extras!.find((e) => e.role === 'path')!.latex), '⦃(2 cos t, sin t)∣0<=t<=2 pi⦄')
+  check('1 変数の区間', (() => { const v = integralDisplay('\\int_{0}^{2}t^2\\,dt'); return v && !('error' in v) ? latexToText(v.extras![0].latex) : null })(), '⦃(x,y,z)∣0<=x<=2,y=0,z=0⦄')
   // ∇ · F⃗ の体積分（媒介変数 3 つ）: 立体を描く
   setRegions({ W: '\\left\\{\\left(r\\cos v,r\\sin v,h\\right)\\mid0\\le r\\le2,0\\le v\\le2\\pi,0\\le h\\le1\\right\\}' })
   const w = integralDisplay('\\iiint_{W}\\nabla\\cdot\\left(x,y,z\\right)\\,dV', 0.5)
   const okw = w !== null && !('error' in w) ? w : null
   check('体積分の立体', okw && latexToText(okw.latex), '⦃(u cos v,u sin v,t)∣0<=u<=1,0<=v<=2 pi ,0<=t<=1⦄')
-  check('体積分の場の矢印', okw?.extras?.map((e) => e.role), ['field'])
+  check('体積分の場の矢印（立体は重ねない）', okw?.extras?.map((e) => e.role), ['field'])
 }
 // 太字の 1 文字は、ベクトルの名前（\vec と同じ名前）
 check('太字 \\mathbf{F}', latexToText('\\mathbf{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'), latexToText('\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'))

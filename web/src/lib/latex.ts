@@ -1242,8 +1242,8 @@ export interface IntegralView {
 
 /** 積分の図に添える図形 */
 export interface IntegralExtra {
-  /** field: ベクトル場の矢印、point: 今の点、tangent: 接線（単位）、normal: 法線（単位）、vector: 場の向き、component: 場の接線・法線の成分 */
-  role: 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
+  /** path: 積分する経路・領域そのもの（範囲全体）、field: ベクトル場の矢印、point: 今の点、tangent: 接線（単位）、normal: 法線（単位）、vector: 場の向き、component: 場の接線・法線の成分 */
+  role: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
   latex: string
   /** 説明（式の下に色と一緒に出す） */
   label: string
@@ -1507,7 +1507,26 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
   // 媒介変数そのものを使う被積分関数（(t + 1, t²)）は、空間の場ではないので矢印の場を添えない
   const usesParams = !('names' in region) && body.some((t) => region.params.includes(t))
   const field = usesParams ? null : fieldOf(body, span.vector)
-  const fieldExtra = (): IntegralExtra[] => (field ? [{ role: 'field', latex: joinToks(field), label: 'ベクトル場' }] : [])
+  /** 積分する経路・領域そのもの（範囲全体。名前で書いた範囲も、積分記号の下に直接書いた範囲も） */
+  const pathExtra = (): IntegralExtra[] => {
+    // 立体（3 重積分・媒介変数 3 つ）は、積分の図そのものが立体なので重ねない
+    if ('names' in region ? region.names.length === 3 : region.params.length === 3) return []
+    if ('names' in region && region.names.length === 1) {
+      // 1 変数の区間: 横の軸の上の線分（変数の名前は x に読み替える）
+      const n = region.names[0]
+      const cond = joinToks(region.cond.map((t) => (t === n ? 'x' : t)))
+      return [{ role: 'path', latex: set(paren('x,y,z'), `${cond},y=0,z=0`), label: '積分する区間' }]
+    }
+    const src =
+      'names' in region
+        ? set(paren(region.names.join(',')), joinToks(region.cond))
+        : set(paren(region.comps.map(joinToks).join(',')), joinToks(region.cond))
+    const latex = regionDisplayLatex(src)
+    if (!latex) return []
+    const label = 'names' in region ? (region.names.length === 1 ? '積分する区間' : '積分する領域') : region.params.length === 1 ? '経路' : region.params.length === 2 ? '積分する曲面・領域' : '積分する立体'
+    return [{ role: 'path', latex, label }]
+  }
+  const fieldExtra = (): IntegralExtra[] => [...pathExtra(), ...(field ? [{ role: 'field' as const, latex: joinToks(field), label: 'ベクトル場' }] : [])]
 
   if ('names' in region) {
     const { names } = region

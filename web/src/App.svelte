@@ -1258,6 +1258,7 @@
 
   /** 添えて描くものの色 */
   const EXTRA_COLORS: Record<NonNullable<PlotItem['integralRole']>, string> = {
+    path: '#3a3a40',
     field: '#6042a6',
     point: '#222222',
     tangent: '#2d70b3',
@@ -1320,8 +1321,9 @@
           integralRole: e.role,
           vertical: false,
           color: EXTRA_COLORS[e.role],
-          lineWidth: e.role === 'point' ? 7 : e.role === 'field' ? 3 : 5,
-          opacity: e.role === 'field' ? 0.8 : 1,
+          lineWidth: e.role === 'point' ? 7 : e.role === 'field' || e.role === 'path' ? 3 : 5,
+          // 経路・領域は、積分の図の下に薄く（曲線はくっきり、面は透かす）
+          opacity: e.role === 'field' ? 0.8 : e.role === 'path' ? 0.45 : 1,
           ranges: { t: ['0', '1'], u: ['0', '1'], v: ['0', '1'] },
         })
         items.push(x)
