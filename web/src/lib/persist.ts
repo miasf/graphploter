@@ -40,6 +40,8 @@ export interface SavedItem {
   folder?: number
   /** 座標系の番号（古い保存データには無い。無ければ直交座標） */
   coordSys?: number
+  /** 自動の座標系（極座標など）の角度の範囲（書き換えたものだけ） */
+  angleRanges?: Record<string, [string, string]>
 }
 
 /** 保存する状態全体 */

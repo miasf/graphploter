@@ -13,7 +13,7 @@
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import CoordPanel from './lib/CoordPanel.svelte'
-  import { COORD_PRESETS, GREEK_NAMES, effectiveRanges, engineName, presetFollow } from './lib/coords'
+  import { AUTO_COORD_NAMES, COORD_PRESETS, GREEK_NAMES, autoCoord, autoRadius, defaultAngleRange, effectiveRanges, engineName, presetFollow, type AutoCoord } from './lib/coords'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestCoordGrid, requestPlot } from './lib/plotClient'
   import { lastBreakdown, recordBreakdown } from './lib/timings'
@@ -199,6 +199,7 @@
         center: it.rotGroup === undefined ? it.center : undefined,
         folder: it.folder,
         coordSys: coordOf(it) ? it.coordSys : undefined,
+        angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
       })),
       groups,
       coordSystems: coordSystems.length > 0 ? coordSystems : undefined,
@@ -912,7 +913,7 @@
     if (item.hidden && usesHiddenRanges(item.hidden.mode) && ensureHiddenRanges(item)) schedule(item, 0)
     const s0 = performance.now()
     // 回す前の形で作った陰関数で、回転だけが変わった: 形はそのままで、3D オブジェクトの向きだけを変える
-    viewer.setMorph(item.id, coordOf(item)?.morph ?? 0)
+    viewer.setMorph(item.id, coordOf(item)?.morph ?? (item.autoCoord ? 1 : 0))
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
     else viewer.dropPixelLayers(item.id) // 回した後の式で描いている光線は、向きだけが変わったらメッシュに戻す（回す前の式なら、setPlotTransform で回す）
     viewer.setPlotTransform(item.id, res.mesh.transform)
@@ -1793,10 +1794,75 @@
     return item.coordSys === undefined ? undefined : coordSystems.find((c) => c.id === item.coordSys)
   }
 
+  /**
+   * 座標系を選んでいない式が θ・φ・ρ を使っていれば、自動で使う座標系（2D は極座標、3D は円柱座標・球座標）。
+   * 同じ名前のパラメータ・定義があれば使わない
+   */
+  function autoCoordOf(item: PlotItem): AutoCoord | null {
+    if (item.coordSys !== undefined && coordOf(item)) return null
+    if (item.param) return null
+    let text: string
+    try {
+      text = latexToText(item.latex)
+    } catch {
+      return null
+    }
+    const defined = new Set<string>(Object.keys(currentParams()))
+    for (const it of items) {
+      if (it === item) continue
+      const d = defNameOf(it)
+      if (d) defined.add(d)
+      if (it.param) defined.add(it.param.name)
+    }
+    return autoCoord(text, flat, defined)
+  }
+
+  /** 自動の座標系の角度（theta・phi）の範囲（LaTeX。書き換えていなければ、式から決めた初期値） */
+  function angleRangeOf(item: PlotItem, angle: string): [string, string] {
+    const own = item.angleRanges?.[angle]
+    if (own) return own
+    let text = ''
+    try {
+      text = latexToText(item.latex)
+    } catch {
+      // 初期値は 0〜2π
+    }
+    return defaultAngleRange(text, angle)
+  }
+
+  /** 自動の座標系の角度の範囲を書き換えた */
+  function setAngleRange(item: PlotItem, angle: string, side: 0 | 1, value: string) {
+    const r = [...angleRangeOf(item, angle)] as [string, string]
+    r[side] = value
+    item.angleRanges = { ...(item.angleRanges ?? {}), [angle]: r }
+    schedule(item, 300)
+  }
+
   /** 計算担当に渡す座標系（計算エンジン用の式に変換する。LaTeX の誤りは投げる） */
   function coordRequest(item: PlotItem): { map: string; ranges: [string, string][]; names: string } | null {
     const c = coordOf(item)
-    if (!c) return null
+    if (!c) {
+      const a = autoCoordOf(item)
+      item.autoCoord = a?.kind
+      if (!a) return null
+      const axes: [number, number][] = [
+        [domain.xmin, domain.xmax],
+        [domain.ymin, domain.ymax],
+        [domain.zmin, domain.zmax],
+      ]
+      const angle = (name: string): [string, string] => {
+        const [lo, hi] = angleRangeOf(item, name)
+        const t = (v: string, side: string) => {
+          const s = latexToText(v)
+          if (s.trim() === '') throw new Error(`${GREEK_NAMES[name] ?? name} の${side}が空です`)
+          return s
+        }
+        return [t(lo, '最小値'), t(hi, '最大値')]
+      }
+      const third: [string, string] = a.kind === 'sphere' ? angle('phi') : [String(domain.zmin), String(domain.zmax)]
+      return { map: a.map, ranges: [autoRadius(a.kind, axes, a.signedRadius), angle('theta'), third], names: a.names.join(',') }
+    }
+    item.autoCoord = undefined
     const text = (latex: string, what: string) => {
       const t = latexToText(latex)
       if (t.trim() === '') throw new Error(`座標系「${c.name}」の${what}が空です`)
@@ -2514,6 +2580,9 @@
             onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}
+          autoCoordName={item.autoCoord && AUTO_COORD_NAMES[item.autoCoord]}
+          autoAngles={item.autoCoord ? (item.autoCoord === 'sphere' ? ['theta', 'phi'] : ['theta']).map((name) => ({ name, range: angleRangeOf(item, name) })) : []}
+          onAngleRange={(name, side, v) => setAngleRange(item, name, side, v)}
             onToggle={() => {
               // 自分で ● を押したら、その表示・非表示に従う（積分の図を消しても戻さない）
               hiddenForIntegral.delete(item.id)

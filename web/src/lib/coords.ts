@@ -2,7 +2,7 @@
 // 計算エンジンは、図形を座標の値の空間で作り、頂点ごとに座標系で移した先 T(q) を別の配列で返す。
 // 画面側は s（0〜1）で (1 − s) q + s T(q) と混ぜる。s を動かしても式は計算し直さない。
 
-import type { CoordPreset, CoordSystem } from './types'
+import type { AutoCoordKind, CoordPreset, CoordSystem } from './types'
 
 /** 用意した座標系の、式（LaTeX。変数は x, y, z）と作る範囲 */
 export const COORD_PRESETS: Record<
@@ -264,4 +264,92 @@ export function weldNormals(normals: Float32Array, groups: Int32Array) {
     }
     start = k + 1
   }
+}
+
+// ---- 自動の座標系（座標系を選んでいない式で θ・φ・ρ を使ったとき） ----
+
+/** 計算エンジン用の式の中の名前（英字の並び。θ などの 1 文字も）を、出てくる順に並べる */
+function words(text: string): string[] {
+  return text.match(/[A-Za-z_]+|[θϑφϕρ]/g) ?? []
+}
+const ALIAS: Record<string, string> = { θ: 'theta', ϑ: 'theta', vartheta: 'theta', φ: 'phi', ϕ: 'phi', varphi: 'phi', ρ: 'rho', varrho: 'rho' }
+
+/** 自動の座標系: 座標の名前（計算エンジン用）・写像（変数は x, y, z）・範囲を書く角度 */
+export interface AutoCoord {
+  kind: AutoCoordKind
+  names: [string, string, string]
+  map: string
+  angles: string[]
+  /** 負の半径も描くか（極座標の曲線。リマソン r = 1 + 2cos θ の内側の輪） */
+  signedRadius: boolean
+}
+
+/**
+ * 座標系を選んでいない式（計算エンジン用の式 `text`）が、θ・φ・ρ を自由な変数として使っていれば（または x・y を使わずに r を使っていれば）、
+ * 自動で使う座標系を返す。
+ * 2D 表示では極座標 (r, θ)。3D では、φ か ρ があれば球座標 (r または ρ, θ, φ)、無ければ円柱座標 (r, θ, z)。
+ * 角度の向きは Desmos などと同じく、θ が xy 平面での角（x 軸から）、φ が z 軸からの角。
+ * `defined` は、パラメータ・定義の名前（同じ名前があれば自動にしない）。
+ * 関係（=・<・≤ など）の無い式・組 (…) の式・関数の定義 f(θ) = … は対象外
+ */
+export function autoCoord(text: string, flat: boolean, defined: Set<string>): AutoCoord | null {
+  const t = text.trim()
+  if (t === '' || t.startsWith('(') || !/[=<>≤≥]/.test(t)) return null
+  // 左辺が f(…) の形（関数の定義）
+  if (/^[A-Za-z]\w*(_\{?\w+\}?)?\s*\([^()]*\)\s*=/.test(t)) return null
+  const used = new Set(words(t).map((w) => ALIAS[w] ?? w))
+  const free = (n: string) => used.has(n) && !defined.has(n)
+  // r だけの式（z = sin r・r = 2）も、x・y を使っていなければ（r x のようにスライダーの r かもしれない式でなければ）
+  // 角度の名前のパラメータを使う式は、座標の名前で上書きしないよう対象外
+  if (['theta', 'phi', 'rho'].some((n) => used.has(n) && defined.has(n))) return null
+  const onlyR = free('r') && !used.has('x') && !used.has('y')
+  if (!free('theta') && !free('phi') && !free('rho') && !onlyR) return null
+  // 負の半径は、等式で r と θ だけの式（極座標の曲線と、それを縦に延ばした面）だけ。不等式では r < 0 の所が
+  // 全部満たしてしまい、z = f(r, θ) では r < 0 の所に別の面ができる
+  const signedRadius = !/[<>≤≥]/.test(t) && !free('z')
+  if (flat) {
+    if (free('phi') || free('rho')) return null
+    return { kind: 'polar', names: ['r', 'theta', 'z'], map: '(x cos(y), x sin(y), z)', angles: ['theta'], signedRadius }
+  }
+  if (free('phi') || free('rho')) {
+    const radius = free('rho') ? 'rho' : 'r'
+    const map = '(x sin(z) cos(y), x sin(z) sin(y), x cos(z))'
+    return { kind: 'sphere', names: [radius, 'theta', 'phi'], map, angles: ['theta', 'phi'], signedRadius: false }
+  }
+  return { kind: 'cylinder', names: ['r', 'theta', 'z'], map: '(x cos(y), x sin(y), z)', angles: ['theta'], signedRadius }
+}
+
+/** 自動の座標系の名前（式の説明に出す） */
+export const AUTO_COORD_NAMES: Record<AutoCoordKind, string> = { polar: '極座標', cylinder: '円柱座標', sphere: '球座標' }
+
+const TRIG = 'sin|cos|tan|sec|csc|cot'
+
+/**
+ * 角度の範囲の初期値（LaTeX）。φ は 0〜π。θ は、式の中で三角関数の中にしか出てこなければ（周期 2π の式。バラ曲線・カージオイドなど）
+ * 0〜2π、外にも出てくれば（アルキメデスのらせん r = θ、等角らせん r = e^{θ/5} など）何周も描けるよう 0〜12π
+ */
+export function defaultAngleRange(text: string, angle: string): [string, string] {
+  if (angle === 'phi') return ['0', '\\pi']
+  // 三角関数の引数を消していく（内側の括弧から。三角関数のでない括弧は [ ] にして、外側の括弧を次に調べる）
+  let s = text.replace(/[θϑ]/g, ' theta ')
+  for (let k = 0; k < 100; k++) {
+    const next = s
+      .replace(new RegExp(`\\b(${TRIG})\\s*(\\^\\s*\\(?[\\d.\\s]*\\)?\\s*)?\\(([^()]*)\\)`, 'g'), ' ')
+      .replace(/\(([^()]*)\)/g, '[$1]')
+    if (next === s) break
+    s = next
+  }
+  // 括弧の無い引数（cos 2 theta・sin theta）
+  s = s.replace(new RegExp(`\\b(${TRIG})\\s*[\\d.\\s*]*\\b(theta|vartheta)\\b`, 'g'), ' ')
+  return /\b(theta|vartheta)\b/.test(s) ? ['0', '12\\pi'] : ['0', '2\\pi']
+}
+
+/**
+ * 自動の座標系で、半径の範囲（表示範囲の箱が全部入る大きさ）。`signed` なら負の半径も（[`AutoCoord`] の signedRadius）。
+ * 円柱座標・極座標は xy 平面の、球座標は 3 つの座標の、表示範囲の端の大きいほうから
+ */
+export function autoRadius(kind: AutoCoordKind, axes: [number, number][], signed = false): [string, string] {
+  const m = axes.map(([lo, hi]) => Math.max(Math.abs(lo), Math.abs(hi)))
+  const r = Math.hypot(m[0], m[1], kind === 'sphere' ? m[2] : 0)
+  return [signed ? num(-r) : '0', num(r)]
 }
