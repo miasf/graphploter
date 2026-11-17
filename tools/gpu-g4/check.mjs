@@ -27,7 +27,7 @@ const N = 400
 const DOM = [-5, -5, 5, 5]
 
 /** ページの中で 1 つの図形を描き、画素ごとの不透明度（0〜255、下の行から）と時間を返す */
-function render({ glsl, frag, n, dom, width }) {
+function render({ glsl, frag, n, dom, width, affine }) {
   const canvas = document.createElement('canvas')
   canvas.width = n
   canvas.height = n
@@ -65,6 +65,11 @@ ${frag.replace('#include <colorspace_fragment>', '')}`
   gl.uniform2f(u('uDx'), (dom[2] - dom[0]) / n, 0)
   gl.uniform2f(u('uDy'), 0, (dom[3] - dom[1]) / n)
   gl.uniform1i(u('uIters'), 400)
+  // 1 次式で受け取る形: 式の座標は画素の座標そのまま（P = (q.x, q.y, 0)）
+  if (affine) {
+    gl.uniform3fv(u('uPA'), [1, 0, 0, 0, 1, 0, 0, 0, 1])
+    gl.uniform1fv(u('uPb'), [0, 0, 0])
+  }
   gl.uniform3f(u('uColor'), 1, 1, 1)
   gl.uniform1f(u('uWidth'), width)
   gl.uniform1f(u('uRatio'), 1)
@@ -172,13 +177,13 @@ let failed = 0
 console.log('| 式 | 確かめたこと | 結果 | 時間 ms（SwiftShader、参考） |')
 console.log('|---|---|---|---|')
 for (const c of cases) {
-  const r = await page.evaluate(render, { glsl: c.glsl, frag: GPU2D_FRAGMENT, n: N, dom: DOM, width: 3 })
+  const r = await page.evaluate(render, { glsl: c.glsl, frag: GPU2D_FRAGMENT, n: N, dom: DOM, width: 3, affine: c.affine })
   if (r.error) {
     console.log(`| \`${c.src}\` | コンパイル | ✗ ${r.error.split('\n')[0]} | |`)
     failed++
     continue
   }
-  for (const [what, ok] of (checks[c.src] ?? (() => []))(r.alpha)) {
+  for (const [what, ok] of (checks[c.src.replace('（1 次式）', '')] ?? (() => []))(r.alpha)) {
     if (!ok) failed++
     console.log(`| \`${c.src}\` | ${what} | ${ok ? '○' : '✗'} | ${r.ms.toFixed(0)} |`)
   }

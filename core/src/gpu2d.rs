@@ -24,6 +24,11 @@ pub struct Scene2d {
     pub cuts: usize,
     /// 境目を実線で引く不等式（ビット k が不等式 k）
     pub lines: u32,
+    /// [`scene_affine`] で作ったとき: 画素の座標 q = (横, 奥, 0) から式の座標への 1 次式（座標ごとに [A_k0, A_k1, A_k2, b_k]）と、
+    /// uniform にしたパラメータの名前・値。[`scene`] で作ったとき（パラメータを畳み込んだ式）は空
+    pub affine: Vec<f64>,
+    pub params: Vec<String>,
+    pub values: Vec<f64>,
 }
 
 /// 等式の上限（0 か 1）と不等式の上限。多いと、画素ごとの計算が重い
@@ -51,7 +56,7 @@ pub fn scene(eq: Option<&Program>, cuts: &[Program], strict: &[bool]) -> Result<
         }
     }
     let refs: Vec<(&Program, &str)> = items.iter().map(|(p, n)| (*p, n.as_str())).collect();
-    let (body, lens) = glsl_bundle(&refs)?;
+    let (body, lens) = glsl_bundle(&refs, &[])?;
     let lines = if eq.is_none() {
         strict.iter().enumerate().filter(|(_, s)| !**s).fold(0u32, |m, (k, _)| m | (1 << k))
     } else {
@@ -86,7 +91,60 @@ pub fn scene(eq: Option<&Program>, cuts: &[Program], strict: &[bool]) -> Result<
     s.push_str(&val);
     s.push_str(&dual);
     s.push_str(&inter);
-    Ok(Scene2d { glsl: s, eq: eq.is_some() as usize, cuts: cuts.len(), lines })
+    Ok(Scene2d { glsl: s, eq: eq.is_some() as usize, cuts: cuts.len(), lines, affine: Vec::new(), params: Vec::new(), values: Vec::new() })
+}
+
+/// [`scene`] の、回転・断面・パラメータを uniform で渡す版（計画 12 章の G7。3D の光線の描き方と同じ考え方）。
+/// 式は元の座標 x, y, z, w, …（`dims` 個）の式で、その後の `n_params` 個の変数がスライダーのパラメータ（`uParam`）。
+/// 画素の座標 q = (横, 奥, 0) から元の座標への 1 次式 P_k = uPA[k] · q + uPb[k] も uniform。
+/// 回転・断面・スライダーを動かしても GLSL を作り直さない（[`Scene2d`] の `affine`・`values` だけが変わる）
+pub fn scene_affine(eq: Option<&Program>, cuts: &[Program], strict: &[bool], dims: usize, n_params: usize) -> Result<Scene2d, String> {
+    if eq.is_none() && cuts.is_empty() {
+        return Err("描く物がありません".into());
+    }
+    if cuts.len() > MAX_CUTS {
+        return Err(format!("不等式が {MAX_CUTS} 本を超える式は GPU の描き方では使えません"));
+    }
+    let mut items: Vec<(&Program, String)> = Vec::new();
+    if let Some(e) = eq {
+        items.push((e, "gE0".into()));
+    }
+    for (k, c) in cuts.iter().enumerate() {
+        items.push((c, format!("gC{k}")));
+    }
+    for (p, _) in &items {
+        if p.vars().len() != dims + n_params {
+            return Err("内部エラー: 2D の式の変数の数が合いません".into());
+        }
+    }
+    let idx: Vec<usize> = (dims..dims + n_params).collect();
+    let refs: Vec<(&Program, &str)> = items.iter().map(|(p, n)| (*p, n.as_str())).collect();
+    let (body, _) = glsl_bundle(&refs, &idx)?;
+    let lines = if eq.is_none() { strict.iter().enumerate().filter(|(_, s)| !**s).fold(0u32, |m, (k, _)| m | (1 << k)) } else { 0 };
+    let mut s = format!("#define G_EQ {}\n#define G_CUTS {}\n#define G_LINES {lines}\n#define G_FUNCS {}\n", eq.is_some() as usize, cuts.len(), items.len());
+    let _ = writeln!(s, "#define G_N {dims}\nuniform vec3 uPA[G_N];\nuniform float uPb[G_N];");
+    if n_params > 0 {
+        let _ = writeln!(s, "uniform float uParam[{n_params}];");
+    }
+    s.push_str(&body);
+    let mut val = String::from("float gF(int f, vec2 q) {\n  float p[G_N];\n  for (int k = 0; k < G_N; k++) p[k] = dot(uPA[k], vec3(q, 0.0)) + uPb[k];\n");
+    let mut dual = String::from("vec4 gFD(int f, vec2 q) {\n  vec4 p[G_N];\n  for (int k = 0; k < G_N; k++) p[k] = vec4(dot(uPA[k], vec3(q, 0.0)) + uPb[k], uPA[k]);\n");
+    // 矩形の上の箱: 1 次式の横・奥の項の範囲を足す
+    let mut inter = String::from(
+        "Div gFI(int f, vec2 lo, vec2 hi) {\n  vec2 p[G_N];\n  for (int k = 0; k < G_N; k++) {\n    vec2 ax = uPA[k].x * vec2(lo.x, hi.x);\n    vec2 ay = uPA[k].y * vec2(lo.y, hi.y);\n    p[k] = vec2(min(ax.x, ax.y) + min(ay.x, ay.y), max(ax.x, ax.y) + max(ay.x, ay.y)) + uPb[k];\n  }\n",
+    );
+    for (k, (_, name)) in items.iter().enumerate() {
+        let _ = writeln!(val, "  if (f == {k}) return {name}(p);");
+        let _ = writeln!(dual, "  if (f == {k}) return {name}d(p);");
+        let _ = writeln!(inter, "  if (f == {k}) return {name}i(p);");
+    }
+    val.push_str("  return 0.0;\n}\n");
+    dual.push_str("  return vec4(0.0);\n}\n");
+    inter.push_str("  return gi_empty();\n}\n");
+    s.push_str(&val);
+    s.push_str(&dual);
+    s.push_str(&inter);
+    Ok(Scene2d { glsl: s, eq: eq.is_some() as usize, cuts: cuts.len(), lines, affine: Vec::new(), params: Vec::new(), values: Vec::new() })
 }
 
 #[cfg(test)]

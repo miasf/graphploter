@@ -146,13 +146,14 @@ fn lit(v: f64) -> String {
 }
 
 /// いくつかの式を 1 つのシェーダーに入れる GLSL（下請けの関数は 1 回だけ）。`items` は (式, 関数の名前)。
-/// パラメータは uniform にしない（式に畳み込まれた定数のまま）。戻り値は GLSL と、式ごとの引数の配列の長さ
-pub fn glsl_bundle(items: &[(&Program, &str)]) -> Result<(String, Vec<usize>), String> {
+/// `params` は uniform（`uParam`）にする変数の番号（全部の式で同じ並び。uniform の宣言は呼び出し側が 1 回だけ書く）。
+/// 戻り値は GLSL と、式ごとの引数の配列の長さ
+pub fn glsl_bundle(items: &[(&Program, &str)], params: &[usize]) -> Result<(String, Vec<usize>), String> {
     let mut used: Vec<&'static str> = Vec::new();
     let mut body = String::new();
     let mut lens = Vec::with_capacity(items.len());
     for (p, name) in items {
-        let (g, u) = to_glsl_used(&p.code, p.vars.len(), &GlslOptions { name: name.to_string(), ..Default::default() })?;
+        let (g, u) = to_glsl_used(&p.code, p.vars.len(), &GlslOptions { name: name.to_string(), params: params.to_vec(), ..Default::default() })?;
         for n in u {
             if !used.contains(&n) {
                 used.push(n);

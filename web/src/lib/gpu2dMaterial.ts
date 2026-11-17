@@ -27,6 +27,13 @@ export interface Gpu2dInfo {
   cuts: number
   /** 境目を実線で引く不等式のビット */
   lines: number
+  /**
+   * 画素の座標 q = (横, 奥, 0) から式の座標（元の座標 x, y, z, w, …）への 1 次式（座標ごとに [A_k0, A_k1, A_k2, b_k]）と、
+   * uniform にしたパラメータの名前・値（計画 G7。回転・断面・スライダーで GLSL を作り直さない）。パラメータを畳み込んだ式なら空
+   */
+  affine: number[]
+  params: string[]
+  values: number[]
 }
 
 export interface Gpu2dUniforms {
@@ -49,6 +56,20 @@ export interface Gpu2dUniforms {
   uDy: { value: THREE.Vector2 }
   /** ループの回数の上限（いつも 400。uniform にして、ループを展開させない） */
   uIters: { value: number }
+  /** 画素の座標から式の座標への 1 次式と、スライダーのパラメータ（Gpu2dInfo の affine・values） */
+  uPA: { value: THREE.Vector3[] }
+  uPb: { value: number[] }
+  uParam: { value: number[] }
+}
+
+/** 計算エンジンが返した 1 次式・パラメータの値を uniform にする（1 次式が無い、畳み込んだ式なら何もしない） */
+export function setGpu2dUniforms(u: Gpu2dUniforms, info: Gpu2dInfo) {
+  if (info.affine.length > 0) {
+    const n = Math.floor(info.affine.length / 4)
+    u.uPA.value = Array.from({ length: n }, (_, k) => new THREE.Vector3(info.affine[4 * k], info.affine[4 * k + 1], info.affine[4 * k + 2]))
+    u.uPb.value = Array.from({ length: n }, (_, k) => info.affine[4 * k + 3])
+  }
+  u.uParam.value = info.values.slice()
 }
 
 export const GPU2D_VERTEX = /* glsl */ `
@@ -305,6 +326,9 @@ export function gpu2dMaterial(info: Gpu2dInfo): THREE.ShaderMaterial {
     uDx: { value: new THREE.Vector2(1, 0) },
     uDy: { value: new THREE.Vector2(0, 1) },
     uIters: { value: 400 },
+    uPA: { value: [] },
+    uPb: { value: [] },
+    uParam: { value: [] },
   }
   return new THREE.ShaderMaterial({
     uniforms,

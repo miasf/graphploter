@@ -7,7 +7,7 @@
 //! 式は `x, y, z` の陰関数か、カンマで区切った不等式（連立）。等式は 左辺 − 右辺、`≤`・`<` は 左辺 − 右辺 ≤ 0、`≥`・`>` は 右辺 − 左辺 ≤ 0
 
 use graph_core::eval::Program;
-use graph_core::gpu2d::scene;
+use graph_core::gpu2d::{scene, scene_affine};
 use graph_core::parser::{parse_system, BinOp, Expr, Rel};
 
 const CASES: &[&str] = &[
@@ -46,16 +46,21 @@ fn main() {
                 }
             }
         }
+        // 式に畳み込んだ形（scene）と、画素の座標から式の座標への 1 次式を uniform で受け取る形（scene_affine。ここでは恒等）の両方
         let s = scene(eq.as_ref(), &cuts, &strict).unwrap_or_else(|e| panic!("{src}: {e}"));
-        out.push_str(&format!(
-            "{{\"src\":{:?},\"glsl\":{:?},\"eq\":{},\"cuts\":{},\"lines\":{}}}{}\n",
-            src,
-            s.glsl,
-            s.eq,
-            s.cuts,
-            s.lines,
-            if i + 1 < CASES.len() { "," } else { "" }
-        ));
+        let t = scene_affine(eq.as_ref(), &cuts, &strict, 3, 0).unwrap_or_else(|e| panic!("{src}: {e}"));
+        for (k, (label, g, affine)) in [(src.to_string(), &s, false), (format!("{src}（1 次式）"), &t, true)].into_iter().enumerate() {
+            out.push_str(&format!(
+                "{{\"src\":{:?},\"glsl\":{:?},\"eq\":{},\"cuts\":{},\"lines\":{},\"affine\":{}}}{}\n",
+                label,
+                g.glsl,
+                g.eq,
+                g.cuts,
+                g.lines,
+                affine,
+                if i + 1 < CASES.len() || k == 0 { "," } else { "" }
+            ));
+        }
     }
     out.push_str("]\n");
     print!("{out}");

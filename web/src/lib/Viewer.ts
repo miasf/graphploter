@@ -9,7 +9,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
-import { gpu2dMaterial, gpu2dMesh, type Gpu2dUniforms } from './gpu2dMaterial'
+import { gpu2dMaterial, gpu2dMesh, setGpu2dUniforms, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
 import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
 import { COLORMAP_INDEX, colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
@@ -158,7 +158,7 @@ export class Viewer {
    * 2D 表示で、画素ごとに描く曲線・領域（計画 12 章の G4）。式の番号 → 平面と材質と、その GLSL・表示範囲。
    * あるときは、plots の線・面を隠して（カーソルの下の点にはそれを使う）、こちらを描く
    */
-  private gpu2d = new Map<number, { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; glsl: string; key: string; eq: number; ready: boolean }>()
+  private gpu2d = new Map<number, { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; glsl: string; key: string; eq: number; ready: boolean; params: string[] }>()
 
   /**
    * 3D の陰関数を光線で描く箱（計画 12 章の G5）。式の番号 → 箱と材質と、その GLSL・表示範囲。
@@ -1437,15 +1437,19 @@ export class Viewer {
         old.key = key
         if (old.ready) this.scene.add(old.mesh)
       }
+      // 回転・断面・パラメータは uniform（GLSL は同じ）
+      setGpu2dUniforms(old.mat.uniforms as Gpu2dUniforms, info)
+      old.params = info.params
       this.dirty = true
       return
     }
     if (old) this.removeGpu2d(id)
     const mat = gpu2dMaterial(info)
+    setGpu2dUniforms(mat.uniforms as Gpu2dUniforms, info)
     const m = gpu2dMesh(mat, d)
-    const layer = { mesh: m, mat, glsl: info.glsl, key, eq: info.eq, ready: false }
+    const layer = { mesh: m, mat, glsl: info.glsl, key, eq: info.eq, ready: false, params: info.params }
     this.gpu2d.set(id, layer)
-    // パラメータは式に畳み込まれた定数なので、スライダーを動かすと GLSL が変わる。コンパイルは裏で行い
+    // GLSL が変わったとき（式を書き換えた・パラメータを畳み込んだ式でスライダーを動かした）は、コンパイルを裏で行い
     // （KHR_parallel_shader_compile。無い環境ではその場で）、終わるまでは今までのメッシュの線・面を見せる
     const show = () => {
       if (this.gpu2d.get(id) !== layer) return // 待っている間に、次の結果が来た・式が消えた
@@ -1621,6 +1625,12 @@ export class Viewer {
     for (const g of this.gpu3d.values()) {
       if (g.params.length === 0) continue
       g.ray.uParam.value = g.params.map((n, k) => values[n] ?? g.ray.uParam.value[k] ?? 0)
+      this.dirty = true
+    }
+    for (const g of this.gpu2d.values()) {
+      if (g.params.length === 0) continue
+      const u = g.mat.uniforms as Gpu2dUniforms
+      u.uParam.value = g.params.map((n, k) => values[n] ?? u.uParam.value[k] ?? 0)
       this.dirty = true
     }
   }
