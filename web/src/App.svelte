@@ -2245,10 +2245,9 @@
     // 4次元の例などは、次元が足りなければ増やす
     if (!view && sample.dims && space.dims < sample.dims) setLayout(resizeSpace(space, sample.dims))
     // 空の式が1つだけなら、それはサンプルで置き換える
-    if (listed().length === 1 && items[0].latex === '') {
-      viewer?.removePlot(items[0].id)
-      items.splice(0, 1)
-    }
+    // （一覧に出ない行（積分の範囲・積分の図）が前にあることもあるので、一覧の行で調べる）
+    const only = listed()
+    if (only.length === 1 && only[0].latex === '') removeItem(only[0])
     const defined = new Set(items.map((it) => it.param?.name ?? latexParamName(it.latex)))
     const adding = sample.items.filter((si) => !(si.param && defined.has(si.param))) // 同じ名前のパラメータがすでにあれば足さない
     // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
