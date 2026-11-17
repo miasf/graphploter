@@ -560,6 +560,11 @@ class Converter {
         // 中身は名前の文字だけを取り出す。数式キーボードから入れると
         // \operatorname{\mathrm{Im}} のように命令が入れ子になることがあるため、命令名と {} を取り除く
         const s = this.rawGroup(true)
+        // 太字の 1 文字 \mathbf{F} はベクトルの名前（\vec{F} と同じ名前。F とは別）
+        if (name === 'mathbf' && /^[A-Za-z]$/.test(s)) {
+          this.out += ` {vec_${s}} `
+          return
+        }
         // 最小公倍数・最大公約数（計画 M13）
         if (s === 'lcm' || s === 'gcd') {
           this.out += ` ${s} `
@@ -752,10 +757,11 @@ class Converter {
         return
       }
       case 'vec':
-      case 'overrightarrow': {
-        // \vec{v} は、v とは別の名前 {vec_v}（ベクトルの名前）
+      case 'overrightarrow':
+      case 'boldsymbol': {
+        // \vec{v} は、v とは別の名前 {vec_v}（ベクトルの名前）。太字 \boldsymbol{v}（と \mathbf{v}）も同じ名前
         const v = this.rawGroup(true)
-        if (!/^[A-Za-z]\w*$/.test(v)) throw new LatexError('\\vec{ } の中には、名前を 1 つ書いてください')
+        if (!/^[A-Za-z]\w*$/.test(v)) throw new LatexError(`\\${name}{ } の中には、名前を 1 つ書いてください`)
         this.out += ` {vec_${v}} `
         return
       }
@@ -1446,7 +1452,7 @@ const between = (lo: Token[], hi: Token[], s: number): string => {
 function fieldOf(body: Token[], vector: boolean): Token[] | null {
   // 定義した場の名前だけ（F・F⃗）なら、定義の行がもう矢印を描いているので、重ねない
   const nameOnly = (ts: Token[]) =>
-    (ts.length === 1 && /^[A-Za-z]$/.test(ts[0])) || (ts.length === 4 && (ts[0] === '\\vec' || ts[0] === '\\mathbf') && ts[1] === '{' && ts[3] === '}')
+    (ts.length === 1 && /^[A-Za-z]$/.test(ts[0])) || (ts.length === 4 && (ts[0] === '\\vec' || ts[0] === '\\mathbf' || ts[0] === '\\boldsymbol') && ts[1] === '{' && ts[3] === '}')
   if (vector) return nameOnly(body) ? null : body
   const k = body.findIndex((t, j) => t === '\\nabla' && body[j + 1] === '\\cdot')
   return k === 0 && !nameOnly(body.slice(2)) ? body.slice(2) : null
@@ -1585,7 +1591,7 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
   /** 被積分関数の、点 r での値（\left. 中身 \right|_{x = …}。∇ × F⃗ のように、展開してから点を入れる） */
   // 中身が名前だけ（定義した F・F⃗）か、∇ のように展開してはじめて x, y, z が出てくる式なら、点での値の形にする。
   // それ以外は、中身の x, y, z に点の成分を直接入れる
-  const opaque = body.some((t) => t === '\\nabla' || t === '\\vec' || t === '\\mathbf' || t === '\\operatorname') || (body.length === 1 && /^[A-Za-z]$/.test(body[0]))
+  const opaque = body.some((t) => t === '\\nabla' || t === '\\vec' || t === '\\mathbf' || t === '\\boldsymbol' || t === '\\operatorname') || (body.length === 1 && /^[A-Za-z]$/.test(body[0]))
   const valueAt = (pt: string[]) =>
     opaque
       ? `\\left.${joinToks(body)}\\right|_{${pt.map((c, k) => `${'xyz'[k]}=${c}`).join(',')}}`

@@ -348,6 +348,10 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   check('体積分の立体', okw && latexToText(okw.latex), '⦃(u cos v,u sin v,t)∣0<=u<=1,0<=v<=2 pi ,0<=t<=1⦄')
   check('体積分の場の矢印', okw?.extras?.map((e) => e.role), ['field'])
 }
+// 太字の 1 文字は、ベクトルの名前（\vec と同じ名前）
+check('太字 \\mathbf{F}', latexToText('\\mathbf{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'), latexToText('\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'))
+check('太字 \\boldsymbol{F}', latexToText('\\boldsymbol{F}'), '{vec_F}')
+check('太字の名前（2 文字以上）はそのまま', latexToText('\\mathbf{Im}'), 'Im')
 setRegions({})
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)

@@ -179,8 +179,14 @@ export const MATRIX_ROWS: CalcKey[][] = [
     key('ker', '\\ker #?', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
   ],
   [
-    key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（F → F⃗。F とは別の名前で、定義して積分などに使える）'),
-    key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)'),
+    {
+      ...key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（F → F⃗。F とは別の名前で、定義して積分などに使える。長押しで太字 𝐅。F⃗ と 𝐅 は同じ名前）'),
+      variants: ['\\mathbf{#@}'],
+    },
+    {
+      ...key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（長押しで太字の 𝐅）'),
+      variants: ['\\mathbf{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)'],
+    },
     key('a·b', '\\cdot', '内積・行列の積'),
     key('a×b', '\\times', '外積'),
     key('⟨a,b⟩', '\\left\\langle#?,#?\\right\\rangle', '内積 ⟨a, b⟩'),
