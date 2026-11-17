@@ -11,6 +11,10 @@ export interface CalcKey {
   variants?: string[]
 }
 
+/** 矢印のベクトルの名前のキーの表示（矢印を重ねる文字 U+20D7 は字体によって □ になるので、→ を文字の上に重ねる） */
+export const vecLabel = (c: string) =>
+  `<span style="display:inline-flex;flex-direction:column;align-items:center;line-height:0.75"><span style="font-size:0.7em">→</span><i>${c}</i></span>`
+
 /** 雛形のキー（label はキーの表示、insert は入れる LaTeX（#? は空欄、#0 は選んでいた部分）、ja は長押しで出る名前） */
 function key(label: string, insert: string, ja: string, small = false): CalcKey {
   return { label, insert, tooltip: ja, ...(small || [...label].length > 2 ? { class: 'small' } : {}) }
@@ -71,7 +75,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('∇·F', '\\nabla\\cdot #?', '発散 div'),
         key('∇×F', '\\nabla\\times #?', '回転 rot'),
         key('∇²f', '\\nabla^{2}#?', 'ラプラシアン'),
-        key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（F⃗ は f とは別の名前）'),
+        key(`${vecLabel('F')}=`, '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 𝐅(x, y, z) = (P, Q, R)（𝐅 は f とは別の名前）'),
         key('∭∇·F', '\\iiint_{V}\\nabla\\cdot #?\\,dV', '体積分 ∭_V ∇ · F dV（立体 V は式の下の欄に {(x(r,u,v), …) | 範囲} で書く。値は V の表面を通る流束と同じ）'),
         key('⊥', '\\perp', '直交 u ⊥ v（u · v = 0）'),
         key('∥', '\\parallel', '平行 u ∥ v（u × v = 0）'),
@@ -84,7 +88,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('Aᵀ', '#@^{T}', '転置'),
         key('A⁻¹', '#@^{-1}', '逆行列'),
         key('ker', '\\ker', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
-        key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（v → v⃗。v とは別の名前）'),
+        key(vecLabel('v'), '\\vec{#@}', '直前の文字をベクトルの名前にする（v の後に押すと \\vec{v}。v とは別の名前）'),
       ],
     ],
   },
@@ -180,11 +184,11 @@ export const MATRIX_ROWS: CalcKey[][] = [
   ],
   [
     {
-      ...key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（F → F⃗。F とは別の名前で、定義して積分などに使える。長押しで太字 𝐅・黒板太字 𝔽。F⃗・𝐅・𝔽 は同じ名前）'),
+      ...key(vecLabel('v'), '\\vec{#@}', '直前の文字をベクトルの名前にする（F の後に押すと \\vec{F}。F とは別の名前で、定義して積分などに使える。長押しで太字 \\mathbf{F}・黒板太字 \\mathbb{F}。この 3 つは同じ名前）'),
       variants: ['\\mathbf{#@}', '\\mathbb{#@}'],
     },
     {
-      ...key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（長押しで太字の 𝐅・黒板太字の 𝔽）'),
+      ...key(`${vecLabel('F')}=`, '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 𝐅(x, y, z) = (P, Q, R)（長押しで太字の 𝐅・黒板太字の 𝔽）'),
       variants: ['\\mathbf{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', '\\mathbb{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)'],
     },
     key('a·b', '\\cdot', '内積・行列の積'),

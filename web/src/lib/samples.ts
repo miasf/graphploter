@@ -228,7 +228,7 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         items: [{ latex: 'y=\\int_{0}^{x}e^{-t^{2}}\\,dt', options: { color: '#2d70b3' } }],
       },
       {
-        label: '線積分 ∮ F⃗ · dr（らせん。スライダーで t を進める）',
+        label: '線積分 ∮ 𝐅 · d𝐫（らせん。スライダーで t を進める）',
         items: [
           { latex: '\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,1\\right)', options: { color: '#6042a6', opacity: 0.8 } },
           { latex: '\\oint_{\\left\\{\\left(3\\cos t,3\\sin t,t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\vec{F}\\cdot d\\mathbf{r}', options: { color: '#388c46' } },
@@ -236,7 +236,7 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         integral: 0.3,
       },
       {
-        label: '流束 ∬ F⃗ · dS とガウスの定理 ∭ ∇ · F⃗ dV（球）',
+        label: '流束 ∬ 𝐅 · d𝐒 とガウスの定理 ∭ ∇ · 𝐅 dV（球）',
         items: [
           { latex: '\\vec{G}\\left(x,y,z\\right)=\\left(x,y,z\\right)', options: { color: '#6042a6', opacity: 0.8 } },
           {

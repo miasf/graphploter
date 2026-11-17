@@ -509,8 +509,14 @@ pub fn def_line() -> Option<String> {
 pub fn def_line_label() -> Option<String> {
     DEF_LINE.with(|d| {
         d.borrow().as_ref().map(|(name, drawn)| {
-            // ベクトルの名前 vec_F は、F⃗ と出す
-            let name = name.strip_prefix("vec_").map_or_else(|| name.clone(), |v| format!("{v}\u{20d7}"));
+            // ベクトルの名前 vec_F は、太字の 𝐅 と出す（矢印を重ねる文字は、字体によって □ になる）
+            let name = match name.strip_prefix("vec_").map(|v| v.chars().collect::<Vec<_>>()).as_deref() {
+                Some([c]) if c.is_ascii_alphabetic() => {
+                    let base = if c.is_ascii_lowercase() { 0x1d41a - 'a' as u32 } else { 0x1d400 - 'A' as u32 };
+                    char::from_u32(base + *c as u32).map_or_else(|| name.clone(), String::from)
+                }
+                _ => name.clone(),
+            };
             match drawn {
                 Some(l) => format!("{name} の定義（{l}）"),
                 None => format!("{name} の定義"),

@@ -1452,9 +1452,9 @@ const between = (lo: Token[], hi: Token[], s: number): string => {
   return `\\left(${a}\\right)+${numTex(s)}\\left(\\left(${b}\\right)-\\left(${a}\\right)\\right)`
 }
 
-/** 被積分関数がベクトル場の演算（∇ · F⃗）なら、その場 F⃗（矢印で添える）。ベクトル場の積分なら中身そのもの */
+/** 被積分関数がベクトル場の演算（∇ · 𝐅）なら、その場 𝐅（矢印で添える）。ベクトル場の積分なら中身そのもの */
 function fieldOf(body: Token[], vector: boolean): Token[] | null {
-  // 定義した場の名前だけ（F・F⃗）なら、定義の行がもう矢印を描いているので、重ねない
+  // 定義した場の名前だけ（F・𝐅）なら、定義の行がもう矢印を描いているので、重ねない
   const nameOnly = (ts: Token[]) =>
     (ts.length === 1 && /^[A-Za-z]$/.test(ts[0])) || (ts.length === 4 && ['\\vec', '\\mathbf', '\\boldsymbol', '\\mathbb'].includes(ts[0]) && ts[1] === '{' && ts[3] === '}')
   if (vector) return nameOnly(body) ? null : body
@@ -1613,8 +1613,8 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
   }
   const s = free.shift() ?? 't'
   const r = paren(comps.map(joinToks).join(','))
-  /** 被積分関数の、点 r での値（\left. 中身 \right|_{x = …}。∇ × F⃗ のように、展開してから点を入れる） */
-  // 中身が名前だけ（定義した F・F⃗）か、∇ のように展開してはじめて x, y, z が出てくる式なら、点での値の形にする。
+  /** 被積分関数の、点 r での値（\left. 中身 \right|_{x = …}。∇ × 𝐅 のように、展開してから点を入れる） */
+  // 中身が名前だけ（定義した F・𝐅）か、∇ のように展開してはじめて x, y, z が出てくる式なら、点での値の形にする。
   // それ以外は、中身の x, y, z に点の成分を直接入れる
   const opaque = body.some((t) => t === '\\nabla' || t === '\\vec' || t === '\\mathbf' || t === '\\boldsymbol' || t === '\\mathbb' || t === '\\operatorname') || (body.length === 1 && /^[A-Za-z]$/.test(body[0]))
   const valueAt = (pt: string[]) =>

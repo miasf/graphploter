@@ -352,7 +352,7 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   const oki = inl !== null && !('error' in inl) ? inl : null
   check('直書きの経路', oki && latexToText(oki.extras!.find((e) => e.role === 'path')!.latex), '⦃(2 cos t, sin t)∣0<=t<=2 pi⦄')
   check('1 変数の区間', (() => { const v = integralDisplay('\\int_{0}^{2}t^2\\,dt'); return v && !('error' in v) ? latexToText(v.extras![0].latex) : null })(), '⦃(x,y,z)∣0<=x<=2,y=0,z=0⦄')
-  // ∇ · F⃗ の体積分（媒介変数 3 つ）: 立体を描く
+  // ∇ · 𝐅 の体積分（媒介変数 3 つ）: 立体を描く
   setRegions({ W: '\\left\\{\\left(r\\cos v,r\\sin v,h\\right)\\mid0\\le r\\le2,0\\le v\\le2\\pi,0\\le h\\le1\\right\\}' })
   const w = integralDisplay('\\iiint_{W}\\nabla\\cdot\\left(x,y,z\\right)\\,dV', 0.5)
   const okw = w !== null && !('error' in w) ? w : null

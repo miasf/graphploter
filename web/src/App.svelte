@@ -1137,17 +1137,18 @@
       // 図を出すときに非表示にした式だけを表示に戻す（もとから非表示だった式は、非表示のまま）
       if (source && hiddenForIntegral.has(source.id) && !source.visible) toggle(source)
       if (source) hiddenForIntegral.delete(source.id)
-      // 添えて描いていた矢印・点も消す
-      if (source) {
-        for (const x of integralExtras(source)) removeItem(x)
-        playingIntegral = playingIntegral.filter((x) => x !== source.id)
-      }
+      // 添えて描いていた矢印・点も消す（元の式がもう一覧から消えていても、番号で探す）
+      for (const x of items.filter((it) => it.integralOf === item.integralOf && it.integralRole !== undefined)) removeItem(x)
+      playingIntegral = playingIntegral.filter((x) => x !== item.integralOf)
     }
     if (!isAux(item)) {
       pruneRegionItems()
-      // この式の積分を描いていたら、一緒に消す
-      const view = integralItem(item)
-      if (view) removeItem(view)
+      // この式の積分を描いていたら、図と、添えて描いていた矢印・点を全部消す
+      for (const x of items.filter((it) => it.integralOf === item.id)) removeItem(x)
+    }
+    // 念のため: 元の式が無くなった積分の図・矢印・点が残っていれば消す（どの道で消えても、グラフに残さない）
+    for (const x of items.filter((it) => it.integralOf !== undefined && !items.some((s) => s.id === it.integralOf))) {
+      removeItem(x)
     }
   }
 
