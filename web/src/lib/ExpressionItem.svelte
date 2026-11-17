@@ -9,7 +9,7 @@
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
   import { gpuByDefault } from './renderMode'
 
   interface Props {
@@ -30,9 +30,13 @@
     /** 範囲の欄の「表示」ボタン（描く・消すを切り替える） */
     onRegionShow: (name: string) => void
     /** この式の積分を描いていれば、その色・説明・誤り（描いていなければ undefined） */
-    integralView?: { color: string; note?: string; error?: string }
+    integralView?: IntegralViewInfo
     /** 「積分を描く」ボタン（描く・消すを切り替える） */
     onIntegralShow: () => void
+    /** 積分の図の進み具合（0〜1）を変えた */
+    onIntegralProgress: (v: number) => void
+    /** 進み具合の再生・停止 */
+    onIntegralPlay: () => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -126,6 +130,8 @@
     onRegionShow,
     integralView,
     onIntegralShow,
+    onIntegralProgress,
+    onIntegralPlay,
     onColor,
     onGrid,
     onOpacity,
@@ -400,6 +406,12 @@
   function setDivision(axis: 'u' | 'v' | 'w', n: number) {
     onGrid(isSheets ? { ...item.grid, u: n, v: n } : { ...item.grid, [axis]: n })
   }
+
+  /** 進み具合で動かす変数の名前（\\theta などの LaTeX の名前も、θ のように出す） */
+  const sweepName = (n: string) => prettyName(n.replace(/^\\(var)?/, ''))
+
+  /** 積分の値を短く出す（有効 6 桁） */
+  const formatValue = (v: number) => (Math.abs(v) < 1e-12 ? '0' : Number(v.toPrecision(6)).toString().replace('-', '−'))
 </script>
 
 <li class="item" class:has-error={!!item.error} class:dragging class:in-folder={!!item.folder} data-item-id={item.id}>
@@ -516,6 +528,47 @@
           <span class="integral-note">{integralView.note}</span>
         {/if}
       </div>
+      {#if integralView && !integralView.error && integralView.sweep}
+        <!-- 進み具合: 積分の範囲を、下の端から途中までにする（学習用。値は途中までの積分） -->
+        <div class="integral-sweep">
+          <span class="sweep-name" title="積分の範囲の、この変数を下の端から動かす">{sweepName(integralView.sweep)}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.005"
+            value={integralView.progress}
+            aria-label="積分の図の進み具合（{integralView.sweep} の範囲の何割まで）"
+            oninput={(e) => onIntegralProgress(e.currentTarget.valueAsNumber)}
+          />
+          <span class="sweep-pct">{Math.round(integralView.progress * 100)}%</span>
+          <button
+            class="sweep-play"
+            class:on={integralView.playing}
+            onclick={onIntegralPlay}
+            aria-label={integralView.playing ? '止める' : '0 から再生する'}
+            title={integralView.playing ? '止める' : '0 から 1 まで動かす'}>{integralView.playing ? '❚❚' : '▶'}</button
+          >
+        </div>
+        <div class="integral-value">
+          {#if integralView.progress >= 1}
+            範囲全体（{sweepName(integralView.sweep)} を動かすと、途中までの積分の値と図が出ます）
+          {:else if integralView.valueError}
+            途中までの値: 計算できません（{integralView.valueError}）
+          {:else if integralView.value !== undefined}
+            途中までの積分 = <b>{formatValue(integralView.value)}</b>
+          {:else}
+            途中までの積分を計算中…
+          {/if}
+        </div>
+      {/if}
+      {#if integralView && integralView.legend.length > 0}
+        <div class="integral-legend">
+          {#each integralView.legend as l (l.label)}
+            <span class="legend-item" title={l.error ?? l.label}><i style:background={l.color}></i>{l.label}{l.error ? '（描けません）' : ''}</span>
+          {/each}
+        </div>
+      {/if}
     {/if}
     {#if hidden.mode === 'slice' || hidden.mode === 'field' || hidden.mode === 'fog'}
       <!-- この式だけの断面の値（決めた座標だけ。× で次元の設定の値に戻す） -->
@@ -1364,6 +1417,64 @@
   }
   .integral .region-error {
     margin-top: 0;
+  }
+  .integral-sweep {
+    display: grid;
+    grid-template-columns: auto 1fr 3em auto;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .integral-sweep input {
+    width: 100%;
+    min-width: 0;
+  }
+  .sweep-name {
+    font: italic 15px 'Times New Roman', serif;
+  }
+  .sweep-pct {
+    font: 12px var(--mono);
+    color: var(--muted);
+    text-align: right;
+  }
+  .sweep-play {
+    width: 26px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--muted);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .sweep-play.on {
+    background: #2d70b3;
+    border-color: #2d70b3;
+    color: #fff;
+  }
+  .integral-value {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .integral-value b {
+    color: var(--text);
+    font: 13px var(--mono);
+  }
+  .integral-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .legend-item i {
+    display: inline-block;
+    width: 10px;
+    height: 3px;
+    margin-right: 4px;
+    vertical-align: middle;
+    border-radius: 2px;
   }
   .integral-note {
     color: var(--muted);

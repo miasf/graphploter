@@ -163,6 +163,11 @@ export interface CoordSystem {
   names?: [string, string, string]
   /** 作る範囲（座標の値の範囲。LaTeX。2\pi なども書ける）。x, y, z の順 */
   ranges: [[string, string], [string, string], [string, string]]
+  /**
+   * 座標ごとに、作る範囲を表示範囲に合わせるか（無い古い保存データは合わせない）。合わせる座標は、表示範囲を変えると追従する
+   * （coords.ts の effectiveRanges）。ranges は、合わせるのをやめたときに戻る値
+   */
+  follow?: [boolean, boolean, boolean]
   /** 移行のスライダー（0〜1） */
   morph: number
   /**
@@ -243,6 +248,15 @@ export interface PlotItem extends PlotStyle {
   regionName?: string
   /** 積分を描くための行（被積分関数を、積分する範囲の上に描く）なら、元の式の id。式の一覧には出さず、保存もしない */
   integralOf?: number
+  /**
+   * 積分を描くための行のうち、添えて描くもの（ベクトル場の矢印・今の点・接線・法線・場の向きと成分）なら、その役。
+   * 積分の図そのものの行は undefined
+   */
+  integralRole?: 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
+  /** 積分を描くための行: 進み具合のスライダーで動かす積分の変数（無ければスライダーを出さない） */
+  auxSweep?: string
+  /** 積分の式（元の式）の、図の進み具合（0〜1。積分の範囲を下の端から途中までにする。無ければ 1）。保存しない */
+  integralProgress?: number
   /** 積分を描くための行: 何を描いているかの説明（描けない形なら、その理由を auxError に入れる） */
   auxNote?: string
   auxError?: string
@@ -289,6 +303,23 @@ export interface PlotItem extends PlotStyle {
   def?: string
   /** この式が使った定義の名前（定義の行が変わったら計算し直す。保存しなくてよい） */
   usedDefs?: string[]
+}
+
+/** 式の下に出す、積分の図の様子（App が作り、ExpressionItem が出す） */
+export interface IntegralViewInfo {
+  color: string
+  note?: string
+  error?: string
+  /** 進み具合のスライダーで動かす変数（無ければスライダーを出さない） */
+  sweep?: string
+  /** 進み具合（0〜1） */
+  progress: number
+  playing: boolean
+  /** 進み具合までの積分の値（進み具合が 1 なら無い） */
+  value?: number
+  valueError?: string
+  /** 添えて描いているもの（色と説明） */
+  legend: { color: string; label: string; error?: string }[]
 }
 
 /** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */

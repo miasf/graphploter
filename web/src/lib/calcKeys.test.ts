@@ -1,6 +1,6 @@
 // calcKeys.ts のテスト。実行: npm test
 // 「∑∫∈」のタブの全部のキーの雛形が、空欄を埋めると計算エンジン用の式に変換できること（「まだ使えません」にならないこと）
-import { CALC_PAGES } from './calcKeys.ts'
+import { CALC_PAGES, MATRIX_ROWS } from './calcKeys.ts'
 import { latexToText, setRegions } from './latex.ts'
 
 // 名前で書いた積分の範囲（∬_D など）の、範囲の欄の中身
@@ -12,7 +12,7 @@ setRegions({
 })
 
 let failures = 0
-for (const page of CALC_PAGES) {
+for (const page of [...CALC_PAGES, { title: '行列', rows: MATRIX_ROWS }]) {
   for (const row of page.rows) {
     for (const k of row) {
       // 空欄と、選んでいた部分（#0・#@）を埋める

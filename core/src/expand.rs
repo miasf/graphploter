@@ -582,7 +582,7 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
     let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
     let out = match x.val(e)? {
         Val::S(s) => s,
-        Val::Fn { .. } => return Err(fn_as_value_error(e)),
+        Val::Fn { arity, body } => field_at_xyz(arity, &body).ok_or_else(|| fn_as_value_error(e))?,
     };
     if out.node_count() > MAX_NODES {
         return Err("式が大きくなりすぎます（関数の入れ子・Σ の項の数を減らしてください）".into());
@@ -611,6 +611,14 @@ fn mentions_defs(e: &Expr) -> bool {
     let mut vs = Vec::new();
     e.collect_vars(&mut vs);
     vs.iter().any(|v| defs.get(v).is_some() || split_subscript(v).is_some_and(|(h, _)| defs.get(h).is_some() || defs.seq(h).is_some()))
+}
+
+/**
+ * 値が組（ベクトル）の関数 F⃗(x, y, z) = (…) を、名前だけで書いた所: 座標 x, y, z に当てはめたベクトル場にする
+ * （`F⃗` だけの行は矢印の場、`F⃗ · (1, 0, 0)` は場の成分）。値がスカラーの関数は、今までどおり引数を書いてもらう
+ */
+fn field_at_xyz(arity: usize, body: &Expr) -> Option<Expr> {
+    (arity <= 3 && matches!(body, Expr::Tuple(_))).then(|| apply_body(body, &["x", "y", "z"][..arity].iter().map(|c| Expr::Var((*c).into())).collect::<Vec<_>>()))
 }
 
 fn fn_as_value_error(e: &Expr) -> String {
@@ -666,7 +674,7 @@ impl Expander<'_> {
     fn scalar(&mut self, e: &Expr) -> Result<Expr, String> {
         match self.val(e)? {
             Val::S(s) => Ok(s),
-            Val::Fn { .. } => Err(fn_as_value_error(e)),
+            Val::Fn { arity, body } => field_at_xyz(arity, &body).ok_or_else(|| fn_as_value_error(e)),
         }
     }
 
@@ -854,6 +862,25 @@ impl Expander<'_> {
                 }
             }
             Expr::Op { op, args } if matches!(op.as_str(), "grad" | "div" | "rot" | "curl" | "lap") => Val::S(self.vector_operator(op, &args[0])?),
+            // 点での値 `@at(式, x, a, y, b, …)`（LaTeX の \left.式\right|_{x=a, y=b}）: 式を展開してから、変数に値を一度に入れる
+            // （∇ × F⃗ のように、展開してはじめて x, y, z が出てくる式にも効く）
+            Expr::Op { op, args } if op == "at" => {
+                if args.len() < 3 || args.len() % 2 == 0 {
+                    return Err("点での値は、式|_{x = a, y = b} の形で書いてください".into());
+                }
+                let mut names = Vec::new();
+                let mut values = Vec::new();
+                for pair in args[1..].chunks(2) {
+                    let Expr::Var(n) = &pair[0] else { return Err("点での値の、= の左には変数の名前を書いてください".into()) };
+                    names.push(n.clone());
+                    values.push(self.scalar(&pair[1])?);
+                }
+                let body = match self.val(&args[0])? {
+                    Val::S(s) => s,
+                    Val::Fn { arity, body } => field_at_xyz(arity, &body).ok_or_else(|| fn_as_value_error(&args[0]))?,
+                };
+                Val::S(body.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone())))
+            }
             Expr::Op { op, args } if op == "compose" => {
                 let (f, g) = (self.val(&args[0])?, self.val(&args[1])?);
                 match (f, g) {

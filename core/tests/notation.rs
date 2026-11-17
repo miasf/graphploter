@@ -1176,3 +1176,41 @@ fn indexed_max() {
     // ふつうの max(a, b) は今までどおり
     assert!(max_diff("z = max(x, y)", "z = (x + y + abs(x - y)) / 2", "") < 1e-9);
 }
+
+/// tr A・det A だけの行は、値を説明に出す（図形は高さがその値の平面）
+#[test]
+fn trace_line_shows_value() {
+    let defs = "A=⟦1,2;3,4⟧";
+    assert!(run("@tr(A)", defs, &[]).unwrap().kind().starts_with("tr = 5"));
+    assert!(run("@rank(A)", defs, &[]).unwrap().kind().starts_with("rank = 2"));
+}
+
+/// ベクトルの名前 F⃗（`{vec_F}`）でベクトル場を定義して、線積分・面積分・体積分・発散に使う
+#[test]
+fn vector_named_field_in_integrals() {
+    let defs = "{vec_F} (x,y,z)=(-y,x,0)\n{vec_G} (x,y,z)=(x,y,z)";
+    let pi = std::f64::consts::PI;
+    // 仕事: 単位円を 1 周 → 2π（点を入れる形と、名前だけの形）
+    assert!((value_with("@intset(( cos t, sin t,0),0<=t<=2 pi; {vec})({vec_F})", defs) - 2.0 * pi).abs() < 1e-9);
+    assert!((value_with("@intset(( cos t, sin t,0),0<=t<=2 pi; {vec})({vec_F} (x,y,z))", defs) - 2.0 * pi).abs() < 1e-9);
+    // 流束: 単位球面を通る G = r の流束は 4π
+    let sphere = "@intset(( sin u cos v, sin u sin v, cos u),0<=u<=pi,0<=v<=2 pi; {vec})({vec_G})";
+    assert!((value_with(sphere, defs) - 4.0 * pi).abs() < 1e-6, "{}", value_with(sphere, defs));
+    // 体積分: ∭ ∇·G dV（単位球）= 3 · 4π/3 = 4π（ガウスの定理と同じ値）
+    let ball = "@intset((r sin u cos v,r sin u sin v,r cos u),0<=r<=1,0<=u<=pi,0<=v<=2 pi)(@div {vec_G})";
+    assert!((value_with(ball, defs) - 4.0 * pi).abs() < 1e-6, "{}", value_with(ball, defs));
+    // 定義の行と名前だけの行は、矢印の場
+    assert_eq!(error_of("{vec_F}", defs), "");
+    assert_eq!(error_of("{vec_F} (x,y,z)", defs), "");
+}
+
+/// 点での値 @at(式, x, a, …): ∇ × F⃗ のように、展開してから値を入れる
+#[test]
+fn value_at_point() {
+    let defs = "{vec_F} (x,y,z)=(-y,x,0)";
+    assert_eq!(value_with("@at(x^2 y, x, 2, y, 3)", ""), 12.0);
+    // ∇ × (−y, x, 0) = (0, 0, 2)
+    assert_eq!(value_with("@at(@rot {vec_F}, x, 1, y, 2, z, 3) · (0,0,1)", defs), 2.0);
+    // F⃗ を点で: (−2, 1, 0)
+    assert_eq!(value_with("@at({vec_F}, x, 1, y, 2, z, 0) · (1,0,0)", defs), -2.0);
+}

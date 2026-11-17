@@ -3,7 +3,7 @@
 import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
 import { coordName, latexName, prettyName } from './params'
 import { COMMON_SYMBOLS, SYMBOL_PAGES, type SymbolKey } from './keyboardSymbols'
-import { CALC_PAGES } from './calcKeys'
+import { CALC_PAGES, MATRIX_ROWS } from './calcKeys'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
 // 相対パスだとスクリプトの場所が基準になってしまうので、ページの URL を基準にした絶対 URL にする
@@ -248,6 +248,25 @@ const CALC_LAYOUT = {
   }),
 }
 
+/** 行列のタブ: 行列・ベクトルの雛形と、det・tr などの演算（calcKeys.ts の MATRIX_ROWS） */
+const MATRIX_LAYOUT = {
+  label: '行列',
+  tooltip: '行列・ベクトル（雛形・det・tr・転置・逆行列・ベクトルの名前）',
+  rows: [
+    ...MATRIX_ROWS.map((r) => r.map((k) => ({ ...k }) as Partial<VirtualKeyboardKeycap>)),
+    [
+      { label: '[left]', width: 1 },
+      { label: '[right]', width: 1 },
+      '[hide-keyboard]',
+      { label: '[return]', width: 1 },
+      '[separator-5]',
+      { latex: ',', tooltip: 'カンマ（行列の中では、右に列を足す）' },
+      { latex: '=', tooltip: '等号' },
+      { label: '[backspace]', width: 1 },
+    ] as (string | Partial<VirtualKeyboardKeycap>)[],
+  ],
+}
+
 /** abc タブのキー（keyboardSymbols.ts の書き方 → MathLive のキー） */
 function symbolKey(k: SymbolKey): Partial<VirtualKeyboardKeycap> {
   if (typeof k === 'string') return { latex: k, tooltip: k }
@@ -370,6 +389,11 @@ function keyAt(target: EventTarget | null): { key: HTMLElement; name: string } |
   return name ? { key, name } : null
 }
 
+/** 長押しで出る、別の候補の欄（出ていなければ null） */
+function variantPanel(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.MLK__variant-panel.is-visible')
+}
+
 /** カーソルを当ててから、名前を出すまでの時間（ミリ秒） */
 const HOVER_MS = 600
 /** 長押しとみなすまでの時間（ミリ秒） */
@@ -382,15 +406,27 @@ function setupKeyTips() {
   bubble.hidden = true
   document.body.append(bubble)
 
-  /** キーの上に名前を出す（画面からはみ出さないように左右を寄せる） */
+  /**
+   * キーの上に名前を出す（画面からはみ出さないように左右を寄せる）。長押しで別の候補（MathLive の候補の欄）が出ているときは、
+   * 候補と重ならないように、候補の欄の上に出す（上に場所が無ければ、候補の欄の横）
+   */
   function show(key: HTMLElement, name: string) {
     bubble.textContent = name
     bubble.hidden = false
-    const r = key.getBoundingClientRect()
+    const panel = variantPanel()
+    const r = (panel ?? key).getBoundingClientRect()
     const w = bubble.offsetWidth
-    const left = Math.min(Math.max(r.left + r.width / 2 - w / 2, 4), window.innerWidth - w - 4)
+    const h = bubble.offsetHeight
+    let left = Math.min(Math.max(r.left + r.width / 2 - w / 2, 4), window.innerWidth - w - 4)
+    let top = r.top - h - 6
+    if (top < 4 && panel) {
+      // 上に場所が無い: 候補の欄の右か左（広いほう）に、縦は欄の真ん中
+      const right = window.innerWidth - r.right
+      left = right >= r.left ? Math.min(r.right + 6, window.innerWidth - w - 4) : Math.max(r.left - w - 6, 4)
+      top = r.top + r.height / 2 - h / 2
+    }
     bubble.style.left = `${left}px`
-    bubble.style.top = `${Math.max(r.top - bubble.offsetHeight - 6, 4)}px`
+    bubble.style.top = `${Math.max(top, 4)}px`
   }
   const hide = () => {
     bubble.hidden = true
@@ -448,10 +484,35 @@ function setupKeyTips() {
     },
     true,
   )
+  // 候補の欄が出ている間: 指でなぞった候補を明るくする（指を離すと、その候補を MathLive が入力する）
+  document.addEventListener(
+    'pointermove',
+    (e) => {
+      if (e.pointerType === 'mouse') return
+      const panel = variantPanel()
+      if (!panel) return
+      const under = document.elementFromPoint(e.clientX, e.clientY)?.closest('.MLK__variant-panel .item')
+      panel.querySelectorAll('.item').forEach((it) => it.classList.toggle('is-active', it === under))
+    },
+    true,
+  )
   const release = (e: PointerEvent) => {
     if (e.pointerType === 'mouse') return
     clearTimeout(timer)
     start = null
+    // 候補の欄が出ている（別の候補のあるキーの長押し）: 指を離した所の候補を入力する。候補の外で離したら何も入れない
+    // （どちらも MathLive に任せるので、ここで止めない）
+    const panel = variantPanel()
+    if (panel) {
+      const under = document.elementFromPoint(e.clientX, e.clientY)?.closest('.MLK__variant-panel .item')
+      if (e.type === 'pointerup' && under && e.target !== under && !under.contains(e.target as Node)) {
+        // 指の下の候補に、指を離したことを知らせる（押した所のキーに離した知らせが届く端末のため）
+        under.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: e.pointerType, pointerId: e.pointerId }))
+      }
+      shown = false
+      hide()
+      return
+    }
     if (!shown) return
     shown = false
     hide()
@@ -492,8 +553,13 @@ function variablesLayout(dims: number) {
         ...numbered,
       ],
       [
-        { latex: '(', tooltip: '左かっこ' },
-        { latex: ')', tooltip: '右かっこ' },
+        { latex: '(', tooltip: '左かっこ（長押しで { } [ ] ⟨ ⟩）', variants: [
+            { latex: '\\left\\{#0\\right\\}', label: '{ }' },
+            { latex: '\\left[#0\\right]', label: '[ ]' },
+            { latex: '\\left\\langle#0\\right\\rangle', label: '⟨ ⟩' },
+            { latex: '\\left\\{#0\\mid#?\\right\\}', label: '{ | }' },
+          ] },
+        { latex: ')', tooltip: '右かっこ（長押しで } ]）', variants: [{ latex: '\\}', label: '}' }, { latex: ']', label: ']' }] },
         { latex: ',', tooltip: 'カンマ（成分の区切り）' },
         { latex: '=', tooltip: '等号。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
         { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（文字の後ろに数字を打っても添字になる）' },
@@ -564,13 +630,23 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           { latex: '\\frac{#@}{#?}', label: '÷', tooltip: '割り算（分数）' },
         ],
         [
-          { latex: '(', tooltip: '左かっこ' },
-          { latex: ')', tooltip: '右かっこ' },
+          { latex: '(', tooltip: '左かっこ（長押しで { } [ ] ⟨ ⟩）', variants: [
+            { latex: '\\left\\{#0\\right\\}', label: '{ }' },
+            { latex: '\\left[#0\\right]', label: '[ ]' },
+            { latex: '\\left\\langle#0\\right\\rangle', label: '⟨ ⟩' },
+            { latex: '\\left\\{#0\\mid#?\\right\\}', label: '{ | }' },
+          ] },
+          { latex: ')', tooltip: '右かっこ（長押しで } ]）', variants: [{ latex: '\\}', label: '}' }, { latex: ']', label: ']' }] },
           { latex: ',', tooltip: 'カンマ（引数・成分の区切り）' },
           { latex: '\\pi', tooltip: '円周率 π' },
           { latex: '\\imaginaryI', label: 'i', tooltip: '虚数単位 i' },
           { latex: 'e', tooltip: 'ネイピア数 e' },
-          { latex: '#@_{#?}', label: 'x₂', tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）' },
+          {
+            latex: '#@_{#?}',
+            label: 'x₂',
+            tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前 F⃗ に',
+            variants: [{ latex: '\\vec{#@}', label: 'v⃗' }],
+          },
           '[separator-5]',
           '4',
           '5',
@@ -583,8 +659,12 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           { latex: '\\sqrt{#0}', label: '√', tooltip: '平方根' },
           { latex: '\\left|#0\\right|', label: '|x|', tooltip: '絶対値' },
           { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
-          { latex: 'f', tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h）', variants: ['f\\left(x\\right)', 'h'] },
-          { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)）', variants: ['g\\left(x\\right)'] },
+          {
+            latex: 'f',
+            tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場 F⃗）',
+            variants: ['f\\left(x\\right)', 'h', '\\vec{F}', { latex: '\\vec{F}\\left(x,y,z\\right)', label: 'F⃗(x,y,z)' }],
+          },
+          { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)・G⃗）', variants: ['g\\left(x\\right)', '\\vec{G}'] },
           '[separator-5]',
           '1',
           '2',
@@ -640,6 +720,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
       ],
     },
     CALC_LAYOUT,
+    MATRIX_LAYOUT,
     SPECIAL_LAYOUT,
     ABC_LAYOUT,
   ]
