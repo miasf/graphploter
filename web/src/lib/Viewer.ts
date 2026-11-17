@@ -12,7 +12,7 @@ import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQua
 import { gpu2dMaterial, gpu2dMesh, setGpu2dUniforms, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
 import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
-import { COLORMAP_INDEX, colormapColor, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
+import { COLORMAP_INDEX, colormapColor, valueT, logRange, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
@@ -1975,7 +1975,11 @@ export class Viewer {
   private applyValueRange(grid: GridUniforms, mesh: MeshData) {
     const vr = mesh.valueRange
     grid.uValue.value = vr ? 1 : 0
-    if (vr) grid.uValueRange.value.set(vr[0], vr[1])
+    if (vr) {
+      grid.uValueRange.value.set(vr[0], vr[1])
+      const lr = logRange(vr, mesh.complexValues)
+      grid.uValueLogRange.value.set(lr[0], lr[1])
+    }
     grid.uComplex.value = !vr && mesh.complexValues.length > 0 ? 1 : 0
   }
 
@@ -2153,20 +2157,22 @@ export class Viewer {
    */
   private setCurveValues(line: LineSegments2, mesh: MeshData) {
     const vr = mesh.valueRange
-    line.userData.values = vr && mesh.complexValues.length === mesh.positions.length ? { pts: mesh.positions, v: mesh.complexValues, range: vr } : null
+    line.userData.values =
+      vr && mesh.complexValues.length === mesh.positions.length ? { pts: mesh.positions, v: mesh.complexValues, range: vr, logRange: logRange(vr, mesh.complexValues) } : null
   }
 
   /** 値で色を付ける曲線なら、線分の両端の色を塗る（色の対応表・式の色が変わったときも塗り直す） */
   private colorCurve(line: LineSegments2, style: PlotStyle, which: keyof typeof COLORMAP_INDEX = style.hidden?.colormap ?? 'viridis'): boolean {
-    const d = line.userData.values as { pts: Float32Array; v: Float32Array; range: [number, number] } | null
+    const d = line.userData.values as { pts: Float32Array; v: Float32Array; range: [number, number]; logRange?: [number, number] } | null
     const m = line.material as LineMaterial
     if (!d) {
       m.vertexColors = false
       return false
     }
-    const { pts, v, range } = d
+    const log = style.hidden?.log === true && d.logRange !== undefined
+    const range = log ? d.logRange! : d.range
+    const { pts, v } = d
     const ok = (k: number) => Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2])
-    const span = range[1] - range[0]
     const base = new THREE.Color(style.color)
     const tmp = new THREE.Color()
     const cols: number[] = []
@@ -2174,7 +2180,7 @@ export class Viewer {
     for (let k = 0; k + 5 < pts.length; k += 3) {
       if (!(ok(k) && ok(k + 3))) continue
       for (const q of [k, k + 3]) {
-        colormapColor(span > 0 ? (v[q] - range[0]) / span : 0.5, which, base, tmp)
+        colormapColor(valueT(v[q], range, log), which, base, tmp)
         cols.push(tmp.r, tmp.g, tmp.b)
       }
     }
@@ -2222,6 +2228,7 @@ export class Viewer {
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
     p.grid.uColormap.value = COLORMAP_INDEX[p.vivid ? 'vivid' : (style.hidden?.colormap ?? 'viridis')]
+    p.grid.uValueLog.value = style.hidden?.log ? 1 : 0
     if (p.volume) applyVolumeStyle(p.volume.u, style.hidden, c, style.opacity)
     // 境目の線は、面の不透明度によらず式の色のまま。値のある線（ベクトル場の流線）は、矢印と同じ色の対応表で塗る
     for (const l of p.outlines) (l.material as LineMaterial).color.copy(this.colorCurve(l, style, p.vivid ? 'vivid' : undefined) ? new THREE.Color(1, 1, 1) : c)
