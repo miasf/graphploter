@@ -26,6 +26,8 @@ export interface Sample {
    * 座標系で描く例（計画 9 章）。追加する式を、この座標系（用意した座標系。同じものがあれば使い回す）で描く。
    * morph は移行のスライダーの値、play なら移行を再生する、flat なら 2D 表示にする
    */
+  /** 追加したら、積分のある式の「∫ 積分を描く」を押して、進み具合をこの値（0〜1）にする */
+  integral?: number
   coord?: { preset: CoordPreset; morph: number; play?: boolean; flat?: boolean; ranges?: [[string, string], [string, string], [string, string]] }
 }
 
@@ -224,6 +226,35 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
       {
         label: '定積分で定義した関数 ∫₀ˣ e^(−t²) dt',
         items: [{ latex: 'y=\\int_{0}^{x}e^{-t^{2}}\\,dt', options: { color: '#2d70b3' } }],
+      },
+      {
+        label: '線積分 ∮ F⃗ · dr（らせん。スライダーで t を進める）',
+        items: [
+          { latex: '\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,1\\right)', options: { color: '#6042a6', opacity: 0.8 } },
+          { latex: '\\oint_{\\left\\{\\left(3\\cos t,3\\sin t,t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\vec{F}\\cdot d\\mathbf{r}', options: { color: '#388c46' } },
+        ],
+        integral: 0.3,
+      },
+      {
+        label: '流束 ∬ F⃗ · dS とガウスの定理 ∭ ∇ · F⃗ dV（球）',
+        items: [
+          { latex: '\\vec{G}\\left(x,y,z\\right)=\\left(x,y,z\\right)', options: { color: '#6042a6', opacity: 0.8 } },
+          {
+            latex: '\\iint_{\\left\\{\\left(3\\sin u\\cos v,3\\sin u\\sin v,3\\cos u\\right)\\mid0\\le u\\le\\pi,0\\le v\\le2\\pi\\right\\}}\\vec{G}\\cdot d\\mathbf{S}',
+            options: { color: '#388c46' },
+          },
+        ],
+        integral: 0.5,
+      },
+      {
+        label: 'スカラー場の線積分 ∫ f ds（平面の曲線の上の幕）',
+        items: [
+          {
+            latex: '\\int_{\\left\\{\\left(4\\cos t,2\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}1+\\frac{x^2}{8}\\,ds',
+            options: { color: '#fa7e19' },
+          },
+        ],
+        integral: 0.4,
       },
       {
         label: '集合 {(x, y, z) | x² + y² ≤ 4, 0 ≤ z ≤ x}',

@@ -46,7 +46,7 @@ const cases: [string, string][] = [
   // 名前に使える文字と、小さな記号（M13）
   ['z=\\alpha x', 'z= {alpha} x'],
   ['\\alpha=1', '{alpha} =1'],
-  ['z=\\hat{x}+\\tilde{\\alpha}+\\mathcal{A}+\\mathbb{K}+\\ell', 'z= {hat_x} + {tilde_alpha} + {cal_A} + {bb_K} + {ell}'],
+  ['z=\\hat{x}+\\tilde{\\alpha}+\\mathcal{A}+\\mathbb{K}+\\ell', 'z= {hat_x} + {tilde_alpha} + {cal_A} + {vec_K} + {ell}'],
   ['z=\\theta+\\beta+\\delta', 'z= theta + {beta} + {delta}'],
   ['x\\equiv1\\pmod{3}', 'mod((x)-(1),3)=0'],
   ['x\\equiv y', 'x=y'],
@@ -321,7 +321,8 @@ const integrals: [string, string | null][] = [
   // 線積分: 曲線の上の幕（媒介変数は u、高さの媒介変数は v）
   ['\\int_{C}x^2\\,ds', '⦃( cos u, sin u,v(( cos u)^(2)))∣0<=u<=2 pi ,0<=v<=1⦄'],
   ['\\oint_{C}\\left(-y,x\\right)\\cdot d\\mathbf{r}', '⦃( cos u, sin u,v((((-( sin u),( cos u)))*( @diff(u) ( cos u, sin u)))/(abs(( @diff(u) ( cos u, sin u))))))∣0<=u<=2 pi ,0<=v<=1⦄'],
-  ['\\int_{H}z\\,ds', 'error: 空間の曲線の上の積分は、'],
+  // 空間の曲線: 曲線に垂直で上を向いた向きに広げた帯
+  ['\\int_{H}1\\,ds', '⦃( cos u, sin u,u)+v((1))((((0,0,1)-((( @diff(u) ( cos u, sin u,u))*(0,0,1))/(( @diff(u) ( cos u, sin u,u))*( @diff(u) ( cos u, sin u,u))))( @diff(u) ( cos u, sin u,u))))/(abs(((0,0,1)-((( @diff(u) ( cos u, sin u,u))*(0,0,1))/(( @diff(u) ( cos u, sin u,u))*( @diff(u) ( cos u, sin u,u))))( @diff(u) ( cos u, sin u,u))))))∣0<=u<=2 pi ,0<=v<=1⦄'],
   // 点を式で書いた平面の領域（極座標）: 高さが被積分関数の立体
   ['\\iint_{P}x^2+y^2\\,dA', '⦃(u cos v,u sin v,t((u cos v)^(2)+(u sin v)^(2)))∣0<=u<=1,0<=v<=2 pi ,0<=t<=1⦄'],
   ['\\iint_{E}xy\\,dA', 'error: E の範囲を、下の欄に書'],
@@ -332,6 +333,27 @@ for (const [latex, want] of integrals) check(`積分を描く式 ${latex}`, draw
 // 面積分: 曲面を、法線の向きに被積分関数の分だけ厚くする
 check('積分を描く式（面積分）', drawn('\\iint_{S}z^2\\,dS')?.startsWith('⦃( sin u cos v, sin u sin v, cos u)+t(( cos u)^(2))((( @diff(u) ( sin u cos v, sin u sin v, cos u))×( @diff(v) '), true)
 check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\cdot d\\mathbf{S}')?.startsWith('⦃( sin u cos v, sin u sin v, cos u)+t(((( sin u cos v),( sin u sin v),( cos u)))*((('), true)
+// 進み具合: 最初の媒介変数の範囲を途中までにし、途中までの積分の式と、今の点・矢印を添える
+{
+  const v = integralDisplay('\\oint_{H}\\vec{F}\\cdot d\\mathbf{r}', 0.5, 2)
+  const ok = v !== null && !('error' in v) ? v : null
+  check('進み具合の変数', ok?.sweep, 't')
+  check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.141593; {vec})({vec_F})')
+  check('添えるもの', ok?.extras?.map((e) => e.role), ['point', 'tangent', 'vector', 'component'])
+  check('今の点', ok && latexToText(ok.extras![0].latex), '( cos (3.141593), sin (3.141593),(3.141593))')
+  // ∇ · F⃗ の体積分（媒介変数 3 つ）: 立体を描く
+  setRegions({ W: '\\left\\{\\left(r\\cos v,r\\sin v,h\\right)\\mid0\\le r\\le2,0\\le v\\le2\\pi,0\\le h\\le1\\right\\}' })
+  const w = integralDisplay('\\iiint_{W}\\nabla\\cdot\\left(x,y,z\\right)\\,dV', 0.5)
+  const okw = w !== null && !('error' in w) ? w : null
+  check('体積分の立体', okw && latexToText(okw.latex), '⦃(u cos v,u sin v,t)∣0<=u<=1,0<=v<=2 pi ,0<=t<=1⦄')
+  check('体積分の場の矢印', okw?.extras?.map((e) => e.role), ['field'])
+}
+// 太字の 1 文字は、ベクトルの名前（\vec と同じ名前）
+check('太字 \\mathbf{F}', latexToText('\\mathbf{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'), latexToText('\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'))
+check('太字 \\boldsymbol{F}', latexToText('\\boldsymbol{F}'), '{vec_F}')
+check('黒板太字 \\mathbb{F}', latexToText('\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le\\pi\\right\\}}\\mathbb{F}\\cdot d\\mathbb{r}'), '@intset(( cos t, sin t),0<=t<= pi; {vec})({vec_F})')
+check('黒板太字の集合はそのまま', latexToText('x\\in\\mathbb{Z}'), 'x∈ℤ')
+check('太字の名前（2 文字以上）はそのまま', latexToText('\\mathbf{Im}'), 'Im')
 setRegions({})
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)

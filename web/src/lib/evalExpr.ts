@@ -2,14 +2,14 @@
 // 表示範囲・回転の中心の数値の欄（2π なども書ける）。ただの数値なら JS で読み、式なら WASM の計算エンジンを使う
 // （WASM は式が初めて出てきたときに読み込む）。
 
-import init, { eval_range } from '../wasm-core/graph_core.js'
+import init, { definitions, eval_range } from '../wasm-core/graph_core.js'
 import { latexToText } from './latex'
 import type { ParamValue } from './types'
 
 let wasm: 'none' | 'loading' | 'ready' = 'none'
 
 /** 式の値。WASM の準備がまだなら null（準備ができたら onReady を呼ぶ） */
-function evaluate(latex: string, params: Record<string, ParamValue>, onReady: () => void): number | null {
+function evaluate(latex: string, params: Record<string, ParamValue>, onReady: () => void, defs = ''): number | null {
   const text = latexToText(latex).trim()
   if (text === '') throw new Error('値を入れてください')
   if (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text)) return Number(text)
@@ -25,6 +25,7 @@ function evaluate(latex: string, params: Record<string, ParamValue>, onReady: ()
   }
   const names = Object.keys(params).join(',')
   const values = new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im]))
+  if (defs !== '') definitions(defs)
   return eval_range(text, names, values)
 }
 
@@ -82,9 +83,11 @@ export function evalValue(
   latex: string,
   params: Record<string, ParamValue>,
   onReady: () => void,
+  /** 定義の行（計算エンジン用の文字列を改行でつないだもの。関数・ベクトル場の定義を使う式のため） */
+  defs = '',
 ): { value: number } | { error: string } | null {
   try {
-    const value = evaluate(latex, params, onReady)
+    const value = evaluate(latex, params, onReady, defs)
     if (value === null) return null
     if (!Number.isFinite(value)) return { error: '値が有限ではありません' }
     return { value }

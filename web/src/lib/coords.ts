@@ -7,10 +7,11 @@ import type { CoordPreset, CoordSystem } from './types'
 /** 用意した座標系の、式（LaTeX。変数は x, y, z）と作る範囲 */
 export const COORD_PRESETS: Record<
   CoordPreset,
-  { name: string; map: CoordSystem['map']; ranges: CoordSystem['ranges']; names: [string, string, string]; note: string }
+  { name: string; map: CoordSystem['map']; ranges: CoordSystem['ranges']; names: [string, string, string]; note: string; follow?: FollowKind[] }
 > = {
   cylinder: {
     name: '円柱座標',
+    follow: ['radius', 'fixed', 'linear'],
     map: ['r\\cos\\theta', 'r\\sin\\theta', 'z'],
     ranges: [['0', '5'], ['0', '2\\pi'], ['-5', '5']],
     names: ['r', 'theta', 'z'],
@@ -18,6 +19,7 @@ export const COORD_PRESETS: Record<
   },
   sphere: {
     name: '球座標',
+    follow: ['radius', 'fixed', 'fixed'],
     map: ['r\\sin\\theta\\cos\\varphi', 'r\\sin\\theta\\sin\\varphi', 'r\\cos\\theta'],
     ranges: [['0', '5'], ['0', '\\pi'], ['0', '2\\pi']],
     names: ['r', 'theta', 'phi'],
@@ -25,6 +27,7 @@ export const COORD_PRESETS: Record<
   },
   ellipticCylinder: {
     name: '楕円柱座標',
+    follow: ['fixed', 'fixed', 'linear'],
     map: ['\\cosh\\mu\\cos\\nu', '\\sinh\\mu\\sin\\nu', 'z'],
     ranges: [['0', '2'], ['0', '2\\pi'], ['-5', '5']],
     names: ['mu', 'nu', 'z'],
@@ -32,6 +35,7 @@ export const COORD_PRESETS: Record<
   },
   parabolicCylinder: {
     name: '放物柱座標',
+    follow: ['fixed', 'fixed', 'linear'],
     map: ['\\frac{\\sigma^2-\\tau^2}{2}', '\\sigma\\tau', 'z'],
     ranges: [['-3', '3'], ['0', '3'], ['-5', '5']],
     names: ['sigma', 'tau', 'z'],
@@ -39,6 +43,7 @@ export const COORD_PRESETS: Record<
   },
   bipolar: {
     name: '双極座標',
+    follow: ['fixed', 'fixed', 'linear'],
     map: ['\\frac{\\sinh\\tau}{\\cosh\\tau-\\cos\\sigma}', '\\frac{\\sin\\sigma}{\\cosh\\tau-\\cos\\sigma}', 'z'],
     ranges: [['0', '2\\pi'], ['-3', '3'], ['-5', '5']],
     names: ['sigma', 'tau', 'z'],
@@ -46,6 +51,7 @@ export const COORD_PRESETS: Record<
   },
   logPolar: {
     name: '対数極座標',
+    follow: ['fixed', 'fixed', 'linear'],
     map: ['e^{\\rho}\\cos\\theta', 'e^{\\rho}\\sin\\theta', 'z'],
     ranges: [['-2', '1.5'], ['0', '2\\pi'], ['-5', '5']],
     names: ['rho', 'theta', 'z'],
@@ -81,6 +87,7 @@ export const COORD_PRESETS: Record<
   },
   twist: {
     name: 'ねじれ座標',
+    follow: ['linear', 'linear', 'linear'],
     map: ['x\\cos\\frac{z}{2}-y\\sin\\frac{z}{2}', 'x\\sin\\frac{z}{2}+y\\cos\\frac{z}{2}', 'z'],
     ranges: [['-3', '3'], ['-3', '3'], ['-5', '5']],
     names: ['x', 'y', 'z'],
@@ -88,11 +95,40 @@ export const COORD_PRESETS: Record<
   },
   custom: {
     name: '自作の座標系',
+    follow: ['linear', 'linear', 'linear'],
     map: ['x', 'y', 'z'],
     ranges: [['-5', '5'], ['-5', '5'], ['-5', '5']],
     names: ['x', 'y', 'z'],
     note: 'x, y, z の式を 3 つ書きます。パラメータも使えます',
   },
+}
+
+/**
+ * 座標の範囲を、表示範囲に合わせる仕方。linear: 表示範囲の同じ軸の最小〜最大、radius: 0〜その軸の端の大きいほう（半径）、
+ * fixed: 合わせない（角度など。書いた範囲のまま）
+ */
+export type FollowKind = 'linear' | 'radius' | 'fixed'
+
+/** 用意した座標系で、表示範囲に合わせる座標（作ったときの初期値） */
+export function presetFollow(preset: CoordPreset): [boolean, boolean, boolean] {
+  const f = COORD_PRESETS[preset].follow ?? ['fixed', 'fixed', 'fixed']
+  return [0, 1, 2].map((k) => f[k] !== 'fixed') as [boolean, boolean, boolean]
+}
+
+/** 数を LaTeX の範囲の欄に書く形（余計な桁を落とす） */
+const num = (v: number) => String(Math.round(v * 1e6) / 1e6)
+
+/**
+ * 描くときに使う範囲: follow の座標は表示範囲（lo・hi はその軸の最小・最大）に合わせ、それ以外は書いた範囲のまま。
+ * 半径の座標（円柱・球座標の r）は 0〜端の大きいほう
+ */
+export function effectiveRanges(sys: CoordSystem, axes: [number, number][]): CoordSystem['ranges'] {
+  const kinds = COORD_PRESETS[sys.preset].follow ?? ['linear', 'linear', 'linear']
+  return sys.ranges.map((r, k) => {
+    if (!sys.follow?.[k]) return [...r]
+    const [lo, hi] = axes[k]
+    return kinds[k] === 'radius' ? ['0', num(Math.max(Math.abs(lo), Math.abs(hi)))] : [num(lo), num(hi)]
+  }) as CoordSystem['ranges']
 }
 
 /**

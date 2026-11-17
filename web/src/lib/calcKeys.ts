@@ -71,7 +71,8 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('∇·F', '\\nabla\\cdot #?', '発散 div'),
         key('∇×F', '\\nabla\\times #?', '回転 rot'),
         key('∇²f', '\\nabla^{2}#?', 'ラプラシアン'),
-        key('F=', 'F\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F(x, y, z) = (P, Q, R)'),
+        key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（F⃗ は f とは別の名前）'),
+        key('∭∇·F', '\\iiint_{V}\\nabla\\cdot #?\\,dV', '体積分 ∭_V ∇ · F dV（立体 V は式の下の欄に {(x(r,u,v), …) | 範囲} で書く。値は V の表面を通る流束と同じ）'),
         key('⊥', '\\perp', '直交 u ⊥ v（u · v = 0）'),
         key('∥', '\\parallel', '平行 u ∥ v（u × v = 0）'),
       ],
@@ -83,7 +84,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('Aᵀ', '#@^{T}', '転置'),
         key('A⁻¹', '#@^{-1}', '逆行列'),
         key('ker', '\\ker', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
-        key('v⃗', '\\vec{#?}', 'ベクトルの名前 \\vec{v}（v とは別の名前）'),
+        key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（v → v⃗。v とは別の名前）'),
       ],
     ],
   },
@@ -147,5 +148,51 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
       ],
     ],
   },
+]
+
+const pm = (rows: number, cols: number, env = 'pmatrix') =>
+  `\\begin{${env}}${Array.from({ length: rows }, () => Array.from({ length: cols }, () => '#?').join(' & ')).join('\\\\ ')}\\end{${env}}`
+
+/**
+ * 「行列」のタブ: 行列・ベクトルの雛形と演算（∑∫∈ の奥まで行かなくても、1 回で開けるように）。
+ * tr・det・rank は、名前の前に付けると値になる（その行だけなら、説明に値が出る）
+ */
+export const MATRIX_ROWS: CalcKey[][] = [
+  [
+    key('(⋮⋮)', pm(2, 2), '2×2 の行列（大きさは、行列の中で出る帯・Enter・カンマで変える）'),
+    key('(⋮⋮⋮)', pm(3, 3), '3×3 の行列'),
+    key('(⋮)₂', pm(2, 1), '2 成分の列ベクトル'),
+    key('(⋮)₃', pm(3, 1), '3 成分の列ベクトル'),
+    key('[⋮⋮]', pm(2, 2, 'bmatrix'), '2×2 の行列（角括弧）'),
+    key('|⋮⋮|', pm(2, 2, 'vmatrix'), '2×2 の行列式（1 行にそれだけなら、列ベクトルが張る平行四辺形）'),
+    key('|⋮⋮⋮|', pm(3, 3, 'vmatrix'), '3×3 の行列式（平行六面体）'),
+    key('A=', 'A=' + pm(2, 2), '行列の定義 A = …（ほかの式で A と書ける）'),
+  ],
+  [
+    key('det', '\\det #?', '行列式 det A（その行だけなら値が出る）'),
+    key('tr', '\\operatorname{tr}#?', 'トレース tr A（対角成分の和。その行だけなら値が出る）'),
+    key('rank', '\\operatorname{rank}#?', '階数 rank A'),
+    key('Aᵀ', '#@^{T}', '転置（直前の行列に付ける）'),
+    key('A⁻¹', '#@^{-1}', '逆行列'),
+    key('Aⁿ', '#@^{#?}', '行列のべき（20 までの整数）'),
+    key('A†', '#@^{\\dagger}', '共役転置'),
+    key('ker', '\\ker #?', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
+  ],
+  [
+    {
+      ...key('v⃗', '\\vec{#@}', '直前の文字をベクトルの名前にする（F → F⃗。F とは別の名前で、定義して積分などに使える。長押しで太字 𝐅・黒板太字 𝔽。F⃗・𝐅・𝔽 は同じ名前）'),
+      variants: ['\\mathbf{#@}', '\\mathbb{#@}'],
+    },
+    {
+      ...key('F⃗=', '\\vec{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', 'ベクトル場の定義 F⃗(x, y, z) = (P, Q, R)（長押しで太字の 𝐅・黒板太字の 𝔽）'),
+      variants: ['\\mathbf{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)', '\\mathbb{F}\\left(x,y,z\\right)=\\left(#?,#?,#?\\right)'],
+    },
+    key('a·b', '\\cdot', '内積・行列の積'),
+    key('a×b', '\\times', '外積'),
+    key('⟨a,b⟩', '\\left\\langle#?,#?\\right\\rangle', '内積 ⟨a, b⟩'),
+    key('‖a‖', '\\left\\Vert#0\\right\\Vert', 'ノルム（大きさ）'),
+    key('Aᵢⱼ', '#@_{#?,#?}', '成分 A_{i,j}'),
+    key('dim', '\\dim #?', '次元 dim ker A など'),
+  ],
 ]
 

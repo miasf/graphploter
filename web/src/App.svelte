@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { hasIntegral, integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
@@ -13,7 +13,7 @@
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import CoordPanel from './lib/CoordPanel.svelte'
-  import { COORD_PRESETS, GREEK_NAMES, engineName } from './lib/coords'
+  import { COORD_PRESETS, GREEK_NAMES, effectiveRanges, engineName, presetFollow } from './lib/coords'
   import SpacePanel from './lib/SpacePanel.svelte'
   import { requestCap, requestCoordGrid, requestPlot } from './lib/plotClient'
   import { lastBreakdown, recordBreakdown } from './lib/timings'
@@ -21,6 +21,7 @@
   import type {
     ComplexMode,
     CoordSystem,
+    IntegralViewInfo,
     CutRequest,
     CutStyle,
     Domain,
@@ -1126,9 +1127,14 @@
     if (item.def) defsChanged([item.def])
     lastDefSource.delete(item.id)
     // 積分の図を消したら、図を出すときに非表示にした元の式（積分だけの式）を表示に戻す
-    if (item.integralOf !== undefined) {
+    if (item.integralOf !== undefined && item.integralRole === undefined) {
       const source = items.find((it) => it.id === item.integralOf)
       if (source && !source.visible && onlyIntegral(source)) toggle(source)
+      // 添えて描いていた矢印・点も消す
+      if (source) {
+        for (const x of integralExtras(source)) removeItem(x)
+        playingIntegral = playingIntegral.filter((x) => x !== source.id)
+      }
     }
     if (!isAux(item)) {
       pruneRegionItems()
@@ -1239,11 +1245,46 @@
 
   // ---- 積分を描く（被積分関数を、積分する範囲の上に描く）----
   /** 式 item の積分を描くための行（描いていなければ undefined） */
-  const integralItem = (item: PlotItem) => items.find((it) => it.integralOf === item.id)
+  const integralItem = (item: PlotItem) => items.find((it) => it.integralOf === item.id && it.integralRole === undefined)
+  /** 式 item の積分の図に添えて描いている行（矢印・点） */
+  const integralExtras = (item: PlotItem) => items.filter((it) => it.integralOf === item.id && it.integralRole !== undefined)
 
-  /** 積分を描くための行 view の中身を、元の式 item から作り直す */
+  /** 添えて描くものの色 */
+  const EXTRA_COLORS: Record<NonNullable<PlotItem['integralRole']>, string> = {
+    field: '#6042a6',
+    point: '#222222',
+    tangent: '#2d70b3',
+    normal: '#2d70b3',
+    vector: '#c74440',
+    component: '#fa7e19',
+  }
+
+  /** 矢印の長さ（表示範囲の一番短い辺の 1/6） */
+  const arrowScale = () => Math.min(domain.xmax - domain.xmin, domain.ymax - domain.ymin, flat ? Infinity : domain.zmax - domain.zmin) / 6
+
+  /** 積分の図の、進み具合までの積分の値（式の id → 値・誤り）。重いので、少し待ってから計算する */
+  let integralValues = $state<Record<number, { partial?: string; value?: number; error?: string }>>({})
+  let integralValueTimer: ReturnType<typeof setTimeout> | undefined
+
+  function updateIntegralValue(item: PlotItem, partial: string | undefined) {
+    clearTimeout(integralValueTimer)
+    if (!partial || (item.integralProgress ?? 1) >= 1) {
+      integralValues[item.id] = {}
+      return
+    }
+    integralValueTimer = setTimeout(() => {
+      const run = () => {
+        const r = evalValue(partial, currentParams(), run, currentDefinitions(item))
+        if (r === null) return
+        integralValues[item.id] = 'error' in r ? { partial, error: r.error } : { partial, value: r.value }
+      }
+      run()
+    }, 120)
+  }
+
+  /** 積分を描くための行 view の中身を、元の式 item から作り直す（添えて描く行も、足す・消す・作り直す） */
   function fillIntegral(view: PlotItem, item: PlotItem) {
-    const d = integralDisplay(item.latex)
+    const d = integralDisplay(item.latex, item.integralProgress ?? 1, arrowScale())
     const failed = d === null ? '積分がありません' : 'error' in d ? d.error : undefined
     const ok = d !== null && !('error' in d) ? d : null
     const field = ok?.field ?? false
@@ -1256,14 +1297,80 @@
       view.hidden = field ? { ...DEFAULT_HIDDEN, mode: 'field', opacity: 'abs', colormap: 'turbo', density: 0.6, lit: true } : { ...DEFAULT_HIDDEN }
       view.opacity = field ? 1 : 0.55
     }
+    view.auxSweep = ok?.sweep
+    updateIntegralValue(item, ok?.partial)
+    // 添えて描くもの
+    const want = ok?.extras ?? []
+    for (const old of integralExtras(item)) {
+      if (!want.some((e) => e.role === old.integralRole)) removeItem(old)
+    }
+    for (const e of want) {
+      let x = integralExtras(item).find((it) => it.integralRole === e.role)
+      const fresh = !x
+      if (!x) {
+        x = newItem('', {
+          integralOf: item.id,
+          integralRole: e.role,
+          vertical: false,
+          color: EXTRA_COLORS[e.role],
+          lineWidth: e.role === 'point' ? 7 : e.role === 'field' ? 3 : 5,
+          opacity: e.role === 'field' ? 0.8 : 1,
+          ranges: { t: ['0', '1'], u: ['0', '1'], v: ['0', '1'] },
+        })
+        items.push(x)
+        x = items[items.length - 1]
+      }
+      x.auxNote = e.label
+      if (x.latex !== e.latex || fresh) {
+        x.latex = e.latex
+        schedule(x, fresh ? 0 : 60)
+      }
+    }
+  }
+
+  /** 積分の図の進み具合を変える（スライダー・再生） */
+  function setIntegralProgress(item: PlotItem, v: number) {
+    item.integralProgress = Math.min(1, Math.max(0, v))
+    updateIntegral(item, 30)
+  }
+
+  /** 進み具合を再生している式の id */
+  let playingIntegral = $state<number[]>([])
+  function togglePlayIntegral(item: PlotItem) {
+    if (playingIntegral.includes(item.id)) {
+      playingIntegral = playingIntegral.filter((x) => x !== item.id)
+      return
+    }
+    if ((item.integralProgress ?? 1) >= 1) setIntegralProgress(item, 0)
+    playingIntegral = [...playingIntegral, item.id]
+    let last = performance.now()
+    let acc = 0
+    const frame = (now: number) => {
+      if (!playingIntegral.includes(item.id) || !items.includes(item)) return
+      const dt = Math.min(0.1, (now - last) / 1000)
+      last = now
+      acc += dt
+      // 計算し直すのは 0.08 秒ごと（毎コマだと追いつかない）
+      if (acc >= 0.08) {
+        const v = Math.min(1, (item.integralProgress ?? 1) + acc / INTEGRAL_PLAY_SECONDS)
+        acc = 0
+        setIntegralProgress(item, v)
+        if (v >= 1) {
+          playingIntegral = playingIntegral.filter((x) => x !== item.id)
+          return
+        }
+      }
+      requestAnimationFrame(frame)
+    }
+    requestAnimationFrame(frame)
   }
 
   /** 式 item の積分をグラフに描く */
   function showIntegral(item: PlotItem) {
     if (integralItem(item) || isAux(item)) return
     const view = newItem('', { integralOf: item.id, vertical: false })
-    fillIntegral(view, item)
     items.push(view)
+    fillIntegral(items[items.length - 1], item)
     schedule(items[items.length - 1], 0)
   }
 
@@ -1274,6 +1381,7 @@
       removeItem(view)
       return
     }
+    item.integralProgress = 1
     showIntegral(item)
     // 積分だけの式（値が 1 つの数）は、高さがその値の平面として描かれていて、積分の図を隠す（∫_0^{2π} sin x dx = 0 の平面は、
     // 面積の図とちょうど重なる）。図を出している間は、平面のほうを非表示にする（● でいつでも戻せる。図を消すと表示に戻す）
@@ -1287,7 +1395,7 @@
   function updateIntegral(item: PlotItem, delay = 200) {
     const view = integralItem(item)
     if (!view) return
-    if (integralDisplay(item.latex) === null) {
+    if (!hasIntegral(item.latex)) {
       removeItem(view)
       return
     }
@@ -1299,8 +1407,29 @@
   /** 式の id → 描いている積分の色・説明・誤り（描いていない式は入れない） */
   const integralViews = $derived(
     Object.fromEntries(
-      items.flatMap((it) => (it.integralOf === undefined ? [] : [[it.integralOf, { color: it.color, note: it.auxNote, error: it.auxError ?? it.error }]])),
-    ) as Record<number, { color: string; note?: string; error?: string }>,
+      items.flatMap((it) => {
+        if (it.integralOf === undefined || it.integralRole !== undefined) return []
+        const source = items.find((x) => x.id === it.integralOf)
+        const extras = source ? integralExtras(source) : []
+        const val = source ? integralValues[source.id] : undefined
+        return [
+          [
+            it.integralOf,
+            {
+              color: it.color,
+              note: it.auxNote,
+              error: it.auxError ?? it.error,
+              sweep: it.auxSweep,
+              progress: source?.integralProgress ?? 1,
+              playing: source ? playingIntegral.includes(source.id) : false,
+              value: val?.value,
+              valueError: val?.error,
+              legend: extras.map((x) => ({ color: x.color, label: x.auxNote ?? '', error: x.error })),
+            },
+          ],
+        ]
+      }),
+    ) as Record<number, IntegralViewInfo>,
   )
 
   function setColor(item: PlotItem, color: string) {
@@ -1658,9 +1787,29 @@
     }
     return {
       map: `(${c.map.map((m, k) => text(m, ` ${'XYZ'[k]} の式`)).join(', ')})`,
-      ranges: c.ranges.map(([a, b], k) => [text(a, ` ${'xyz'[k]} の範囲`), text(b, ` ${'xyz'[k]} の範囲`)] as [string, string]),
+      ranges: coordRanges(c).map(([a, b], k) => [text(a, ` ${'xyz'[k]} の範囲`), text(b, ` ${'xyz'[k]} の範囲`)] as [string, string]),
       names: coordNames(c),
     }
+  }
+
+  /** 座標系の、描くときに使う範囲（表示範囲に合わせる座標は、今の表示範囲） */
+  function coordRanges(c: CoordSystem): CoordSystem['ranges'] {
+    return effectiveRanges(c, [
+      [domain.xmin, domain.xmax],
+      [domain.ymin, domain.ymax],
+      [domain.zmin, domain.zmax],
+    ])
+  }
+
+  /** 座標の範囲を表示範囲に合わせるかを変える（やめたときは、今の値を書いた範囲として残す） */
+  function setCoordFollow(cid: number, k: number, on: boolean) {
+    const c = coordSystems.find((x) => x.id === cid)
+    if (!c) return
+    const follow = [...(c.follow ?? [false, false, false])] as [boolean, boolean, boolean]
+    if (!on) c.ranges[k] = [...coordRanges(c)[k]]
+    follow[k] = on
+    c.follow = follow
+    for (const it of items) if (it.coordSys === cid) schedule(it)
   }
 
   /**
@@ -1698,6 +1847,8 @@
       map: [...p.map],
       names: [...p.names],
       ranges: p.ranges.map((r) => [...r]) as CoordSystem['ranges'],
+      // 長さの座標（直交・半径・高さ）は、最初は表示範囲に合わせる（角度などは用意した範囲のまま）
+      follow: presetFollow(preset),
       grid: { on: true, faces: 4 },
       morph: 1,
     }
@@ -1725,6 +1876,7 @@
         map,
         names: ['x', 'y', 'z'],
         ranges: [['-5', '5'], ['-5', '5'], ['-5', '5']],
+        follow: [true, true, true],
         grid: { on: true, faces: 4 },
         morph: 1,
       }
@@ -1829,7 +1981,7 @@
   // 座標系（移行の値を除く）・式の座標系と表示・パラメータ・2D 表示が変わったら、少し待ってから格子を頼み直す
   $effect(() => {
     const key = JSON.stringify([
-      coordSystems.map((c) => [c.id, c.map, c.ranges, c.names, c.grid]),
+      coordSystems.map((c) => [c.id, c.map, coordRanges(c), c.names, c.grid]),
       items.map((it) => [it.coordSys, it.visible, !!it.param, it.param?.name, it.param?.re, it.param?.im, it.def ? it.latex : '']),
       flat,
     ])
@@ -1933,6 +2085,8 @@
   let playingParams = $state<number[]>([])
   /** パラメータの再生: 最小値から最大値まで 4 秒で動かし、最大値に来たら最小値に戻る */
   const PARAM_PLAY_SECONDS = 4
+  /** 積分の図の進み具合を、0 から 1 まで再生する秒数 */
+  const INTEGRAL_PLAY_SECONDS = 6
 
   /** 再生中のパラメータの、刻みにそろえる前の値（行の id → 値） */
   const playPos = new Map<number, number>()
@@ -2093,7 +2247,11 @@
       )
       coordSys = same?.id ?? createCoord(preset)
       const made = coordSystems.find((c) => c.id === coordSys)
-      if (made && !same) made.ranges = ranges.map((r) => [...r]) as CoordSystem['ranges']
+      if (made && !same && sample.coord.ranges) {
+        // 範囲を指定した例（極座標で負の半径も描くなど）は、表示範囲に合わせない
+        made.ranges = ranges.map((r) => [...r]) as CoordSystem['ranges']
+        made.follow = [false, false, false]
+      }
       playingMorph = playingMorph.filter((x) => x !== coordSys)
       setMorph(coordSys, morph)
       if (play) togglePlayMorph(coordSys)
@@ -2106,6 +2264,14 @@
       if (!view) schedule(items[items.length - 1], 0)
     }
     if (view) applyView(view)
+    // 積分の図を出す例（学習用。進み具合を途中にしておく）
+    if (sample.integral !== undefined) {
+      for (const it of items.slice(items.length - adding.length)) {
+        if (!hasIntegral(it.latex) || integralItem(it)) continue
+        toggleIntegral(it)
+        setIntegralProgress(it, sample.integral)
+      }
+    }
     // パラメータを再生する例
     if (sample.play) {
       const p = items.find((it) => (it.param?.name ?? latexParamName(it.latex)) === sample.play)
@@ -2235,6 +2401,8 @@
     domainError = ''
     viewer?.setDomain(domain)
     replotAll(300)
+    // 積分の図の矢印の長さは表示範囲で決めるので、作り直す
+    for (const it of items) if (!isAux(it) && integralItem(it)) updateIntegral(it, 300)
   }
 </script>
 
@@ -2305,6 +2473,11 @@
             onRegionShow={toggleRegion}
             integralView={integralViews[item.id]}
             onIntegralShow={() => toggleIntegral(item)}
+            onIntegralProgress={(v) => {
+              playingIntegral = playingIntegral.filter((x) => x !== item.id)
+              setIntegralProgress(item, v)
+            }}
+            onIntegralPlay={() => togglePlayIntegral(item)}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
@@ -2566,6 +2739,8 @@
               </div>
               <CoordPanel
                 sys={tabCoord}
+                effective={coordRanges(tabCoord)}
+                onFollow={(k, on) => setCoordFollow(tabCoord.id, k, on)}
                 onShape={(m, r) => setCoordShape(tabCoord.id, m, r)}
                 onNames={(n) => setCoordNames(tabCoord.id, n)}
                 onGrid={(g) => setCoordGrid(tabCoord.id, g)}

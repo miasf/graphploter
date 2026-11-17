@@ -652,6 +652,20 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         }
         _ => return Ok(None),
     };
+    // tr A・det A・rank A などだけの行: 値を説明に出す（図形は今までどおり、高さがその値の平面）
+    if let Expr::Op { op, args } = expr {
+        if def.is_none() && args.len() == 1 && matches!(op.as_str(), "tr" | "det" | "rank" | "dim" | "norm" | "angle" | "dot") {
+            if let Ok(Expr::Num(v)) = crate::expand::expand(expr, params) {
+                let name = match op.as_str() {
+                    "norm" => "‖ ‖".to_string(),
+                    "angle" => "角".to_string(),
+                    "dot" => "内積".to_string(),
+                    o => o.to_string(),
+                };
+                crate::expand::set_kind(format!("{name} = {}（高さがこの値の平面）", format_number(v)));
+            }
+        }
+    }
     let numeric = |e: &Expr| -> Result<Option<Matrix>, String> {
         Ok(match crate::expand::matrix_value(e, params)? {
             Some((rows, cols, items)) => {

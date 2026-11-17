@@ -341,6 +341,8 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
         "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" => OpKind::Func,
+        // 点での値 @at(式, x, a, y, b, …)
+        "at" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
         "grad" | "div" | "rot" | "curl" | "lap" => OpKind::Prefix,
         _ => return None,

@@ -62,6 +62,8 @@ export function nameLatex(name: string): string | null {
   if (name in GREEK_LOWER || name in GREEK_UPPER || name in LETTERLIKE) return `\\${name}`
   const m = /^([a-z]+)_(\\?[A-Za-z]+)$/.exec(name)
   if (!m) return null
+  // ベクトルの名前（\vec{F}・\mathbf{F}・\mathbb{F} はどれもこの名前）
+  if (m[1] === 'vec') return /^[A-Za-z]\w*$/.test(m[2]) ? `\\vec{${m[2]}}` : null
   if (m[1] in ACCENTS) {
     const l = letter(m[2])
     return l ? `\\${m[1]}{${l.latex}}` : null
@@ -78,6 +80,8 @@ export function nameText(name: string): string | null {
   if (name in LETTERLIKE) return LETTERLIKE[name]
   const m = /^([a-z]+)_([A-Za-z]+)$/.exec(name)
   if (!m) return null
+  // ベクトルの名前は、文字に矢印を付けて出す（F⃗）
+  if (m[1] === 'vec') return `${m[2]}\u20d7`
   if (m[1] in ACCENTS) {
     const l = letter(m[2])
     return l ? l.text + ACCENTS[m[1]] : null

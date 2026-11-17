@@ -7,6 +7,10 @@
 
   interface Props {
     sys: CoordSystem
+    /** 描くときに使う範囲（表示範囲に合わせる座標は、今の表示範囲） */
+    effective: CoordSystem['ranges']
+    /** 座標 k の範囲を表示範囲に合わせるかを変えた */
+    onFollow: (k: number, on: boolean) => void
     /** 式・範囲を変えた（計算し直す） */
     onShape: (map: CoordSystem['map'], ranges: CoordSystem['ranges']) => void
     /** 格子（座標曲線）の設定を変えた */
@@ -19,7 +23,7 @@
     playing: boolean
     onPlay: () => void
   }
-  let { sys, onShape, onNames, onGrid, onMorph, playing, onPlay }: Props = $props()
+  let { sys, effective, onFollow, onShape, onNames, onGrid, onMorph, playing, onPlay }: Props = $props()
 
   const grid = $derived(sys.grid ?? { on: true, faces: 4 })
 
@@ -110,11 +114,22 @@
   <p class="label">作る範囲（座標の値の範囲）</p>
   <div class="ranges">
     {#each NAMES as n, k (n)}
-      <MathInput small keyboardToggle={false} value={sys.ranges[k][0]} label="座標系の {n} の最小値" onInput={(v) => setRange(k, 0, v)} />
-      <span class="name">≤ {n} ≤</span>
-      <MathInput small keyboardToggle={false} value={sys.ranges[k][1]} label="座標系の {n} の最大値" onInput={(v) => setRange(k, 1, v)} />
+      {@const nm = prettyCoordName(names[k])}
+      {#if sys.follow?.[k]}
+        <span class="followed">{effective[k][0]}</span>
+        <span class="name">≤ {nm} ≤</span>
+        <span class="followed">{effective[k][1]}</span>
+      {:else}
+        <MathInput small keyboardToggle={false} value={sys.ranges[k][0]} label="座標系の {n} の最小値" onInput={(v) => setRange(k, 0, v)} />
+        <span class="name">≤ {nm} ≤</span>
+        <MathInput small keyboardToggle={false} value={sys.ranges[k][1]} label="座標系の {n} の最大値" onInput={(v) => setRange(k, 1, v)} />
+      {/if}
+      <label class="follow" title="表示範囲の {n} の最小・最大に合わせる（表示範囲を変えると追従する）">
+        <input type="checkbox" checked={!!sys.follow?.[k]} onchange={(e) => onFollow(k, e.currentTarget.checked)} /> 表示範囲
+      </label>
     {/each}
   </div>
+  <p class="hint">「表示範囲」に印のある座標は、表示範囲（設定の「表示範囲」）と同じ範囲で作ります（半径は 0 から）。外すと、そのときの値から自由に書けます。</p>
   <p class="hint">
     式は今までどおり x, y, z で書き、それを座標の値として読みます。回転は座標の値の空間でかかります（移した後の図形は、視点を回して見てください）。
     切り口のふたは作りません。曲線は (t, t, t) のように書きます（(u, u, u) は曲面になります）。
@@ -185,9 +200,25 @@
     align-items: center;
     gap: 4px 8px;
   }
+  .followed {
+    padding: 3px 6px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 6px;
+    font: 13px var(--mono);
+    color: var(--muted);
+    text-align: center;
+  }
+  .follow {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
   .ranges {
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    grid-template-columns: 1fr auto 1fr auto;
     align-items: center;
     gap: 4px 8px;
   }
