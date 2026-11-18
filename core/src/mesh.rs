@@ -50,6 +50,9 @@ pub struct Mesh {
     pub stats: Stats,
     /// 座標系で移した先 T(q)（頂点ごとに 3 つ。[`crate::coords`]）。空なら座標系なし。描画側が位置と混ぜる
     pub target: Vec<f32>,
+    /// 2D の投影で、真上から見て面積が無くなる三角形（縦に立った面 y = x など）の代わりに引く線分（2 点ずつ、間は NaN）。
+    /// [`flatten`] が作り、`lib.rs` が境目の線（outline）に移す
+    pub edge_lines: Vec<f32>,
 }
 
 /// メッシュを作るのにかかった時間の内訳（ミリ秒）
@@ -7750,6 +7753,7 @@ fn merge_inner(meshes: Vec<Mesh>, curve: bool) -> Mesh {
         out.positions.extend_from_slice(&m.positions);
         out.normals.extend_from_slice(&m.normals);
         out.indices.extend(m.indices.iter().map(|k| k + base));
+        out.edge_lines.extend_from_slice(&m.edge_lines);
         // 粗い版が無いメッシュは、そのままの三角形を使う
         if lod {
             let src = if m.lod.is_empty() { &m.indices } else { &m.lod };
@@ -7871,6 +7875,24 @@ fn grid_tris(m: usize, count: usize) -> Vec<u32> {
 /// 縦の座標を 0 にして平らにする（2D 表示）。曲面の法線はすべて +縦 の向きにする
 pub fn flatten(mesh: &mut Mesh, curve: bool) {
     mesh.lod_mesh = None; // 平らにした後の粗い版は作らない（2D 表示は軽い）
+    // 縦に立った面（y = x, x² + y² = 1 など）は、押しつぶすと三角形の面積が無くなって見えなくなる。
+    // 真上から見た面積が 3 次元の面積の 5% 以下の三角形は、押しつぶした後のいちばん長い辺を線として残す
+    if !curve {
+        let p = &mesh.positions;
+        let at = |k: u32| [0, 1, 2].map(|c| p[3 * k as usize + c] as f64);
+        for t in mesh.indices.chunks_exact(3) {
+            let (a, b, c) = (at(t[0]), at(t[1]), at(t[2]));
+            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if !(len > 0.0) || n[2].abs() > 0.05 * len {
+                continue;
+            }
+            let d2 = |x: [f64; 3], y: [f64; 3]| (x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2);
+            let (x, y) = [(a, b), (b, c), (c, a)].into_iter().max_by(|e, f| d2(e.0, e.1).total_cmp(&d2(f.0, f.1))).unwrap_or((a, b));
+            mesh.edge_lines.extend([x[0] as f32, x[1] as f32, 0.0, y[0] as f32, y[1] as f32, 0.0, f32::NAN, f32::NAN, f32::NAN]);
+        }
+    }
     for p in mesh.positions.chunks_exact_mut(3) {
         if p[2].is_finite() {
             p[2] = 0.0;
@@ -8538,6 +8560,7 @@ impl LocalMesh {
                 note: src.note.clone(),
                 stats: src.stats,
                 target: Vec::new(),
+                edge_lines: Vec::new(),
             }
         };
         let mut out = move_mesh(&self.mesh);

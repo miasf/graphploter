@@ -741,6 +741,8 @@ pub fn plot(
         coords::trim_to_domain(&mut inner, dom, curve, flat);
     }
     let mut outline = built.outline;
+    // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
+    outline.0.append(&mut inner.edge_lines);
     let mut outline_target = (Vec::new(), Vec::new());
     if let Some(c) = &coord {
         // 作る範囲からはみ出した所を落とす（媒介変数表示は、範囲が媒介変数で決まるので切らない）
@@ -2196,16 +2198,17 @@ impl Shape {
     /// 結果の入れ物（式の説明などは、この形のものを使う）
     fn result(
         &self,
-        inner: mesh::Mesh,
+        mut inner: mesh::Mesh,
         field: Option<(Vec<mesh::Field>, mesh::Domain)>,
         solid: bool,
         transform: Option<[f64; 12]>,
     ) -> MeshResult {
+        let lines = std::mem::take(&mut inner.edge_lines);
         MeshResult {
             inner,
             flat: self.flat,
             flat_slice: self.flat_slice,
-            outline: Default::default(),
+            outline: (lines, Vec::new()),
             outline_values: Vec::new(),
             vivid: false,
             outline_target: Default::default(),
