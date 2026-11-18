@@ -180,3 +180,31 @@ fn rotated_sets_keep_shape() {
         assert!(w <= 1e-3, "{src}: 頂点 {p:?} が領域の外（{w}）");
     }
 }
+
+#[test]
+#[ignore]
+fn axis_angles() {
+    let g = |p: [f64; 3]| (p[0] * p[0] + p[1] * p[1] - 1.0).max(-p[2]).max(p[2] - p[0].powi(3) - p[1].powi(3));
+    let src = "⦃(x,y,z)∣x^2+y^2<=1, 0<=z<=x^3+y^3⦄";
+    let a0 = area(&mesh(src, 1.5, &[0.0; 10]));
+    let d = mesh("⦃(x,y,z)∣x^2+z^2<=1, 0<=-y<=x^3+z^3⦄", 1.5, &[0.0; 10]);
+    println!("plane direct: tri {} area {:.4} open {}", d.t.len(), area(&d), open(&d));
+    for idx in [4usize, 1] {
+        for deg in [30.0f64, 60.0, 90.0, 135.0] {
+            let mut rot = [0.0; 10];
+            rot[idx] = deg.to_radians();
+            let m = mesh(src, 1.5, &rot);
+            let (w, p) = worst(&m, &rot, &g);
+            println!("plane {idx} {deg}°: tri {} area {:.4} (0°: {a0:.4}) open {} worst {w:.2e} at {p:?}", m.t.len(), area(&m), open(&m));
+        }
+    }
+}
+
+/// 境目の面を陽関数にするとき、根号の無い解の座標を選ぶ（0 ≤ −y ≤ x³ + z³ は z = ∛(−y − x³) でなく y = −x³ − z³）。
+/// 前は ∛ の面が z ≈ 0 で垂直になって縞と隙間が出て、面積が 0.6% 多かった（x 軸の周りに 90° 回したときも同じ）
+#[test]
+fn faces_avoid_radicals() {
+    let a0 = area(&mesh("⦃(x,y,z)∣x^2+y^2<=1, 0<=z<=x^3+y^3⦄", 1.5, &[0.0; 10]));
+    let d = area(&mesh("⦃(x,y,z)∣x^2+z^2<=1, 0<=-y<=x^3+z^3⦄", 1.5, &[0.0; 10]));
+    assert!((d - a0).abs() <= 1e-3 * a0, "面積 {d}（回す前の形で {a0}）");
+}
