@@ -122,3 +122,19 @@ fn infinite_sums() {
     assert!(eval_constant("@sum(k,1,∞) (-1)^k").is_err());
     assert!(eval_constant("@prod(k,1,∞) k").is_err());
 }
+
+/// 値が定数になる max・min（計画 P1-7）: 区間演算の分枝限定法で保証つき。特殊関数は黄金分割の近似
+#[test]
+fn closed_extrema() {
+    let close = |src: &str, want: f64, tol: f64| {
+        let v = eval_constant(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+        assert!((v - want).abs() <= tol * want.abs().max(1.0), "{src}: {v} (want {want})");
+    };
+    // 細い山（幅 0.01）。等分の標本は山の頂上に乗らない
+    close("@max(t, 0, 1)(exp(-10^4 (t - 0.3123)^2))", 1.0, 1e-12);
+    // 参照は 200 万点の標本（標本は真の最大に届かないので、許容は 1e-11）
+    close("@max(t, 0, 2 pi)(sin(t) + 0.5 sin(3t))", 1.0758287072790371, 1e-11);
+    close("@min(t, -2, 2)(t^4 - 2t^2 + 0.1 t)", -1.1006173766350262, 1e-11);
+    // 特殊関数（区間演算なし）: J0(t) + 0.01t ≈ 1 − t²/4 + 0.01t の最大 ≈ 1.0001（t ≈ 0.02）
+    close("@max(t, 0, 10)(besselJ(0, t) + 0.01 t)", 1.0001000025, 1e-9);
+}

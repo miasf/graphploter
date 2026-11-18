@@ -1608,11 +1608,116 @@ impl Expander<'_> {
     }
 
     /// 添字つきの最大・最小 $\max_{t \in [a, b]} g(t)$（計画 M12）: 範囲を 64 等分した 65 点での値の max・min（近似）
+    /// `max_{t ∈ [a, b]} g`・`min` で、a・b・g が t とパラメータだけの式のとき（計画 P1-7。A69 + 区間演算）。
+    /// 区間演算が使える式は分枝限定法: 区間の上限（最大なら）の大きい順に半分に分け、真ん中の値で今までの最大を更新し、
+    /// 上限が今までの最大 + 許容（1e-12 倍）以下の区間は捨てる。残りが無くなれば、その値は 1e-12 の精度で保証つき。
+    /// 区間演算が使えない式（特殊関数）は、4,097 点で探して、いちばん良い点の周りを黄金分割で詰める（近似。説明に注意を出す）。
+    /// 定数にならなければ None（今までの 65 点の近似の式にする）
+    fn closed_extremum(&mut self, max: bool, var: &str, lo: &Expr, hi: &Expr, g: &Expr) -> Option<f64> {
+        use crate::eval::Program;
+        use crate::interval::{Interval, Range};
+        use num_complex::Complex64 as C;
+        let num = |e: &Expr| -> Option<f64> {
+            let p = Program::compile_with(e, &[], self.params).ok()?;
+            let mut out = [C::new(0.0, 0.0)];
+            p.eval_batch(&[], &mut out);
+            Some(crate::eval::as_real(out[0])).filter(|v| v.is_finite())
+        };
+        let (a, b) = (num(lo)?, num(hi)?);
+        let f = Program::compile_with(g, &[var], self.params).ok()?;
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            for p in f.used_params() {
+                if !u.contains(p) {
+                    u.push(p.clone());
+                }
+            }
+        });
+        let (a, b) = (a.min(b), a.max(b));
+        // 最大を求める形にそろえる（最小は −g の最大）
+        let sign = if max { 1.0 } else { -1.0 };
+        let vals = |ts: &[f64]| -> Vec<f64> {
+            let mut out = vec![C::new(0.0, 0.0); ts.len()];
+            f.eval_batch(&[ts], &mut out);
+            out.iter().map(|v| sign * crate::eval::as_real(*v)).collect()
+        };
+        let pick = |ts: &[f64], vs: &[f64]| ts.iter().zip(vs).filter(|(_, v)| v.is_finite()).fold((f64::NAN, f64::NEG_INFINITY), |m, (&t, &v)| if v > m.1 { (t, v) } else { m });
+        let ts: Vec<f64> = (0..=4096).map(|k| a + (b - a) * k as f64 / 4096.0).collect();
+        let (mut best_t, mut best) = pick(&ts, &vals(&ts));
+        if best == f64::NEG_INFINITY {
+            return None; // どこでも値が実数にならない
+        }
+        if f.supports_interval() && a < b {
+            // 分枝限定法（上限の大きい順。BinaryHeap は最大を先に出す）
+            let upper = |lo: f64, hi: f64| -> f64 {
+                match f.eval_interval(&[Interval::new(lo, hi)]) {
+                    Range::Known(iv) => if max { iv.hi } else { -iv.lo },
+                    Range::Unknown => f64::INFINITY,
+                }
+            };
+            let mut heap = std::collections::BinaryHeap::new();
+            let key = |u: f64| (u.to_bits() as i64 ^ (((u.to_bits() as i64) >> 63) & i64::MAX)) as i128;
+            heap.push((key(upper(a, b)), a.to_bits(), b.to_bits()));
+            let mut steps = 0;
+            let mut proved = false;
+            while let Some((_, lb, hb)) = heap.pop() {
+                let (l, h) = (f64::from_bits(lb), f64::from_bits(hb));
+                let u = upper(l, h);
+                // 上限の大きい順に出てくるので、これが今までの最大 + 許容以下なら、残り全部も以下（証明が済んだ）
+                if u <= best + 1e-12 * best.abs().max(1e-300) {
+                    proved = true;
+                    break;
+                }
+                steps += 1;
+                if steps > 20_000 {
+                    break;
+                }
+                let m = 0.5 * (l + h);
+                if m <= l || m >= h {
+                    continue; // 浮動小数点の幅の下限（この区間の値は端の点で見ている）
+                }
+                let v = vals(&[m])[0];
+                if v.is_finite() && v > best {
+                    (best_t, best) = (m, v);
+                }
+                for (p, q) in [(l, m), (m, h)] {
+                    let uq = upper(p, q);
+                    if uq > best + 1e-12 * best.abs().max(1e-300) {
+                        heap.push((key(uq), p.to_bits(), q.to_bits()));
+                    }
+                }
+            }
+            if proved || heap.is_empty() {
+                return Some(sign * best);
+            }
+        }
+        // 区間演算が使えない・分枝限定が終わらない: いちばん良い点の周りを黄金分割で詰める（近似）
+        let step = (b - a) / 4096.0;
+        let (mut lo_t, mut hi_t) = ((best_t - step).max(a), (best_t + step).min(b));
+        let r = 0.618_033_988_749_895;
+        for _ in 0..80 {
+            let (c, d) = (hi_t - r * (hi_t - lo_t), lo_t + r * (hi_t - lo_t));
+            let v = vals(&[c, d]);
+            if v[0] >= v[1] { hi_t = d } else { lo_t = c }
+            for vv in v {
+                if vv.is_finite() && vv > best {
+                    best = vv;
+                }
+            }
+        }
+        add_note("max・min は 4,097 点と黄金分割での近似（区間演算が使えない式）");
+        Some(sign * best)
+    }
+
     fn extremum(&mut self, max: bool, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
         const N: usize = 64;
         let [lo, hi] = args else { return Err("max・min は、max_{t ∈ [0, 1]} の形で範囲を書いてください".into()) };
         let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
         let g = self.scalar(body)?;
+        // 値が定数になるもの（範囲と中身が t とパラメータだけ）は、分枝限定法で保証つきの最大・最小にする
+        if let Some(v) = self.closed_extremum(max, var, &lo, &hi, &g) {
+            return Ok(Expr::Num(v));
+        }
         let f = if max { crate::functions::Func::Max } else { crate::functions::Func::Min };
         let mut terms = Vec::with_capacity(N + 1);
         for k in 0..=N {
