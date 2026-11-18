@@ -359,6 +359,106 @@ pub enum Rel {
     Ge,
 }
 
+/// 範囲を共有する略記を、変数ごとの行に分ける。カンマで区切った行のうち、関係の無い「変数 1 つだけ」の行
+/// （今までは「行ごとに = か不等号を付けてください」のエラー）を、前の行の最後の変数・次の行の最初の変数と組にする:
+///
+/// - `−1 ≤ x, y, z ≤ 1` → `−1 ≤ x ≤ 1`, `−1 ≤ y ≤ 1`, `−1 ≤ z ≤ 1`
+/// - `0 ≤ x, y, z` → `0 ≤ x`, `0 ≤ y`, `0 ≤ z`、`x, y ≥ 0` → `x ≥ 0`, `y ≥ 0`
+///
+/// 変数だけの行が無い `0 ≤ x, y ≤ 1` は、今までどおり 2 つの条件（x ≥ 0 と y ≤ 1）。
+/// 集合の条件 `{(x, y, z) | −1 ≤ x, y, z ≤ 1}` でも同じ（[`Parser::formula`]）
+pub fn expand_shared_bounds(chains: Vec<Chain>) -> Vec<Chain> {
+    let bare = |c: &Chain| c.rels.is_empty() && matches!(c.exprs.as_slice(), [Expr::Var(_)]);
+    if !chains.iter().any(bare) {
+        return chains;
+    }
+    let mut out: Vec<Chain> = Vec::new();
+    let mut i = 0;
+    while i < chains.len() {
+        if !bare(&chains[i]) {
+            out.push(chains[i].clone());
+            i += 1;
+            continue;
+        }
+        // 変数だけの行の並び [i, j)
+        let mut j = i;
+        while j < chains.len() && bare(&chains[j]) {
+            j += 1;
+        }
+        let mut vars: Vec<(Expr, usize)> = chains[i..j].iter().map(|c| (c.exprs[0].clone(), c.pos[0])).collect();
+        // 前の行（関係があり、最後が変数）を、範囲の左側として使う
+        let left = out.last().filter(|c| !c.rels.is_empty() && matches!(c.exprs.last(), Some(Expr::Var(_)))).cloned();
+        if let Some(l) = &left {
+            out.pop();
+            vars.insert(0, (l.exprs.last().cloned().unwrap_or(Expr::Num(0.0)), *l.pos.last().unwrap_or(&0)));
+        }
+        // 次の行（関係があり、最初が変数）を、範囲の右側として使う
+        let right = chains.get(j).filter(|c| !c.rels.is_empty() && matches!(c.exprs.first(), Some(Expr::Var(_)))).cloned();
+        if let Some(r) = &right {
+            vars.push((r.exprs[0].clone(), r.pos[0]));
+            j += 1;
+        }
+        if left.is_none() && right.is_none() {
+            // 範囲が無い: そのまま（後でエラーになる）
+            out.extend(chains[i..j].iter().cloned());
+            i = j;
+            continue;
+        }
+        for (v, at) in vars {
+            let mut c = Chain { exprs: Vec::new(), rels: Vec::new(), pos: Vec::new() };
+            if let Some(l) = &left {
+                let n = l.exprs.len() - 1;
+                c.exprs.extend(l.exprs[..n].iter().cloned());
+                c.pos.extend(l.pos[..n].iter().copied());
+                c.rels.extend(l.rels.iter().copied());
+            }
+            c.exprs.push(v);
+            c.pos.push(at);
+            if let Some(r) = &right {
+                c.exprs.extend(r.exprs[1..].iter().cloned());
+                c.pos.extend(r.pos[1..].iter().copied());
+                c.rels.extend(r.rels.iter().copied());
+            }
+            out.push(c);
+        }
+        i = j;
+    }
+    out
+}
+
+
+/// 条件の並び（`,` で区切ったもの）の中の、範囲を共有する略記 `−1 ≤ x, y, z ≤ 1` を変数ごとの条件に分ける
+/// （[`expand_shared_bounds`]）。変数 1 つだけの条件は集合の名前（`Formula::Set(SetE::Named)`）として読まれているので、
+/// 隣に範囲（変数で終わる・始まる関係の連鎖）があるときだけ、その変数の範囲にする
+fn shared_bounds_in_formulas(parts: Vec<Formula>) -> Vec<Formula> {
+    let bare = |f: &Formula| matches!(f, Formula::Set(SetE::Named(_)));
+    if !parts.iter().any(bare) || !parts.iter().any(|f| matches!(f, Formula::Chain(_))) {
+        return parts;
+    }
+    let mut out = Vec::new();
+    let mut run: Vec<Chain> = Vec::new();
+    let flush = |run: &mut Vec<Chain>, out: &mut Vec<Formula>| {
+        for c in expand_shared_bounds(std::mem::take(run)) {
+            out.push(match (c.rels.is_empty(), c.exprs.as_slice()) {
+                (true, [Expr::Var(n)]) => Formula::Set(SetE::Named(n.clone())),
+                _ => Formula::Chain(c),
+            });
+        }
+    };
+    for f in parts {
+        match f {
+            Formula::Chain(c) => run.push(c),
+            Formula::Set(SetE::Named(n)) => run.push(Chain { exprs: vec![Expr::Var(n)], rels: Vec::new(), pos: vec![0] }),
+            other => {
+                flush(&mut run, &mut out);
+                out.push(other);
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 /// 関係の連鎖 `a ∘₁ b ∘₂ c …`（`exprs` は `rels` より 1 つ多い。関係が無ければ式 1 つ）
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
@@ -1280,6 +1380,7 @@ impl Parser<'_> {
             self.next();
             parts.push(self.equivalence()?);
         }
+        let mut parts = shared_bounds_in_formulas(parts);
         Ok(if parts.len() == 1 { parts.pop().unwrap_or(Formula::True) } else { Formula::And(parts) })
     }
 

@@ -1011,6 +1011,8 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             }
         }
     }
+    // 略記 −1 ≤ x, y, z ≤ 1（x・y・z がどれも −1 以上 1 以下）・x, y ≥ 0・0 ≤ x, y, z を、変数ごとの行に分ける
+    chains = crate::parser::expand_shared_bounds(chains);
     // ベクトル = ベクトルは、成分ごとの等式の連立（(x, y, z) = (1, 2, 3) は x = 1, y = 2, z = 3）。計画 M6
     chains = split_vector_relations(chains)?;
     // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
@@ -2725,9 +2727,11 @@ mod tests {
 
     #[test]
     fn system_errors() {
-        for src in ["(x = y)", "x <", "x = y,", ", x = y", "a = 1, b = 2", "x, y = 1", "sin(x ≤ 1)"] {
+        for src in ["(x = y)", "x <", "x = y,", ", x = y", "a = 1, b = 2", "sin(x ≤ 1)"] {
             assert!(kind(src).starts_with("error"), "{src}: {}", kind(src));
         }
+        // 範囲を共有する略記: x, y = 1 は x = 1 かつ y = 1（parser::expand_shared_bounds）
+        assert_eq!(kind("x, y = 1"), "連立方程式の曲線");
         assert_eq!(kind("(x = y)"), "error: =・≤ などは、括弧の外に書いてください（4文字目）");
         assert!(kind("x = y,").contains("`,` の前後に式を書いてください"));
         assert!(kind("a = 1, b = 2").contains("パラメータの定義は、1 行に 1 つだけ"));
