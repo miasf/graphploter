@@ -2164,6 +2164,7 @@ fn fit_to_shape(dom: mesh::Domain, n: usize, make: impl Fn(mesh::Domain) -> mesh
     let n = n.max(2) as f64;
     let side = |d: &mesh::Domain| (0..3).map(|a| d.hi[a] - d.lo[a]).fold(0.0, f64::max);
     let (mut best, mut box_) = (make(dom), dom);
+    let first_lines = best.edge_lines.clone();
     // 1 回目は表示範囲の 2/3 以下になるとき。粗い格子の余白（1.5 マス）が大きいので、作り直した面でもう一度だけ詰める（8 割以下になるとき）
     for shrink in [2.0 / 3.0, 0.8] {
         let Some((lo, hi)) = bounds(&best.positions) else { break };
@@ -2188,6 +2189,9 @@ fn fit_to_shape(dom: mesh::Domain, n: usize, make: impl Fn(mesh::Domain) -> mesh
         }
         (best, box_) = (next, fit);
     }
+    // 面にならない特異点の線（mesh::singular::trace_singular_lines）は、表示範囲の格子で作った 1 回目のものを使う
+    // （ローマ曲面のひげは面の外へ伸びるので、面の周りだけの箱では途中で切れる。線はニュートン法で寄せるので格子の粗さによらない）
+    best.edge_lines = first_lines;
     best
 }
 

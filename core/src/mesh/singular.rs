@@ -19,6 +19,9 @@ use super::*;
 const TURN_COS: f64 = 0.97;
 /// 特異点の周りで三角形を捨てる半径（格子の何マス分か）。丸まるのは 1 マスほどなので、その外から結び直す
 const CUT: f64 = 1.5;
+/// 交わる角度 θ が小さい所（ピンチ点の近く）で捨てる半径の上限（マス）。2 枚の面は線から距離 r の所で r θ しか離れていないので、
+/// 1.5 マス離れる r = 1.5 / θ までは、格子の 1 マスに 2 枚が入って混ざる（くしの歯のような切れ込み）。その外から結び直す
+const MAX_CUT: f64 = 6.0;
 /// $\nabla F = 0$ へ寄せるくり返しの回数（減衰が強いので、1 回で寄る距離は 9 割ほど）
 const STEPS: usize = 14;
 /// 鞍の形とみなす、正と負の固有値の大きさ（いちばん大きい固有値に対する割合）
@@ -206,6 +209,34 @@ fn onto_singular(prog: &Program, starts: &[[f64; 3]], h: f64, reach: f64) -> Vec
         .collect()
 }
 
+/// 点を面 F = 0 へ寄せる（ニュートン法 4 回。1 回に 1 マスまで）。寄らない・動きすぎる（1 マス超）点はそのまま
+fn onto_surface(prog: &Program, pts: &[[f64; 3]], h: f64) -> Vec<[f64; 3]> {
+    let mut cur = pts.to_vec();
+    for _ in 0..4 {
+        if cur.is_empty() {
+            break;
+        }
+        let d = derivs(prog, &cur, 1e-2 * h);
+        for (q, dk) in cur.iter_mut().zip(d) {
+            let Some((f, g, _)) = dk else { continue };
+            let gg = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+            if !(gg > 0.0) {
+                continue;
+            }
+            let step = g.map(|c| c * f / gg);
+            if norm(step) <= h {
+                for c in 0..3 {
+                    q[c] -= step[c];
+                }
+            }
+        }
+    }
+    cur.iter()
+        .zip(pts)
+        .map(|(q, p)| if norm([0, 1, 2].map(|c| q[c] - p[c])) <= h { *q } else { *p })
+        .collect()
+}
+
 /// 3 × 3 の連立 1 次方程式（部分ピボット）
 fn solve3(mut m: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<[f64; 3]> {
     for c in 0..3 {
@@ -231,6 +262,20 @@ fn solve3(mut m: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<[f64; 3]> {
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
+/// 鞍の形の特異点で、三角形を捨てる半径（マス）。正と負の固有値のうち大きいものどうしの比 ρ から、交わる角度
+/// θ = 2 atan √ρ を出し、1.5 / θ（[`CUT`]〜[`MAX_CUT`]）
+fn cut_radius(hm: &[[f64; 3]; 3]) -> f64 {
+    let ev = eigenvalues(*hm);
+    let pos = ev.iter().fold(0.0f64, |a, &v| a.max(v));
+    let neg = ev.iter().fold(0.0f64, |a, &v| a.max(-v));
+    let (lo, hi) = (pos.min(neg), pos.max(neg));
+    if !(hi > 0.0) {
+        return CUT;
+    }
+    let theta = 2.0 * (lo / hi).sqrt().atan();
+    (1.5 / theta.max(1e-9)).clamp(CUT, MAX_CUT)
+}
+
 /// ヘッセ行列が鞍の形（正と負の両方の固有値が、いちばん大きい固有値の [`SADDLE`] 倍以上）か
 fn saddle(hm: &[[f64; 3]; 3]) -> bool {
     let ev = eigenvalues(*hm);
@@ -239,10 +284,10 @@ fn saddle(hm: &[[f64; 3]; 3]) -> bool {
 }
 
 /// 面が自分と交わる線・尖った点の周りを、X の字・円錐の先に描き直す（モジュールの説明を参照）。`h` は格子の 1 マスの幅。
-/// 頂点ごとの値（色分け・格子用の座標）を持つメッシュは、何もしない（足した頂点の値が決められないため）
-pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) {
+/// 頂点ごとの値（色分け・格子用の座標）を持つメッシュは、何もしない（足した頂点の値が決められないため）。見つけた特異点を返す
+pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) -> Vec<[f64; 3]> {
     if prog.vars().len() != 3 || mesh.indices.is_empty() || !mesh.complex.is_empty() || !mesh.grid_coords.is_empty() || !(h > 0.0) {
-        return;
+        return Vec::new();
     }
     let pos: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
     // 1. 頂点ごとに、周りの三角形の向き（単位ベクトル）の平均の長さを見る。向きがそろっていれば 1 に近く、
@@ -269,7 +314,7 @@ pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) {
     let cand: Vec<bool> = (0..pos.len()).map(|w| cnt[w] >= 2 && norm(sum[w]) < TURN_COS * cnt[w] as f64).collect();
     let starts: Vec<[f64; 3]> = (0..pos.len()).filter(|&v| cand[v]).map(|v| pos[v]).collect();
     if starts.is_empty() || starts.len() > MAX_CANDIDATES {
-        return;
+        return Vec::new();
     }
     // 1'. 1 回だけ微分して絞る: 特異点から距離 d の所では |∇F| ≈ ‖H‖ d なので、|∇F| が ‖H‖ の 3 マス分より大きい頂点
     // （なめらかな面が粗い格子で折れて見えるだけの所。極小曲面など）と、ヘッセ行列が鞍の形でない頂点は、ニュートン法にかけない
@@ -284,34 +329,36 @@ pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) {
         })
         .collect();
     if starts.is_empty() {
-        return;
+        return Vec::new();
     }
-    // 2. 特異点（鞍の形のものだけ）。近すぎる点はまとめる
-    let cell = CUT * h;
+    // 2. 特異点（鞍の形のものだけ）と、その周りで三角形を捨てる半径。近すぎる点はまとめる
+    // 格子の大きさ: 捨てる半径の上限 + 切れた縁の辺の長さ（2 マス）。近くの特異点は隣の箱までで見つかる
+    let cell = (MAX_CUT + 2.0) * h;
     let key = |p: &[f64; 3]| p.map(|v| (v / cell).floor() as i64);
-    let mut grid: crate::adaptive::HashMap<[i64; 3], Vec<[f64; 3]>> = Default::default();
+    let mut grid: crate::adaptive::HashMap<[i64; 3], Vec<([f64; 3], f64)>> = Default::default();
     let mut count = 0;
     for (p, hm) in onto_singular(prog, &starts, h, 2.0 * h).into_iter().flatten() {
         if !saddle(&hm) {
             continue;
         }
         let k = key(&p);
-        let close = grid.get(&k).is_some_and(|l| l.iter().any(|q| norm([0, 1, 2].map(|c| p[c] - q[c])) < 0.25 * h));
+        let close = grid.get(&k).is_some_and(|l| l.iter().any(|(q, _)| norm([0, 1, 2].map(|c| p[c] - q[c])) < 0.25 * h));
         if !close {
-            grid.entry(k).or_default().push(p);
+            grid.entry(k).or_default().push((p, cut_radius(&hm) * h));
             count += 1;
         }
     }
     if count == 0 {
-        return;
+        return Vec::new();
     }
+    let found: Vec<[f64; 3]> = grid.values().flatten().map(|(p, _)| *p).collect();
     let near = |p: &[f64; 3]| -> bool {
         let k = key(p);
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
                     if let Some(l) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
-                        if l.iter().any(|q| norm([0, 1, 2].map(|c| p[c] - q[c])) < cell) {
+                        if l.iter().any(|(q, r)| norm([0, 1, 2].map(|c| p[c] - q[c])) < *r) {
                             return true;
                         }
                     }
@@ -345,24 +392,25 @@ pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) {
     let mut ends: Vec<u32> = border.iter().flat_map(|&(a, b)| [a, b]).collect();
     ends.sort_unstable();
     ends.dedup();
-    let projected = onto_singular(prog, &ends.iter().map(|&v| pos[v as usize]).collect::<Vec<_>>(), h, (CUT + 2.0) * h);
+    let projected = onto_singular(prog, &ends.iter().map(|&v| pos[v as usize]).collect::<Vec<_>>(), h, (MAX_CUT + 2.0) * h);
     // 寄らなかった頂点（ピンチ点の近くなど、交わる角度が 0 に近い所）は、見つけた特異点のうち一番近い点へつなぐ（穴を空けない）
     let nearest = |p: &[f64; 3]| -> Option<[f64; 3]> {
         let k = key(p);
-        let mut best: Option<(f64, [f64; 3])> = None;
-        for dx in -2..=2 {
-            for dy in -2..=2 {
-                for dz in -2..=2 {
-                    for q in grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]).into_iter().flatten() {
+        let mut best: Option<(f64, [f64; 3], f64)> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &(q, r) in grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]).into_iter().flatten() {
+                        // 捨てた半径（＋2 マス。切れた縁の頂点は、捨てた三角形の辺 1 本分まで外にある）の中にある特異点のうち、いちばん近いもの
                         let d = norm([0, 1, 2].map(|c| p[c] - q[c]));
-                        if best.is_none_or(|(bd, _)| d < bd) {
-                            best = Some((d, *q));
+                        if d <= r + 2.0 * h && best.is_none_or(|(bd, _, _)| d < bd) {
+                            best = Some((d, q, r));
                         }
                     }
                 }
             }
         }
-        best.filter(|(d, _)| *d <= (CUT + 1.0) * h).map(|(_, q)| q)
+        best.map(|(_, q, _)| q)
     };
     // 寄せた点のうち、0.01 h 以内のものは 1 つの頂点にする（円錐の先では、縁の頂点が全部 1 点に寄る。別々の頂点にすると、隣の扇と辺を共有せず、ひびになる）
     let tol = 0.01 * h;
@@ -393,14 +441,146 @@ pub(crate) fn sharpen_singularities(mesh: &mut Mesh, prog: &Program, h: f64) {
         });
         proj_id.insert(v, id);
     }
+    // 縁の頂点から特異点までを、1 マスほどの刻みの列にする（途中の点は面 F = 0 へ寄せる）。捨てる半径が大きい所
+    // （ピンチ点の近くで 6 マスまで）を 1 枚の三角形で結ぶと、曲がった面から平らな三角形が離れて、穴・とげに見える
+    let mut columns: crate::adaptive::HashMap<u32, Vec<u32>> = Default::default();
+    {
+        let mut mids: Vec<[f64; 3]> = Vec::new();
+        let mut owner: Vec<(u32, usize)> = Vec::new(); // (縁の頂点, 列の中の番号)
+        let mut cols: Vec<(u32, Vec<Option<u32>>)> = Vec::new();
+        for (&v, &pv) in &proj_id {
+            let a = pos[v as usize];
+            let p = [0, 1, 2].map(|c| mesh.positions[3 * pv as usize + c] as f64);
+            let k = (norm([0, 1, 2].map(|c| p[c] - a[c])) / h).ceil().max(1.0) as usize;
+            let mut col = vec![Some(v)];
+            for j in 1..k {
+                let t = j as f64 / k as f64;
+                mids.push([0, 1, 2].map(|c| a[c] + t * (p[c] - a[c])));
+                owner.push((v, j));
+                col.push(None);
+            }
+            col.push(Some(pv));
+            cols.push((v, col));
+        }
+        let projected = onto_surface(prog, &mids, h);
+        let mut slot: crate::adaptive::HashMap<(u32, usize), u32> = Default::default();
+        for ((v, j), q) in owner.into_iter().zip(projected) {
+            let id = (mesh.positions.len() / 3) as u32;
+            mesh.positions.extend(q.map(|x| x as f32));
+            mesh.normals.extend_from_slice(&[0.0; 3]);
+            slot.insert((v, j), id);
+        }
+        for (v, col) in cols {
+            let ids: Vec<u32> = col.iter().enumerate().map(|(j, c)| c.unwrap_or_else(|| slot[&(v, j)])).collect();
+            columns.insert(v, ids);
+        }
+    }
     for (a, b) in border {
-        let (Some(&pa), Some(&pb)) = (proj_id.get(&a), proj_id.get(&b)) else { continue };
-        kept.extend_from_slice(&[b, a, pa]);
-        if pa != pb {
-            kept.extend_from_slice(&[b, pa, pb]);
+        let (Some(ca), Some(cb)) = (columns.get(&a), columns.get(&b)) else { continue };
+        // 2 本の列の間を、t（縁 0 → 特異点 1）の小さいほうから進めて三角形で埋める。向きは今までの (b, a, a') と (b, a', b') と同じ
+        let (na, nb) = (ca.len() - 1, cb.len() - 1);
+        let (mut i, mut j) = (0, 0);
+        while i < na || j < nb {
+            let advance_a = j == nb || (i < na && (i + 1) as f64 / na as f64 <= (j + 1) as f64 / nb as f64);
+            if advance_a {
+                kept.extend_from_slice(&[cb[j], ca[i], ca[i + 1]]);
+                i += 1;
+            } else if cb[j + 1] != ca[i] {
+                kept.extend_from_slice(&[cb[j], ca[i], cb[j + 1]]);
+                j += 1;
+            } else {
+                j += 1;
+            }
         }
     }
     mesh.indices = kept;
     // 使われなくなった頂点はそのまま残す（番号を詰めると、粗い版などの番号がずれる）。法線は三角形から作り直す
     compute_normals(mesh);
+    found
+}
+
+/// 面にならない特異点の線（ローマ曲面の座標軸の |t| > 1/2 の「ひげ」、ホイットニーの傘 x² = y² z の z < 0 の「柄」）を、線として描く。
+///
+/// F ≥ 0（か ≤ 0）が線の上でだけ 0 に触れる所は、符号が変わらないので面にならず、格子では見つからない。そうした線は、交わる線（二重線）の
+/// 端のピンチ点から続いている。見つけた特異点 `seeds` から、ヘッセ行列の 0 の固有値の向き（線の向き）へ約 1 マスずつ進み、
+/// 進んだ先を ∇F = 0 へ寄せる（[`onto_singular`]）。ヘッセ行列の 0 でない 2 つの固有値の符号がそろう点（ひげ・柄）だけを線にし、
+/// 二重線の上（鞍の形）は記録せずに通り過ぎる。表示範囲を出る・寄らない・F が 0 でない・通った所に戻ったら止める。
+/// 線は `mesh.edge_lines`（2 点ずつ、間は NaN。`lib.rs` が実線の境目の線にする）に足す
+pub(crate) fn trace_singular_lines(mesh: &mut Mesh, prog: &Program, h: f64, dom: Domain, seeds: &[[f64; 3]]) {
+    if seeds.is_empty() || prog.vars().len() != 3 || !(h > 0.0) {
+        return;
+    }
+    let inside = |p: &[f64; 3]| (0..3).all(|a| p[a] >= dom.lo[a] - 1e-9 && p[a] <= dom.hi[a] + 1e-9);
+    let key = |p: &[f64; 3]| p.map(|v| (v / h).floor() as i64);
+    let mut visited: crate::adaptive::HashMap<[i64; 3], ()> = Default::default();
+    // 線の向き（ヘッセ行列の 0 の固有値の固有ベクトル）と、ひげか（ほかの 2 つの固有値の符号がそろう）。
+    // ピンチ点の近くでは 0 に近い固有値が 2 つになるので、小さい 2 つのうち、今までの向き `prev` に近いほうを線の向きにする
+    let classify = |hm: &[[f64; 3]; 3], prev: Option<[f64; 3]>| -> Option<([f64; 3], bool)> {
+        let (ev, vecs) = super::crease::eigen_sym(*hm);
+        let m = ev.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        if !(m > 0.0) {
+            return None;
+        }
+        let mut order = [0, 1, 2];
+        order.sort_by(|&i, &j| ev[i].abs().total_cmp(&ev[j].abs()));
+        let vec_of = |i: usize| [vecs[0][i], vecs[1][i], vecs[2][i]];
+        let k = match prev {
+            Some(d) if ev[order[1]].abs() <= SADDLE * m => {
+                let align = |i: usize| {
+                    let v = vec_of(i);
+                    (v[0] * d[0] + v[1] * d[1] + v[2] * d[2]).abs()
+                };
+                if align(order[1]) > align(order[0]) { order[1] } else { order[0] }
+            }
+            _ => order[0],
+        };
+        if ev[k].abs() > SADDLE * m {
+            return None; // 線ではない（尖った点など）
+        }
+        let others: Vec<f64> = (0..3).filter(|&i| i != k).map(|i| ev[i]).collect();
+        let whisker = others.iter().all(|&v| v > SADDLE * m) || others.iter().all(|&v| v < -SADDLE * m);
+        Some((vec_of(k), whisker))
+    };
+    let max_steps = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / h).sum::<f64>() as usize + 8;
+    let mut lines: Vec<f32> = Vec::new();
+    for seed in seeds {
+        if visited.contains_key(&key(seed)) {
+            continue;
+        }
+        let Some(Some((p0, hm0))) = onto_singular(prog, &[*seed], h, 2.0 * h).into_iter().next() else { continue };
+        let Some((dir0, _)) = classify(&hm0, None) else { continue };
+        visited.insert(key(&p0), ());
+        for sign in [1.0, -1.0] {
+            let (mut p, mut dir) = (p0, dir0.map(|c| c * sign));
+            let mut prev_whisker: Option<[f64; 3]> = None;
+            for _ in 0..max_steps {
+                let guess = [0, 1, 2].map(|c| p[c] + h * dir[c]);
+                let Some(Some((q, hm))) = onto_singular(prog, &[guess], h, 2.0 * h).into_iter().next() else { break };
+                let Some((d, whisker)) = classify(&hm, Some(dir)) else { break };
+                let step = [0, 1, 2].map(|c| q[c] - p[c]);
+                // 戻った・ほとんど進まない（線の端）なら止める
+                if norm(step) < 0.25 * h || (step[0] * dir[0] + step[1] * dir[1] + step[2] * dir[2]) <= 0.0 || !inside(&q) {
+                    break;
+                }
+                let k = key(&q);
+                if visited.contains_key(&k) {
+                    break;
+                }
+                visited.insert(k, ());
+                if whisker {
+                    if let Some(a) = prev_whisker {
+                        lines.extend([a[0] as f32, a[1] as f32, a[2] as f32, q[0] as f32, q[1] as f32, q[2] as f32, f32::NAN, f32::NAN, f32::NAN]);
+                    }
+                    prev_whisker = Some(q);
+                } else {
+                    prev_whisker = None;
+                }
+                // 向きは前と同じ側にそろえる
+                let s = if d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2] < 0.0 { -1.0 } else { 1.0 };
+                dir = d.map(|c| c * s);
+                p = q;
+            }
+        }
+    }
+    mesh.edge_lines.extend(lines);
 }
