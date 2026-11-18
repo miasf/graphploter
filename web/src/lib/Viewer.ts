@@ -1223,7 +1223,15 @@ export class Viewer {
     }
     const gridGeo = new THREE.BufferGeometry()
     gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
-    this.frame.add(new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: t.grid })))
+    const floorGrid = new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: t.grid }))
+    if (!this.flat) {
+      // 3D: 床の方眼は、図形よりいつも奥に見せる（最初に描き、深さを書かない）。下から見上げると、床（z = 0）は上の図形より手前にあるので、
+      // 深さのとおりに描くと方眼が図形の上に重なって、図形にひびが入ったように見えた（floor(x) + floor(y) + floor(z) = 0 の立方体）。
+      // 軸・枠は深さのとおりに描く（面を貫く軸の見え方を残す）
+      floorGrid.material.depthWrite = false
+      floorGrid.renderOrder = -10000
+    }
+    this.frame.add(floorGrid)
 
     // 座標軸（原点を通る。原点が範囲外なら範囲の端に寄せる）
     const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
