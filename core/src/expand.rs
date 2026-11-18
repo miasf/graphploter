@@ -1449,6 +1449,10 @@ impl Expander<'_> {
             return Err("積分の入れ子は 3 重までにしてください".into());
         }
         let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
+        // 値が定数になる積分は、適応型の積分で 1 つの数にする（決まった点の和より、ずっと正確）
+        if let Some(v) = self.closed_integral(var, &lo, &hi, body)? {
+            return Ok(Expr::Num(v));
+        }
         let inf = |e: &Expr| match e {
             Expr::Num(v) if v.is_infinite() => Some(v.signum()),
             Expr::Neg(a) => match &**a {
@@ -1528,6 +1532,79 @@ impl Expander<'_> {
         }
         self.int_depth -= 1;
         Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
+    }
+
+    /// 値が定数になる積分（端と中身が、積分の変数とパラメータだけの式）を、適応型の積分（`quad.rs`）で数にする。
+    /// すぐ内側に続く積分 ∫∫∫（内側の端は外側の積分の変数の式でよい）も、まとめて入れ子のまま計算する
+    /// （内側を決まった点の和にすると、内側の誤差がそのまま残る）。定数にならない・計算が多すぎるときは None
+    /// （今までの、点の和の式にする道に任せる）
+    fn closed_integral(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Result<Option<f64>, String> {
+        // 端に ∞ がある積分で誤差が目標に届かないのは、ほとんど発散しているとき（∫₀^∞ 1 dt など）
+        match self.closed_integral_value(var, lo, hi, body) {
+            Some((_, true, true)) => Err("積分が収束しないようです（∞ までの積分が発散する・とても遅く 0 に近づく・範囲の中に中身が定義されない所がある）".to_string()),
+            Some((v, _, _)) => Ok(Some(v)),
+            None => Ok(None),
+        }
+    }
+
+    /// [`Self::closed_integral`] の本体。(値, 誤差が目標に届かなかったか, 端に ∞ があるか)
+    fn closed_integral_value(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Option<(f64, bool, bool)> {
+        use crate::eval::Program;
+        let mut levels: Vec<(String, Expr, Expr)> = vec![(var.to_string(), lo.clone(), hi.clone())];
+        let mut inner = body;
+        while let Expr::Binder { op, var: v, args, body: b } = inner {
+            if op != "int" || args.len() != 2 || levels.len() >= 3 || levels.iter().any(|l| &l.0 == v) {
+                break;
+            }
+            let (Ok(l), Ok(h)) = (self.scalar(&args[0]), self.scalar(&args[1])) else { break };
+            levels.push((v.clone(), l, h));
+            inner = b;
+        }
+        let names: Vec<&str> = levels.iter().map(|l| l.0.as_str()).collect();
+        // 端の式（±∞ はコンパイルできないので、数のまま持つ）
+        let bound = |e: &Expr, i: usize| -> Option<Bound> {
+            match e {
+                Expr::Num(v) if v.is_infinite() => Some(Bound::Inf(*v)),
+                Expr::Neg(a) if matches!(&**a, Expr::Num(v) if v.is_infinite()) => {
+                    let Expr::Num(v) = &**a else { return None };
+                    Some(Bound::Inf(-*v))
+                }
+                _ => Program::compile_with(e, &names[..i], self.params).ok().map(Bound::Prog),
+            }
+        };
+        let mut bounds = Vec::with_capacity(levels.len());
+        for (i, (_, l, h)) in levels.iter().enumerate() {
+            bounds.push((bound(l, i)?, bound(h, i)?));
+        }
+        self.int_depth += levels.len();
+        let g = self.scalar(inner);
+        self.int_depth -= levels.len();
+        let f = Program::compile_with(&g.ok()?, &names, self.params).ok()?;
+        // パラメータを使っていれば、スライダーが動いたら計算し直す
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            let progs = bounds.iter().flat_map(|(a, b)| [a, b]).filter_map(|b| if let Bound::Prog(p) = b { Some(p) } else { None });
+            for p in progs.flat_map(|p| p.used_params()).chain(f.used_params()) {
+                if !u.contains(p) {
+                    u.push(p.clone());
+                }
+            }
+        });
+        let budget = crate::quad::Budget::new(CLOSED_BUDGET);
+        let v = nested_integral(&bounds, &f, 0, [0.0; 3], &budget);
+        let infinite = bounds.iter().any(|(a, b)| matches!(a, Bound::Inf(_)) || matches!(b, Bound::Inf(_)));
+        if budget.exhausted() {
+            return None;
+        }
+        if !v.is_finite() {
+            // 端に ∞ があって有限の値にならない: 発散している（今までの点の和にすると、意味の無い数になる）
+            return infinite.then_some((v, true, true));
+        }
+        let rough = budget.rough.get();
+        if rough {
+            add_note("積分の誤差の見積もりが目標（10⁻¹⁰）に届いていません（端で発散する・激しく振動するなど）");
+        }
+        Some((v, rough, infinite))
     }
 
     /// 添字つきの最大・最小 $\max_{t \in [a, b]} g(t)$（計画 M12）: 範囲を 64 等分した 65 点での値の max・min（近似）
@@ -1848,6 +1925,32 @@ impl Expander<'_> {
         // 条件を「左 関係 右」の組に分ける（関係は '<' か '≤'。'>'・'≥' は左右を入れ替える）
         let mut pairs: Vec<(Expr, bool, Expr)> = Vec::new();
         for chain in &args[1..args.len() - 1] {
+            // 論理式の条件（∨・¬ など）: 選言標準形にして、1 本の不等式 max_k min_j (右 − 左) ≥ 0 にまとめる
+            // （「かつ」のかたまり k のどれかを全部満たす）。等式は面積・体積が 0、≠ は面積・体積を変えないので落とす
+            if let Expr::Cond(f) = chain {
+                use crate::functions::Func;
+                use crate::logic::Op as L;
+                let lookup = |n: &str| set_def(n);
+                let clauses = crate::logic::clauses(f, &vars, &lookup)?;
+                let mut alts = Vec::new();
+                for clause in &clauses {
+                    let mut gs = Vec::new();
+                    for lit in clause {
+                        match lit.op {
+                            L::Lt | L::Le => gs.push(crate::diff::sub(self.scalar(&lit.r)?, self.scalar(&lit.l)?)),
+                            L::Ne => {}
+                            L::Eq => {} // 面積・体積 0 の部分（そのかたまりは落とす）
+                        }
+                    }
+                    if clause.iter().any(|lit| lit.op == L::Eq) {
+                        continue;
+                    }
+                    alts.push(gs.into_iter().reduce(|a, b| Expr::Call(Func::Min, vec![a, b])).unwrap_or(Expr::Num(1.0)));
+                }
+                let g = alts.into_iter().reduce(|a, b| Expr::Call(Func::Max, vec![a, b])).unwrap_or(Expr::Num(-1.0));
+                pairs.push((Expr::Num(0.0), false, g));
+                continue;
+            }
             let Expr::Op { op, args: exprs } = chain else { return Err("内部エラー: 条件の形".into()) };
             let rels: Vec<char> = op.trim_start_matches("rel:").chars().collect();
             let exprs = exprs.iter().map(|e| self.scalar(e)).collect::<Result<Vec<_>, _>>()?;
@@ -1961,6 +2064,184 @@ impl Expander<'_> {
 
     /// 累次積分の形に書けない領域の上の積分（`region.rs`）。条件が積分の変数とパラメータだけの式でなければ None
     /// （領域がほかの座標で変わるときは、点を置く場所を前もって決められない）。結果は Σ 重み · 中身(点)
+    /// g（変数 v と、ほかの積分の変数の式）を v の 2 次以下の式 a v² + b v + c と見たときの (a, b, c)。
+    /// 係数は v = 0, ±1 を入れた式から作り、いくつかの点で g と一致するかを数で確かめる（一致しなければ None）
+    fn as_quadratic(&self, g: &Expr, v: &str, names: &[&str]) -> Option<Quadratic> {
+        use crate::diff::{add, div, sub};
+        use num_complex::Complex64 as C;
+        let at = |t: f64| g.substitute(&|name: &str| (name == v).then_some(Expr::Num(t)));
+        let (c, p1, m1) = (at(0.0), at(1.0), at(-1.0));
+        let b = div(sub(p1.clone(), m1.clone()), Expr::Num(2.0));
+        let a = sub(div(add(p1, m1), Expr::Num(2.0)), c.clone());
+        let k = names.iter().position(|n| *n == v)?;
+        let progs: Vec<crate::eval::Program> =
+            [g, &a, &b, &c].iter().map(|e| crate::eval::Program::compile_with(e, names, self.params).ok()).collect::<Option<_>>()?;
+        // 確かめる点（どの変数にも、ありふれた値にならない数）
+        let pts = [[0.37, -0.81, 0.53], [-1.29, 0.44, 1.71], [0.93, 1.37, -0.66], [2.13, -1.57, -1.21], [-0.52, 0.71, 0.29]];
+        let mut checked = 0;
+        // 確かめた点での a, b の値（どの点でも同じなら定数）
+        let (mut a_seen, mut b_seen): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
+        for pt in pts {
+            let cols: Vec<[f64; 1]> = (0..names.len()).map(|i| [pt[i]]).collect();
+            let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+            let val = |p: &crate::eval::Program| {
+                let mut out = [C::new(0.0, 0.0)];
+                p.eval_batch(&inputs, &mut out);
+                crate::eval::as_real(out[0])
+            };
+            let (gv, av, bv, cv) = (val(&progs[0]), val(&progs[1]), val(&progs[2]), val(&progs[3]));
+            if !(gv.is_finite() && av.is_finite() && bv.is_finite() && cv.is_finite()) {
+                continue;
+            }
+            let t = pt[k];
+            let fit = av * t * t + bv * t + cv;
+            if (gv - fit).abs() > 1e-9 * (gv.abs() + (av * t * t).abs() + (bv * t).abs() + cv.abs() + 1.0) {
+                return None;
+            }
+            checked += 1;
+            a_seen.push(av);
+            b_seen.push(bv);
+        }
+        let same = |xs: &[f64]| xs.first().copied().filter(|&x0| xs.iter().all(|x| (x - x0).abs() <= 1e-12 * (1.0 + x0.abs())));
+        (checked >= 3).then_some((a, b, c, same(&a_seen), same(&b_seen)))
+    }
+
+    /// 3 重積分の領域で、ある変数 v の条件が全部「v の範囲」に直せるとき（v について 2 次以下の不等式で、v² の係数が負の数か 0）、
+    /// v の積分を内側の 1 次元の積分 $\int_{\max_i l_i}^{\min_j h_j} f\,dv$ にし、残り 2 変数の領域（v を含まない条件と、
+    /// 2 次式の判別式 ≥ 0、すべての l_i ≤ h_j）の上で 2 重の領域の積分（`region.rs`）にする。
+    /// 球 x² + y² + z² ≤ 1 は −√(1 − x² − y²) ≤ z ≤ √(1 − x² − y²) と円板に、2 本の円柱 x² + z² ≤ 1, y² + z² ≤ 1 は
+    /// z の範囲と正方形になる。3 次元の切り口を探すより、ずっと速く正確（2 次元の切り口だけ探せばよい）。直せなければ None
+    fn reduced_region(&mut self, vars: &[String], pairs: &[(Expr, bool, Expr)], f: &crate::eval::Program, budget: &crate::quad::Budget) -> Option<f64> {
+        use crate::diff::{add, div, mul, sub};
+        use crate::eval::Program;
+        use num_complex::Complex64 as C;
+        let names: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
+        'var: for k in (0..3).rev() {
+            let v = vars[k].as_str();
+            let outer: Vec<String> = vars.iter().enumerate().filter(|(i, _)| *i != k).map(|(_, s)| s.clone()).collect();
+            let (mut lows, mut highs, mut rest) = (Vec::new(), Vec::new(), Vec::new());
+            for (l, s, r) in pairs {
+                if !l.uses_var(v) && !r.uses_var(v) {
+                    rest.push((l.clone(), *s, r.clone()));
+                    continue;
+                }
+                let g = sub(r.clone(), l.clone()); // g ≥ 0
+                // 1. v の 2 次以下の式なら、根の公式で
+                let quadratic = match self.as_quadratic(&g, v, &names) {
+                    Some((_, b, c, Some(av), b_const)) => {
+                        // 1 次式（a = 0）は、丸め誤差で a が 0 にならないこともあるので幅を持たせる
+                        let av = if av.abs() <= 1e-12 { 0.0 } else { av };
+                        if av < 0.0 {
+                            // a v² + b v + c ≥ 0（a < 0）: 2 つの根の間。判別式が負なら空
+                            let disc = sub(mul(b.clone(), b.clone()), mul(Expr::Num(4.0 * av), c));
+                            let root = Expr::Call(crate::functions::Func::Sqrt, vec![disc.clone()]);
+                            let two_a = Expr::Num(2.0 * av);
+                            lows.push(div(add(Expr::Neg(Box::new(b.clone())), root.clone()), two_a.clone()));
+                            highs.push(div(sub(Expr::Neg(Box::new(b)), root), two_a));
+                            rest.push((Expr::Num(0.0), false, disc));
+                            true
+                        } else if av == 0.0 {
+                            match b_const {
+                                Some(bv) if bv > 0.0 => lows.push(div(Expr::Neg(Box::new(c)), Expr::Num(bv))),
+                                Some(bv) if bv < 0.0 => highs.push(div(Expr::Neg(Box::new(c)), Expr::Num(bv))),
+                                Some(_) => rest.push((Expr::Num(0.0), false, c)),
+                                None => {}
+                            }
+                            b_const.is_some()
+                        } else {
+                            false // v² の係数が正: 2 つの根の外側（区間 1 つにならない）
+                        }
+                    }
+                    _ => false,
+                };
+                // 2. v が 1 か所にしか出てこなければ、孤立法で（√x + √y + √z ≤ 1・|x| + |y| + |z| ≤ 1）
+                if !quadratic {
+                    let Some((lo, hi, conds)) = isolate(&g, v) else { continue 'var };
+                    lows.extend(lo);
+                    highs.extend(hi);
+                    rest.extend(conds.into_iter().map(|c| (Expr::Num(0.0), false, c)));
+                }
+            }
+            for lo in &lows {
+                for hi in &highs {
+                    rest.push((lo.clone(), false, hi.clone()));
+                }
+            }
+            let onames: Vec<&str> = outer.iter().map(|s| s.as_str()).collect();
+            let compile = |es: &[Expr]| es.iter().map(|e| Program::compile_with(e, &onames, self.params).ok()).collect::<Option<Vec<_>>>();
+            let (Some(low_p), Some(high_p)) = (compile(&lows), compile(&highs)) else { continue };
+            let Some((progs, known)) = self.region_programs(&outer, &rest) else { continue };
+            // 中身が定数（体積など）なら、内側の積分は (上の端 − 下の端) · 定数（ばらばらな 3 点で値がぴったり同じなら定数とみなす）
+            let fconst = {
+                let mut out = [C::new(0.0, 0.0); 3];
+                let probe = [[0.31, -0.47, 0.83], [1.7, 2.3, -1.1], [-2.9, 0.61, 3.7]];
+                let cols: Vec<Vec<f64>> = (0..3).map(|i| probe.iter().map(|p| p[i]).collect()).collect();
+                let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+                f.eval_batch(&inputs, &mut out);
+                (out[0] == out[1] && out[1] == out[2] && out[0].im == 0.0 && out[0].re.is_finite()).then_some(out[0].re)
+            };
+            let eval_at = |p: &Program, pt: [f64; 2]| {
+                let mut out = [C::new(0.0, 0.0)];
+                p.eval_batch(&[&[pt[0]], &[pt[1]]], &mut out);
+                crate::eval::as_real(out[0])
+            };
+            let integrand = |inputs: &[&[f64]], out: &mut [f64]| {
+                for (j, o) in out.iter_mut().enumerate() {
+                    let pt = [inputs[0][j], inputs[1][j]];
+                    let lo = low_p.iter().map(|p| eval_at(p, pt)).fold(f64::NEG_INFINITY, f64::max);
+                    let hi = high_p.iter().map(|p| eval_at(p, pt)).fold(f64::INFINITY, f64::min);
+                    if hi <= lo || hi.is_nan() || lo.is_nan() {
+                        *o = 0.0;
+                        continue;
+                    }
+                    if let Some(c) = fconst {
+                        *o = c * (hi - lo);
+                        continue;
+                    }
+                    let mut g = |ts: &[f64], vals: &mut [f64]| {
+                        let cols: Vec<Vec<f64>> = (0..3)
+                            .map(|i| if i == k { ts.to_vec() } else { vec![pt[if i < k { i } else { i - 1 }]; ts.len()] })
+                            .collect();
+                        let ins: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+                        let mut res = vec![C::new(0.0, 0.0); ts.len()];
+                        f.eval_batch(&ins, &mut res);
+                        for (o, r) in vals.iter_mut().zip(&res) {
+                            *o = crate::eval::as_real(*r);
+                        }
+                    };
+                    *o = crate::quad::integrate(&mut g, lo, hi, crate::quad::Tol { rel: 1e-11, panels: 100, ends: true }, budget);
+                }
+            };
+            return crate::region::integrate(progs, 2, &known, &integrand, budget);
+        }
+        None
+    }
+
+    /// 条件の組（左 ≤ 右）を、領域の条件の式（右 − 左 ≥ 0）と、数で書かれた変数ごとの端にする。式にできなければ None
+    fn region_programs(&mut self, vars: &[String], pairs: &[(Expr, bool, Expr)]) -> Option<RegionPrograms> {
+        let names: Vec<&str> = vars.iter().map(|v| v.as_str()).collect();
+        let free = |e: &Expr| !vars.iter().any(|v| e.uses_var(v));
+        let mut progs = Vec::new();
+        let mut known: Vec<(Option<f64>, Option<f64>)> = vec![(None, None); vars.len()];
+        for (l, _, r) in pairs {
+            let g = Expr::Bin(BinOp::Sub, Box::new(r.clone()), Box::new(l.clone()));
+            progs.push(crate::eval::Program::compile_with(&g, &names, self.params).ok()?);
+            for (i, v) in vars.iter().enumerate() {
+                let is_v = |e: &Expr| matches!(e, Expr::Var(name) if name == v);
+                if is_v(r) && free(l) {
+                    if let Ok(a) = self.number(l, "領域の条件") {
+                        known[i].0 = Some(known[i].0.map_or(a, |b: f64| b.max(a)));
+                    }
+                } else if is_v(l) && free(r) {
+                    if let Ok(a) = self.number(r, "領域の条件") {
+                        known[i].1 = Some(known[i].1.map_or(a, |b: f64| b.min(a)));
+                    }
+                }
+            }
+        }
+        Some((progs, known))
+    }
+
     fn general_region(&mut self, vars: &[String], pairs: &[(Expr, bool, Expr)], body: &Expr) -> Result<Option<Expr>, String> {
         let n = vars.len();
         let names: Vec<&str> = vars.iter().map(|v| v.as_str()).collect();
@@ -1995,6 +2276,30 @@ impl Expander<'_> {
                 }
             }
         });
+        // 値が定数になる積分（中身が積分の変数とパラメータだけの式）は、適応型の積分で数にする
+        self.int_depth += n;
+        let closed = self.scalar(body).ok().and_then(|g| crate::eval::Program::compile_with(&g, &names, self.params).ok());
+        self.int_depth -= n;
+        if let Some(f) = closed {
+            USED_PARAMS.with(|u| {
+                let mut u = u.borrow_mut();
+                for p in f.used_params() {
+                    if !u.contains(p) {
+                        u.push(p.clone());
+                    }
+                }
+            });
+            let budget = crate::quad::Budget::new(CLOSED_BUDGET);
+            // 3 重積分で、ある変数の条件が全部その変数の範囲に直せるなら、その変数を内側の 1 次元の積分にする
+            let reduced = if n == 3 { self.reduced_region(vars, pairs, &f, &budget) } else { None };
+            let rv = reduced.or_else(|| crate::region::integrate(progs.clone(), n, &known, &crate::region::program_integrand(&f), &budget));
+            if let Some(v) = rv {
+                if budget.rough.get() {
+                    add_note("積分の誤差の見積もりが目標（10⁻¹⁰）に届いていません（端で発散する・激しく振動するなど）");
+                }
+                return Ok(Some(Expr::Num(v)));
+            }
+        }
         let points = crate::region::quadrature(progs, n, &known)?;
         self.int_depth += n;
         let result = (|| {
@@ -2155,6 +2460,191 @@ impl Expander<'_> {
 }
 
 /// ガウス・ルジャンドルの n 点の節点と重み（区間 [−1, 1]）。ルジャンドル多項式 $P_n$ の根をニュートン法で求める
+/// 不等式 g ≥ 0 を、変数 v の範囲（下の端の並び・上の端の並び）と、v を含まない条件（≥ 0 になるべき式の並び）に解く。
+/// v が g の中に 1 か所しか出てこないときの「孤立法」: g = A ± u（u だけが v を含む）から u の範囲を出し、
+/// u の外側の演算から順に逆の演算を当てて v の範囲にする（符号・定数倍・定数の足し引き・√・|·|・2 乗・exp・ln）。
+/// 解けなければ None
+fn isolate(g: &Expr, v: &str) -> Option<(Vec<Expr>, Vec<Expr>, Vec<Expr>)> {
+    let (mut lows, mut highs, mut conds) = (Vec::new(), Vec::new(), Vec::new());
+    // g ≥ 0 ⇔ 0 ≤ g: 「u ≥ 0」を解く
+    bound_of(g, Expr::Num(0.0), false, v, &mut lows, &mut highs, &mut conds)?;
+    Some((lows, highs, conds))
+}
+
+/// 和・差を (符号, 項) に分ける
+fn add_terms(e: &Expr, sign: f64, out: &mut Vec<(f64, Expr)>) {
+    match e {
+        Expr::Bin(BinOp::Add, a, b) => {
+            add_terms(a, sign, out);
+            add_terms(b, sign, out);
+        }
+        Expr::Bin(BinOp::Sub, a, b) => {
+            add_terms(a, sign, out);
+            add_terms(b, -sign, out);
+        }
+        Expr::Neg(a) => add_terms(a, -sign, out),
+        _ => out.push((sign, e.clone())),
+    }
+}
+
+/// u ≤ b（upper）・u ≥ b（!upper）を、v の範囲と条件に解いて足す。解けなければ None
+#[allow(clippy::too_many_arguments)]
+fn bound_of(u: &Expr, b: Expr, upper: bool, v: &str, lows: &mut Vec<Expr>, highs: &mut Vec<Expr>, conds: &mut Vec<Expr>) -> Option<()> {
+    use crate::diff::{add, div, mul, sub};
+    use crate::functions::Func;
+    let neg = |e: Expr| Expr::Neg(Box::new(e));
+    let num = |e: &Expr| match e {
+        Expr::Num(k) => Some(*k),
+        Expr::Neg(a) => match &**a {
+            Expr::Num(k) => Some(-*k),
+            _ => None,
+        },
+        _ => None,
+    };
+    if matches!(u, Expr::Var(n) if n == v) {
+        if upper { highs.push(b) } else { lows.push(b) }
+        return Some(());
+    }
+    if !u.uses_var(v) {
+        // v を含まない: 条件そのもの（u ≤ b なら b − u ≥ 0）
+        conds.push(if upper { sub(b, u.clone()) } else { sub(u.clone(), b) });
+        return Some(());
+    }
+    match u {
+        Expr::Bin(BinOp::Add | BinOp::Sub, ..) | Expr::Neg(_) => {
+            // u = A + σ w（w だけが v を含む）: σ w ≤ b − A
+            let mut terms = Vec::new();
+            add_terms(u, 1.0, &mut terms);
+            let with: Vec<&(f64, Expr)> = terms.iter().filter(|t| t.1.uses_var(v)).collect();
+            if with.len() != 1 {
+                return None;
+            }
+            let (sigma, w) = with[0].clone();
+            let mut rest = b;
+            for (s, t) in terms.iter().filter(|t| !t.1.uses_var(v)) {
+                rest = if *s > 0.0 { sub(rest, t.clone()) } else { add(rest, t.clone()) };
+            }
+            if sigma > 0.0 {
+                bound_of(&w, rest, upper, v, lows, highs, conds)
+            } else {
+                bound_of(&w, neg(rest), !upper, v, lows, highs, conds)
+            }
+        }
+        // 定数倍 k w・w k・w / k
+        Expr::Bin(BinOp::Mul, a, c) if num(a).is_some() || num(c).is_some() => {
+            let (k, w) = match num(a) {
+                Some(k) => (k, &**c),
+                None => (num(c)?, &**a),
+            };
+            if k == 0.0 {
+                return None;
+            }
+            bound_of(w, div(b, Expr::Num(k)), if k > 0.0 { upper } else { !upper }, v, lows, highs, conds)
+        }
+        Expr::Bin(BinOp::Div, w, c) if num(c).is_some() => {
+            let k = num(c)?;
+            if k == 0.0 {
+                return None;
+            }
+            bound_of(w, mul(b, Expr::Num(k)), if k > 0.0 { upper } else { !upper }, v, lows, highs, conds)
+        }
+        // √w ≤ b ⇔ b ≥ 0 かつ 0 ≤ w ≤ b²、√w ≥ b ⇔ w ≥ max(b, 0)²
+        Expr::Call(Func::Sqrt, args) if args.len() == 1 => {
+            let w = &args[0];
+            if upper {
+                conds.push(b.clone());
+                bound_of(w, Expr::Num(0.0), false, v, lows, highs, conds)?;
+                bound_of(w, mul(b.clone(), b), true, v, lows, highs, conds)
+            } else {
+                let m = Expr::Call(Func::Max, vec![b, Expr::Num(0.0)]);
+                bound_of(w, mul(m.clone(), m), false, v, lows, highs, conds)
+            }
+        }
+        // |w| ≤ b ⇔ −b ≤ w ≤ b（|w| ≥ b は区間 2 つになるので解かない）
+        Expr::Call(Func::Abs, args) if args.len() == 1 && upper => {
+            bound_of(&args[0], b.clone(), true, v, lows, highs, conds)?;
+            bound_of(&args[0], neg(b), false, v, lows, highs, conds)
+        }
+        // w² ≤ b ⇔ b ≥ 0 かつ −√b ≤ w ≤ √b
+        Expr::Bin(BinOp::Pow, w, e) if upper && num(e) == Some(2.0) => {
+            conds.push(b.clone());
+            let r = Expr::Call(Func::Sqrt, vec![b]);
+            bound_of(w, r.clone(), true, v, lows, highs, conds)?;
+            bound_of(w, neg(r), false, v, lows, highs, conds)
+        }
+        // e^w ≤ b ⇔ b > 0 かつ w ≤ ln b（e^w ≥ b は b ≤ 0 で全部になるので解かない）
+        Expr::Call(Func::Exp, args) if args.len() == 1 && upper => {
+            conds.push(b.clone());
+            bound_of(&args[0], Expr::Call(Func::Ln, vec![b]), true, v, lows, highs, conds)
+        }
+        // ln w ≤ b ⇔ 0 ≤ w ≤ e^b、ln w ≥ b ⇔ w ≥ e^b
+        Expr::Call(Func::Ln, args) if args.len() == 1 => {
+            let eb = Expr::Call(Func::Exp, vec![b]);
+            if upper {
+                bound_of(&args[0], Expr::Num(0.0), false, v, lows, highs, conds)?;
+            }
+            bound_of(&args[0], eb, upper, v, lows, highs, conds)
+        }
+        _ => None,
+    }
+}
+
+/// 値が定数になる積分 1 つで、中身を計算してよい回数の上限（3 重積分でも 0.5 秒ほどで終わる数）
+const CLOSED_BUDGET: u64 = 6_000_000;
+
+/// 入れ子の積分 ∫_{a₀}^{b₀} ∫_{a₁(t₀)}^{b₁(t₀)} … f dt… の、i 段目から内側（`p` は外側の積分の変数の値）
+/// v の 2 次以下の式 a v² + b v + c の (a, b, c) と、a・b が定数ならその値（[`Expander::as_quadratic`]）
+type Quadratic = (Expr, Expr, Expr, Option<f64>, Option<f64>);
+
+/// 領域の条件の式（≥ 0）と、変数ごとの数で書かれた端（[`Expander::region_programs`]）
+type RegionPrograms = (Vec<crate::eval::Program>, Vec<(Option<f64>, Option<f64>)>);
+
+/// 入れ子の積分の端: 外側の積分の変数の式か、±∞
+enum Bound {
+    Prog(crate::eval::Program),
+    Inf(f64),
+}
+
+fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize, p: [f64; 3], budget: &crate::quad::Budget) -> f64 {
+    use num_complex::Complex64 as C;
+    let n = bounds.len();
+    let at = |b: &Bound| {
+        let prog = match b {
+            Bound::Inf(v) => return *v,
+            Bound::Prog(prog) => prog,
+        };
+        let cols: Vec<[f64; 1]> = (0..i).map(|k| [p[k]]).collect();
+        let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+        let mut out = [C::new(0.0, 0.0)];
+        prog.eval_batch(&inputs, &mut out);
+        crate::eval::as_real(out[0])
+    };
+    let (a, b) = (at(&bounds[i].0), at(&bounds[i].1));
+    // 外側ほど目標を厳しくする（内側の積分の誤差は、外側の値の誤差として足される）
+    let tol = crate::quad::Tol { rel: if n == 1 { 1e-10 } else if i == 0 { 1e-9 } else { 1e-11 }, panels: [[600, 0, 0], [400, 200, 0], [200, 100, 100]][n - 1][i], ends: true };
+    if i + 1 == n {
+        let mut g = |ts: &[f64], out: &mut [f64]| {
+            let cols: Vec<Vec<f64>> = (0..n).map(|k| if k == i { ts.to_vec() } else { vec![p[k]; ts.len()] }).collect();
+            let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+            let mut vals = vec![C::new(0.0, 0.0); ts.len()];
+            f.eval_batch(&inputs, &mut vals);
+            for (o, v) in out.iter_mut().zip(&vals) {
+                *o = crate::eval::as_real(*v);
+            }
+        };
+        crate::quad::integrate(&mut g, a, b, tol, budget)
+    } else {
+        let mut g = |ts: &[f64], out: &mut [f64]| {
+            for (o, &t) in out.iter_mut().zip(ts) {
+                let mut q = p;
+                q[i] = t;
+                *o = nested_integral(bounds, f, i + 1, q, budget);
+            }
+        };
+        crate::quad::integrate(&mut g, a, b, tol, budget)
+    }
+}
+
 pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut xs = vec![0.0; n];
     let mut ws = vec![0.0; n];

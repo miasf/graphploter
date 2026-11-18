@@ -10,6 +10,7 @@
 
 use crate::eval::{as_real, Program};
 use crate::expand::gauss_legendre;
+use crate::quad;
 
 type C = num_complex::Complex64;
 
@@ -41,6 +42,44 @@ struct Region {
     n: usize,
     lo: [f64; 3],
     hi: [f64; 3],
+    /// 座標ごとの変数変換（箱の座標 s → 積分の変数 x）。点と重みを返す道（[`quadrature`]）ではすべて恒等
+    maps: [Map; 3],
+    /// 一番内側の座標の、切り口の端の二分法の回数（ほかの座標は [`BISECTIONS`]）
+    inner_bisections: usize,
+    /// 標本の間隔より細い所を探すときの拡大の回数（[`ZOOMS`]。適応型の積分では、尖った先の近くの細い切り口も拾えるよう増やす）
+    zooms: u32,
+}
+
+/// 箱の座標 s から積分の変数 x への変換。端の書かれていない向きを、有限の箱に写す（[`integrate`] だけで使う）
+#[derive(Clone, Copy, PartialEq)]
+enum Map {
+    Id,
+    /// x = a + s/(1 − s)（s ∈ [0, 1)）: [a, ∞)
+    Lower(f64),
+    /// x = b − s/(1 − s): (−∞, b]
+    Upper(f64),
+    /// x = s/(1 − s²)（s ∈ (−1, 1)）: (−∞, ∞)
+    Both,
+}
+
+impl Map {
+    fn x(self, s: f64) -> f64 {
+        match self {
+            Map::Id => s,
+            Map::Lower(a) => a + s / (1.0 - s),
+            Map::Upper(b) => b - s / (1.0 - s),
+            Map::Both => s / (1.0 - s * s),
+        }
+    }
+
+    /// dx/ds
+    fn jac(self, s: f64) -> f64 {
+        match self {
+            Map::Id => 1.0,
+            Map::Lower(_) | Map::Upper(_) => 1.0 / ((1.0 - s) * (1.0 - s)),
+            Map::Both => (1.0 + s * s) / ((1.0 - s * s) * (1.0 - s * s)),
+        }
+    }
 }
 
 impl Region {
@@ -51,6 +90,13 @@ impl Region {
     }
 
     fn inside(&self, cols: &[Vec<f64>], len: usize) -> Vec<bool> {
+        let mapped: Vec<Vec<f64>>;
+        let cols = if self.maps[..self.n].iter().all(|m| *m == Map::Id) {
+            cols
+        } else {
+            mapped = cols.iter().zip(&self.maps).map(|(c, m)| c.iter().map(|&s| m.x(s)).collect()).collect();
+            &mapped
+        };
         let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
         let mut ok = vec![true; len];
         let mut out = vec![C::new(0.0, 0.0); len];
@@ -62,6 +108,58 @@ impl Region {
             }
         }
         ok
+    }
+
+    /// 点 p（座標 d を t にしたもの）で、条件の値のいちばん小さいもの（領域に入れば 0 以上。計算できなければ NaN）
+    fn margin(&self, p: &[f64; 3], d: usize, t: f64) -> f64 {
+        let cols: Vec<Vec<f64>> = (0..self.n).map(|k| vec![self.maps[k].x(if k == d { t } else { p[k] })]).collect();
+        let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+        let mut out = [C::new(0.0, 0.0)];
+        let mut m = f64::INFINITY;
+        for prog in &self.progs {
+            prog.eval_batch(&inputs, &mut out);
+            let v = as_real(out[0]);
+            if v.is_nan() {
+                return f64::NAN;
+            }
+            m = m.min(v);
+        }
+        m
+    }
+
+    /// 一番内側の座標 d の、入る点 a と入らない点 b の間の境目（Illinois 法。入らない側の値が NaN なら二分法の 1 歩）。
+    /// 戻り値は境目のすぐ内側
+    fn boundary(&self, p: &[f64; 3], d: usize, mut a: f64, mut b: f64) -> f64 {
+        let (mut ga, mut gb) = (self.margin(p, d, a), self.margin(p, d, b));
+        let mut last = 0i8;
+        for _ in 0..self.inner_bisections {
+            let mid = 0.5 * (a + b);
+            let mut c = if ga.is_finite() && gb.is_finite() && ga > gb { a + (b - a) * ga / (ga - gb) } else { mid };
+            if !(c > a.min(b) && c < a.max(b)) {
+                c = mid;
+            }
+            if c == a || c == b {
+                break;
+            }
+            let gc = self.margin(p, d, c);
+            if gc >= 0.0 {
+                (a, ga) = (c, gc);
+                if last == 1 {
+                    gb *= 0.5; // 同じ側が続いたら、反対の端の値を半分にする（Illinois 法）
+                }
+                last = 1;
+            } else {
+                (b, gb) = (c, gc);
+                if last == -1 {
+                    ga *= 0.5;
+                }
+                last = -1;
+            }
+            if (b - a).abs() <= 4.0 * f64::EPSILON * a.abs().max(b.abs()).max(1e-300) {
+                break;
+            }
+        }
+        a
     }
 
     /// 座標 d の標本。zoom = 0 なら箱の端から端まで。zoom ≥ 1 なら、center を中心に幅を 1/8^zoom にした範囲（箱からはみ出さない）
@@ -81,7 +179,7 @@ impl Region {
         if d == self.n {
             return self.inside_line(p, d - 1, &[p[d - 1]])[0].then_some(*p);
         }
-        for zoom in 0..=ZOOMS {
+        for zoom in 0..=self.zooms {
             if zoom > 0 && hint.is_none() {
                 break;
             }
@@ -109,13 +207,13 @@ impl Region {
     /// 座標 0..d を p で決めたときの、座標 d の切り口（区間の集まり）。区間ごとに、両端の近くで見つけた領域の点も返す
     fn sections(&self, p: &mut [f64; 3], d: usize, hint: Option<&[f64; 3]>) -> Vec<Section> {
         let innermost = d == self.n - 1;
-        for zoom in 0..=ZOOMS {
+        for zoom in 0..=self.zooms {
             if zoom > 0 && hint.is_none() {
                 break;
             }
             let ts = self.samples(d, hint.map_or(0.0, |h| h[d]), zoom);
             // 標本ごとの、領域に入る点（入らなければ None）
-            let hits: Vec<Option<[f64; 3]>> = if innermost {
+            let mut hits: Vec<Option<[f64; 3]>> = if innermost {
                 let flags = self.inside_line(p, d, &ts);
                 ts.iter().zip(flags).map(|(&t, ok)| ok.then(|| { let mut q = *p; q[d] = t; q })).collect()
             } else {
@@ -124,8 +222,40 @@ impl Region {
             if hits.iter().all(|h| h.is_none()) {
                 continue;
             }
+            // 内側に座標が残っている段では、入らなかった標本が本当に外とは限らない（内側の切り口が内側の標本の間隔より細い所。
+            // 円と直線の間のくさびの先など）。入っている標本の隣で入らなかった標本は、隣で見つけた点の周りを細かく探し直す。
+            // 探し直さないと、端の二分法がその標本の手前で止まり、くさびの先が抜け落ちる
+            if !innermost {
+                let mut tried = vec![false; hits.len()];
+                loop {
+                    let mut changed = false;
+                    for j in 0..hits.len() {
+                        if hits[j].is_some() || tried[j] {
+                            continue;
+                        }
+                        let near = if j > 0 && hits[j - 1].is_some() { hits[j - 1] } else if j + 1 < hits.len() { hits[j + 1] } else { None };
+                        let Some(w) = near else { continue };
+                        tried[j] = true;
+                        p[d] = ts[j];
+                        if let Some(h) = self.find(p, d + 1, Some(&w)) {
+                            hits[j] = Some(h);
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        break;
+                    }
+                }
+            }
             // 入っている点 a（領域の点 w）と入っていない点 b の間の境目
             let mut edge = |mut a: f64, mut b: f64, mut w: [f64; 3]| {
+                if innermost && self.inner_bisections > BISECTIONS {
+                    // 一番内側: 条件の値（いちばん小さい G_k）で、はさみうち法（Illinois 法）。二分法の 52 回より少ない回数で詰まる
+                    a = self.boundary(p, d, a, b);
+                    p[d] = a;
+                    w = *p;
+                    return (a, w);
+                }
                 for _ in 0..BISECTIONS {
                     let c = 0.5 * (a + b);
                     if c == a || c == b {
@@ -178,7 +308,8 @@ impl Region {
     fn nodes(&self, p: &mut [f64; 3], d: usize, w: f64, hint: Option<&[f64; 3]>, out: &mut Vec<([f64; 3], f64)>) {
         let innermost = d == self.n - 1;
         let (xs, ws) = gauss_legendre(COUNTS[self.n - 1][d]);
-        for sec in self.sections(p, d, hint) {
+        let secs = self.sections(p, d, hint);
+        for sec in secs {
             if sec.b <= sec.a {
                 continue;
             }
@@ -303,7 +434,7 @@ impl Region {
 pub fn quadrature(progs: Vec<Program>, n: usize, known: &[(Option<f64>, Option<f64>)]) -> Result<Vec<([f64; 3], f64)>, String> {
     assert!((1..=3).contains(&n) && known.len() == n);
     let g = GRID[n - 1];
-    let mut region = Region { progs, n, lo: [0.0; 3], hi: [0.0; 3] };
+    let mut region = Region { progs, n, lo: [0.0; 3], hi: [0.0; 3], maps: [Map::Id; 3], inner_bisections: BISECTIONS, zooms: ZOOMS };
     // 1. 箱を探す: 端の書かれていない向きは、幅を 2 倍ずつ広げる。領域が箱の端（広げた向き）に触れなくなったら終わり
     let mut ext = None;
     let mut seen = false;
@@ -339,15 +470,26 @@ pub fn quadrature(progs: Vec<Program>, n: usize, known: &[(Option<f64>, Option<f
             break;
         }
     }
-    let Some(mut ext) = ext else {
+    let Some(ext) = ext else {
         return Err(if seen {
             "積分する領域が、どこまでも続いているようです（変数の範囲を 0 ≤ x ≤ 1 のように書いてください）".into()
         } else {
             "積分する領域が見つかりません（空か、とても小さいか、原点からとても遠くにあります。変数の範囲を 0 ≤ x ≤ 1 のように書いてください）".into()
         });
     };
-    // 箱を領域に合わせて縮める（入る点の範囲の 3 マス外まで。書かれている端は越えない）。箱があまり縮まなくなったら終わり。
-    // 格子の点が領域の先の細い所（格子の間隔より細い）を外すので、余裕を持たせる。細い所は、後で線の上の標本と二分法で探す
+    region.shrink(ext, known);
+    // 2・3. 切り口ごとに点を置く
+    let mut out = Vec::new();
+    region.nodes(&mut [0.0; 3], 0, 1.0, None, &mut out);
+    Ok(out)
+}
+
+impl Region {
+    /// 箱を領域に合わせて縮める（入る点の範囲の 3 マス外まで。書かれている端は越えない）。箱があまり縮まなくなったら終わり。
+    /// 格子の点が領域の先の細い所（格子の間隔より細い）を外すので、余裕を持たせる。細い所は、後で線の上の標本と二分法で探す
+    fn shrink(&mut self, mut ext: [(usize, usize); 3], known: &[(Option<f64>, Option<f64>)]) {
+        let (n, g) = (self.n, GRID[self.n - 1]);
+        let region = self;
     for _ in 0..60 {
         let mut shrunk = false;
         let (lo, hi) = (region.lo, region.hi);
@@ -366,8 +508,115 @@ pub fn quadrature(progs: Vec<Program>, n: usize, known: &[(Option<f64>, Option<f
             None => break, // 格子より細い領域: この箱のまま、線の上の標本に任せる
         }
     }
-    // 2・3. 切り口ごとに点を置く
-    let mut out = Vec::new();
-    region.nodes(&mut [0.0; 3], 0, 1.0, None, &mut out);
-    Ok(out)
+    }
+
+    /// 座標 0..d を p で決めたときの、残りの座標の上の f の積分（適応型。`quad.rs`）。
+    /// 切り口の区間ごとに、その区間の上の「内側の積分」を積分する。切り口の形が変わる所（穴の端・角）では内側の積分が
+    /// なめらかでなくなるが、その近くの区間が細かくなるので、そのまま収束する
+    fn integrate_level(&self, p: &mut [f64; 3], d: usize, hint: Option<&[f64; 3]>, f: &Integrand, budget: &quad::Budget) -> f64 {
+        let n = self.n;
+        let innermost = d == n - 1;
+        // 外側ほど目標を厳しくする（内側の積分の誤差は、外側の値の誤差として足される）。区間の数の上限は 3 重で控えめに
+        let tol = quad::Tol { rel: [[1e-10, 0.0, 0.0], [1e-9, 1e-11, 0.0], [1e-8, 1e-9, 1e-10]][n - 1][d], panels: [[400, 0, 0], [300, 150, 0], [40, 30, 30]][n - 1][d], ends: true };
+        let mut total = 0.0;
+        let secs = self.sections(p, d, hint);
+        for sec in secs {
+            if sec.b <= sec.a {
+                continue;
+            }
+            let mid = 0.5 * (sec.a + sec.b);
+            let near = |t: f64| if t < mid { sec.wa } else { sec.wb };
+            let base = *p;
+            let v = if innermost {
+                // 外側の座標の変換の重み
+                let outer: f64 = (0..d).map(|k| self.maps[k].jac(base[k])).product();
+                let mut g = |ts: &[f64], out: &mut [f64]| {
+                    let len = ts.len();
+                    let cols: Vec<Vec<f64>> = (0..n)
+                        .map(|k| if k == d { ts.iter().map(|&s| self.maps[k].x(s)).collect() } else { vec![self.maps[k].x(base[k]); len] })
+                        .collect();
+                    let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+                    let mut vals = vec![0.0; len];
+                    f(&inputs, &mut vals);
+                    for ((o, v), &s) in out.iter_mut().zip(&vals).zip(ts) {
+                        let fv = *v;
+                        // 無限遠で 0 になる中身は、変換の重みが大きくても 0
+                        *o = if fv == 0.0 { 0.0 } else { fv * outer * self.maps[d].jac(s) };
+                    }
+                };
+                quad::integrate(&mut g, sec.a, sec.b, tol, budget)
+            } else {
+                let mut g = |ts: &[f64], out: &mut [f64]| {
+                    for (o, &t) in out.iter_mut().zip(ts) {
+                        let mut q = base;
+                        q[d] = t;
+                        let h = near(t);
+                        *o = self.integrate_level(&mut q, d + 1, Some(&h), f, budget);
+                    }
+                };
+                quad::integrate(&mut g, sec.a, sec.b, tol, budget)
+            };
+            total += v;
+        }
+        total
+    }
+}
+
+/// 積分の中身: 積分の変数の値の列（変数ごと）から、点ごとの値を出す
+pub type Integrand<'a> = dyn Fn(&[&[f64]], &mut [f64]) + 'a;
+
+/// 式（積分の変数の順に変数を持つ）を [`Integrand`] にする。値が実数でなければ NaN
+pub fn program_integrand(f: &Program) -> impl Fn(&[&[f64]], &mut [f64]) + '_ {
+    move |inputs: &[&[f64]], out: &mut [f64]| {
+        let mut vals = vec![C::new(0.0, 0.0); out.len()];
+        f.eval_batch(inputs, &mut vals);
+        for (o, v) in out.iter_mut().zip(&vals) {
+            *o = as_real(*v);
+        }
+    }
+}
+
+/// 値が定数になる、領域 {p | すべての progs(p) ≥ 0} の上の f の積分（適応型。点と重みを返す [`quadrature`] より、ずっと正確）。
+/// 端の書かれていない向きは、有限の箱に写して探す（どこまでも続く領域 x ≥ 0, y ≥ 0 の上の e^(−x−y) も積分できる）。
+/// 計算の回数が上限を超えた・格子の点が 1 つも入らないときは None（呼び出し側が [`quadrature`] に戻す）。
+/// 誤差が目標に届かなかったかは `budget.rough`
+pub fn integrate(progs: Vec<Program>, n: usize, known: &[(Option<f64>, Option<f64>)], f: &Integrand, budget: &quad::Budget) -> Option<f64> {
+    assert!((1..=3).contains(&n) && known.len() == n);
+    let mut region = Region { progs, n, lo: [0.0; 3], hi: [0.0; 3], maps: [Map::Id; 3], inner_bisections: 52, zooms: 7 };
+    let mut boxed = Vec::with_capacity(n);
+    for (i, &(lo, hi)) in known.iter().enumerate() {
+        let (m, a, b) = match (lo, hi) {
+            (Some(a), Some(b)) => (Map::Id, a, b),
+            (Some(a), None) => (Map::Lower(a), 0.0, 1.0),
+            (None, Some(b)) => (Map::Upper(b), 0.0, 1.0),
+            (None, None) => (Map::Both, -1.0, 1.0),
+        };
+        if a >= b {
+            return Some(0.0); // 下の端 ≥ 上の端: 空の領域
+        }
+        (region.maps[i], region.lo[i], region.hi[i]) = (m, a, b);
+        boxed.push((Some(a), Some(b)));
+    }
+    let ext = region.grid_extent(GRID[n - 1])?;
+    region.shrink(ext, &boxed);
+    // 領域が無限遠まで届いているか（写した箱の、無限遠の側の端まで縮まなかった）
+    let unbounded = (0..n).any(|i| match region.maps[i] {
+        Map::Id => false,
+        Map::Lower(_) | Map::Upper(_) => region.hi[i] >= 1.0,
+        Map::Both => region.lo[i] <= -1.0 || region.hi[i] >= 1.0,
+    });
+    // 縮めた箱を両側に幅の 1/4 ずつ広げ直す（元の箱は越えない）。格子の点より細い尖った先（√x + √y ≤ 1 の (1, 0) の近く）は
+    // 格子では見つからず、縮めた箱の外に切り落とされる。箱の中なら、切り口を探すときの拡大で拾える
+    for (i, &(a, b)) in boxed.iter().enumerate() {
+        let w = region.hi[i] - region.lo[i];
+        region.lo[i] = (region.lo[i] - 0.25 * w).max(a.unwrap_or(f64::NEG_INFINITY));
+        region.hi[i] = (region.hi[i] + 0.25 * w).min(b.unwrap_or(f64::INFINITY));
+    }
+    let v = region.integrate_level(&mut [0.0; 3], 0, None, f, budget);
+    // 無限遠まで届く領域で誤差が目標に届かないのは、ほとんど積分が発散しているとき（帯 0 ≤ x + y ≤ 1 の上の 1 など）。
+    // 数を返さず、今までの道（「どこまでも続いている」の誤り）に任せる
+    if unbounded && budget.rough.get() {
+        return None;
+    }
+    (!budget.exhausted() && v.is_finite()).then_some(v)
 }

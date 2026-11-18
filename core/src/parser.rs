@@ -858,7 +858,24 @@ impl Parser<'_> {
         let mut args = vec![vars];
         while *self.peek() == Tok::Comma {
             self.next();
-            args.push(self.relation_chain("積分する領域の条件")?);
+            // ふつうは関係の連鎖。「または」「否定」などの論理式（x² + y² ≤ 1 ∨ (x − 1)² + y² ≤ 1・¬(x² + y² < 1)）なら、
+            // 読み直して論理式として持つ
+            let start = self.i;
+            match self.relation_chain("積分する領域の条件") {
+                Ok(chain) if matches!(self.peek(), Tok::Comma | Tok::Semi | Tok::RParen) => args.push(chain),
+                first => {
+                    self.i = start;
+                    match self.equivalence() {
+                        Ok(f) if matches!(self.peek(), Tok::Comma | Tok::Semi | Tok::RParen) => args.push(Expr::Cond(Box::new(f))),
+                        // 論理式としても読めなければ、関係の連鎖としての誤りを出す
+                        _ => {
+                            self.i = start;
+                            first?;
+                            args.push(self.relation_chain("積分する領域の条件")?);
+                        }
+                    }
+                }
+            }
         }
         // `; {vec}`: ベクトル場と向きの付いた要素の内積（F · dr、F · dS）
         if *self.peek() == Tok::Semi {

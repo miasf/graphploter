@@ -27,6 +27,7 @@ pub mod linalg;
 pub mod mesh;
 pub mod ode;
 pub mod pixel;
+pub mod quad;
 mod region;
 pub mod parser;
 pub mod special;
