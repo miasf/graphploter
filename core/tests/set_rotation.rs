@@ -208,3 +208,25 @@ fn faces_avoid_radicals() {
     let d = area(&mesh("⦃(x,y,z)∣x^2+z^2<=1, 0<=-y<=x^3+z^3⦄", 1.5, &[0.0; 10]));
     assert!((d - a0).abs() <= 1e-3 * a0, "面積 {d}（回す前の形で {a0}）");
 }
+
+/// 不等式の領域は、回転の再生・ドラッグ中は回す前の形を回すだけで描く（陰関数と同じ。止まったときと同じ細かさ）。
+/// 前は再生のたびに格子 16 ほどで作り直して、境目がぎざぎざに崩れて見えた
+#[test]
+fn sets_rotate_rigidly_while_playing() {
+    let src = "⦃(x,y,z)∣x^2+y^2<=1, 0<=z<=x^3+y^3⦄";
+    let dom = [-10.0, 10.0, -10.0, 10.0, -5.0, 5.0];
+    let call = |flags: u32| plot(src, &dom, 60, 80, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, flags).ok().unwrap();
+    let rest = call(0);
+    assert!(rest.local_available(), "回す前の形を作れることになっていない");
+    let rest_tris = rest.indices().len() / 3;
+    let mut local = call(8);
+    let shape = local.take_shape().expect("回す前の形が無い");
+    assert!(shape.rigid());
+    let mesh = shape.local_mesh().expect("回す前のメッシュが無い");
+    let tris = mesh.indices().len() / 3;
+    assert!(tris as f64 >= 0.5 * rest_tris as f64, "回す前の形の三角形 {tris}（止まったとき {rest_tris}）");
+    // 回す前の形の頂点は、領域の境目の上
+    let g = |p: [f64; 3]| (p[0] * p[0] + p[1] * p[1] - 1.0).max(-p[2]).max(p[2] - p[0].powi(3) - p[1].powi(3));
+    let worst = mesh.positions().chunks_exact(3).map(|v| g([v[0] as f64, v[1] as f64, v[2] as f64])).fold(0.0, f64::max);
+    assert!(worst <= 1e-3, "頂点が領域の外（{worst}）");
+}

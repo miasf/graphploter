@@ -345,7 +345,18 @@ pub enum Plot {
         exact: [Option<Vec<[f64; 3]>>; 2],
         /// GPU の画素ごとの描き方（2D）に渡す、回転・断面を入れる前の元の座標の式（[`GpuSystem`]）
         gpu: Option<Box<GpuSystem>>,
+        /// 不等式だけの領域で、回転が表示中の座標どうしだけなら、回す前の形（[`LocalRegion`]）。
+        /// 回転の再生・ドラッグ中は、これで作った面を回すだけで描く（陰関数の `local` と同じ）
+        local: Option<Box<LocalRegion>>,
     },
+}
+
+/// 回す前の座標の不等式の領域（[`Plot::System`] の `local`）。`cuts`・`faces` は回す前の座標の式、
+/// `max` は max G_j（領域が ≤ 0。切り口のふたに使う）
+pub struct LocalRegion {
+    pub cuts: Vec<Program>,
+    pub faces: Vec<Vec<(usize, Program)>>,
+    pub max: Program,
 }
 
 /// GPU の画素ごとの描き方に渡す連立方程式・不等式（[`GpuImplicit`] と同じ形。等式・不等式で変数の並びをそろえる）。
@@ -1830,20 +1841,21 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
     let consts = space.with_hidden(params);
     let rot = space.rotation_matrix();
-    // 左辺 − 右辺（回転していれば、座標を回した後の座標の式に置き換えてから引く）
-    let diff = |a: &Expr, b: &Expr| -> Result<Program, String> {
-        let (a, b) = match &rot {
+    // 左辺 − 右辺（回転していれば、座標を回した後の座標の式に置き換えてから引く。`rot` が None なら回す前の式）
+    let diff_with = |a: &Expr, b: &Expr, rot: &Option<Vec<Vec<f64>>>| -> Result<Program, String> {
+        let (a, b) = match rot {
             Some(m) => (rotate_coords(a, m, space), rotate_coords(b, m, space)),
             None => (a.clone(), b.clone()),
         };
         Program::compile_with(&Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b)), &shown_refs, &consts)
     };
+    let diff = |a: &Expr, b: &Expr| diff_with(a, b, &rot);
     let (mut eqs, mut cuts, mut strict) = (Vec::new(), Vec::new(), Vec::new());
     let mut faces = Vec::new();
     let mut eq_rows = Vec::new();
     // 境目の面 G = 0 を、表示中の座標の 1 つについて解く（解が 1 つになる座標を先に。同じなら z を先に）
-    let solve_face = |a: &Expr, b: &Expr| -> Vec<(usize, Program)> {
-        let (a, b) = match &rot {
+    let solve_face_with = |a: &Expr, b: &Expr, rot: &Option<Vec<Vec<f64>>>| -> Vec<(usize, Program)> {
+        let (a, b) = match rot {
             Some(m) => (rotate_coords(a, m, space), rotate_coords(b, m, space)),
             None => (a.clone(), b.clone()),
         };
@@ -1867,6 +1879,7 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         }
         best
     };
+    let solve_face = |a: &Expr, b: &Expr| solve_face_with(a, b, &rot);
     for (l, rel, r) in &rels {
         match rel {
             Rel::Eq => {
@@ -1913,7 +1926,38 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     } else {
         None
     };
-    Ok(Plot::System { base, eqs, cuts, strict, faces, exact: [exact3, exact2], gpu })
+    // 回す前の形: 不等式だけで、回転が表示中の座標どうしだけ（使う座標が全部表示中）で、範囲で重ねる名前を使わないとき。
+    // 回転していないときも作る（初めて回すときから、回すだけで描けるように）
+    let local = if eqs.is_empty() && !space.flat_slice {
+        let mut used = Vec::new();
+        for (l, _, r) in &rels {
+            l.collect_vars(&mut used);
+            r.collect_vars(&mut used);
+        }
+        let ranged = space.ranged().iter().any(|(n, _, _)| used.contains(n));
+        if !ranged && space.rotation_keeps_shown(&used) {
+            let none = None;
+            let mut lc = Vec::new();
+            let mut lf = Vec::new();
+            let mut sides = Vec::new();
+            for (l, rel, r) in &rels {
+                let (a, b) = if matches!(rel, Rel::Ge | Rel::Gt) { (r, l) } else { (l, r) };
+                lc.push(diff_with(a, b, &none)?);
+                lf.push(solve_face_with(a, b, &none));
+                sides.push(Expr::Bin(BinOp::Sub, Box::new(a.clone()), Box::new(b.clone())));
+            }
+            let max = sides.into_iter().reduce(|a, b| Expr::Call(crate::functions::Func::Max, vec![a, b]));
+            match max.map(|m| Program::compile_with(&m, &shown_refs, &consts)) {
+                Some(Ok(max)) => Some(Box::new(LocalRegion { cuts: lc, faces: lf, max })),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(Plot::System { base, eqs, cuts, strict, faces, exact: [exact3, exact2], gpu, local })
 }
 
 /// 連立方程式・不等式の、GPU の描き方の式（[`GpuSystem`]）。どれかの式がコンパイルできなければ None（今までどおり、式に畳み込んだ形で描く）

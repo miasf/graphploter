@@ -815,7 +815,10 @@ pub fn plot(
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
             _ => None,
         },
-        local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        local_available: !flat
+            && !hidden_on
+            && coord.is_none()
+            && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
         gpu2d: if coord.is_some() {
             None
         } else {
@@ -1626,6 +1629,18 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             mesh::add_cluster_lod(&mut m);
             let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
             b.local = Some((local, lp.used_params().to_vec()));
+        }
+        // 不等式の領域の回す前の形（陰関数の上と同じ）: 回す前の不等式で、回転の中心から表示範囲の角までの距離 ρ の立方体に作る。
+        // 小さい領域は fit_to_shape で領域の周りだけの格子にするので、回転の再生・ドラッグ中も止まったときと同じ細かさで回る
+        // （前は再生のたびに格子 16 ほどで作り直して、境目がぎざぎざに崩れて見えた）
+        P::System { eqs, local: Some(lr), .. } if ctx.local && eqs.is_empty() => {
+            let ext = rotated_domain(space, dom);
+            let mut m = fit_to_shape(ext, ctx.implicit_resolution, |d| {
+                system::region_faces(&lr.cuts, &lr.faces, d, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine)
+            });
+            mesh::add_cluster_lod(&mut m);
+            let local = mesh::LocalMesh { mesh: m, prog: lr.max.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
+            b.local = Some((local, lr.max.used_params().to_vec()));
         }
         // 複素数の陰関数（値が複素数の F = 0）: Re F = Im F = 0 の線として、連立方程式の交わる線と同じ道で描く
         // 複素数の色分けをするなら、曲面（|F| = 1・Re F = 0・Im F = 0）を作って、頂点の F の値で色を付ける（陽関数の色分けと同じ色）
