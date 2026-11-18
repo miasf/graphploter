@@ -2064,46 +2064,9 @@ impl Expander<'_> {
 
     /// 累次積分の形に書けない領域の上の積分（`region.rs`）。条件が積分の変数とパラメータだけの式でなければ None
     /// （領域がほかの座標で変わるときは、点を置く場所を前もって決められない）。結果は Σ 重み · 中身(点)
-    /// g（変数 v と、ほかの積分の変数の式）を v の 2 次以下の式 a v² + b v + c と見たときの (a, b, c)。
-    /// 係数は v = 0, ±1 を入れた式から作り、いくつかの点で g と一致するかを数で確かめる（一致しなければ None）
+    /// g を v の 2 次以下の式と見たときの係数（`solve.rs`）
     fn as_quadratic(&self, g: &Expr, v: &str, names: &[&str]) -> Option<Quadratic> {
-        use crate::diff::{add, div, sub};
-        use num_complex::Complex64 as C;
-        let at = |t: f64| g.substitute(&|name: &str| (name == v).then_some(Expr::Num(t)));
-        let (c, p1, m1) = (at(0.0), at(1.0), at(-1.0));
-        let b = div(sub(p1.clone(), m1.clone()), Expr::Num(2.0));
-        let a = sub(div(add(p1, m1), Expr::Num(2.0)), c.clone());
-        let k = names.iter().position(|n| *n == v)?;
-        let progs: Vec<crate::eval::Program> =
-            [g, &a, &b, &c].iter().map(|e| crate::eval::Program::compile_with(e, names, self.params).ok()).collect::<Option<_>>()?;
-        // 確かめる点（どの変数にも、ありふれた値にならない数）
-        let pts = [[0.37, -0.81, 0.53], [-1.29, 0.44, 1.71], [0.93, 1.37, -0.66], [2.13, -1.57, -1.21], [-0.52, 0.71, 0.29]];
-        let mut checked = 0;
-        // 確かめた点での a, b の値（どの点でも同じなら定数）
-        let (mut a_seen, mut b_seen): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
-        for pt in pts {
-            let cols: Vec<[f64; 1]> = (0..names.len()).map(|i| [pt[i]]).collect();
-            let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
-            let val = |p: &crate::eval::Program| {
-                let mut out = [C::new(0.0, 0.0)];
-                p.eval_batch(&inputs, &mut out);
-                crate::eval::as_real(out[0])
-            };
-            let (gv, av, bv, cv) = (val(&progs[0]), val(&progs[1]), val(&progs[2]), val(&progs[3]));
-            if !(gv.is_finite() && av.is_finite() && bv.is_finite() && cv.is_finite()) {
-                continue;
-            }
-            let t = pt[k];
-            let fit = av * t * t + bv * t + cv;
-            if (gv - fit).abs() > 1e-9 * (gv.abs() + (av * t * t).abs() + (bv * t).abs() + cv.abs() + 1.0) {
-                return None;
-            }
-            checked += 1;
-            a_seen.push(av);
-            b_seen.push(bv);
-        }
-        let same = |xs: &[f64]| xs.first().copied().filter(|&x0| xs.iter().all(|x| (x - x0).abs() <= 1e-12 * (1.0 + x0.abs())));
-        (checked >= 3).then_some((a, b, c, same(&a_seen), same(&b_seen)))
+        crate::solve::quadratic(g, v, names, self.params)
     }
 
     /// 3 重積分の領域で、ある変数 v の条件が全部「v の範囲」に直せるとき（v について 2 次以下の不等式で、v² の係数が負の数か 0）、
@@ -2593,8 +2556,7 @@ fn bound_of(u: &Expr, b: Expr, upper: bool, v: &str, lows: &mut Vec<Expr>, highs
 const CLOSED_BUDGET: u64 = 6_000_000;
 
 /// 入れ子の積分 ∫_{a₀}^{b₀} ∫_{a₁(t₀)}^{b₁(t₀)} … f dt… の、i 段目から内側（`p` は外側の積分の変数の値）
-/// v の 2 次以下の式 a v² + b v + c の (a, b, c) と、a・b が定数ならその値（[`Expander::as_quadratic`]）
-type Quadratic = (Expr, Expr, Expr, Option<f64>, Option<f64>);
+use crate::solve::Quadratic;
 
 /// 領域の条件の式（≥ 0）と、変数ごとの数で書かれた端（[`Expander::region_programs`]）
 type RegionPrograms = (Vec<crate::eval::Program>, Vec<(Option<f64>, Option<f64>)>);

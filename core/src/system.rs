@@ -871,6 +871,71 @@ fn drop_outside(m: &mut Mesh, g: &Program, cuts: &[Program], i: usize, h: f64) {
     m.lod.clear();
 }
 
+/// 陽関数で作った面の向きを、領域の外向き（∇G の向き。G ≤ 0 が中）にそろえる。陽関数の面はいつも座標の正の向きなので、
+/// 下側の面（球の下半分 z = −√(1 − x² − y²)）は逆向きになる。三角形の多くが逆向きなら、面全体を裏返す（頂点の順と法線）
+fn orient_outward(m: &mut Mesh, g: &Program) {
+    let p = &m.positions;
+    let at = |k: u32| [0, 1, 2].map(|c| p[k as usize * 3 + c] as f64);
+    let tris: Vec<[[f64; 3]; 3]> = m.indices.chunks_exact(3).map(|t| [at(t[0]), at(t[1]), at(t[2])]).collect();
+    if tris.is_empty() {
+        return;
+    }
+    let centers: Vec<[f64; 3]> = tris.iter().map(|t| [0, 1, 2].map(|c| (t[0][c] + t[1][c] + t[2][c]) / 3.0)).collect();
+    let grads = gradients(g, &centers, 1e-6);
+    let mut score = 0.0;
+    for (t, d) in tris.iter().zip(&grads) {
+        let e1 = [0, 1, 2].map(|c| t[1][c] - t[0][c]);
+        let e2 = [0, 1, 2].map(|c| t[2][c] - t[0][c]);
+        let nrm = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let dot = nrm[0] * d[0] + nrm[1] * d[1] + nrm[2] * d[2];
+        if dot.is_finite() {
+            score += dot.signum();
+        }
+    }
+    if score >= 0.0 {
+        return;
+    }
+    for t in m.indices.chunks_exact_mut(3) {
+        t.swap(1, 2);
+    }
+    for v in m.normals.iter_mut() {
+        *v = -*v;
+    }
+    m.lod.clear();
+    m.lod_mesh = None;
+}
+
+/// 重心が面 G = 0 から離れている（距離の見積もり |G| / |∇G| が、三角形のいちばん長い辺より遠い）三角形を消す
+fn drop_off_surface(m: &mut Mesh, g: &Program) {
+    let p = &m.positions;
+    let at = |k: u32| [0, 1, 2].map(|c| p[k as usize * 3 + c] as f64);
+    let tris: Vec<[[f64; 3]; 3]> = m.indices.chunks_exact(3).map(|t| [at(t[0]), at(t[1]), at(t[2])]).collect();
+    if tris.is_empty() {
+        return;
+    }
+    let centers: Vec<[f64; 3]> = tris.iter().map(|t| [0, 1, 2].map(|c| (t[0][c] + t[1][c] + t[2][c]) / 3.0)).collect();
+    let vals = values_at(g, &cols_of(&centers));
+    let size = tris.iter().map(|t| {
+        let d = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        d(t[0], t[1]).max(d(t[1], t[2])).max(d(t[2], t[0]))
+    });
+    let grads = gradients(g, &centers, 1e-6);
+    let keep: Vec<bool> = size
+        .zip(&vals)
+        .zip(&grads)
+        .map(|((s, v), d)| {
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            !(v.is_finite() && len.is_finite() && len > 0.0) || v.abs() <= (s + 1e-9) * len
+        })
+        .collect();
+    if keep.iter().all(|&b| b) {
+        return;
+    }
+    m.indices = m.indices.chunks_exact(3).enumerate().filter(|(k, _)| keep[*k]).flat_map(|(_, t)| t.iter().copied()).collect();
+    m.lod.clear();
+    m.lod_mesh = None;
+}
+
 /// 重心が面 G = 0 の上（距離の見積もり |G| / |∇G| が 10⁻³ マスより近い）にある三角形を消す
 fn drop_on_surface(m: &mut Mesh, g: &Program, h: f64) {
     if let Some(l) = m.lod_mesh.as_deref_mut() {
@@ -896,9 +961,12 @@ fn drop_on_surface(m: &mut Mesh, g: &Program, h: f64) {
     m.lod.clear();
 }
 
-/// 不等式の領域 G_1 ≤ 0, …, G_k ≤ 0 の境目の面。面 G_i = 0 ごとに今の陰関数の道で作り、ほかの全部の G_j ≤ 0 で切り取ってまとめる
-/// （角が立つ）。陰関数の粗い版も同じように切ってまとめる（どれかの面に粗い版が無ければ、全体の粗い版を作らない）
-pub fn region_faces(cuts: &[Program], dom: Domain, n: usize, refine: Refine) -> Mesh {
+/// 不等式の領域 G_1 ≤ 0, …, G_k ≤ 0 の境目の面。面 G_i = 0 ごとに作り、ほかの全部の G_j ≤ 0 で切り取ってまとめる
+/// （角が立つ）。陰関数の粗い版も同じように切ってまとめる（どれかの面に粗い版が無ければ、全体の粗い版を作らない）。
+/// 面 G_i = 0 を座標の 1 つについて解いた陽関数（`faces[i]`。`solve.rs`）があれば、陰関数の格子（`n`）ではなく
+/// 陽関数の道（`resolution`。適応的に細かくする）で作る: 格子の粗さで面と切り取った縁がギザギザにならない
+/// （`x² + y² ≤ 1, 0 ≤ z ≤ x³ + y³` の上の面 z = x³ + y³ と、円柱 x = ±√(1 − y²)）
+pub fn region_faces(cuts: &[Program], faces: &[Vec<(usize, Program)>], dom: Domain, n: usize, resolution: usize, refine: Refine, explicit_refine: bool) -> Mesh {
     if mesh::field_mode_is_split() {
         mesh::mark_unsplittable();
         return Mesh::default();
@@ -907,7 +975,28 @@ pub fn region_faces(cuts: &[Program], dom: Domain, n: usize, refine: Refine) -> 
     let mut lods = Vec::new();
     let h = cell(dom, n);
     for (i, g) in cuts.iter().enumerate() {
-        let mut m = mesh::implicit_solid_opt(g, dom, n, &[], 0, refine);
+        // 陽関数にするのは、解が 1 つの面（その座標の 1 次式。z = x³ + y³・平面・円錐 z = √(x² + y²)）だけ。
+        // 2 つに分かれる面（球・円柱 z = ±√(1 − y²)）は、2 枚の継ぎ目（面が垂直になる所）が領域の境目の上に来ると、
+        // 継ぎ目に沿って細い三角形と切り取りの縞が出るので、今までどおり陰関数で作る。
+        // 不等式が 1 本だけのときも、等式の行と同じ面にする（陽関数にしない）
+        let explicit = faces.get(i).filter(|fs| fs.len() == 1 && cuts.len() >= 2);
+        let mut m = match explicit {
+            Some(fs) => {
+                let parts: Vec<Mesh> = fs
+                    .iter()
+                    .map(|(axis, f)| {
+                        let mut part = mesh::explicit_surface_opt(f, dom, resolution, *axis, mesh::ComplexMode::Off, false, explicit_refine);
+                        orient_outward(&mut part, g);
+                        part
+                    })
+                    .collect();
+                let mut m = mesh::merge(parts, false);
+                // 解いた式の余分な枝（孤立法で 2 乗した所など）は、面 G_i = 0 の上に無いので消す
+                drop_off_surface(&mut m, g);
+                m
+            }
+            _ => mesh::implicit_solid_opt(g, dom, n, &[], 0, refine),
+        };
         for (j, other) in cuts.iter().enumerate() {
             if j != i {
                 // ほかの G_j は、面 G_i = 0 から中身の側（G_i < 0 の側）へ少しずらした点で計算する。
@@ -985,7 +1074,7 @@ mod tests {
         // 0 ≤ xy ≤ x, x ≤ 2, |z| ≤ 1: x > 0, 0 ≤ y ≤ 1 の板。x = 0 の面では xy も x − xy も 0 なので、y < 0・y > 1 の所にも
         // 厚さ 0 の壁がある（集合としては入っている）が、描かない。x = 0, 0 ≤ y ≤ 1 の面（板の端）は 1 枚だけ描く
         let cuts = ["-x y", "x y - x", "x - 2", "z - 1", "-z - 1"].map(prog);
-        let m = region_faces(&cuts, DOM, 40, Refine::Normal);
+        let m = region_faces(&cuts, &[], DOM, 40, 60, Refine::Normal, true);
         let p = &m.positions;
         let mut wall = 0.0;
         for t in m.indices.chunks_exact(3) {

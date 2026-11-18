@@ -28,6 +28,7 @@ pub mod mesh;
 pub mod ode;
 pub mod pixel;
 pub mod quad;
+pub mod solve;
 mod region;
 pub mod parser;
 pub mod special;
@@ -1745,8 +1746,8 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind.push_str(&format!("（霧、{n}³）"));
             b.volume = Some((region_distance(&g, dom, n), n));
         }
-        P::System { eqs, cuts, .. } if eqs.is_empty() => {
-            b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);
+        P::System { eqs, cuts, faces, .. } if eqs.is_empty() => {
+            b.inner = system::region_faces(cuts, faces, dom, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine);
             b.fields.push(mesh::Field::region(cuts));
         }
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),

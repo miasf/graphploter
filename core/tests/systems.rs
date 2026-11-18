@@ -926,3 +926,17 @@ fn flat_region_outline() {
     let mut m = run_flat("x^2 + y^2 = 4", true);
     assert!(m.take_outline().is_empty() && m.take_outline_dashed().is_empty());
 }
+
+#[test]
+fn region_with_explicit_faces() {
+    // 上の面 z = (x³ + y³)/9 と下の面 z = 0 は z の 1 次式なので陽関数で作る（円柱は陰関数）。
+    // 体積 ∬_{半径 3 の円板, x³+y³ ≥ 0} (x³ + y³)/9 = 9√2（半径 1 の √2/3 を 27 倍）
+    let (p, idx) = closed_region("x^2 + y^2 ≤ 9, 0 ≤ z ≤ (x^3 + y^3)/9");
+    let v = volume(&p, &idx);
+    assert!((v / (9.0 * 2f64.sqrt()) - 1.0).abs() <= 0.01, "{v}");
+    // 円錐 z ≥ √(x² + y²) は陽関数、球は陰関数。体積 (2π/3)(1 − 1/√2) · 8（半径 2）
+    let (p, idx) = closed_region("x^2 + y^2 + z^2 ≤ 4, z ≥ sqrt(x^2 + y^2)");
+    let v = volume(&p, &idx);
+    let want = 2.0 * std::f64::consts::PI / 3.0 * (1.0 - 1.0 / 2f64.sqrt()) * 8.0;
+    assert!((v / want - 1.0).abs() <= 0.01, "{v} vs {want}");
+}
