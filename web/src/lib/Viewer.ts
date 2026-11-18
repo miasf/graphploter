@@ -1261,6 +1261,23 @@ export class Viewer {
       const x = this.flat ? d.xmin - pad * 1.3 : d.xmax + pad
       this.frame.add(label(fmt(y), 'tick', new THREE.Vector3(x, y, zFloor)))
     }
+    if (!this.flat) {
+      // 3D: 床の方眼・軸・枠の線を、深さだけ少し奥へずらす。面とちょうど同じ所にある線（floor(x) + floor(y) + floor(z) = 0 の
+      // z = 0 の上面・平面 z = 0）は、深さが同じになって、線がぶつぶつに見える（ちらつく）。面の上に描く境目の線・≠ の点線は
+      // ずらさないので、面の上にそのまま見える
+      this.frame.traverse((o) => {
+        if (o instanceof THREE.LineSegments) {
+          const m = o.material as THREE.Material
+          m.onBeforeCompile = (shader) => {
+            shader.vertexShader = shader.vertexShader.replace(
+              '#include <project_vertex>',
+              '#include <project_vertex>\n  gl_Position.z += 3e-4 * gl_Position.w;',
+            )
+          }
+          m.customProgramCacheKey = () => 'frame-behind'
+        }
+      })
+    }
     if (this.flat) {
       // 枠・方眼・軸は、z = 0 にある図形の下に描く（同じ高さで重なってちらつかないように）
       this.frame.traverse((o) => {
