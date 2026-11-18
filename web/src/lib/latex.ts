@@ -605,7 +605,9 @@ class Converter {
         }
         const big = name.startsWith('big')
         const sym = name === 'sum' ? 'Σ' : name === 'prod' ? 'Π' : name === 'bigcup' ? '⋃' : name === 'bigcap' ? '⋂' : name === 'bigvee' ? '⋁' : '⋀'
-        const m = lo?.match(/^\s*([A-Za-z]\w*)\s*=(.+)$/)
+        // 添字は 1 つか、カンマで並べた複数（\sum_{x,y,z=0}^{n} は x・y・z それぞれ 0〜n の 3 重の和）
+        const m = lo?.match(/^\s*([A-Za-z]\w*(?:\s*,\s*[A-Za-z]\w*)*)\s*=(.+)$/)
+        const idx = m ? m[1].split(',').map((v) => v.trim()) : []
         if (lo !== null && (hi === null || big) && !(m && hi !== null)) {
           // 集合の上: 添字は「n ∈ …」「(m,n) ∈ …」「d ∣ …」の左、または連鎖 a ≤ n ≤ b の真ん中
           const cond = lo.trim()
@@ -622,12 +624,12 @@ class Converter {
           // \bigcup_{k=1}^{3} → @bigcup(k; 1<=k<=3)
           if (!m || hi === null || hi.trim() === '') throw new LatexError(`${sym} の下と上に、k=1 と 3 のように添字の範囲を書いてください`)
           const op = name === 'bigcup' || name === 'bigvee' ? 'bigcup' : 'bigcap'
-          this.out += ` @${op}(${m[1]}; ${m[2].trim()}<=${m[1]}<=${hi.trim()}) `
+          for (const v of idx) this.out += ` @${op}(${v}; ${m[2].trim()}<=${v}<=${hi.trim()}) `
           return
         }
         if (!m) throw new LatexError(`${sym} の下に n=1 の形で書いてください`)
         if (hi === null || hi.trim() === '') throw new LatexError(`${sym} の上に終わりの値を書いてください`)
-        this.out += ` @${name}(${m[1]},${m[2].trim()},${hi.trim()}) `
+        for (const v of idx) this.out += ` @${name}(${v},${m[2].trim()},${hi.trim()}) `
         return
       }
       case 'Delta':

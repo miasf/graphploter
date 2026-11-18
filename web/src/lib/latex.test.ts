@@ -13,6 +13,9 @@ function check(name: string, got: unknown, want: unknown) {
 const cases: [string, string][] = [
   // 数学の記法（計画 docs/plan-math-notation.md の M1・M4）
   ['\\sum_{n=1}^{10}n^2', '@sum(n,1,10) n^(2)'],
+  // 添字を並べた多重の和: \sum_{x,y,z=0}^{n} は x・y・z それぞれ 0〜n
+  ['\\sum_{x,y,z=0}^{2}xyz', '@sum(x,0,2) @sum(y,0,2) @sum(z,0,2) xyz'],
+  ['\\prod_{m,n=1}^{3}\\left(m+n\\right)', '@prod(m,1,3) @prod(n,1,3) (m+n)'],
   ['\\sum_{k=1}^{N}\\frac{\\sin\\left(kx\\right)}{k}+1', '@sum(k,1,N) ((sin (kx))/(k))+1'],
   ['\\prod\\limits_{k=1}^{5}\\left(x-k\\right)', '@prod(k,1,5) (x-k)'],
   ['y=\\pm\\sqrt{x}', 'y=± sqrt(x)'],
