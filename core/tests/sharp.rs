@@ -46,3 +46,18 @@ fn cube_corners_and_edges_are_sharp() {
         assert!(sum / count as f64 <= 0.35 * h, "格子 {ires}: 辺の平均 {}", sum / count as f64);
     }
 }
+
+/// 角が格子に対してどこにあっても（格子の点の上・マスの途中）、8 つの角すべてに頂点が乗る。
+/// 前は、角の頂点の周りの三角形が 2 つの面にしか付かない向きの 6 つの角で、0.1〜0.6 マス離れていた
+#[test]
+fn corners_snap_at_any_grid_offset() {
+    for r in [1.1, 1.13, 1.15, 1.17, 1.2, 1.25, 1.3, 1.4] {
+        let p = positions("max(abs(x), abs(y), abs(z)) = 1", r, 40);
+        let h = 2.0 * r / 40.0;
+        for c in 0..8 {
+            let q = [0, 1, 2].map(|k| if c >> k & 1 == 1 { 1.0 } else { -1.0 });
+            let d = nearest(&p, q);
+            assert!(d < 0.01 * h, "範囲 {r}: 角 {q:?} から {} マス", d / h);
+        }
+    }
+}

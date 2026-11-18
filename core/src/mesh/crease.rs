@@ -197,7 +197,14 @@ pub(crate) fn sharpen_creases(mesh: &mut Mesh, prog: &Program, cell: f64) {
         return;
     }
     // 2. 候補と隣の頂点を F = 0 へ寄せる（ニュートン法 8 回。1.5 マスまで。折れ目の上では 1 回で 1/3 ほどしか寄らない）
-    let mut involved: Vec<usize> = cand.iter().flat_map(|&v| std::iter::once(v).chain(nbr[v].iter().map(|&j| j as usize))).collect();
+    // 角は 2 近傍の平面でも探すので、2 近傍まで寄せる
+    let ring2 = |v: usize| -> Vec<usize> {
+        let mut r: Vec<usize> = std::iter::once(v).chain(nbr[v].iter().flat_map(|&j| std::iter::once(j as usize).chain(nbr[j as usize].iter().map(|&k| k as usize)))).collect();
+        r.sort_unstable();
+        r.dedup();
+        r
+    };
+    let mut involved: Vec<usize> = cand.iter().flat_map(|&v| ring2(v)).collect();
     involved.sort_unstable();
     involved.dedup();
     let mut q: Vec<[f64; 3]> = involved.iter().map(|&v| pts[v]).collect();
@@ -220,30 +227,49 @@ pub(crate) fn sharpen_creases(mesh: &mut Mesh, prog: &Program, cell: f64) {
     let vgq = value_grad_kink(prog, &q, e);
     let index_of = |v: usize| involved.binary_search(&v).ok();
     // 3. 候補ごとに QEF の最小へ
+    let plane_of = |w: usize| -> Option<([f64; 3], [f64; 3])> {
+        let i = index_of(w)?;
+        let (f, g, kink) = vgq[i]?;
+        let n = unit(g)?;
+        // 折れ目の上の点（中心差分の勾配が偽の向き）と、面の上に寄らなかった点（1 マスの 2% より遠い。接平面がずれている）は使わない
+        (!kink && f.abs() <= 0.02 * cell * norm(g)).then_some((q[i], n))
+    };
     let mut moves: Vec<(usize, [f64; 3])> = Vec::new();
+    // 角の候補（頂点, 角の点, 頂点からの距離）。1 近傍の平面が 2 つの面だけ（角の頂点の周りの三角形の付き方による）でも、
+    // 2 近傍なら 3 つ目の面が入る。平面がどれもその点を通る（残差が 1 マスの 1% 以下。曲がった面の接平面は通らない）ものだけ
+    let mut corners: Vec<(usize, [f64; 3], f64)> = Vec::new();
     for &v in &cand {
-        let mut planes = Vec::with_capacity(1 + nbr[v].len());
-        for w in std::iter::once(v).chain(nbr[v].iter().map(|&j| j as usize)) {
-            let Some(i) = index_of(w) else { continue };
-            let Some((f, g, kink)) = vgq[i] else { continue };
-            let Some(n) = unit(g) else { continue };
-            if kink {
-                continue; // 折れ目の上の点（中心差分の勾配が偽の向き）
+        let p0 = pts[v];
+        let dist = |t: [f64; 3]| norm([t[0] - p0[0], t[1] - p0[1], t[2] - p0[2]]);
+        let planes2: Vec<([f64; 3], [f64; 3])> = ring2(v).into_iter().filter_map(plane_of).collect();
+        if planes2.len() >= 4 {
+            let (x, rank) = qef(&planes2);
+            let resid = planes2.iter().map(|(p, n)| dot(*n, [x[0] - p[0], x[1] - p[1], x[2] - p[2]]).abs()).fold(0.0, f64::max);
+            if rank == 3 && resid <= 0.01 * cell && dist(x) <= 1.75 * cell {
+                corners.push((v, x, dist(x)));
             }
-            // 面の上に寄った点（1 マスの 2% 以内）だけを使う（寄らなかった点の接平面は、ずれている）
-            if f.abs() > 0.02 * cell * norm(g) {
-                continue;
-            }
-            planes.push((q[i], n));
         }
+        let planes: Vec<([f64; 3], [f64; 3])> = std::iter::once(v).chain(nbr[v].iter().map(|&j| j as usize)).filter_map(plane_of).collect();
         if planes.len() < 3 {
             continue;
         }
         let (x, rank) = qef(&planes);
         let target = if rank >= 2 { x } else { q[index_of(v).unwrap_or(0)] };
-        let p0 = pts[v];
-        if norm([target[0] - p0[0], target[1] - p0[1], target[2] - p0[2]]) <= 1.75 * cell {
+        if dist(target) <= 1.75 * cell {
             moves.push((v, target));
+        }
+    }
+    // 角ごとに、いちばん近い頂点だけを角へ（同じ角を指す頂点を全部寄せると、角の周りの辺がつぶれる）
+    corners.sort_by(|a, b| a.2.total_cmp(&b.2));
+    let mut taken: Vec<[f64; 3]> = Vec::new();
+    for (v, x, _) in corners {
+        if taken.iter().any(|t| norm([t[0] - x[0], t[1] - x[1], t[2] - x[2]]) <= 0.5 * cell) {
+            continue;
+        }
+        taken.push(x);
+        match moves.iter_mut().find(|m| m.0 == v) {
+            Some(m) => m.1 = x,
+            None => moves.push((v, x)),
         }
     }
     if moves.is_empty() {
