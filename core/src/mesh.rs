@@ -4,6 +4,7 @@ use crate::equation::others;
 use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
+mod crease;
 mod pieces;
 mod singular;
 pub use pieces::in_inscribed_ball;
@@ -2153,6 +2154,8 @@ pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64,
         let cell = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
         // 面が自分と交わる線・尖った点を、X の字・円錐の先のまま描く（singular.rs）
         singular::sharpen_singularities(&mut mesh, prog, cell);
+        // 折れ目（鋭い辺・角。max(|x|, |y|, |z|) = 1 の立方体）を、Dual Contouring の頂点の置き方で立てる（crease.rs）
+        crease::sharpen_creases(&mut mesh, prog, cell);
         let h = cell * 1e-3;
         gradient_normals(&mut mesh, prog, h);
         if let Some(l) = mesh.lod_mesh.as_deref_mut() {
