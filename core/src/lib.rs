@@ -753,10 +753,16 @@ pub fn plot(
     // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
     let excluded = expand::take_excluded();
     let mut holes = Vec::new();
-    if !excluded.is_empty() && coord.is_none() {
-        let (h, dashed) = mark_excluded(&inner, curve, &excluded);
+    // 2D の投影は縦の座標を押しつぶした後なので、≠ の式（縦の座標を使うかもしれない）では調べない
+    if !excluded.is_empty() && coord.is_none() && !(flat && !ctx.flat_slice) {
+        let (h, dashed, all) = mark_excluded(&inner, curve, &excluded);
         holes = h;
         outline.1.extend(dashed);
+        if all {
+            // 曲線全体が除かれた（y = x, z ≠ 0 の 2D の切り口 z = 0）: 何も描かない
+            inner = mesh::Mesh::default();
+            expand::add_note("≠ で全部除かれる");
+        }
     }
     // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
     // 流線（点ごとの値つきの線）・座標系があるときは足さない
@@ -1752,9 +1758,27 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）。
         // 不等式があれば、線分を切る
-        P::System { eqs, cuts, .. } if eqs.len() == 2 => {
+        P::System { eqs, cuts, exact, .. } if eqs.len() == 2 => {
             b.curve = true;
             b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, ctx.implicit_resolution, ctx.implicit_refine);
+            // 縦の座標を使わない 2 本の等式で、符号の変わる所が無い（接するだけ: y = x², y = 0 は x = y = 0 の直線）なら、
+            // グレブナー基底で求めた平面の解（exact[1]）を縦にのばした直線にする
+            if b.inner.positions.is_empty() && !eqs.iter().any(|e| e.uses_var_index(2)) {
+                if let Some(pts) = &exact[1] {
+                    let mut pos = Vec::new();
+                    for p in pts.iter().filter(|p| (0..2).all(|a| p[a] >= dom.lo[a] && p[a] <= dom.hi[a])) {
+                        if !pos.is_empty() {
+                            pos.extend([f32::NAN; 3]);
+                        }
+                        let n = 64;
+                        for k in 0..=n {
+                            let z = dom.lo[2] + (dom.hi[2] - dom.lo[2]) * k as f64 / n as f64;
+                            pos.extend([p[0] as f32, p[1] as f32, z as f32]);
+                        }
+                    }
+                    b.inner.positions = pos;
+                }
+            }
             for g in cuts {
                 system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
             }
@@ -2061,8 +2085,8 @@ fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]
 
 /// ≠ で除いた所 h = 0（`hs` のどれか）を示す。曲線なら、線分が h = 0 を横切る点（はさみうち法で寄せる）を白丸の点にし、
 /// 面・領域なら、三角形ごとに h = 0 の線分を求めて点線にする。曲線が h = 0 の上を走っている（頂点の半分以上で h = 0）なら、
-/// その h では何も出さない（図形全体が除かれる。点が多すぎるので）。戻り値は（白丸の点, 点線の線分）
-fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f32>, Vec<f32>) {
+/// 曲線全体が除かれる（3 つ目の値が true）。戻り値は（白丸の点, 点線の線分, 曲線全体が除かれるか）
+fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f32>, Vec<f32>, bool) {
     let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
     let eval_at = |h: &eval::Program, q: &[[f64; 3]]| -> Vec<f64> {
         let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| q.iter().map(|p| p[c]).collect());
@@ -2077,7 +2101,7 @@ fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f
         if curve {
             let zeros = v.iter().filter(|x| **x == 0.0).count();
             if zeros * 2 > v.iter().filter(|x| x.is_finite()).count() {
-                continue;
+                return (Vec::new(), Vec::new(), true);
             }
             // 符号が変わる線分（はさみうち法で 30 回寄せる）と、ちょうど 0 の頂点
             let mut found: Vec<[f64; 3]> = Vec::new();
@@ -2151,7 +2175,7 @@ fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f
             }
         }
     }
-    (holes, dashed)
+    (holes, dashed, false)
 }
 
 /// 表示範囲に比べて小さい図形を、図形の周りだけの格子で作り直す（表示範囲を広げると粗くなるのを防ぐ）。

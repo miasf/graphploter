@@ -28,3 +28,23 @@ fn excluded_points_and_lines() {
     let (h, dashed, _) = run("y = x, y ≠ 0", false);
     assert!(h.is_empty() && dashed > 10, "白丸 {h:?}・点線の点 {dashed}");
 }
+
+/// 2D の切り口（z = 0）で、z ≠ 0 の曲線は全部除かれる（前は y = x がそのまま描かれていた）
+#[test]
+fn slice_fully_excluded() {
+    let mut m = plot("y = x, z ≠ 0", &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, true, 1, true, 0).ok().unwrap();
+    assert!(m.positions().is_empty() && m.kind().contains("全部除かれる"), "{}", m.kind());
+    assert!(m.take_holes().is_empty());
+}
+
+/// 接するだけの 2 本の等式（y = x², y = 0）も、3D で交わる線（z 軸）を描く（前は 0 個の点）
+#[test]
+fn tangent_surfaces_meet_on_a_line() {
+    let m = plot("y = x^2, y = 0", &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0).ok().unwrap();
+    let p: Vec<f32> = m.positions();
+    let pts: Vec<&[f32]> = p.chunks_exact(3).filter(|v| v[0].is_finite()).collect();
+    assert!(pts.len() > 20, "{}", pts.len());
+    assert!(pts.iter().all(|v| v[0].abs() < 1e-6 && v[1].abs() < 1e-6), "z 軸の上にない");
+    let (lo, hi) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v[2]), b.max(v[2])));
+    assert!(lo <= -1.99 && hi >= 1.99, "{lo}..{hi}");
+}
