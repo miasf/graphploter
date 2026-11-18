@@ -82,31 +82,84 @@ export function applyShownRotation(ray: RaycastUniforms, axes: number[], t: Arra
 
 
 
-/** main の最初に差し込む: 光線を飛ばし、当たらなければ捨てる。当たれば、光の計算・格子線が使う値を差し替え、深さを書く */
-const RAY_MAIN = /* glsl */ `
-{
-  vec3 ro = cameraPosition;
-  vec3 rd = normalize(vRayWorld - cameraPosition);
+/**
+ * 光線が箱・カメラの手前の面・切り口の平面で切られた区間 [t0, t1]（空なら t0 ≥ t1）。
+ * カメラが箱の中にいるとき、光線はカメラの位置（t = 0）から始まる。1 画素の大きさ（uPixel · t）は t = 0 で 0 になるので、
+ * 面が密な式（tan(xyz) = 1 など）ではカメラのすぐ手前を際限なく細かく分け、繰り返しの上限まで使い切っていた（拡大して 1 コマ 0.5 秒）。
+ * メッシュと同じく、カメラの手前の面（near）より近い所は描かない
+ */
+const RAY_RANGE = /* glsl */ `
+vec2 gRayRange(vec3 ro, vec3 rd) {
   vec2 tr = gRayBox(ro, rd);
-  // カメラが箱の中にいるとき、光線はカメラの位置（t = 0）から始まる。1 画素の大きさ（uPixel · t）は t = 0 で 0 になるので、
-  // 面が密な式（tan(xyz) = 1 など）ではカメラのすぐ手前を際限なく細かく分け、繰り返しの上限まで使い切っていた（拡大して 1 コマ 0.5 秒）。
-  // メッシュと同じく、カメラの手前の面（near）より近い所は描かない
   tr.x = max(tr.x, uNear);
   if (uCutOn > 0.5) {
     float s0 = dot(uCut.xyz, ro) + uCut.w;
     float sd = dot(uCut.xyz, rd);
     if (sd == 0.0) {
-      if (s0 < 0.0) discard;
+      if (s0 < 0.0) return vec2(1.0, 0.0);
     } else {
       float tc = -s0 / sd;
       if (sd > 0.0) tr.x = max(tr.x, tc); else tr.y = min(tr.y, tc);
     }
   }
-  if (!(tr.x < tr.y)) discard;
+  return tr;
+}
+`
+
+/** main の最初に差し込む: 光線を飛ばし、当たらなければ捨てる。当たれば、光の計算・格子線が使う値を差し替え、深さを書く */
+const RAY_MAIN = /* glsl */ `
+{
+  vec3 ro = cameraPosition;
+  vec3 rd = normalize(vRayWorld - cameraPosition);
+  // 隣の画素への光線の向きの差（輪郭の画素で、画素の中の別の位置へ光線を飛ばすのに使う）。捨てる前に求める
+  // （2 × 2 の画素の組のどれかを先に捨てると、微分が決まらない）
+  vec3 dRx = dFdx(rd);
+  vec3 dRy = dFdy(rd);
+  vec2 tr = gRayRange(ro, rd);
   // 光線は表示中の座標のまま。式の座標への 1 次式は gRayV・gRayI・gRayGrad の中で掛ける（勾配も表示中の座標についてのもの）
-  float tHit;
-  int res = gRay(ro, rd, tr.x, tr.y, tHit);
+  float tHit = 0.0;
+  int res = 0;
+  if (tr.x < tr.y) res = gRay(ro, rd, tr.x, tr.y, tHit);
+  // 輪郭のアンチエイリアス: 画素の中の 4 点（回した格子）へも光線を飛ばし、当たった割合を MSAA の標本に割り振る（alphaToCoverage）。
+  // - 真ん中の光線が当たった画素: 4 本とも、まず当たった深さの前後 2 画素分だけを探す（面の上なら区間演算 数回で済む）。
+  //   そこに無ければ（輪郭の外へはみ出した）、その先を全部探す。奥の別の面に当たれば覆われているとみなす（段差の継ぎ目を出さない）
+  // - 外れた画素: 2 × 2 の画素の組の中で当たる画素と隣り合うとき（fwidth）だけ、4 本を全部探す（背景の画素を全部探すと重い）
+  // 2 × 2 の組の境目にある輪郭は、外側の画素では見つからないが、内側（当たった画素）では必ず調べるので、輪郭はなめらかになる
+  float hitF = res != 0 ? 1.0 : 0.0;
+  bool missEdge = res == 0 && fwidth(hitF) > 0.0;
+  float cover = hitF;
+  // 視点を動かしている間（光線の回数を減らしているとき。uMaxIter が RAY_STILL の 256 より少ない）はしない（輪郭の画素で光線が最大 5 倍になり、動きが重くなる）
+  if ((res != 0 || missEdge) && uProbe < 0.5 && uMaxIter >= 256) {
+    float bestT = 1e30;
+    vec3 bestD = rd;
+    int bestRes = 0;
+    float wNear = 2.0 * uPixel * tHit;
+    int n = 0;
+    // 8 回: 光線 k = s / 2 の、手前の探索（s が偶数）と、その先の探索（奇数。手前で見つからなかったときだけ）
+    bool found = false;
+    for (int s = 0; s < 8; s++) {
+      int k = s / 2;
+      bool second = s - 2 * k == 1;
+      if (second && (found || res == 0)) continue;
+      vec2 o = k == 0 ? vec2(-0.125, -0.375) : k == 1 ? vec2(0.375, -0.125) : k == 2 ? vec2(0.125, 0.375) : vec2(-0.375, 0.125);
+      vec3 d = normalize(rd + dRx * o.x + dRy * o.y);
+      vec2 trk = gRayRange(ro, d);
+      if (res != 0) trk = second ? vec2(max(trk.x, tHit + wNear), trk.y) : vec2(max(trk.x, tHit - wNear), min(trk.y, tHit + wNear));
+      float tk = 0.0;
+      int rk = 0;
+      if (trk.x < trk.y) rk = gRay(ro, d, trk.x, trk.y, tk);
+      found = rk != 0;
+      if (found) {
+        n++;
+        if (tk < bestT) { bestT = tk; bestD = d; bestRes = rk; }
+      }
+    }
+    cover = (hitF + float(n)) * 0.2;
+    // 真ん中の光線が外れた輪郭の画素は、当たった中でいちばん手前の光線の点で塗る
+    if (res == 0 && bestRes != 0) { rd = bestD; tHit = bestT; res = bestRes; }
+  }
   if (res == 0) discard;
+  gRayCover = cover;
   vec3 hit = ro + tHit * rd;
   vec3 g = gRayGrad(hit);
   gRayBack = dot(g, rd) > 0.0;
@@ -116,8 +169,22 @@ const RAY_MAIN = /* glsl */ `
   vec3 dn = cross(dFdx(hit), dFdy(hit));
   if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) {
     gRayBack = false;
-    nw = dot(dn, rd) > 0.0 ? -dn : dn;
-    if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) nw = -rd;
+    // 値が飛ぶ面（floor の和の立方体など）: 当たった点の前後 1 画素で、値がいちばん大きく変わる軸を面の向きにする。
+    // 隣の画素との当たった点の差（dn）は、奥の別の面と隣り合う画素（輪郭・段差）で向きがでたらめになり、黒い点々になっていた
+    float e = uPixel * tHit;
+    vec3 jump = vec3(
+      abs(gRayV(hit + vec3(e, 0.0, 0.0)) - gRayV(hit - vec3(e, 0.0, 0.0))),
+      abs(gRayV(hit + vec3(0.0, e, 0.0)) - gRayV(hit - vec3(0.0, e, 0.0))),
+      abs(gRayV(hit + vec3(0.0, 0.0, e)) - gRayV(hit - vec3(0.0, 0.0, e))));
+    jump = vec3(jump.x == jump.x ? jump.x : 0.0, jump.y == jump.y ? jump.y : 0.0, jump.z == jump.z ? jump.z : 0.0);
+    float jm = max(jump.x, max(jump.y, jump.z));
+    if (jm > 0.0) {
+      vec3 ax = jump.x == jm ? vec3(1.0, 0.0, 0.0) : jump.y == jm ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+      nw = dot(ax, rd) > 0.0 ? -ax : ax;
+    } else {
+      nw = dot(dn, rd) > 0.0 ? -dn : dn;
+      if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) nw = -rd;
+    }
   }
   gRayN = normalize((viewMatrix * vec4(nw, 0.0)).xyz);
   // 当たった点での 1 画素の大きさ（面に沿った長さ）。格子線の太さの見積もりの上限に使う
@@ -137,6 +204,8 @@ const RAY_MAIN = /* glsl */ `
  */
 export function createRaycastMaterial(glsl: string, n: number, grid: GridUniforms, ray: RaycastUniforms): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({ side: THREE.BackSide, roughness: 0.55, metalness: 0.05 })
+  // 輪郭の画素の当たった割合（gRayCover）を、MSAA の標本の数に割り振る（並べ替えの要らないアンチエイリアス）
+  m.alphaToCoverage = true
   m.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, grid, ray)
     shader.vertexShader = shader.vertexShader
@@ -156,9 +225,9 @@ export function createRaycastMaterial(glsl: string, n: number, grid: GridUniform
     shader.fragmentShader = shader.fragmentShader
       // 光の計算が使う点の位置を、箱の面ではなく当たった点にする（同じ名前の変数にして、three.js の部品をそのまま使う）
       .replace('varying vec3 vViewPosition;', 'vec3 vViewPosition;')
-      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
+      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\nfloat gRayCover = 1.0;\n${header}\n${glsl}\n${RAY_GLSL}\n${RAY_RANGE}`)
       .replace('#include <clipping_planes_fragment>', RAY_MAIN)
-      .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);`)
+      .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);\ndiffuseColor.a *= gRayCover;`)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = gRayN;\nnonPerturbedNormal = gRayN;')
       .replace('#include <dithering_fragment>', '#include <dithering_fragment>\nif (uProbe > 0.5) gl_FragColor = vec4(gRayAborted ? 1.0 : 0.0, 1.0, 0.0, 1.0);')
   }
