@@ -36,6 +36,13 @@ const LANCZOS_P: [f64; 9] = [
 /// - Re z < 1/2 では相反公式 Γ(z)Γ(1-z) = π / sin(πz) を使う
 /// - それ以外は Lanczos 近似
 pub fn gamma(z: C) -> C {
+    // 実数なら実数だけで計算する（同じ式を複素数で計算するより何倍も速い。nCr・nPr・x! のグラフで効く）。
+    // 極・桁あふれ（値が有限でない）ときは、今までどおり複素数で計算する
+    if z.im == 0.0 {
+        if let Some(v) = gamma_real(z.re) {
+            return C::new(v, 0.0);
+        }
+    }
     if z.re < 0.5 {
         // 極（0 以下の整数）。sin(πz) は丸め誤差でぴったり 0 にならないので先に判定する
         if z.im == 0.0 && z.re == z.re.round() {
@@ -49,7 +56,45 @@ pub fn gamma(z: C) -> C {
         x += *p / (z + k as f64);
     }
     let t = z + LANCZOS_G + 0.5;
-    (2.0 * PI).sqrt() * t.powc(z + 0.5) * (-t).exp() * x
+    let pw = t.powc(z + 0.5);
+    if pw.re.is_finite() && pw.im.is_finite() {
+        return (2.0 * PI).sqrt() * pw * (-t).exp() * x;
+    }
+    // t^(z + 1/2) だけが桁あふれする（Re z が 143 くらいから。Γ そのものは 171.6 くらいまで有限）: 半分の累乗に分けて、
+    // e^(−t) で小さくしてから掛ける
+    let half = t.powc((z + 0.5) / 2.0);
+    (2.0 * PI).sqrt() * half * ((-t).exp() * half) * x
+}
+
+/// Γ(x)（実数）。[`gamma`] と同じ計算（相反公式と Lanczos 近似）を実数で行う。値が有限でなければ None
+fn gamma_real(x: f64) -> Option<f64> {
+    let v = if x < 0.5 {
+        if x == x.round() {
+            return None; // 極
+        }
+        match gamma_real(1.0 - x) {
+            Some(g) => PI / ((PI * x).sin() * g),
+            // Γ(1 − x) が桁あふれする（x < −170 くらい）: |Γ(x)| は 10⁻³⁰⁸ より小さく、0 になる
+            None if 1.0 - x > 171.0 => 0.0,
+            None => return None,
+        }
+    } else {
+        let z = x - 1.0;
+        let mut s = LANCZOS_P[0];
+        for (k, p) in LANCZOS_P.iter().enumerate().skip(1) {
+            s += *p / (z + k as f64);
+        }
+        let t = z + LANCZOS_G + 0.5;
+        let pw = t.powf(z + 0.5);
+        if pw.is_finite() {
+            (2.0 * PI).sqrt() * pw * (-t).exp() * s
+        } else {
+            // t^(z + 1/2) だけが桁あふれする（[`gamma`] と同じ）
+            let half = t.powf((z + 0.5) / 2.0);
+            (2.0 * PI).sqrt() * half * ((-t).exp() * half) * s
+        }
+    };
+    v.is_finite().then_some(v)
 }
 
 /// 1 / Γ(z)（極では 0）
@@ -102,6 +147,13 @@ pub fn binomial(n: C, r: C) -> C {
             return sign * binomial(C::new(ri - ni - 1.0, 0.0), r);
         }
     }
+    // 実数なら、割り算も実数で（複素数の割り算は遅く、途中で桁あふれしやすい）。有限でなければ複素数で計算し直す
+    if n.im == 0.0 && r.im == 0.0 {
+        let v = gamma(n + 1.0).re / (gamma(r + 1.0).re * gamma(n - r + 1.0).re);
+        if v.is_finite() {
+            return C::new(v, 0.0);
+        }
+    }
     gamma(n + 1.0) / (gamma(r + 1.0) * gamma(n - r + 1.0))
 }
 
@@ -115,6 +167,12 @@ pub fn permutation(n: C, r: C) -> C {
             if ri <= DIRECT_LIMIT {
                 return C::new(falling_product(ni, ri, false), 0.0);
             }
+        }
+    }
+    if n.im == 0.0 && r.im == 0.0 {
+        let v = gamma(n + 1.0).re / gamma(n - r + 1.0).re;
+        if v.is_finite() {
+            return C::new(v, 0.0);
         }
     }
     gamma(n + 1.0) / gamma(n - r + 1.0)
@@ -306,6 +364,13 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
         return (C::new(0.0, PI * s) * nu).exp() * bessel_series(nu, w, sign);
     }
     if sign < 0.0 && bessel::use_schlafli(nu, z) {
+        // ν, z が実数なら実数だけで計算する（値が有限でなければ複素数で計算し直す）
+        if nu.im == 0.0 && z.im == 0.0 {
+            let j = bessel::schlafli(nu.re, z.re).0;
+            if j.is_finite() {
+                return C::new(j, 0.0);
+            }
+        }
         return bessel::schlafli(nu, z).0;
     }
     if sign < 0.0 && bessel::use_asymptotic(nu, z) {
@@ -313,6 +378,23 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
     }
     if z == C::new(0.0, 0.0) {
         return if nu == C::new(0.0, 0.0) { C::new(1.0, 0.0) } else { C::new(0.0, 0.0) };
+    }
+    // ν が実数で z が正の実数なら、級数も実数だけで足す（値が有限でなければ複素数で計算し直す）
+    if nu.im == 0.0 && z.im == 0.0 && z.re > 0.0 {
+        let (nu, h) = (nu.re, z.re / 2.0);
+        let h2 = sign * h * h;
+        let mut term = h.powf(nu) / gamma(C::new(nu + 1.0, 0.0)).re;
+        let mut sum = term;
+        for k in 1..500 {
+            term *= h2 / (k as f64 * (nu + k as f64));
+            sum += term;
+            if term.abs() < 1e-17 * sum.abs() && k > 2 {
+                break;
+            }
+        }
+        if sum.is_finite() {
+            return C::new(sum, 0.0);
+        }
     }
     let h = z / 2.0;
     let h2 = sign * h * h;

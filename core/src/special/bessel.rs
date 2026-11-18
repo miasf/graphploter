@@ -30,31 +30,93 @@ const GL_W: [f64; 5] = [
     0.066_671_344_308_688_14,
 ];
 
+/// シュレーフリの積分の計算に使う数（実数と複素数）。実数の ν, z では実数だけで計算する
+/// （複素数の cos・sin・exp は実数の 4 倍ほどの手間がかかる。ベッセル関数の膜のグラフで効く）
+pub(crate) trait SchlafliNum:
+    Copy
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Mul<f64, Output = Self>
+    + std::ops::Div<f64, Output = Self>
+    + std::ops::Neg<Output = Self>
+    + std::ops::AddAssign
+{
+    fn zero() -> Self;
+    fn cos(self) -> Self;
+    fn sin(self) -> Self;
+    fn exp(self) -> Self;
+    fn real(self) -> f64;
+    fn abs(self) -> f64;
+}
+
+impl SchlafliNum for f64 {
+    fn zero() -> f64 {
+        0.0
+    }
+    fn cos(self) -> f64 {
+        f64::cos(self)
+    }
+    fn sin(self) -> f64 {
+        f64::sin(self)
+    }
+    fn exp(self) -> f64 {
+        f64::exp(self)
+    }
+    fn real(self) -> f64 {
+        self
+    }
+    fn abs(self) -> f64 {
+        f64::abs(self)
+    }
+}
+
+impl SchlafliNum for C {
+    fn zero() -> C {
+        C::new(0.0, 0.0)
+    }
+    fn cos(self) -> C {
+        C::cos(self)
+    }
+    fn sin(self) -> C {
+        C::sin(self)
+    }
+    fn exp(self) -> C {
+        C::exp(self)
+    }
+    fn real(self) -> f64 {
+        self.re
+    }
+    fn abs(self) -> f64 {
+        self.norm()
+    }
+}
+
 /// [a, b] の 10 点ガウス・ルジャンドル積分（f は 2 つの値を同時に返す）
-fn gauss2(f: &impl Fn(f64) -> (C, C), a: f64, b: f64) -> (C, C) {
+fn gauss2<T: SchlafliNum>(f: &impl Fn(f64) -> (T, T), a: f64, b: f64) -> (T, T) {
     let (mid, half) = ((a + b) / 2.0, (b - a) / 2.0);
-    let (mut s1, mut s2) = (C::new(0.0, 0.0), C::new(0.0, 0.0));
+    let (mut s1, mut s2) = (T::zero(), T::zero());
     for (x, w) in GL_X.iter().zip(GL_W.iter()) {
         for t in [mid - half * x, mid + half * x] {
             let (u, v) = f(t);
-            s1 += w * u;
-            s2 += w * v;
+            s1 += u * *w;
+            s2 += v * *w;
         }
     }
     (s1 * half, s2 * half)
 }
 
 /// シュレーフリの積分表示で (J_ν(z), Y_ν(z)) を計算する（Re z > 0）。
-/// 級数の桁落ちが大きく、漸近展開もまだ使えない中くらいの |z| 用
-pub(crate) fn schlafli(nu: C, z: C) -> (C, C) {
+/// 級数の桁落ちが大きく、漸近展開もまだ使えない中くらいの |z| 用。ν, z が実数なら `T = f64` で呼ぶ
+pub(crate) fn schlafli<T: SchlafliNum>(nu: T, z: T) -> (T, T) {
     // ∫₀^π cos(ντ − z sin τ) dτ と ∫₀^π sin(z sin τ − ντ) dτ
-    let panels = ((z.norm() + nu.norm()) / 2.0).ceil() as usize + 4;
+    let panels = ((z.abs() + nu.abs()) / 2.0).ceil() as usize + 4;
     let width = PI / panels as f64;
     let osc = |t: f64| {
         let th = nu * t - z * t.sin();
         (th.cos(), -th.sin())
     };
-    let (mut ic, mut is) = (C::new(0.0, 0.0), C::new(0.0, 0.0));
+    let (mut ic, mut is) = (T::zero(), T::zero());
     for k in 0..panels {
         let (a, b) = gauss2(&osc, k as f64 * width, (k + 1) as f64 * width);
         ic += a;
@@ -65,14 +127,14 @@ pub(crate) fn schlafli(nu: C, z: C) -> (C, C) {
         let e = (-z * t.sinh()).exp();
         (e * (-nu * t).exp(), e * (nu * t).exp())
     };
-    let (mut ta, mut tb) = (C::new(0.0, 0.0), C::new(0.0, 0.0));
+    let (mut ta, mut tb) = (T::zero(), T::zero());
     let mut top = f64::NEG_INFINITY;
     for k in 0..400 {
         let (t0, t1) = (k as f64 * 0.25, (k + 1) as f64 * 0.25);
         let (a, b) = gauss2(&tail, t0, t1);
         ta += a;
         tb += b;
-        let level = nu.re.abs() * t1 - z.re * t1.sinh();
+        let level = nu.real().abs() * t1 - z.real() * t1.sinh();
         top = top.max(level);
         if level < top - 40.0 {
             break;

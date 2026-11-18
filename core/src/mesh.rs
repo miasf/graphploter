@@ -1310,7 +1310,15 @@ fn hidden_features(
     const UNIT: i64 = 64; // 最初の格子の 1 マス = 64 単位（1/32 マスの箱でも、中点が整数になる）
     // 深さ（最初の格子の 1 マスの 1/32 まで）
     const MAX_DEPTH: u32 = 8;
-    const MAX_INTERVALS: usize = 30_000;
+    // 区間演算の回数の上限。命令の多い式（項がたくさんの総和、積分を和にした式。命令が数百〜数千）では、1 回の区間演算が
+    // 重いうえに、区間が広がりすぎてどの箱も疑わしくなり、上限まで使い切る（200 項の総和で 0.26 秒、2 重の積分で 0.7 秒）。
+    // 命令が OPS_REF 個を超える式は、区間演算の手間（回数 × 命令の数）がおよそ同じになるように回数を減らす（下限あり）
+    const OPS_REF: usize = 40;
+    let max_intervals: usize = {
+        const FULL: usize = 30_000;
+        let ops = prog.op_count().max(1);
+        if ops <= OPS_REF { FULL } else { (FULL * OPS_REF / ops).max(2_000) }
+    };
     let m = n + 1;
     let (u0, u1, v0, v1) = (dom.lo[ua], dom.hi[ua], dom.lo[va], dom.hi[va]);
     let mut out = SeedMap { n, u: (u0, u1), v: (v0, v1), cells: Default::default(), mids: Vec::new() };
@@ -1398,11 +1406,10 @@ fn hidden_features(
     let mut intervals = 0usize;
     // 箱 [x0, x1] × [y0, y1]（単位）のはみ出し（疑わしくなければ None）。`vals` は箱の角と中の点の値
     let excess = |x0: i64, x1: i64, y0: i64, y1: i64, vals: &[f64], intervals: &mut usize| -> Option<f64> {
-        let fin: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
-        if fin.is_empty() {
-            return None;
+        let (mn, mx) = vals.iter().filter(|v| v.is_finite()).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        if mn > mx {
+            return None; // 有限な値が無い
         }
-        let (mn, mx) = fin.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
         *intervals += 1;
         let r = prog.eval_interval(&[Interval::new(pu(x0), pu(x1)), Interval::new(pv(y0), pv(y1))]);
         let Range::Known(iv) = r else { return Some(h) };
@@ -1439,10 +1446,10 @@ fn hidden_features(
         }
     }
     // 疑わしい箱を、はみ出しの大きい順に四つに分けていく
-    while !frontier.is_empty() && intervals < MAX_INTERVALS {
+    while !frontier.is_empty() && intervals < max_intervals {
         frontier.sort_by(|a, b| b.0.total_cmp(&a.0));
         // 子の区間演算の回数（4 回ずつ）が上限を超えない分だけ
-        let room = (MAX_INTERVALS - intervals) / 4;
+        let room = (max_intervals - intervals) / 4;
         frontier.truncate(room.max(1));
         let boxes: Vec<([i64; 4], u32)> = frontier.drain(..).map(|(_, b, d)| (b, d)).collect();
         // 新しい点（中心と辺の中点）をまとめて計算する
@@ -1476,11 +1483,9 @@ fn hidden_features(
             }
             for (a0, a1) in [(x0, xm), (xm, x1)] {
                 for (b0, b1) in [(y0, ym), (ym, y1)] {
-                    let corners: Vec<f64> = [(a0, b0), (a1, b0), (a0, b1), (a1, b1)]
-                        .iter()
-                        .filter_map(|&p| value(&known, p))
-                        .collect();
-                    if intervals >= MAX_INTERVALS {
+                    // 値の分かっている角（無い角は NaN にする。excess は有限な値だけを見るので同じ）
+                    let corners = [(a0, b0), (a1, b0), (a0, b1), (a1, b1)].map(|p| value(&known, p).unwrap_or(f64::NAN));
+                    if intervals >= max_intervals {
                         break;
                     }
                     if let Some(e) = excess(a0, a1, b0, b1, &corners, &mut intervals) {
@@ -1568,14 +1573,39 @@ fn clip_to_height_range(
         ids
     };
 
+    // 点ごとの高さ（定義されない点は NaN）と、上端・下端に対する位置（0 = 範囲の中、1 = 上端より上（定義されない点も）、
+    // -1 = 下端より下）。三角形ごとに何度も計算しないよう、点を足すたびに一緒に足す
+    let side_of = |v: f64| -> i8 {
+        if !v.is_finite() || v > hi {
+            1
+        } else if v < lo {
+            -1
+        } else {
+            0
+        }
+    };
+    let mut ph: Vec<f64> = vals.iter().map(|v| height(*v, mode)).collect();
+    let mut pside: Vec<i8> = ph.iter().map(|&v| side_of(v)).collect();
+    let sync = |pval: &[C], ph: &mut Vec<f64>, pside: &mut Vec<i8>| {
+        for &z in &pval[ph.len()..] {
+            let v = height(z, mode);
+            ph.push(v);
+            pside.push(side_of(v));
+        }
+    };
+
     // 1. 定義域の縁
     let mut edge_pt: crate::adaptive::HashMap<(usize, usize), usize> = Default::default();
     let mut todo: Vec<(usize, usize)> = Vec::new();
     for t in tris {
+        let d = [ph[t[0]].is_finite(), ph[t[1]].is_finite(), ph[t[2]].is_finite()];
+        if d[0] && d[1] && d[2] {
+            continue; // ほとんどの三角形（縁を横切らない）
+        }
         for e in 0..3 {
             let (a, b) = (t[e], t[(e + 1) % 3]);
             for (i, o) in [(a, b), (b, a)] {
-                if defined(&vals[i]) && !defined(&vals[o]) && !edge_pt.contains_key(&(i, o)) {
+                if ph[i].is_finite() && !ph[o].is_finite() && !edge_pt.contains_key(&(i, o)) {
                     edge_pt.insert((i, o), usize::MAX);
                     todo.push((i, o));
                 }
@@ -1587,6 +1617,7 @@ fn clip_to_height_range(
         for (pair, id) in todo.iter().zip(ids) {
             edge_pt.insert(*pair, id);
         }
+        sync(&pval, &mut ph, &mut pside);
     }
     // 定義される部分の多角形（点の番号。向きは元の三角形と同じ）
     // 面積がほとんど 0 の多角形（x + iy のように線の上でしか定義されない式の、縁の細い切れ端）は描かない
@@ -1598,53 +1629,60 @@ fn clip_to_height_range(
         }
         0.5 * a.abs()
     };
-    let polys: Vec<Vec<usize>> = tris
-        .iter()
-        .map(|t| {
-            let mut poly = Vec::with_capacity(4);
-            for e in 0..3 {
-                let (a, b) = (t[e], t[(e + 1) % 3]);
-                let (da, db) = (defined(&vals[a]), defined(&vals[b]));
-                if da {
-                    poly.push(a);
-                }
-                if da != db {
-                    poly.push(edge_pt[&if da { (a, b) } else { (b, a) }]);
-                }
+    let mut polys: Vec<SmallPoly> = Vec::with_capacity(tris.len());
+    for t in tris {
+        let mut poly = SmallPoly::default();
+        for e in 0..3 {
+            let (a, b) = (t[e], t[(e + 1) % 3]);
+            let (da, db) = (ph[a].is_finite(), ph[b].is_finite());
+            if da {
+                poly.push(a);
             }
-            (poly, area(t, &pu, &pv))
-        })
-        .filter(|(p, whole)| p.len() >= 3 && area(p, &pu, &pv) > 1e-6 * whole)
-        .map(|(p, _)| p)
-        .collect();
+            if da != db {
+                poly.push(edge_pt[&if da { (a, b) } else { (b, a) }]);
+            }
+        }
+        if poly.len() >= 3 && area(poly.as_slice(), &pu, &pv) > 1e-6 * area(t, &pu, &pv) {
+            polys.push(poly);
+        }
+    }
 
     // 2. 上端・下端で切る
     let h = |val: &C| height(*val, mode);
-    // 点の位置: 0 = 範囲の中、1 = 上端より上（定義されない点も）、-1 = 下端より下
-    let side = |val: &C| {
-        let v = h(val);
-        if !v.is_finite() || v > hi { 1i8 } else if v < lo { -1 } else { 0 }
-    };
-    let outside_of = |poly: &[usize], pval: &[C]| -> i8 {
-        let s: Vec<i8> = poly.iter().map(|&k| side(&pval[k])).collect();
-        if !s.contains(&0) || (s.contains(&1) && s.contains(&-1)) {
-            0 // 全部外（描画側で切り落とされる）か、上下の両方に出る（そのまま描く）
+    // 多角形の向かう外: 0 = 全部外（描画側で切り落とされる）か、上下の両方に出る（そのまま描く）か、全部中。
+    // 1 = 一部が上端より上、-1 = 一部が下端より下
+    let outside_of = |poly: &SmallPoly, pside: &[i8]| -> i8 {
+        let (mut inside, mut up, mut down) = (false, false, false);
+        for &k in poly.as_slice() {
+            match pside[k] {
+                0 => inside = true,
+                1 => up = true,
+                _ => down = true,
+            }
+        }
+        if !inside || (up && down) {
+            0
+        } else if up {
+            1
+        } else if down {
+            -1
         } else {
-            s.iter().copied().find(|&x| x != 0).unwrap_or(0)
+            0
         }
     };
+    let outs: Vec<i8> = polys.iter().map(|p| outside_of(p, &pside)).collect();
     let mut cut_pt: crate::adaptive::HashMap<(usize, usize), usize> = Default::default();
     let mut todo: Vec<(usize, usize)> = Vec::new();
     let mut todo_level: Vec<f64> = Vec::new();
-    for poly in &polys {
-        let out = outside_of(poly, &pval);
+    for (poly, &out) in polys.iter().zip(&outs) {
         if out == 0 {
             continue;
         }
+        let poly = poly.as_slice();
         for e in 0..poly.len() {
             let (a, b) = (poly[e], poly[(e + 1) % poly.len()]);
             for (i, o) in [(a, b), (b, a)] {
-                if side(&pval[i]) == 0 && side(&pval[o]) == out && !cut_pt.contains_key(&(i, o)) {
+                if pside[i] == 0 && pside[o] == out && !cut_pt.contains_key(&(i, o)) {
                     cut_pt.insert((i, o), usize::MAX);
                     todo.push((i, o));
                     todo_level.push(if out > 0 { hi } else { lo });
@@ -1679,19 +1717,26 @@ fn clip_to_height_range(
         }
         pid[k]
     };
-    for poly in &polys {
-        let out = outside_of(poly, &pval);
-        let kept: Vec<usize> = if out == 0 {
-            let s: Vec<i8> = poly.iter().map(|&k| side(&pval[k])).collect();
-            if !s.contains(&0) && !(s.contains(&1) && s.contains(&-1)) {
+    for (poly, &out) in polys.iter().zip(&outs) {
+        let kept = if out == 0 {
+            let (mut inside, mut up, mut down) = (false, false, false);
+            for &k in poly.as_slice() {
+                match pside[k] {
+                    0 => inside = true,
+                    1 => up = true,
+                    _ => down = true,
+                }
+            }
+            if !inside && !(up && down) {
                 continue; // 全部が上端より上（または下端より下）: 見えない
             }
-            poly.clone()
+            *poly
         } else {
-            let mut kept = Vec::with_capacity(poly.len() + 1);
+            let poly = poly.as_slice();
+            let mut kept = SmallPoly::default();
             for e in 0..poly.len() {
                 let (a, b) = (poly[e], poly[(e + 1) % poly.len()]);
-                let (sa, sb) = (side(&pval[a]) == 0, side(&pval[b]) == 0);
+                let (sa, sb) = (pside[a] == 0, pside[b] == 0);
                 if sa {
                     kept.push(a);
                 }
@@ -1704,11 +1749,36 @@ fn clip_to_height_range(
         if kept.len() < 3 {
             continue;
         }
-        let ids: Vec<u32> = kept.iter().map(|&k| vid(k, mesh)).collect();
-        for k in 1..ids.len() - 1 {
+        let mut ids = [0u32; SmallPoly::CAP];
+        for (slot, &k) in ids.iter_mut().zip(kept.as_slice()) {
+            *slot = vid(k, mesh);
+        }
+        for k in 1..kept.len() - 1 {
             let t = [ids[0], ids[k], ids[k + 1]];
             mesh.indices.extend_from_slice(&if flip { [t[0], t[2], t[1]] } else { t });
         }
+    }
+}
+
+/// 頂点の番号を並べた小さい多角形（三角形を定義域の縁と上端・下端で切ったもの。頂点は多くても 8 個）。
+/// 三角形ごとに `Vec` を作ると、確保と解放だけで陽関数の時間の大半を使うので、固定の大きさの配列にする
+#[derive(Clone, Copy, Default)]
+struct SmallPoly {
+    n: u8,
+    v: [usize; SmallPoly::CAP],
+}
+
+impl SmallPoly {
+    const CAP: usize = 8;
+    fn push(&mut self, k: usize) {
+        self.v[self.n as usize] = k;
+        self.n += 1;
+    }
+    fn len(&self) -> usize {
+        self.n as usize
+    }
+    fn as_slice(&self) -> &[usize] {
+        &self.v[..self.n as usize]
     }
 }
 
@@ -4298,10 +4368,10 @@ fn coarse_nets(
 /// （分けないと、鞍の形の面で 4 つの三角形が 1 本の辺に集まる）
 fn nets_on_grid(
     dims: [usize; 3],
-    cell_ok: &dyn Fn([usize; 3]) -> bool,
-    val: &dyn Fn([usize; 3]) -> f32,
-    cross: &dyn Fn([usize; 3], usize) -> Option<(f64, bool)>,
-    pos: &dyn Fn([f64; 3]) -> [f64; 3],
+    cell_ok: impl Fn([usize; 3]) -> bool,
+    val: impl Fn([usize; 3]) -> f32,
+    cross: impl Fn([usize; 3], usize) -> Option<(f64, bool)>,
+    pos: impl Fn([f64; 3]) -> [f64; 3],
 ) -> Mesh {
     let cell = |c: [usize; 3]| c[0] + dims[0] * (c[1] + dims[1] * c[2]);
     let edge_axis: [usize; 12] = EDGES.map(|[ca, cb]| (0..3).find(|&x| CORNERS[ca][x] != CORNERS[cb][x]).unwrap_or(0));
@@ -5316,20 +5386,31 @@ fn refine_blocks(
                 }
             }
         }
-        let list: Vec<usize> = (0..need.len()).filter(|&l| need[l]).collect();
+        // 計算する格子点の番号と、その (x, y, z) の番号（番号から割り算で戻すと、点が多いので割り算だけで遅い）
+        let count = need.iter().filter(|&&b| b).count();
+        let mut list: Vec<usize> = Vec::with_capacity(count);
+        let mut list_q: Vec<[u32; 3]> = Vec::with_capacity(count);
+        for z in 0..pts[2] {
+            for y in 0..pts[1] {
+                let row = at([0, y, z]);
+                for (x, _) in need[row..row + pts[0]].iter().enumerate().filter(|(_, &b)| b) {
+                    list.push(row + x);
+                    list_q.push([x as u32, y as u32, z as u32]);
+                }
+            }
+        }
         if list.len() > budget.points {
             return None;
         }
         budget.points -= list.len();
         budget.blocks -= blocks.len();
-        let coord = |l: usize, a: usize| {
-            let q = [l % pts[0], (l / pts[0]) % pts[1], l / (pts[0] * pts[1])];
-            dom.at(a, c0[a] as f64 + q[a] as f64 / r as f64, n)
-        };
+        // 軸ごとの、細かい格子の番号 → 座標
+        let axis_coord: [Vec<f64>; 3] = [0, 1, 2].map(|a| (0..pts[a]).map(|q| dom.at(a, c0[a] as f64 + q as f64 / r as f64, n)).collect());
+        let coord_q = |q: [u32; 3], a: usize| axis_coord[a][q[a] as usize];
         let mut vals = vec![f32::NAN; need.len()];
         let mut sc = FieldScratch::default();
-        for part in list.chunks(FIELD_CHUNK) {
-            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| part.iter().map(|&l| coord(l, a)).collect());
+        for (part, part_q) in list.chunks(FIELD_CHUNK).zip(list_q.chunks(FIELD_CHUNK)) {
+            let cols: [Vec<f64>; 3] = [0, 1, 2].map(|a| part_q.iter().map(|&q| coord_q(q, a)).collect());
             let v = field_values_with(prog, combos, [&cols[0], &cols[1], &cols[2]], &mut sc);
             for (&l, &x) in part.iter().zip(v) {
                 vals[l] = x as f32;
@@ -5351,9 +5432,9 @@ fn refine_blocks(
         // 符号は変わるが F = 0 になる点が無い辺（極など）には面を張らない（[`false_crossings`]）
         let mut sign_edges: Vec<SignEdge> = Vec::new();
         let mut sign_ids: Vec<usize> = Vec::new();
-        let point = |l: usize| [0, 1, 2].map(|a| coord(l, a));
-        for &l in &list {
-            let p = [l % pts[0], (l / pts[0]) % pts[1], l / (pts[0] * pts[1])];
+        let point = |q: [u32; 3]| [0, 1, 2].map(|a| coord_q(q, a));
+        for (&l, &pq) in list.iter().zip(&list_q) {
+            let p = pq.map(|v| v as usize);
             for a in 0..3 {
                 if p[a] + 1 >= pts[a] {
                     continue;
@@ -5371,7 +5452,9 @@ fn refine_blocks(
                         continue;
                     }
                 }
-                sign_edges.push(SignEdge { p0: point(l), p1: point(l + st), f0: f0 as f64, f1: f1 as f64 });
+                let mut pq1 = pq;
+                pq1[a] += 1;
+                sign_edges.push(SignEdge { p0: point(pq), p1: point(pq1), f0: f0 as f64, f1: f1 as f64 });
                 sign_ids.push(3 * l + a);
             }
         }
@@ -5379,10 +5462,9 @@ fn refine_blocks(
             let flags = false_crossings(&mut |xyz| field_values_with(prog, combos, xyz, &mut sc).to_vec(), &sign_edges);
             sign_ids.into_iter().zip(flags).filter(|&(_, bad)| bad).map(|(id, _)| id).collect()
         };
-        let cell_ok = |c: [usize; 3]| {
-            let b = [0, 1, 2].map(|a| ((c0[a] + c[a] / r) / BLOCK).min(nb - 1) - b0[a]);
-            inside[b[0] + bd[0] * (b[1] + bd[1] * b[2])]
-        };
+        // 軸ごとの、細かい格子のセルの番号 → 直方体の中のブロックの番号（セルごとに割り算をしない）
+        let cell_block: [Vec<usize>; 3] = [0, 1, 2].map(|a| (0..dims[a]).map(|c| ((c0[a] + c / r) / BLOCK).min(nb - 1) - b0[a]).collect());
+        let cell_ok = |c: [usize; 3]| inside[cell_block[0][c[0]] + bd[0] * (cell_block[1][c[1]] + bd[1] * cell_block[2][c[2]])];
         let cross = |p: [usize; 3], a: usize| -> Option<(f64, bool)> {
             let mut q = p;
             q[a] += 1;

@@ -151,7 +151,16 @@
     ;(async () => {
       // 共有リンクで開いた、またはブラウザに保存してあるなら、その状態に戻す
       const saved = await loadInitial()
-      if (saved) restore(saved)
+      if (saved) {
+        // 読み込めない保存データ（別の版のものなど）で止まると、開き直しても同じ所で止まり続ける。最初の状態に戻して続ける
+        const fresh = snapshot()
+        try {
+          restore(saved)
+        } catch (e) {
+          console.error('保存した状態を読み込めませんでした', e)
+          restore(fresh)
+        }
+      }
       viewer?.setDark(dark)
       viewer?.setPerspective(flat ? 0 : perspective / 100)
       viewer?.setFlat(flat)
@@ -241,11 +250,13 @@
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
     items = s.items.map((si) => newItem(si.latex, { ...si, rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }))
     domain = s.domain
-    resolution = s.resolution
-    implicitResolution = s.implicitResolution
+    // 数でない値（壊れた・別の版の保存データ）は、今の値のままにする
+    const num = (v: unknown, now: number) => (typeof v === 'number' && Number.isFinite(v) ? v : now)
+    resolution = num(s.resolution, resolution)
+    implicitResolution = num(s.implicitResolution, implicitResolution)
     findSmall = s.findSmall ?? false
-    perspective = s.perspective
-    dark = s.dark
+    perspective = num(s.perspective, perspective)
+    dark = typeof s.dark === 'boolean' ? s.dark : dark
     // 古い保存データ・壊れた共有リンクでも動くよう、次元に合わせて配列の長さをそろえる
     const dims = Math.max(3, Math.min(10, Math.round(Number(s.space.dims)) || 3))
     space = {
@@ -2264,6 +2275,42 @@
   }
 
   async function startBench(v: Viewer) {
+    // ?bench=1&set=samples: サンプルを全部、ふつうに追加したときと同じ道で描いて測る
+    if (new URLSearchParams(location.search).get('set') === 'samples') {
+      const { runSampleSweep } = await import('./lib/bench')
+      const stopAll = () => {
+        for (const key of Object.keys(playing)) playing[Number(key)] = []
+        playingParams = []
+        playingSlices = []
+        playingMorph = []
+        animationChanged()
+      }
+      await runSampleSweep(
+        {
+          viewer: v,
+          idle: benchIdle,
+          stopAll,
+          animating: () => anyRotPlaying() || playingParams.length > 0 || playingSlices.length > 0 || playingMorph.length > 0,
+          errors: () => items.filter((it) => it.error).map((it) => ({ latex: it.latex, error: it.error! })),
+          async load(s) {
+            stopAll()
+            for (const it of [...items]) removeItem(it)
+            folders = []
+            for (const c of [...coordSystems]) removeCoord(c.id)
+            if (flat) setFlat(false)
+            resolution = 150
+            implicitResolution = 80
+            applyView({ dims: 3, half: 5 })
+            await benchIdle()
+            pushItem(newItem(''))
+            await addSample(s)
+          },
+        },
+        SAMPLE_GROUPS,
+        (text) => (benchText = text),
+      )
+      return
+    }
     const { runBench } = await import('./lib/bench')
     await runBench(
       {

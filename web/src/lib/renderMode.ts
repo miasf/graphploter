@@ -8,16 +8,23 @@
  */
 import type { RenderMode } from './types'
 
+// 見た目を設定するたびに呼ばれる（再生中は毎コマ）ので、メディアクエリと URL の読み取りは 1 回だけにする。
+// MediaQueryList の matches は、端末の状態が変わればその時の値を返す
+const coarse = typeof matchMedia === 'undefined' ? null : matchMedia('(pointer: coarse)')
+const urlOff = (() => {
+  if (typeof location === 'undefined') return { '2d': false, '3d': false }
+  const q = new URLSearchParams(location.search)
+  return { '2d': q.get('gpu2d') === '0', '3d': q.get('gpu3d') === '0' }
+})()
+
 /** この端末で、自動のときに GPU の描き方を使うか */
 export function gpuByDefault(): boolean {
-  if (typeof matchMedia === 'undefined') return true
-  return !matchMedia('(pointer: coarse)').matches
+  return coarse === null || !coarse.matches
 }
 
 /** URL で GPU の描き方を止めているか（kind は '2d' か '3d'） */
 function disabledByUrl(kind: '2d' | '3d'): boolean {
-  if (typeof location === 'undefined') return false
-  return new URLSearchParams(location.search).get(kind === '2d' ? 'gpu2d' : 'gpu3d') === '0'
+  return urlOff[kind]
 }
 
 /** 式の描画の方法 mode で、GPU の描き方を使うか（式が GPU に移せるかは、呼び出し側が別に確かめる） */

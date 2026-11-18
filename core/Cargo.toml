@@ -15,6 +15,14 @@ num-complex = "0.4"
 [profile.release]
 opt-level = 3
 lto = true
+# 1 つの単位でまとめて最適化する（ビルドは遅くなるが、WASM が小さく速くなる）
+codegen-units = 1
+# パニックしたら止める（WASM では巻き戻しができないので、止めるのと同じ。巻き戻しのための表が消えて小さくなる）。
+# テストはこの設定を無視して巻き戻す
+panic = "abort"
+# デバッグ情報を消す。strip = true（関数の名前の表まで消す。WASM がさらに 9% 小さい）は、WASM の機能を書いた区画
+# （target_features）も消してしまい、wasm-bindgen が使える機能を判定できなくなる（ビルドで警告が出る）ので使わない
+strip = "debuginfo"
 
 # wasm-opt（追加の最適化ツール）はダウンロードに失敗しやすいので、ひとまず無効にしておく
 [package.metadata.wasm-pack.profile.release]

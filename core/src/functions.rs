@@ -276,6 +276,24 @@ impl Func {
 
     /// 引数 `x` で計算する。引数の個数は `arities()` のどれかであること
     pub fn call(self, x: &[C]) -> C {
+        // 虚部の −0 は +0 にそろえる。符号を変える（-4 = −(4 + 0i) = −4 − 0i）・負の数で割ると虚部が −0 になり、
+        // 負の実数の上に切れ目のある関数（sqrt・ln・arg・逆三角関数など）が切れ目の下側の値を返していた
+        // （sqrt(-4) が −2i、arg(-1) が −π）。数学の約束（Wolfram|Alpha なども）では上側の値
+        if x.iter().any(|z| z.im == 0.0 && z.im.is_sign_negative()) {
+            let mut y = [C::new(0.0, 0.0); 8];
+            if x.len() <= y.len() {
+                for (d, z) in y.iter_mut().zip(x) {
+                    *d = C::new(z.re, z.im + 0.0);
+                }
+                return self.call_raw(&y[..x.len()]);
+            }
+            let y: Vec<C> = x.iter().map(|z| C::new(z.re, z.im + 0.0)).collect();
+            return self.call_raw(&y);
+        }
+        self.call_raw(x)
+    }
+
+    fn call_raw(self, x: &[C]) -> C {
         let nan = C::new(f64::NAN, f64::NAN);
         let r = |v: f64| C::new(v, 0.0);
         match (self, x.len()) {

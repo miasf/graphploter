@@ -30,6 +30,13 @@ pub use pieces::Cond;
 /// 一度にまとめて計算する点の数
 const CHUNK: usize = 256;
 
+thread_local! {
+    /// 命令列の実行の作業領域（[`Code::run_inner`]）。呼び出しのたびに確保し直さないよう、使い回す
+    static SCRATCH_RE: std::cell::Cell<Vec<f64>> = const { std::cell::Cell::new(Vec::new()) };
+    static SCRATCH_CX: std::cell::Cell<Vec<C>> = const { std::cell::Cell::new(Vec::new()) };
+    static SCRATCH_IV: std::cell::Cell<Vec<Interval>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
 /// 命令。引数の `usize` は「何番目の命令の結果を使うか」。
 #[derive(Debug, Clone)]
 enum Op {
@@ -227,49 +234,59 @@ impl Code {
 
     fn run_inner<S: Sink>(&self, inputs: &[&[f64]], n: usize, sink: &mut S) {
         let m = self.ops.len();
-        // 命令ごとの作業領域（CHUNK 個ずつ）。定数は最初に1回だけ書き込む
-        let mut re: Vec<f64> = Vec::new();
-        let mut cx: Vec<C> = Vec::new();
+        // 命令ごとの作業領域の幅。点が CHUNK より少ない呼び出し（二分法・細分で数点ずつ計算する所。とても多い）では、
+        // 点の数だけにする（CHUNK 個分の領域を確保して定数で埋めるだけで、計算より時間がかかっていた）
+        let w = CHUNK.min(n.max(1));
+        // 作業領域は呼び出しをまたいで使い回す（入れ子の呼び出しでは、空の領域を新しく確保する）
+        let mut re: Vec<f64> = SCRATCH_RE.with(|c| c.take());
+        let mut cx: Vec<C> = SCRATCH_CX.with(|c| c.take());
+        let mut cx_ready = false;
         if self.real {
-            re = vec![0.0; m * CHUNK];
+            re.clear();
+            re.resize(m * w, 0.0);
             for (i, op) in self.ops.iter().enumerate() {
                 if let Op::Const(c) = op {
-                    re[i * CHUNK..(i + 1) * CHUNK].fill(c.re);
+                    re[i * w..(i + 1) * w].fill(c.re);
                 }
             }
         }
         let mut start = 0;
         while start < n {
-            let len = CHUNK.min(n - start);
-            if self.real && self.chunk_real(inputs, start, len, &mut re) {
+            let len = w.min(n - start);
+            if self.real && self.chunk_real(inputs, start, len, w, &mut re) {
                 for (j, &o) in self.outs.iter().enumerate() {
-                    sink.real(j, start, &re[o * CHUNK..o * CHUNK + len]);
+                    sink.real(j, start, &re[o * w..o * w + len]);
                 }
             } else {
-                if cx.is_empty() {
-                    cx = vec![C::new(0.0, 0.0); m * CHUNK];
+                if !cx_ready {
+                    cx_ready = true;
+                    cx.clear();
+                    cx.resize(m * w, C::new(0.0, 0.0));
                     for (i, op) in self.ops.iter().enumerate() {
                         if let Op::Const(c) = op {
-                            cx[i * CHUNK..(i + 1) * CHUNK].fill(*c);
+                            cx[i * w..(i + 1) * w].fill(*c);
                         }
                     }
                 }
-                self.chunk_complex(inputs, start, len, &mut cx);
+                self.chunk_complex(inputs, start, len, w, &mut cx);
                 for (j, &o) in self.outs.iter().enumerate() {
-                    sink.complex(j, start, &cx[o * CHUNK..o * CHUNK + len]);
+                    sink.complex(j, start, &cx[o * w..o * w + len]);
                 }
             }
             start += len;
         }
+        SCRATCH_RE.with(|c| c.set(re));
+        SCRATCH_CX.with(|c| c.set(cx));
     }
 
     /// 1つの CHUNK を複素数で計算する
-    fn chunk_complex(&self, inputs: &[&[f64]], start: usize, len: usize, regs: &mut [C]) {
+    /// `w` は命令ごとの作業領域の幅（[`Code::run_inner`]）
+    fn chunk_complex(&self, inputs: &[&[f64]], start: usize, len: usize, w: usize, regs: &mut [C]) {
         for (i, op) in self.ops.iter().enumerate() {
             // 自分より前の命令の結果だけを読むので、split_at_mut で安全に分けられる
-            let (done, rest) = regs.split_at_mut(i * CHUNK);
+            let (done, rest) = regs.split_at_mut(i * w);
             let dst = &mut rest[..len];
-            let arg = |a: usize| &done[a * CHUNK..a * CHUNK + len];
+            let arg = |a: usize| &done[a * w..a * w + len];
             match op {
                 Op::Const(_) => {}
                 Op::Var(k) => {
@@ -288,22 +305,34 @@ impl Code {
                         dst[j] = binop(*o, a[j], b[j]);
                     }
                 }
+                // 引数が直前の点とビットまで同じなら、直前の値を使う（[`Code::chunk_real`] の map1_memo と同じ）。
+                // 複素数の関数・特殊関数はどれも重いので、全部この形にする
                 Op::Call1(f, a) => {
+                    let mut prev = ((u64::MAX, u64::MAX), C::new(f64::NAN, f64::NAN));
                     for (d, a) in dst.iter_mut().zip(arg(*a)) {
-                        *d = f.eval1(*a);
+                        let bits = (a.re.to_bits(), a.im.to_bits());
+                        if bits != prev.0 {
+                            prev = (bits, f.eval1(*a));
+                        }
+                        *d = prev.1;
                     }
                 }
                 Op::Call2(f, a, b) => {
                     let (a, b) = (arg(*a), arg(*b));
+                    let mut prev = ([u64::MAX; 4], C::new(f64::NAN, f64::NAN));
                     for j in 0..len {
-                        dst[j] = f.eval2(a[j], b[j]);
+                        let bits = [a[j].re.to_bits(), a[j].im.to_bits(), b[j].re.to_bits(), b[j].im.to_bits()];
+                        if bits != prev.0 {
+                            prev = (bits, f.eval2(a[j], b[j]));
+                        }
+                        dst[j] = prev.1;
                     }
                 }
                 Op::CallN(f, args) => {
                     let mut vals = vec![C::new(0.0, 0.0); args.len()];
                     for (j, d) in dst.iter_mut().enumerate() {
                         for (v, &a) in vals.iter_mut().zip(args) {
-                            *v = done[a * CHUNK + j];
+                            *v = done[a * w + j];
                         }
                         *d = f.call(&vals);
                     }
@@ -316,8 +345,16 @@ impl Code {
     /// 有限でない値が出たら false を返す（呼び出し側が複素数で計算し直す）
     /// 区間演算（[`Program::eval_interval`]）。命令は [`Code::chunk_real`] と同じものを扱う。分からなければ None
     fn interval(&self, boxes: &[Interval]) -> Option<Interval> {
+        // 命令ごとの区間の置き場は使い回す（陽関数の細い山探しなどで、1 回の描画に何万回も呼ばれる）
+        let mut regs: Vec<Interval> = SCRATCH_IV.with(|c| c.take());
+        regs.clear();
+        let r = self.interval_with(boxes, &mut regs);
+        SCRATCH_IV.with(|c| c.set(regs));
+        r
+    }
+
+    fn interval_with(&self, boxes: &[Interval], regs: &mut Vec<Interval>) -> Option<Interval> {
         use crate::interval as iv;
-        let mut regs: Vec<Interval> = Vec::with_capacity(self.ops.len());
         for op in &self.ops {
             let r = |k: usize| regs[k];
             let v = match op {
@@ -541,11 +578,11 @@ impl Code {
         regs[self.outs[0]]
     }
 
-    fn chunk_real(&self, inputs: &[&[f64]], start: usize, len: usize, regs: &mut [f64]) -> bool {
+    fn chunk_real(&self, inputs: &[&[f64]], start: usize, len: usize, w: usize, regs: &mut [f64]) -> bool {
         for (i, op) in self.ops.iter().enumerate() {
-            let (done, rest) = regs.split_at_mut(i * CHUNK);
+            let (done, rest) = regs.split_at_mut(i * w);
             let dst = &mut rest[..len];
-            let arg = |a: usize| &done[a * CHUNK..a * CHUNK + len];
+            let arg = |a: usize| &done[a * w..a * w + len];
             // 1引数: dst[j] = f(a[j])
             macro_rules! map1 {
                 ($a:expr, $f:expr) => {
@@ -553,6 +590,27 @@ impl Code {
                         *d = $f(x);
                     }
                 };
+            }
+            // 1引数の重い関数（三角関数・指数・対数など）: 引数が直前の点とビットまで同じなら、直前の値を使う。
+            // 格子の上の点では、1 つの座標だけの式（ジャイロイドの cos(y)・sin(z)、陽関数の cos(y)）は、
+            // 格子の行の上でずっと同じ引数になるので、計算の大半を省ける（同じ引数なら同じ値なので、結果は変わらない）
+            // 直前の点だけでなく、小さな表（引数のビット → 値、MEMO 個）にも覚える。陰関数の格子はブロックごとに計算するので、
+            // ブロックの中の x の値（9 通り）が行ごとに繰り返し出てくる（ジャイロイドの sin(x)・cos(x)）
+            macro_rules! map1_memo {
+                ($a:expr, $f:expr) => {{
+                    const MEMO: usize = 64;
+                    let mut keys = [u64::MAX; MEMO];
+                    let mut vals = [0.0f64; MEMO];
+                    for (d, &x) in dst.iter_mut().zip(arg($a)) {
+                        let bits = x.to_bits();
+                        let slot = (bits.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58) as usize;
+                        if keys[slot] != bits || bits == u64::MAX {
+                            keys[slot] = bits;
+                            vals[slot] = $f(x);
+                        }
+                        *d = vals[slot];
+                    }
+                }};
             }
             // 1引数で、使える範囲が決まっているもの（範囲の外が1つでもあれば、複素数で計算し直す）
             macro_rules! map1_if {
@@ -586,8 +644,18 @@ impl Code {
                 // 累乗は複素数の pow と同じ場合分けにする（整数乗 / 0 以上の数の実数乗。それ以外は複素数になる）
                 Op::Bin(BinOp::Pow, a, b) => match self.ops[*b] {
                     Op::Const(e) if e.re.fract() == 0.0 && e.re.abs() <= 1024.0 => {
-                        let e = e.re as i32;
-                        map1!(*a, |x: f64| x.powi(e))
+                        // よく出る 2〜4 乗は掛け算にする（`powi` は関数の呼び出しになり、まとめて計算できない）。
+                        // `powi` と同じ順番で掛けるので、結果のビットまで同じ
+                        match e.re as i32 {
+                            1 => map1!(*a, |x: f64| x),
+                            2 => map1!(*a, |x: f64| x * x),
+                            3 => map1!(*a, |x: f64| x * (x * x)),
+                            4 => map1!(*a, |x: f64| {
+                                let s = x * x;
+                                s * s
+                            }),
+                            e => map1!(*a, |x: f64| x.powi(e)),
+                        }
                     }
                     _ => {
                         let (a, b) = (arg(*a), arg(*b));
@@ -607,27 +675,27 @@ impl Code {
                     }
                 },
                 Op::Call1(f, a) => match f {
-                    Func::Sin => map1!(*a, f64::sin),
-                    Func::Cos => map1!(*a, f64::cos),
-                    Func::Tan => map1!(*a, f64::tan),
-                    Func::Sec => map1!(*a, |x: f64| 1.0 / x.cos()),
-                    Func::Csc => map1!(*a, |x: f64| 1.0 / x.sin()),
-                    Func::Cot => map1!(*a, |x: f64| x.cos() / x.sin()),
+                    Func::Sin => map1_memo!(*a, f64::sin),
+                    Func::Cos => map1_memo!(*a, f64::cos),
+                    Func::Tan => map1_memo!(*a, f64::tan),
+                    Func::Sec => map1_memo!(*a, |x: f64| 1.0 / x.cos()),
+                    Func::Csc => map1_memo!(*a, |x: f64| 1.0 / x.sin()),
+                    Func::Cot => map1_memo!(*a, |x: f64| x.cos() / x.sin()),
                     Func::Asin => map1_if!(*a, |x: f64| x.abs() <= 1.0, f64::asin),
                     Func::Acos => map1_if!(*a, |x: f64| x.abs() <= 1.0, f64::acos),
-                    Func::Atan => map1!(*a, f64::atan),
-                    Func::Sinh => map1!(*a, f64::sinh),
-                    Func::Cosh => map1!(*a, f64::cosh),
-                    Func::Tanh => map1!(*a, f64::tanh),
-                    Func::Asinh => map1!(*a, f64::asinh),
+                    Func::Atan => map1_memo!(*a, f64::atan),
+                    Func::Sinh => map1_memo!(*a, f64::sinh),
+                    Func::Cosh => map1_memo!(*a, f64::cosh),
+                    Func::Tanh => map1_memo!(*a, f64::tanh),
+                    Func::Asinh => map1_memo!(*a, f64::asinh),
                     Func::Acosh => map1_if!(*a, |x: f64| x >= 1.0, f64::acosh),
                     Func::Atanh => map1_if!(*a, |x: f64| x.abs() <= 1.0, f64::atanh),
-                    Func::Exp => map1!(*a, f64::exp),
+                    Func::Exp => map1_memo!(*a, f64::exp),
                     Func::Ln => map1_if!(*a, |x: f64| x >= 0.0, f64::ln),
                     Func::Log10 => map1_if!(*a, |x: f64| x >= 0.0, f64::log10),
                     Func::Sqrt => map1_if!(*a, |x: f64| x >= 0.0, f64::sqrt),
                     Func::Abs => map1!(*a, f64::abs),
-                    Func::Sinc => map1!(*a, |x: f64| if x.abs() < 1e-8 { 1.0 - x * x / 6.0 } else { x.sin() / x }),
+                    Func::Sinc => map1_memo!(*a, |x: f64| if x.abs() < 1e-8 { 1.0 - x * x / 6.0 } else { x.sin() / x }),
                     Func::Floor => map1!(*a, f64::floor),
                     Func::Ceil => map1!(*a, f64::ceil),
                     Func::Round => map1!(*a, f64::round),
@@ -644,23 +712,38 @@ impl Code {
                 },
                 Op::CallN(Func::Piece, args) => {
                     for (j, d) in dst.iter_mut().enumerate() {
-                        let pick = crate::functions::piece_index(args.len(), |i| done[args[i] * CHUNK + j]);
-                        *d = pick.map_or(f64::NAN, |i| done[args[i] * CHUNK + j]);
+                        let pick = crate::functions::piece_index(args.len(), |i| done[args[i] * w + j]);
+                        *d = pick.map_or(f64::NAN, |i| done[args[i] * w + j]);
                     }
                 }
                 Op::CallN(..) => return false,
             }
-            // 有限でない値（0 での割り算・桁あふれなど）が1つでもあれば、v·0 の和が NaN になる
-            let mut check = 0.0;
-            for &v in dst.iter() {
-                check += v * 0.0;
-            }
-            if check.is_nan() {
+            // 有限でない値（0 での割り算・桁あふれなど）が1つでもあれば、v·0 の和が NaN になる。
+            // 和を 8 本に分けて足す（1 本だと、足し算が前の足し算の結果を待つ鎖になり、命令ごとにこの確かめが
+            // 計算そのものより遅くなる。NaN が出るかどうかは足す順番によらない）
+            if !all_finite(dst) {
                 return false;
             }
         }
         true
     }
+}
+
+/// 値がすべて有限か（[`Code::chunk_real`] の確かめ）。v·0 は有限なら ±0、有限でなければ NaN になるので、
+/// その和が NaN かどうかで決まる。独立した 8 本の和にして、足し算の鎖を待たずに計算できるようにする
+#[inline]
+fn all_finite(vals: &[f64]) -> bool {
+    let mut acc = [0.0f64; 8];
+    let (blocks, rest) = vals.as_chunks::<8>();
+    for c in blocks {
+        for (a, &v) in acc.iter_mut().zip(c) {
+            *a += v * 0.0;
+        }
+    }
+    for (a, &v) in acc.iter_mut().zip(rest) {
+        *a += v * 0.0;
+    }
+    !acc.iter().sum::<f64>().is_nan()
 }
 
 /// コンパイル済みの式
@@ -871,6 +954,11 @@ impl Program {
         Program { code: Code::new(b, outs), vars: self.vars.clone(), used_params: self.used_params.clone() }
     }
 
+    /// 命令の数（式の重さの目安。区間演算 1 回の手間はこれに比例する）
+    pub fn op_count(&self) -> usize {
+        self.code.ops.len()
+    }
+
     /// 区間演算が使える式か（定数がすべて実数で、関数が初等関数だけ。特殊関数・虚数の定数を使う式は使えない）
     pub fn supports_interval(&self) -> bool {
         self.code.real
@@ -1036,8 +1124,31 @@ fn binop(o: BinOp, a: C, b: C) -> C {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
         BinOp::Mul => a * b,
-        BinOp::Div => a / b,
+        BinOp::Div => div(a, b),
         BinOp::Pow => pow(a, b),
+    }
+}
+
+/// 複素数の割り算。ふつうは (ac + bd + i(bc − ad)) / (c² + d²) のまま（今までと同じ値）。
+/// 割る数の絶対値が 10¹⁵⁴ ほどを超えると c² + d² が桁あふれして、答えが有限なのに 0 や NaN になる
+/// （gamma(160) / gamma(159) が「実数の値になりません」になっていた）ので、そのときだけ Smith の方法で計算し直す
+fn div(a: C, b: C) -> C {
+    let q = a / b;
+    if q.re.is_finite() && q.im.is_finite() && q != C::new(0.0, 0.0) {
+        return q;
+    }
+    let finite = |z: C| z.re.is_finite() && z.im.is_finite();
+    if !finite(a) || !finite(b) || b == C::new(0.0, 0.0) || a == C::new(0.0, 0.0) {
+        return q;
+    }
+    if b.re.abs() >= b.im.abs() {
+        let r = b.im / b.re;
+        let den = b.re + b.im * r;
+        C::new((a.re + a.im * r) / den, (a.im - a.re * r) / den)
+    } else {
+        let r = b.re / b.im;
+        let den = b.re * r + b.im;
+        C::new((a.re * r + a.im) / den, (a.im * r - a.re) / den)
     }
 }
 
@@ -1054,6 +1165,8 @@ fn pow(a: C, b: C) -> C {
     if a == C::new(0.0, 0.0) {
         return if b.re > 0.0 { a } else { C::new(f64::NAN, f64::NAN) };
     }
+    // 底の虚部の −0 は +0 にそろえる（(−8)^(1/3) が切れ目の下側の 1 − 1.73i にならないように。[`Func::call`] と同じ）
+    let a = C::new(a.re, a.im + 0.0);
     let r = a.powc(b);
     // 絶対値がとても小さい本物の複素数（(-0.25)^15.5 ≈ 4.7e-10 · e^{15.5πi} など）は、虚部が as_real の
     // 「無視できる」幅（1e-9）に収まってしまい、実数の ±0 とみなされる。偏角で符号が入れ替わるので、

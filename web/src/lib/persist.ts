@@ -109,12 +109,26 @@ async function decompress(bytes: Uint8Array): Promise<string> {
 
 function isState(x: unknown): x is SavedState {
   const s = x as SavedState
-  const ok = !!s && s.version === 1 && Array.isArray(s.items) && !!s.domain && !!s.space
+  const ok = !!s && typeof s === 'object' && s.version === 1 && Array.isArray(s.items) && validDomain(s.domain) && !!s.space && typeof s.space === 'object'
+  if (!ok) return false
+  // 壊れた・別の版の保存データ（共有リンクは外から来る）でも、画面が壊れたままにならないようにする:
+  // LaTeX の無い式は捨て、null の項目は「無い」にする（null のままだと、式の既定の設定を上書きしてしまう）
+  s.items = s.items
+    .filter((it) => !!it && typeof it === 'object' && typeof it.latex === 'string')
+    .map((it) => Object.fromEntries(Object.entries(it).filter(([, v]) => v !== null)) as unknown as SavedItem)
   // 古い保存データでは、座標の範囲が数値 [最小, 最大] だった。式（文字列）にそろえる
-  if (ok && Array.isArray(s.space.ranges)) {
-    s.space.ranges = s.space.ranges.map((r) => (r ? [String(r[0]), String(r[1])] : null))
+  if (Array.isArray(s.space.ranges)) {
+    s.space.ranges = s.space.ranges.map((r) => (Array.isArray(r) ? [String(r[0]), String(r[1])] : null))
   }
-  return ok
+  return true
+}
+
+/** 表示範囲が数値で、最小 < 最大か */
+function validDomain(d: unknown): d is Domain {
+  if (!d || typeof d !== 'object') return false
+  const v = d as Record<string, unknown>
+  const num = (k: string) => typeof v[k] === 'number' && Number.isFinite(v[k])
+  return ['x', 'y', 'z'].every((a) => num(a + 'min') && num(a + 'max') && (v[a + 'min'] as number) < (v[a + 'max'] as number))
 }
 
 /** ブラウザに保存する */

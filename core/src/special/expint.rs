@@ -56,7 +56,11 @@ pub fn e1(z: C) -> C {
     if z == C::new(0.0, 0.0) {
         return C::new(f64::INFINITY, 0.0);
     }
-    if z.norm() <= 4.0 {
+    // 負の実数（切れ目の上）は級数（項はすべて同じ符号で、桁落ちしない）。連分数はここでは収束せず、
+    // 3000 回まわしてから級数に戻っていた（1 回 40 µs ほど）
+    // 負の実軸の近く（|z| + Re z < 8）も級数にする。連分数はそこでは収束が遅く（Ei(x + 0.5i) で 1 回 70 µs）、
+    // 級数は項の向きがそろうので、桁落ちは e^(|z| + Re z) 倍（3000 倍）まで
+    if z.norm() <= 4.0 || (z.re < 0.0 && z.norm() + z.re < 8.0) {
         return e1_series(z);
     }
     e1_cf(z).unwrap_or_else(|| e1_series(z))
@@ -78,8 +82,78 @@ pub fn ei(z: C) -> C {
     if z == C::new(0.0, 0.0) {
         return C::new(f64::NEG_INFINITY, 0.0);
     }
-    // Ei(z) = −E₁(−z) + (ln z − ln(1/z)) / 2 − ln(−z)
+    // 正の実数は実数で直接計算する。下の式は E₁ を切れ目（負の実軸）の上で使うので、遅いうえに、x ≳ 40 では
+    // 連分数が切れ目の分（iπ）を落とした値を返し、虚部に π が残っていた
+    if z.im == 0.0 && z.re > 0.0 {
+        return C::new(ei_positive(z.re), 0.0);
+    }
+    // 負の実数: Ei(x) = −E₁(−x)（実数）
+    if z.im == 0.0 {
+        return C::new(-e1(C::new(-z.re, 0.0)).re, 0.0);
+    }
+    // Ei(z) = −E₁(−z) + (ln z − ln(1/z)) / 2 − ln(−z)。対数の部分は、実軸の外では虚部の符号で決まる定数 ±iπ。
+    // 対数のまま計算すると ln|z| ほどの値の足し引きの丸め誤差が残り、Ei の小さい所（Re z が負で大きい所）では
+    // 値そのものを消していた（Ei(−50) が 0 になった）
+    let branch = C::new(0.0, if z.im > 0.0 { PI } else { -PI });
+    -e1(-z) + branch
+}
+
+#[cfg(test)]
+fn ei_by_logs(z: C) -> C {
     -e1(-z) + (z.ln() - (1.0 / z).ln()) / 2.0 - (-z).ln()
+}
+
+#[cfg(test)]
+mod ei_tests {
+    use super::*;
+    #[test]
+    fn ei_branch_constant_matches_logs() {
+        for &(re, im) in &[(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (3.0, -0.5), (-30.0, 2.0), (0.2, 5.0), (10.0, 0.1), (-0.5, -0.01)] {
+            let z = C::new(re, im);
+            let (a, b) = (ei(z), ei_by_logs(z));
+            assert!((a - b).norm() <= 1e-12 * b.norm().max(1.0), "{z}: {a} vs {b}");
+        }
+        // 負の実数・正の実数（参照値）
+        assert!((ei(C::new(-50.0, 0.0)).re / -3.783264029550459e-24 - 1.0).abs() < 1e-13);
+        assert!((ei(C::new(-10.0, 0.0)).re / -4.156968929685324e-6 - 1.0).abs() < 1e-14);
+        assert!((ei(C::new(1.0, 0.0)).re / 1.8951178163559368 - 1.0).abs() < 1e-15);
+        assert!((ei(C::new(50.0, 0.0)).re / 1.0585636897131690e20 - 1.0).abs() < 1e-14);
+        assert_eq!(ei(C::new(50.0, 0.0)).im, 0.0);
+    }
+}
+
+/// Ei(x)（x > 0）。x ≤ 40 は級数 γ + ln x + Σ xᵏ / (k · k!)（項はすべて正）、それより大きいときは
+/// 漸近展開 eˣ / x · Σ k! / xᵏ（いちばん小さい項で止める。x > 40 なら誤差は e⁻ˣ ほど）
+fn ei_positive(x: f64) -> f64 {
+    if x <= 40.0 {
+        let mut term = 1.0;
+        let mut sum = 0.0;
+        for k in 1..500 {
+            let kf = k as f64;
+            term *= x / kf;
+            let t = term / kf;
+            sum += t;
+            if t < 1e-17 * sum {
+                break;
+            }
+        }
+        return EULER_GAMMA + x.ln() + sum;
+    }
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    for k in 1..200 {
+        let next = term * k as f64 / x;
+        if next > term {
+            break;
+        }
+        term = next;
+        sum += term;
+        if term < 1e-17 * sum {
+            break;
+        }
+    }
+    // eˣ が桁あふれしても（x > 709）、eˣ / x が有限な所までは出す
+    (x - x.ln()).exp() * sum
 }
 
 /// 対数積分 li(z) = Ei(ln z)
@@ -201,8 +275,71 @@ pub fn chi(z: C) -> C {
 
 /// 虚数誤差関数 erfi(z) = −i erf(iz)
 pub fn erfi(z: C) -> C {
+    if z.im == 0.0 {
+        return C::new(erfi_real(z.re), 0.0);
+    }
     let i = C::new(0.0, 1.0);
     -i * erf(i * z)
+}
+
+/// erfi(x)（実数）。複素数の erf(ix) を通すと 1 回 10〜30 µs かかっていた。
+/// |x| ≤ 6 は級数 2/√π Σ x^(2k+1) / (k! (2k+1))（項はすべて同じ符号）、それより外は 2/√π · e^(x²) · F(x)
+/// （F はドーソン関数の漸近展開。x² > 36 なら誤差は e^(−x²) ほど）。|x| > 26.7 ほどで桁あふれする
+fn erfi_real(x: f64) -> f64 {
+    let c = 2.0 / PI.sqrt();
+    if x.abs() <= 6.0 {
+        let x2 = x * x;
+        let mut term = x; // x^(2k+1) / k!
+        let mut sum = x;
+        for k in 1..300 {
+            let kf = k as f64;
+            term *= x2 / kf;
+            let t = term / (2.0 * kf + 1.0);
+            sum += t;
+            if t.abs() < 1e-17 * sum.abs() {
+                break;
+            }
+        }
+        return c * sum;
+    }
+    let f = dawson(C::new(x, 0.0)).re;
+    let e = (x * x).exp();
+    if e.is_finite() {
+        c * e * f
+    } else {
+        f64::INFINITY.copysign(x)
+    }
+}
+
+#[cfg(test)]
+mod erfi_tests {
+    use super::*;
+    #[test]
+    fn erfi_real_matches_complex() {
+        let i = C::new(0.0, 1.0);
+        let mut x = -26.0;
+        while x <= 26.0 {
+            let a = erfi_real(x);
+            let b = (-i * erf(i * C::new(x, 0.0))).re;
+            assert!((a - b).abs() <= 1e-13 * b.abs().max(1e-300), "erfi({x}): {a} vs {b}");
+            x += 0.173;
+        }
+        assert!((erfi_real(1.0) - 1.6504257587975428).abs() < 1e-15);
+        assert_eq!(erfi_real(30.0), f64::INFINITY);
+        assert_eq!(erfi_real(-30.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn e1_series_near_negative_axis_matches_cf() {
+        for &(re, im) in &[(-5.0, 2.0), (-20.0, 4.0), (-60.0, 5.0), (-3.0, -3.5), (-100.0, -6.0)] {
+            let z = C::new(re, im);
+            if z.norm() + z.re >= 8.0 {
+                continue;
+            }
+            let (a, b) = (e1_series(z), e1_cf(z).expect("連分数が収束しない"));
+            assert!((a - b).norm() <= 1e-11 * b.norm(), "E1({z}): {a} vs {b}");
+        }
+    }
 }
 
 /// ドーソン関数 F(z) = e^(−z²) ∫₀ᶻ e^(t²) dt = √π / 2 · e^(−z²) erfi(z)

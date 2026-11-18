@@ -10,7 +10,7 @@
 // URL の引数: frames（1 周のコマ数。既定 240）、only（式の名前にこの文字を含むものだけ）、play（再生を測る秒数。既定 4）
 
 import type { Viewer } from './Viewer'
-import type { SampleItem } from './samples'
+import type { Sample, SampleItem } from './samples'
 import type { Stage } from './motionQuality'
 import { breakdownListeners, lastBreakdown, type PlotBreakdown } from './timings'
 
@@ -191,7 +191,7 @@ function stages(base: number): { name: string; stage: Stage }[] {
   return list
 }
 
-async function measureStage(viewer: Viewer, stage: Stage, frames: number): Promise<FrameStats> {
+async function measureStage(viewer: Viewer, stage: Stage | null, frames: number): Promise<FrameStats> {
   // 描き方を変えた直後の数コマ（画素密度を変えたときの作り直し）は数えない
   viewer.benchMeasure(stage)
   for (let k = 0; k < 6; k++) {
@@ -339,5 +339,156 @@ export async function runBench(host: BenchHost, show: (text: string) => void): P
   show(`終わりました（${cases.length} 個の式）\n\n${text}`)
   console.log(JSON.stringify({ env, results }))
   ;(globalThis as { __benchResults?: unknown }).__benchResults = { env, results, text }
+  return results
+}
+
+// ---- サンプルを全部、実際の画面で順に描いて測る（?bench=1&set=samples） ----
+//
+// 機能ごとのサンプル（lib/samples.ts。表示の仕方・再生・座標系・積分の図などの設定を含む）を 1 つずつ、
+// ふつうに「サンプルを追加」したときと同じ道で描き、次を測る:
+// - 追加してから、計算の返事が全部届くまでの時間と、計算担当の total の合計・最大、画面側の登録（setPlot）の最大
+// - その間の、画面のスレッドの長いタスク（50 ms を超える処理。画面が固まる時間）の合計・最大
+// - 視点を 1 周回したときのコマの時間（render の呼び出し・GPU）
+// - 再生する例（パラメータ・回転・座標系の移行）は、再生中の返事の数・往復・コマの間隔と長いタスク
+// - 式の誤り（行ごとの error）
+
+
+/** サンプルを測るために画面側が用意する操作 */
+export type SweepHost = {
+  viewer: Viewer
+  /** 今の式を全部消して、このサンプルを追加する（再生する例は再生も始まる） */
+  load(s: Sample): Promise<void>
+  /** 計算が全部終わるまで待つ */
+  idle(): Promise<void>
+  /** 再生を全部止める */
+  stopAll(): void
+  /** 再生中か（パラメータ・回転・断面・座標系の移行のどれか） */
+  animating(): boolean
+  /** 今の行の誤り（行の式 → 説明） */
+  errors(): { latex: string; error: string }[]
+}
+
+type SweepResult = {
+  group: string
+  label: string
+  /** 追加してから最後の返事が届くまで（ms） */
+  settle: number
+  replies: number
+  totalSum: number
+  totalMax: number
+  setPlotMax: number
+  triangles: number
+  longSum: number
+  longMax: number
+  orbit: FrameStats | null
+  play: { replies: number; perSecond: number; roundMedian: number | null; roundP95: number | null; frames: FrameStats; longSum: number; longMax: number } | null
+  errors: { latex: string; error: string }[]
+}
+
+/** 画面のスレッドの長いタスク（50 ms を超える処理）を集める */
+function longTasks() {
+  const list: number[] = []
+  let obs: PerformanceObserver | null = null
+  try {
+    obs = new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) list.push(e.duration)
+    })
+    obs.observe({ type: 'longtask', buffered: false })
+  } catch {
+    obs = null
+  }
+  return {
+    take() {
+      const r = { sum: list.reduce((a, b) => a + b, 0), max: list.length ? Math.max(...list) : 0 }
+      list.length = 0
+      return r
+    },
+    stop() {
+      obs?.disconnect()
+    },
+  }
+}
+
+export function formatSweep(results: SweepResult[]): string {
+  const out: string[] = ['# サンプルの計測（?bench=1&set=samples）', '']
+  out.push('| グループ | サンプル | 落ち着くまで | 返事 | total 合計 | total 最大 | 登録 最大 | 三角形 | 長いタスク 合計 / 最大 | 回す render 中央値 / 95% | 回す GPU 中央値 | 再生 返事/秒 | 再生 往復 中央値 / 95% | 再生 コマ 中央値 / 95% | 再生 長いタスク | 誤り |')
+  out.push('|' + '---|'.repeat(16))
+  for (const r of results) {
+    const p = r.play
+    out.push(
+      `| ${r.group} | ${r.label} | ${f1(r.settle)} | ${r.replies} | ${f1(r.totalSum)} | ${f1(r.totalMax)} | ${f1(r.setPlotMax)} | ${r.triangles.toLocaleString()} | ${f1(r.longSum)} / ${f1(r.longMax)} | ${f2(r.orbit?.cpuMedian ?? null)} / ${f2(r.orbit?.cpuP95 ?? null)} | ${f2(r.orbit?.gpuMedian ?? null)} | ${p ? p.perSecond.toFixed(1) : '—'} | ${p ? `${f1(p.roundMedian)} / ${f1(p.roundP95)}` : '—'} | ${p ? `${f1(p.frames.median)} / ${f1(p.frames.p95)}` : '—'} | ${p ? `${f1(p.longSum)} / ${f1(p.longMax)}` : '—'} | ${r.errors.map((e) => e.error).join(' / ').slice(0, 80)} |`,
+    )
+  }
+  return out.join('\n')
+}
+
+export async function runSampleSweep(host: SweepHost, groups: { title: string; samples: Sample[] }[], show: (text: string) => void): Promise<SweepResult[]> {
+  const q = new URLSearchParams(location.search)
+  const only = q.get('only')
+  const frames = Math.max(30, Number(q.get('frames')) || 60)
+  const playSeconds = Math.max(1, Number(q.get('play')) || 3)
+  const list = groups.flatMap((g) => g.samples.map((s) => ({ group: g.title, s }))).filter(({ s }) => !only || s.label.includes(only))
+  const results: SweepResult[] = []
+  const lt = longTasks()
+  for (const [n, { group, s }] of list.entries()) {
+    show(`${n + 1} / ${list.length}: ${s.label}\n\n${formatSweep(results)}`)
+    host.stopAll()
+    await host.idle()
+    const got: { b: PlotBreakdown; at: number }[] = []
+    const listen = (_: number, b: PlotBreakdown) => got.push({ b, at: performance.now() })
+    breakdownListeners.add(listen)
+    lt.take()
+    const t0 = performance.now()
+    await host.load(s)
+    const playing = host.animating()
+    if (!playing) await host.idle()
+    else await sleep(1500)
+    breakdownListeners.delete(listen)
+    const long = lt.take()
+    const settle = got.length ? Math.max(...got.map((g) => g.at)) - t0 : 0
+    const res: SweepResult = {
+      group,
+      label: s.label,
+      settle,
+      replies: got.length,
+      totalSum: got.reduce((a, g) => a + g.b.total, 0),
+      totalMax: got.length ? Math.max(...got.map((g) => g.b.total)) : 0,
+      setPlotMax: got.length ? Math.max(...got.map((g) => g.b.setPlot)) : 0,
+      triangles: [...lastBreakdown.values()].reduce((a, b) => a + b.triangles, 0),
+      longSum: long.sum,
+      longMax: long.max,
+      orbit: null,
+      play: null,
+      errors: host.errors(),
+    }
+    if (playing) {
+      const seen: PlotBreakdown[] = []
+      const l2 = (_: number, b: PlotBreakdown) => seen.push(b)
+      breakdownListeners.add(l2)
+      host.viewer.benchMeasure(null)
+      lt.take()
+      const p0 = performance.now()
+      await sleep(playSeconds * 1000)
+      const el = (performance.now() - p0) / 1000
+      breakdownListeners.delete(l2)
+      const fr = host.viewer.frameStats()
+      host.viewer.benchEnd()
+      const pl = lt.take()
+      const round = seen.map((b) => b.total + b.transfer + b.setPlot)
+      res.play = { replies: seen.length, perSecond: seen.length / el, roundMedian: quantile(round, 0.5), roundP95: quantile(round, 0.95), frames: fr, longSum: pl.sum, longMax: pl.max }
+      host.stopAll()
+      await host.idle()
+    }
+    // 視点を 1 周回す（止まった形で。動かしている間の描き方は quality が選ぶ）
+    res.orbit = await measureStage(host.viewer, null, frames)
+    host.viewer.benchEnd()
+    await frame()
+    results.push(res)
+  }
+  lt.stop()
+  const text = formatSweep(results)
+  show(`終わりました（${list.length} 個のサンプル）\n\n${text}`)
+  console.log(JSON.stringify({ sweep: results }))
+  ;(globalThis as { __benchResults?: unknown }).__benchResults = { sweep: results, text }
   return results
 }
