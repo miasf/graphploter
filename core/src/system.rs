@@ -523,6 +523,21 @@ pub fn flat_points(f1: &Program, f2: &Program, dom: Domain, n: usize) -> Vec<[f6
     distinct_inside(newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten(), dom, 2, 0.25 * h)
 }
 
+/// 数値で探した点に、グレブナー基底で求めた点（`exact`。表示範囲の中のもの）を合わせる。近い点は 1 つにする
+/// （代数的に求めた点を優先する。符号が変わらない解は、数値では見つからない）
+pub fn with_exact(found: Vec<[f64; 3]>, exact: Option<&[[f64; 3]]>, dom: Domain, dims: usize) -> Vec<[f64; 3]> {
+    let Some(exact) = exact else { return found };
+    let inside = |p: &[f64; 3]| (0..dims).all(|k| p[k] >= dom.lo[k] && p[k] <= dom.hi[k]);
+    let tol = (0..dims).map(|k| dom.hi[k] - dom.lo[k]).fold(0.0f64, f64::max) * 1e-6;
+    let mut out: Vec<[f64; 3]> = exact.iter().copied().filter(inside).collect();
+    for p in found {
+        if !out.iter().any(|q| (0..dims).all(|k| (p[k] - q[k]).abs() <= tol.max(1e-9))) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// 因数ごとの「同時に 0 になる式の組」（[`Program::common_zero_sets`]）を描く。式が 2 つの組は線、3 つ以上の組は点。
 /// 戻り値はメッシュ（曲線）と、説明（線か点か）
 pub fn common_zero_sets(sets: &[Vec<Program>], dom: Domain, n: usize, refine: Refine) -> (Mesh, String) {

@@ -940,3 +940,22 @@ fn region_with_explicit_faces() {
     let want = 2.0 * std::f64::consts::PI / 3.0 * (1.0 - 1.0 / 2f64.sqrt()) * 8.0;
     assert!((v / want - 1.0).abs() <= 0.01, "{v} vs {want}");
 }
+
+#[test]
+fn tangent_points_from_groebner_basis() {
+    // 接するだけの交点（もう片方の式の符号が変わらない）は、数値の探し方では見つからない。式が多項式なら、グレブナー基底で解く
+    let points = |src: &str, flat: bool| -> Vec<[f32; 3]> {
+        let m = plot(src, &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, true, 0)
+            .unwrap_or_else(|_| panic!("{src}"));
+        let mut ps: Vec<[f32; 3]> = m.positions().chunks_exact(3).filter(|p| p[0].is_finite()).map(|p| [p[0], p[1], p[2]]).collect();
+        ps.dedup();
+        ps
+    };
+    let near = |p: [f32; 3], q: [f32; 3]| (0..3).all(|k| (p[k] - q[k]).abs() < 1e-5);
+    let ps = points("y = x^2, y = 0", true);
+    assert!(ps.len() == 1 && near(ps[0], [0.0, 0.0, 0.0]), "{ps:?}");
+    let ps = points("x^2 + y^2 = 1, y = 1", true);
+    assert!(ps.len() == 1 && near(ps[0], [0.0, 1.0, 0.0]), "{ps:?}");
+    let ps = points("x^2 + y^2 + z^2 = 1, (x - 2)^2 + y^2 + z^2 = 1, z = 0", false);
+    assert!(ps.len() == 1 && near(ps[0], [1.0, 0.0, 0.0]), "{ps:?}");
+}
