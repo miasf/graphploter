@@ -194,6 +194,12 @@ export class Viewer {
   /** 画面の下側が何 px 隠れているか（スマホで式の一覧のシートが重なる分） */
   private bottomInset = 0
   private resizeObserver: ResizeObserver
+  /**
+   * 描く所の大きさ（CSS の画素。resize で覚える）。毎コマの処理で container.clientWidth・clientHeight を読むと、
+   * 画面の DOM が変わった直後には、その場でレイアウトを計算し直させてしまう（式の欄を書き換えている間など）
+   */
+  private viewW = 0
+  private viewH = 0
   private stopped = false
 
   // ---- 描画を軽くするための状態 ----
@@ -770,6 +776,8 @@ export class Viewer {
   private resize() {
     const w = this.container.clientWidth
     const h = this.container.clientHeight
+    this.viewW = w
+    this.viewH = h
     if (w === 0 || h === 0) return
     this.dirty = true
     this.camera.aspect = w / h
@@ -1015,13 +1023,13 @@ export class Viewer {
    * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
    */
   private updateLabelSizes() {
-    const k = 2 / (this.container.clientHeight * this.camera.projectionMatrix.elements[5])
+    const k = 2 / ((this.viewH || 1) * this.camera.projectionMatrix.elements[5])
     for (const l of this.labels) l.sprite.scale.set(l.w * k, l.h * k, 1)
   }
 
   /** カメラから dist 離れた所での、1 画素（CSS の画素）の大きさ */
   private pixelAt(dist: number): number {
-    return (2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / (this.container.clientHeight || 1)
+    return (2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / (this.viewH || 1)
   }
 
   /** 表示範囲の対角線の長さ */
@@ -1510,6 +1518,11 @@ export class Viewer {
     this.applyRayBudget(ray)
     // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
     const mat = createRaycastMaterial(glsl, Math.floor(info.affine.length / 4), p.grid, ray)
+    // 不透明・半透明は、コンパイルの前に面の材質に合わせる（three.js は別のシェーダーにするので、後で変えると
+    // 画面のスレッドを止めてコンパイルし直す。光線のシェーダーは重く、Windows の Chrome で 2 秒ほど固まった）
+    const src = (p.group.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial
+    mat.transparent = src.transparent
+    mat.depthWrite = src.depthWrite
     const m = raycastMesh(mat, ray, d)
     const layer = { mesh: m, mat, ray, glsl, key, ready: false, axes: info.axes, params: info.params }
     this.gpu3d.set(id, layer)
@@ -1549,31 +1562,62 @@ export class Viewer {
    * mod(x y, z) = 0 のように、値の飛ぶ所が 1 画素より細かく並ぶ式は、画面の大きさではほとんどの画素が打ち切りになる
    */
   private abortRatio(layer: { mesh: THREE.Mesh; ray: RaycastUniforms }): number {
-    const w = 192
-    const h = Math.max(1, Math.round((w * (this.container.clientHeight || 1)) / (this.container.clientWidth || 1)))
-    const rt = new THREE.WebGLRenderTarget(w, h)
-    const probe = new THREE.Scene()
-    const parent = layer.mesh.parent
-    probe.add(layer.mesh)
+    // 描く先は画面そのもの（左下の小さな範囲）、シーンもふだんと同じ（光線の箱のほかは隠す）にする。
+    // three.js は、描く先（画面 / 描画先のテクスチャ）で色空間が、シーンの光源で光の数が変わると、別のシェーダーとして
+    // コンパイルし直す。前は光源の無いシーンを描画先のテクスチャに描いていたので、重い光線のシェーダーをもう一度、
+    // 画面のスレッドを止めてコンパイルしていた（Windows の Chrome で 2〜4 秒固まった）。同じ設定で描けば、
+    // 裏でコンパイルし終えたシェーダーをそのまま使える
+    const ratio = this.renderer.getPixelRatio()
+    const cw = this.viewW || 1
+    const ch = this.viewH || 1
+    const w = Math.min(192, Math.floor(cw * ratio))
+    const h = Math.max(1, Math.round((w * ch) / cw))
+    const hidden: THREE.Object3D[] = []
+    // 光源（カメラに付けた光源も）を含むものは隠さない（光の数が変わると、別のシェーダーになる）
+    const hasLight = (o: THREE.Object3D) => {
+      let found = false
+      o.traverse((c) => {
+        if ((c as THREE.Light).isLight) found = true
+      })
+      return found
+    }
+    for (const o of this.scene.children) {
+      if (o !== layer.mesh && o.visible && !hasLight(o)) {
+        o.visible = false
+        hidden.push(o)
+      }
+    }
+    const background = this.scene.background
+    this.scene.background = null
     layer.ray.uProbe.value = 1
     layer.mesh.userData.pixelH = this.renderer.domElement.height
-    const prevTarget = this.renderer.getRenderTarget()
     const prevColor = this.renderer.getClearColor(new THREE.Color())
     const prevAlpha = this.renderer.getClearAlpha()
     const px = new Uint8Array(w * h * 4)
+    const gl = this.renderer.getContext()
+    const prevViewport = this.renderer.getViewport(new THREE.Vector4())
+    const prevScissor = this.renderer.getScissor(new THREE.Vector4())
+    const prevScissorTest = this.renderer.getScissorTest()
     try {
-      this.renderer.setRenderTarget(rt)
+      this.renderer.setRenderTarget(null)
+      this.renderer.setViewport(0, 0, w / ratio, h / ratio)
+      this.renderer.setScissor(0, 0, w / ratio, h / ratio)
+      this.renderer.setScissorTest(true)
       this.renderer.setClearColor(0x000000, 0)
       this.renderer.clear()
-      this.renderer.render(probe, this.camera)
-      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, px)
+      this.renderer.render(this.scene, this.camera)
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px)
     } finally {
-      this.renderer.setRenderTarget(prevTarget)
+      this.renderer.setScissorTest(prevScissorTest)
+      this.renderer.setScissor(prevScissor)
+      this.renderer.setViewport(prevViewport)
       this.renderer.setClearColor(prevColor, prevAlpha)
+      this.scene.background = background
+      for (const o of hidden) o.visible = true
       layer.ray.uProbe.value = 0
       delete layer.mesh.userData.pixelH
-      if (parent) parent.add(layer.mesh)
-      rt.dispose()
+      // 左下を確かめのために塗ったので、画面に出る前に、ふつうの絵で描き直す
+      this.renderer.render(this.scene, this.camera)
       this.dirty = true
     }
     let drawn = 0
@@ -1658,11 +1702,24 @@ export class Viewer {
     const m = layer.mat
     m.color.copy(src.color)
     m.emissive.copy(src.emissive)
+    m.depthWrite = src.depthWrite
     if (m.transparent !== src.transparent) {
+      // 不透明・半透明が変わると three.js は別のシェーダーにするので、裏でコンパイルし直し、その間はメッシュの面を見せる
       m.transparent = src.transparent
       m.needsUpdate = true
+      layer.ready = false
+      this.scene.remove(layer.mesh)
+      main.visible = true
+      const show = () => {
+        if (this.gpu3d.get(id) !== layer || layer.ready) return
+        layer.ready = true
+        this.scene.add(layer.mesh)
+        const st = this.styles.get(id)
+        if (st) this.styleGpu3d(id, st)
+        this.dirty = true
+      }
+      this.renderer.compileAsync(layer.mesh, this.camera, this.scene).then(show, show)
     }
-    m.depthWrite = src.depthWrite
   }
 
   /** 画素ごとの描き方の見た目。メッシュの線・面（と実線の境目）は隠し、点線の境目だけ残す */
@@ -1795,6 +1852,7 @@ export class Viewer {
     } else {
       // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
       p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes))
+      p.cap.frustumCulled = false // 切り口は表示範囲の中（外接球を求めない。下の曲面と同じ）
       p.group.add(p.cap)
       this.setStyle(id, style)
     }
@@ -1945,7 +2003,12 @@ export class Viewer {
     const grid = createGridUniforms(this.pixelScale)
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
-    group.add(new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes)))
+    const surface = new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes))
+    // 曲面はいつも表示範囲の箱の中にあるので、視錐台の判定はしない。判定すると、three.js が新しい形ごとに外接球を
+    // 点を 1 つずつ読んで求める（再生中は返事のたびに。数十万点の形で数十 ms）。カーソルの下の点を探すときは、
+    // three.js が必要になったときに求める
+    surface.frustumCulled = false
+    group.add(surface)
     const uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
     this.applyValueRange(grid, mesh)
     grid.uHeat.value = mesh.heat ? 1 : 0
@@ -1986,6 +2049,8 @@ export class Viewer {
   /** 伝達関数の箱を作り直す（格子の値が無ければ消す）。箱は計算したときの表示範囲 */
   private setVolume(p: PlotObject, mesh: MeshData) {
     if (p.kind !== 'surface') return
+    // 前の箱が見えていたか（見えていたなら、そのシェーダーはもうコンパイルしてある）
+    const wasShown = p.volume !== null && p.volume.box.parent === p.group
     if (p.volume) {
       p.volume.u.uTex.value.dispose()
       p.volume.box.geometry.dispose()
@@ -2042,9 +2107,22 @@ export class Viewer {
     }
     p.volume = { box, u }
     this.applyVolumeCut(p)
-    p.group.add(box)
     const style = this.styles.get(this.idOf(p))
     if (style) applyVolumeStyle(u, style.hidden, new THREE.Color(style.color), style.opacity)
+    // シェーダーのコンパイルは裏で行い（KHR_parallel_shader_compile。無い環境ではその場で）、終わってから箱を見せる。
+    // 最初に描くときにコンパイルすると、その間（Windows の Chrome で 1 秒近く）画面が固まる。
+    // 前の箱が見えていた（再生中などで、次の結果に差し替える）ときは、すぐに入れ替える。拡張の無い環境（Firefox・Safari）の
+    // compileAsync は、コンパイル済みでも 10 ms 待ってから返事をするので、その間の 1 コマ、箱が消えてちらつく
+    if (wasShown) {
+      p.group.add(box)
+      return
+    }
+    const show = () => {
+      if (p.volume?.box !== box) return // 待っている間に、次の結果が来た・式が消えた
+      p.group.add(box)
+      this.dirty = true
+    }
+    this.renderer.compileAsync(box, this.camera, this.scene).then(show, show)
   }
 
   /** 伝達関数の箱に、切り口の平面を渡す */
@@ -2085,8 +2163,9 @@ export class Viewer {
         dashSize: span * 0.02,
         gapSize: span * 0.012,
       })
-      mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
+      mat.resolution.set(this.viewW, this.viewH)
       const line = new LineSegments2(this.curveGeometry(pts), mat)
+      line.frustumCulled = false // 表示範囲の中の線（視錐台の判定のための外接球を求めない）
       if (dashed) line.computeLineDistances()
       line.userData.dashed = dashed
       // ベクトル場の流線: 点ごとの大きさで色を付ける（色は setStyle で塗る）
@@ -2156,8 +2235,9 @@ export class Viewer {
 
   private setCurve(id: number, pts: Float32Array) {
     const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
-    mat.resolution.set(this.container.clientWidth, this.container.clientHeight)
+    mat.resolution.set(this.viewW, this.viewH)
     const line = new LineSegments2(this.curveGeometry(pts), mat)
+    line.frustumCulled = false // 表示範囲の中の線（視錐台の判定のための外接球を求めない）
     // 点は、光の当たった小さな球として空間に置く（画面に貼った円ではなく、遠近で大きさが変わり、面の陰に隠れる）
     const dotMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05, clippingPlanes: this.clipPlanes })
     const dots = this.makeDots(pts, dotMat)

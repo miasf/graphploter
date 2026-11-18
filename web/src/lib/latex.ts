@@ -1045,7 +1045,14 @@ let REGIONS: Record<string, string> = {}
 /** 範囲の欄の中身を知らせる（latexToText が積分の範囲を置き換えるのに使う） */
 export function setRegions(regions: Record<string, string>) {
   REGIONS = regions
+  textCache.clear() // 範囲の中身で変換の結果が変わるので、覚えた結果を捨てる
 }
+
+/**
+ * 変換した結果（変換できなかったときは、その LatexError）。同じ LaTeX を何度も変換するので覚えておく
+ * （再生中・計算し直しのたびに、全部の行の式を変換していた）。結果は LaTeX と範囲の中身だけで決まる
+ */
+const textCache = new Map<string, string | LatexError>()
 
 const GREEK: Record<string, string> = {
   '\\Gamma': 'Γ', '\\Delta': 'Δ', '\\Theta': 'Θ', '\\Lambda': 'Λ', '\\Xi': 'Ξ', '\\Pi': 'Π', '\\Sigma': 'Σ', '\\Phi': 'Φ', '\\Psi': 'Ψ', '\\Omega': 'Ω',
@@ -1722,6 +1729,23 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
 
 /** LaTeX を計算エンジン用の式の文字列に変換する。変換できなければ LatexError を投げる */
 export function latexToText(latex: string): string {
+  const hit = textCache.get(latex)
+  if (hit !== undefined) {
+    if (hit instanceof LatexError) throw hit
+    return hit
+  }
+  if (textCache.size >= 2000) textCache.clear()
+  try {
+    const text = convertLatex(latex)
+    textCache.set(latex, text)
+    return text
+  } catch (e) {
+    if (e instanceof LatexError) textCache.set(latex, e)
+    throw e
+  }
+}
+
+function convertLatex(latex: string): string {
   // a ≡ b \pmod{n} は、mod(a − b, n) = 0（計画 M13）
   const pm = latex.match(/^(.*?)\\equiv(.*?)\\pmod\s*\{(.*)\}\s*$/s) ?? latex.match(/^(.*?)\\equiv(.*?)\\pmod\s*(\S)\s*$/s)
   if (pm) {

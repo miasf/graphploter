@@ -2036,6 +2036,11 @@ impl Expander<'_> {
         let mut out = [num_complex::Complex64::new(0.0, 0.0)];
         prog.eval_batch(&[], &mut out);
         let v = crate::eval::as_real(out[0]);
+        if v.is_infinite() {
+            // Σ_{k=1}^{∞} など（Σ は項を全部書き並べて計算するので、無限には足せない）。
+            // 前は「実数の値になりません」と出て、何がいけないのか分からなかった
+            return Err(format!("{what}に ∞ は使えません（有限の値にしてください）"));
+        }
         if !v.is_finite() {
             return Err(format!("{what}が実数の値になりません"));
         }

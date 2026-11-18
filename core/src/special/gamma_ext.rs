@@ -278,6 +278,10 @@ pub fn polylog(s: C, z: C) -> C {
                 - two_pi_i.powi(n as i32) / nf * bernoulli_poly(n as usize, 0.5 + (-z).ln() / two_pi_i);
         }
     }
+    // z = 1 は ζ(s)（下の μ = ln z の級数は μ = 0 で 0 · ∞ になる）。Re s ≤ 1 では発散する
+    if z == C::new(1.0, 0.0) {
+        return if s.re > 1.0 { zeta(s) } else { NAN };
+    }
     // μ = ln z の級数（|μ| < 2π）
     let mu = z.ln();
     if mu.norm() >= 2.0 * PI * 0.98 {
