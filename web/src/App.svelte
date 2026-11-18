@@ -937,13 +937,41 @@
       item.info += ' · 計算中'
       fineNext.add(item.id)
     }
+    // 陽関数の高さ（頂点の縦の座標）。定数（積分の値など）ならその値を書き、表示範囲の外なら知らせる
+    // 2D 表示（高さは色）・回した式・座標系の式は、頂点の縦の座標が値でないので調べない
+    const upright = plain && !flat && !coordOf(item) && rotationOf(item).rotation.every((a: number) => a === 0)
+    const heights = / = f\(/.test(res.kind) && !res.mesh.curve && upright ? finiteHeights(res.mesh.positions) : null
+    if (heights && heights.min === heights.max) item.info += ` · 値 ${formatValue(heights.min)}`
+    if (heights && res.mesh.indices.length === 0) {
+      const [lo, hi] = [domain.zmin, domain.zmax]
+      if (heights.max < lo || heights.min > hi) {
+        item.info += ` · 値が表示範囲（${lo} 〜 ${hi}）の外なので、見えません`
+        return
+      }
+    }
     // 陽関数の値がどこでも実数にならない（複素数の関数）なら、色分けで描けることを知らせる
-    if (!res.mesh.curve && res.mesh.indices.length === 0 && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
+    if (!res.mesh.curve && res.mesh.indices.length === 0 && !heights && / = f\(/.test(res.kind) && (item.complexMode ?? 'off') === 'off') {
       item.info +=
         ' · 値が実数になりません。⚙ の「複素数の色分け」で |f| と偏角の色で描けます。' +
         '値を複素平面の点として描くなら、x, y の代わりに媒介変数 t を使ってください（例: e^{it} → 単位円）'
     }
   }
+
+  /** 頂点の縦の座標（3 つ目）のうち有限なものの最小・最大（無ければ null） */
+  function finiteHeights(pts: Float32Array): { min: number; max: number } | null {
+    let min = Infinity
+    let max = -Infinity
+    for (let k = 2; k < pts.length; k += 3) {
+      const v = pts[k]
+      if (!Number.isFinite(v)) continue
+      if (v < min) min = v
+      if (v > max) max = v
+    }
+    return min <= max ? { min, max } : null
+  }
+
+  /** 値を 6 桁で書く（負の符号は −） */
+  const formatValue = (v: number) => String(Number(v.toPrecision(6))).replace('-', '−')
 
   /** 複素平面の点の位置を「0.28 + 0.96i」のように書く（リストで複数あれば、ちがう点を並べる） */
   function complexPointText(pts: Float32Array): string {
