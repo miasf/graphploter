@@ -3,6 +3,7 @@
   import type { MathfieldElement } from 'mathlive'
   import { onMount } from 'svelte'
   import { fenceBareDelimiters } from './latex'
+  import { findShortcut, reverseShortcuts } from './autoNames'
   import { colBlank, colsOf, formatMatrix, insertCol, insertRow, isBlank, MAX_SIZE, parseMatrix, removeCol, removeRow, resize, rowBlank, rowsOf, type Matrix } from './matrixEdit'
   import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
@@ -633,7 +634,49 @@
     onInput(lastEmitted)
   }
 
+  const SHORTCUT_BACK = reverseShortcuts(SHORTCUTS)
+  /** 自動変換で書き換えている途中（書き換えで来る input では、もう一度調べない） */
+  let autoNaming = false
+
+  /**
+   * 文字を打った後: カーソルの直前の文字の並びが関数名・記号の名前（sin・floor・theta・<= など）なら、立体の関数名・記号に変える。
+   * MathLive の自動変換はスマホの文字入力（IME）では効かないので、こちらでも行う（物理キーボードでは MathLive が先に変えている）
+   */
+  function autoName() {
+    const pos = el.position
+    const depth = depthAt(pos)
+    const atoms: string[] = []
+    /** 要素ごとの、その要素の手前の位置 */
+    const starts: number[] = []
+    // 同じ深さ（同じ括弧・分数の中）の、直前の 24 個まで
+    // \operatorname{erf} のような中身のある要素は、[中身の先頭, e, r, f, 要素そのもの] と並ぶので、中身の手前から要素までをまとめて取る
+    for (let k = pos; k >= 1 && atoms.length < 24; ) {
+      if (depthAt(k) !== depth) break
+      let start = k - 1
+      if (atomAt(k) === '' && depthAt(k - 1) > depth) {
+        while (start >= 0 && depthAt(start) > depth) start--
+        if (start < 0) break
+      }
+      const a = el.getValue(start, k, 'latex')
+      if (a === '') break
+      atoms.unshift(a)
+      starts.unshift(start)
+      k = start
+    }
+    const hit = findShortcut(atoms, SHORTCUTS, SHORTCUT_BACK)
+    if (!hit) return
+    autoNaming = true
+    try {
+      el.selection = { ranges: [[starts[starts.length - hit.count], pos]], direction: 'forward' }
+      el.insert(hit.latex, { format: 'latex', selectionMode: hit.latex.includes('#?') ? 'placeholder' : 'after' })
+    } finally {
+      autoNaming = false
+    }
+  }
+
   function handleInput(e: Event) {
+    if (autoNaming) return
+    if ((e as InputEvent).inputType === 'insertText' && el.selectionIsCollapsed) autoName()
     // エンター（改行）は式には入れず、新しい式を足す合図にする
     if ((e as InputEvent).inputType === 'insertLineBreak') {
       // 行列の中では、下に行を足す（数式キーボードの改行。物理キーボードは matrixKey）

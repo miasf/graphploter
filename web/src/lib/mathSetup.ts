@@ -4,6 +4,7 @@ import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
 import { coordName, latexName, prettyName } from './params'
 import { COMMON_SYMBOLS, SYMBOL_PAGES, type SymbolKey } from './keyboardSymbols'
 import { CALC_PAGES, MATRIX_ROWS } from './calcKeys'
+import { FUNCTION_SHORTCUTS } from './autoNames'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
 // 相対パスだとスクリプトの場所が基準になってしまうので、ページの URL を基準にした絶対 URL にする
@@ -13,19 +14,10 @@ MathfieldElement.soundsDirectory = null // キーを押したときの音を鳴�
 /**
  * 入力中の自動変換。例: "pi" と打つと π、"sqrt" と打つと √ になる。
  * MathLive の標準の変換表は、"in" が ∈ になるなどこのアプリに合わないので、必要なものだけにしている。
- * ここに無い関数名（floor, mod, nCr など）は文字のまま残り、計算エンジン側で関数として読まれる。
+ * 関数名（sin・floor・nCr・besselJ など）は立体の関数名になる（長い名前を優先するので、sinc が「\\sin c」にはならない）。
+ * スマホの文字入力でも効くよう、入力欄（MathInput.svelte）でも同じ表で置き換える（autoNames.ts）。
  */
 export const SHORTCUTS: Record<string, string> = {
-  // 下の短い変換（sin、log、gamma など）を中に含む長い関数名は、そのままの名前で残す
-  // （例: "sinc" が「\sin c」に、"digamma" が「di Γ」にならないように）
-  ...Object.fromEntries(
-    [
-      'sinc', 'gammaP', 'gammaQ', 'loggamma', 'lngamma', 'digamma', 'polygamma', 'polylog',
-      'expIntegralEi', 'expIntegralE', 'logIntegral', 'sinIntegral', 'cosIntegral', 'sinhIntegral', 'coshIntegral',
-      // 逆双曲線関数と、逆三角関数の短い名前（"arcsinh" が「arc sinh」、"asin" が「a sin」にならないように）
-      'arcsinh', 'arccosh', 'arctanh', 'asin', 'acos', 'atan', 'asinh', 'acosh', 'atanh',
-    ].map((f) => [f, `\\operatorname{${f}}`]),
-  ),
   pi: '\\pi',
   // 座標の名前（座標系。計画 S38）
   theta: '\\theta',
@@ -45,12 +37,8 @@ export const SHORTCUTS: Record<string, string> = {
   infty: '\\infty',
   sqrt: '\\sqrt{#?}',
   gamma: '\\Gamma',
-  ...Object.fromEntries(
-    ['sin', 'cos', 'tan', 'sec', 'csc', 'cot', 'sinh', 'cosh', 'tanh', 'arcsin', 'arccos', 'arctan', 'exp', 'ln', 'log'].map((f) => [
-      f,
-      `\\${f}`,
-    ]),
-  ),
+  // 関数名（floor・erf・besselJ なども。打つと立体の関数名になる。autoNames.ts）
+  ...FUNCTION_SHORTCUTS,
 }
 
 /** 関数のキー（押すと「関数名(□)」が入る）。ja は長押し・カーソルを当てたときに出す名前 */
@@ -616,7 +604,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           ...COMMON_SYMBOLS.slice(0, 7).map((k) => k as Partial<VirtualKeyboardKeycap>),
           '[separator-5]',
           ...COMMON_SYMBOLS.slice(7).map((k) => k as Partial<VirtualKeyboardKeycap>),
-          { latex: '\\alpha', tooltip: 'アルファ \\alpha' },
+          { latex: 'r', tooltip: '極座標の半径 r（θ と一緒に使うと自動で極座標。r = θ でらせん）' },
         ],
         [
           { latex: 'x', tooltip: '座標 x' },
