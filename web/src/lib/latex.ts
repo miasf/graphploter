@@ -987,6 +987,100 @@ function integrandSpan(toks: Token[], start: number, multi: number): { end: numb
 }
 
 /**
+ * 等式で書いた曲線・曲面 {(x, y, z) | x = y = z, 0 ≤ x ≤ 1} を、媒介変数で書いた形 {(t, t, t) | 0 ≤ t ≤ 1} に直す（線積分・面積分）。
+ * 等式は面積・体積が 0 なので、領域としては積分できない（「= は使えません」のエラーだった）。等式の片側が座標 1 つだけなら、その座標を
+ * もう片側の式で置き換える（x = y = z は y := x, z := x）。残った座標が媒介変数（t, s, …）になる。等式が無ければ、そのまま返す。
+ * 置き換えられない等式（x² + y² = 1 など両側が式）は、そのまま返す（今までどおりのエラー）。媒介変数の範囲が無ければ、範囲を足すよう促す
+ */
+function equalitiesToCurve(toks: Token[]): Token[] {
+  const fenced = (open: Token[], close: Token[]) => open.every((t, k) => toks[k] === t) && close.every((t, k) => toks[toks.length - close.length + k] === t)
+  const fence = fenced(['\\left', '\\{'], ['\\right', '\\}']) ? 2 : fenced(['\\{'], ['\\}']) || fenced(['\\lbrace'], ['\\rbrace']) ? 1 : 0
+  if (fence === 0) return toks
+  const inner = toks.slice(fence, toks.length - fence)
+  const parts = splitTop(inner, (t) => t === '\\mid' || t === '|' || t === ':' || t === '\\vert')
+  if (parts.length !== 2) return toks
+  let pt = parts[0].filter((t) => t !== ' ')
+  if (pt[0] === '\\left' && pt[1] === '(' && pt[pt.length - 2] === '\\right' && pt[pt.length - 1] === ')') pt = pt.slice(2, -2)
+  else if (pt[0] === '(' && pt[pt.length - 1] === ')') pt = pt.slice(1, -1)
+  const comps = splitTop(pt, (t) => t === ',')
+  if (comps.length < 2 || !comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) return toks
+  const vars = comps.map((c) => c[0])
+  if (new Set(vars).size !== vars.length) return toks
+  const REL = new Set(['=', '<', '>', '\\le', '\\leq', '\\leqq', '\\leqslant', '\\ge', '\\geq', '\\geqq', '\\geqslant', '\\lt', '\\gt'])
+  // 深さ 0 の関係の記号
+  const relsOf = (c: Token[]): Token[] => {
+    const rels: Token[] = []
+    let depth = 0
+    for (let k = 0; k < c.length; k++) {
+      const t = c[k]
+      if (t === '\\left' || t === '\\right') {
+        depth += t === '\\left' ? 1 : -1
+        k++
+        continue
+      }
+      if (t === '{' || t === '(' || t === '[') depth++
+      else if (t === '}' || t === ')' || t === ']') depth--
+      else if (depth === 0 && REL.has(t)) rels.push(t)
+    }
+    return rels
+  }
+  const conds = splitTop(parts[1], (t) => t === ',').filter((c) => c.some((t) => t !== ' ' && t !== '\\ '))
+  const subs = new Map<string, Token[]>()
+  const wrap = (e: Token[]): Token[] => (e.length === 1 ? e : ['\\left', '(', ...e, '\\right', ')'])
+  const apply = (e: Token[]): Token[] => e.flatMap((t) => (subs.has(t) ? wrap(subs.get(t)!) : [t]))
+  const keep: Token[][] = []
+  let any = false
+  for (const c of conds) {
+    const rels = relsOf(c)
+    if (rels.length === 0 || !rels.every((r) => r === '=')) {
+      if (rels.includes('=')) return toks // 等号と不等号が混ざった連鎖は扱わない
+      keep.push(c)
+      continue
+    }
+    any = true
+    const sides = splitTop(c, (t) => REL.has(t))
+    for (let k = 0; k + 1 < sides.length; k++) {
+      const a = apply(sides[k].filter((t) => t !== ' '))
+      const b = apply(sides[k + 1].filter((t) => t !== ' '))
+      const single = (e: Token[]) => (e.length === 1 && vars.includes(e[0]) && !subs.has(e[0]) ? e[0] : null)
+      const [sa, sb] = [single(a), single(b)]
+      let v: string
+      let e: Token[]
+      if (sa && sb) {
+        if (sa === sb) continue
+        // 後ろの座標を、前の座標で置き換える（x = y = z は x が媒介変数）
+        ;[v, e] = vars.indexOf(sa) > vars.indexOf(sb) ? [sa, b] : [sb, a]
+      } else if (sa && !b.includes(sa)) [v, e] = [sa, b]
+      else if (sb && !a.includes(sb)) [v, e] = [sb, a]
+      else return toks
+      for (const [w, ex] of subs) subs.set(w, ex.flatMap((t) => (t === v ? wrap(e) : [t])))
+      subs.set(v, e)
+    }
+  }
+  if (!any) return toks
+  const free = vars.filter((v) => !subs.has(v))
+  if (free.length === 0) throw new LatexError('等式だけで点が 1 つに決まってしまい、曲線・曲面になりません')
+  // 残った座標を媒介変数の名前にする（式に出てこない t, s, u, v, … から）
+  const used = new Set(toks)
+  const fresh = ['t', 's', 'u', 'v', 'p', 'q'].filter((n) => !used.has(n))
+  const rename = new Map(free.map((v, k) => [v, fresh[k] ?? v]))
+  const ren = (e: Token[]) => e.map((t) => rename.get(t) ?? t)
+  const point = vars.map((v) => ren(subs.has(v) ? subs.get(v)! : [v]))
+  const cond = keep.map((c) => ren(apply(c)))
+  const params = [...rename.values()]
+  if (!params.every((q) => cond.some((c) => c.includes(q)))) {
+    const ex = free.map((v) => `0 ≤ ${v} ≤ 1`).join(', ')
+    throw new LatexError(`等式で書いた曲線・曲面には端が無いので、${ex} のように範囲を足してください`)
+  }
+  const out: Token[] = ['\\left', '\\{', '\\left', '(']
+  point.forEach((c, k) => out.push(...(k > 0 ? [','] : []), ...c))
+  out.push('\\right', ')', '\\mid')
+  cond.forEach((c, k) => out.push(...(k > 0 ? [','] : []), ...c))
+  out.push('\\right', '\\}')
+  return out
+}
+
+/**
  * 積分する領域（∬ の下）を、計算エンジンの @intset の引数「(x,y),条件,…」にする。
  * 集合 \{(x,y) \mid 条件\}（\mid・|・: で区切る）と、区間の直積 [0,1]\times[0,2]（変数は dx\,dy の順）を読む
  */
@@ -998,6 +1092,7 @@ function regionOf(toks: Token[], vars: string[]): string {
     if (def === '') throw new LatexError(`${regionLabel(name)} の範囲を、下の欄に書いてください（例: {(x, y) | x² + y² < 1}）`)
     toks = tokenize(def)
   }
+  toks = equalitiesToCurve(toks)
   // 集合の括弧を外す
   let inner = toks
   const strip = (open: Token[], close: Token[]) => {
@@ -1342,6 +1437,7 @@ function integralRegion(sub: Token[], vars: string[]): IntegralRegion {
     toks = tokenize(REGIONS[name] ?? '')
     if (toks.length === 0 || toks.includes('\\placeholder')) throw new LatexError(`${regionLabel(name)} の範囲を、下の欄に書いてください`)
   }
+  toks = equalitiesToCurve(toks)
   const fenced = (open: Token[], close: Token[]) => open.every((t, k) => toks[k] === t) && close.every((t, k) => toks[toks.length - close.length + k] === t)
   const set = fenced(['\\left', '\\{'], ['\\right', '\\}']) ? 2 : fenced(['\\{'], ['\\}']) || fenced(['\\lbrace'], ['\\rbrace']) ? 1 : 0
   if (set === 0) {
@@ -1366,7 +1462,8 @@ function integralRegion(sub: Token[], vars: string[]): IntegralRegion {
   // 2 本目より後の | は、条件の中の絶対値。そのまま戻す
   const cond = expandListedRanges(parts.slice(1).reduce((a, b) => [...a, '|', ...b]))
   const comps = splitTop(stripParens(parts[0]), (t) => t === ',')
-  if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) return { names: comps.map((c) => c[0]), cond }
+  // 点が座標の名前だけ（重ならない）なら領域。(t, t, t) のように重なるなら、媒介変数で書いた曲線
+  if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0])) && new Set(comps.map((c) => c[0])).size === comps.length) return { names: comps.map((c) => c[0]), cond }
   // 媒介変数は、条件に出てくる文字のうち、点の式にも出てくるもの（点の式に出てくる順）
   const isName = (t: Token) => (/^[A-Za-z]$/.test(t) && t !== 'e' && t !== 'i' && t !== 'd') || PARAM_GREEK.has(t)
   const inCond = new Set(cond.filter(isName))

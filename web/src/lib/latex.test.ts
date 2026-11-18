@@ -94,6 +94,10 @@ const cases: [string, string][] = [
   ['y=\\int x^2\\,dx', 'y= @int(x)(x^(2))'],
   ['\\int_0^1\\int_0^x xy\\,dy\\,dx', '@int(x,0,1)(@int(y,0,x)(xy))'],
   ['\\iint_{\\left\\{\\left(x,y\\right)\\mid0\\le x\\le1,0\\le y\\le x\\right\\}}xy\\,dA', '@intset((x,y),0<=x<=1,0<=y<=x)(xy)'],
+  // 等式で書いた曲線・曲面は、媒介変数で書いた形に直す（線積分・面積分）
+  ['\\int_{\\left\\{\\left(x,y,z\\right)\\mid x=y=z,0\\le x\\le1\\right\\}}x^2\\,ds', '@intset((t,t,t),0<=t<=1)(x^(2))'],
+  ['\\int_{\\left\\{\\left(x,y\\right)\\mid y=2x+1,0\\le x\\le1\\right\\}}xy\\,ds', '@intset((t,2t+1),0<=t<=1)(xy)'],
+  ['\\iint_{\\left\\{\\left(x,y,z\\right)\\mid z=x+y,0\\le x\\le1,0\\le y\\le1\\right\\}}1\\,dS', '@intset((t,s,t+s),0<=t<=1,0<=s<=1)(1)'],
   ['\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}xy\\,dx\\,dy', '@intset((x,y),0<=x<=1,0<=y<=2)(xy)'],
   ['\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x\\le1,0\\le y\\le1,0\\le z\\le1\\right\\}}1\\,dV', '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1)(1)'],
   // ベクトル場の演算子・外積・線積分・面積分
