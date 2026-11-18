@@ -122,7 +122,7 @@ const RAY_MAIN = /* glsl */ `
   if (tr.x < tr.y) res = gRay(ro, rd, tr.x, tr.y, tHit);
   // 輪郭のアンチエイリアス: 画素の中の 4 点（回した格子）へも光線を飛ばし、当たった割合を MSAA の標本に割り振る（alphaToCoverage）。
   // - 真ん中の光線が当たった画素: 4 本とも、まず当たった深さの前後 2 画素分だけを探す（面の上なら区間演算 数回で済む）。
-  //   そこに無ければ（輪郭の外へはみ出した）、その先を全部探す。奥の別の面に当たれば覆われているとみなす（段差の継ぎ目を出さない）
+  //   そこに無ければ（輪郭の外へはみ出した・別の面の縁にかかった）、光線の全体を探す。別の面に当たれば覆われているとみなす（段差の継ぎ目を出さない）
   // - 外れた画素: 2 × 2 の画素の組の中で当たる画素と隣り合うとき（fwidth）だけ、4 本を全部探す（背景の画素を全部探すと重い）
   // 2 × 2 の組の境目にある輪郭は、外側の画素では見つからないが、内側（当たった画素）では必ず調べるので、輪郭はなめらかになる
   float hitF = res != 0 ? 1.0 : 0.0;
@@ -144,7 +144,8 @@ const RAY_MAIN = /* glsl */ `
       vec2 o = k == 0 ? vec2(-0.125, -0.375) : k == 1 ? vec2(0.375, -0.125) : k == 2 ? vec2(0.125, 0.375) : vec2(-0.375, 0.125);
       vec3 d = normalize(rd + dRx * o.x + dRy * o.y);
       vec2 trk = gRayRange(ro, d);
-      if (res != 0) trk = second ? vec2(max(trk.x, tHit + wNear), trk.y) : vec2(max(trk.x, tHit - wNear), min(trk.y, tHit + wNear));
+      // 2 回目は光線の全体（手前の別の面の縁に当たる光線もある。手前を探さないと外れとみなし、継ぎ目に背景の色の点線が出た）
+      if (res != 0 && !second) trk = vec2(max(trk.x, tHit - wNear), min(trk.y, tHit + wNear));
       float tk = 0.0;
       int rk = 0;
       if (trk.x < trk.y) rk = gRay(ro, d, trk.x, trk.y, tk);
@@ -169,9 +170,10 @@ const RAY_MAIN = /* glsl */ `
   vec3 dn = cross(dFdx(hit), dFdy(hit));
   if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) {
     gRayBack = false;
-    // 値が飛ぶ面（floor の和の立方体など）: 当たった点の前後 1 画素で、値がいちばん大きく変わる軸を面の向きにする。
+    // 値が飛ぶ面（floor の和の立方体など）: 当たった点の前後で、値がいちばん大きく変わる軸を面の向きにする。
     // 隣の画素との当たった点の差（dn）は、奥の別の面と隣り合う画素（輪郭・段差）で向きがでたらめになり、黒い点々になっていた
-    float e = uPixel * tHit;
+    // 前後に見る幅は 0.1 画素（当たった点は 1/16 画素まで詰めてある。1 画素だと縁の近くでほかの軸の段差も拾い、縁に暗い点線が出た）
+    float e = 0.1 * uPixel * tHit;
     vec3 jump = vec3(
       abs(gRayV(hit + vec3(e, 0.0, 0.0)) - gRayV(hit - vec3(e, 0.0, 0.0))),
       abs(gRayV(hit + vec3(0.0, e, 0.0)) - gRayV(hit - vec3(0.0, e, 0.0))),
