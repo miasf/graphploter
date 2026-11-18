@@ -93,6 +93,32 @@ fn single_integrals() {
     close("@int(t,-∞,∞)(exp(-t^2))", PI.sqrt());
     close("@int(t,0,1)(abs(t-0.3))", 0.29);
     close("@int(x,0,1)(@int(y,0,x)(xy))", 0.125);
+    // 振動して遅く 0 になる ∞ までの積分（零点の間ごとに積分して、部分和を Wynn の ε で加速）
+    close("@int(t,0,∞)(sinc(t))", PI / 2.0);
+    close("@int(t,0,∞)(sin(t^2))", (PI / 8.0).sqrt());
+    close("@int(t,0,100)(sin(t^2))", 0.6314179218669654); // Simpson 法 400 万区間
+    close("@int(t,1,∞)(t^(-1.5))", 2.0);
     // 発散する積分は数を返さない
     assert!(eval_constant("@int(t,0,∞)(1)").is_err());
+}
+
+/// ∞ までの総和（計画 P1-1）: そのまま・交代級数の加速・オイラー・マクローリン
+#[test]
+fn infinite_sums() {
+    let close = |src: &str, want: f64, tol: f64| {
+        let v = eval_constant(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+        assert!((v - want).abs() <= tol * want.abs().max(1.0), "{src}: {v} (want {want})");
+    };
+    close("@sum(k,1,∞) 1/k^2", PI * PI / 6.0, 1e-13);
+    close("@sum(k,0,∞) 1/k!", std::f64::consts::E, 1e-14);
+    close("@sum(k,1,∞) (-1)^(k+1)/k", 2f64.ln(), 1e-14);
+    close("@sum(k,0,∞) (-1)^k/(2k+1)", PI / 4.0, 1e-14);
+    close("@sum(k,1,∞) 1/k^1.5", 2.612375348685488, 1e-12);
+    close("@sum(k,1,∞) sin(k)/k^2", 1.0139591323607684, 1e-10);
+    close("@sum(k,1,∞) 1/(k^2+1)", (PI / PI.tanh() - 1.0) / 2.0, 1e-13);
+    close("@sum(k,0,∞) 0.5^k", 2.0, 1e-15);
+    // 発散する級数は数を返さない（1 − 1 + 1 − … に交代級数の加速の「自然な和」1/2 を返さない）
+    assert!(eval_constant("@sum(k,1,∞) 1/k").is_err());
+    assert!(eval_constant("@sum(k,1,∞) (-1)^k").is_err());
+    assert!(eval_constant("@prod(k,1,∞) k").is_err());
 }

@@ -10,6 +10,7 @@
 //! - 関数の値の計算の回数に上限を付ける（[`Budget`]）。超えたら諦めて、呼び出し側が今までの方法に戻す
 
 use std::cell::Cell;
+use std::collections::BinaryHeap;
 
 /// ガウス・クロンロッド 15 点の点（正の側。最後が 0）
 const XGK: [f64; 8] = [
@@ -49,7 +50,7 @@ impl Budget {
     }
 
     /// n 回分を使う。足りなければ false
-    fn take(&self, n: u64) -> bool {
+    pub fn take(&self, n: u64) -> bool {
         let left = self.left.get();
         if left < n {
             self.left.set(0);
@@ -186,19 +187,36 @@ fn finite(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol, budge
     let split = a + (b - a) * 0.534_726_195_3;
     let (Some(l), Some(r)) = (panel(a, split, &mut xs, &mut fs), panel(split, b, &mut xs, &mut fs)) else { return f64::NAN };
     let mut panels: Vec<(f64, f64, f64, f64, f64)> = vec![l, r];
+    // 誤差の大きい順のヒープ（区間の番号つき。分けた区間の古い項目は、誤差が今の値と違うので読み飛ばす）。
+    // 値と誤差の合計は増減で持ち、64 回ごとに足し直す（区間が 2 万個でも、分けるたびに全部を見ない）
+    let mut heap: BinaryHeap<ByErr> = BinaryHeap::from([ByErr(l.3, 0), ByErr(r.3, 1)]);
+    let sums = |ps: &[(f64, f64, f64, f64, f64)]| {
+        let total: f64 = ps.iter().map(|p| p.2).sum();
+        let err: f64 = ps.iter().map(|p| p.3).sum();
+        (total, err)
+    };
+    let (mut total, mut err) = sums(&panels);
+    let mut steps = 0usize;
     loop {
-        let total: f64 = panels.iter().map(|p| p.2).sum();
-        let err: f64 = panels.iter().map(|p| p.3).sum();
+        if steps % 64 == 0 || !err.is_finite() {
+            (total, err) = sums(&panels);
+        }
         if err <= tol.rel * total.abs() || err <= f64::MIN_POSITIVE {
-            return total;
+            return sums(&panels).0;
         }
         // 誤差のいちばん大きい区間を 2 つに分ける
-        let (k, _) = panels.iter().enumerate().fold((0, f64::NEG_INFINITY), |m, (k, p)| if p.3 > m.1 { (k, p.3) } else { m });
-        let (pa, pb, _, pe, cut) = panels[k];
+        let k = loop {
+            let Some(ByErr(e, k)) = heap.pop() else { return sums(&panels).0 };
+            if e.to_bits() == panels[k].3.to_bits() {
+                break k;
+            }
+        };
+        let (pa, pb, pv, pe, cut) = panels[k];
         let mid = if cut > pa && cut < pb { cut } else { 0.5 * (pa + pb) };
         if panels.len() >= tol.panels || mid <= pa || mid >= pb {
             // 区間の数の上限・浮動小数点の幅の下限に届いた。有限でない区間が残っていれば、積分できない
-            if pe.is_infinite() || panels.iter().any(|p| p.3.is_infinite()) {
+            let (total, err) = sums(&panels);
+            if !err.is_finite() {
                 return f64::NAN;
             }
             if err > 1e3 * tol.rel * total.abs() {
@@ -207,8 +225,33 @@ fn finite(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol, budge
             return total;
         }
         let (Some(l), Some(r)) = (panel(pa, mid, &mut xs, &mut fs), panel(mid, pb, &mut xs, &mut fs)) else { return f64::NAN };
+        total += l.2 + r.2 - pv;
+        err += l.3 + r.3 - pe;
         panels[k] = l;
         panels.push(r);
+        heap.push(ByErr(l.3, k));
+        heap.push(ByErr(r.3, panels.len() - 1));
+        steps += 1;
+    }
+}
+
+/// 誤差で並べるヒープの項目（誤差, 区間の番号）
+struct ByErr(f64, usize);
+
+impl PartialEq for ByErr {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for ByErr {}
+impl PartialOrd for ByErr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ByErr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0).then(other.1.cmp(&self.1))
     }
 }
 
@@ -288,28 +331,135 @@ pub fn integrate(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol
             finite(&mut g, -1.0, 1.0, tol, budget)
         }
         (true, true) => finite(f, a, b, tol, budget),
-        (true, false) => half_line(f, a, 1.0, tol, budget),
-        (false, true) => half_line(f, b, -1.0, tol, budget),
-        (false, false) => half_line(f, 0.0, 1.0, tol, budget) + half_line(f, 0.0, -1.0, tol, budget),
+        (true, false) => infinite(f, a, 1.0, tol, budget),
+        (false, true) => infinite(f, b, -1.0, tol, budget),
+        (false, false) => infinite(f, 0.0, 1.0, tol, budget) + infinite(f, 0.0, -1.0, tol, budget),
     }
 }
 
-/// base から dir の向きの無限の区間: t = base + dir · s / (1 − s)、dt = ds / (1 − s)²（s ∈ [0, 1)）
+/// base から dir の向きの無限の区間: t = base + dir · L s / (1 − s)、dt = L ds / (1 − s)²（s ∈ [0, 1)。L = max(1, |base|)）
 fn half_line(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: Tol, budget: &Budget) -> f64 {
+    // 縮尺 L: 端が原点から遠い（∫_4097^∞）と、L = 1 では被積分関数が s = 1 のすぐ近くに鋭い山を作る
+    let l = base.abs().max(1.0);
     let mut ts = [0.0; 15];
     let mut g = |ss: &[f64], out: &mut [f64]| {
         let n = ss.len();
         for (t, &s) in ts[..n].iter_mut().zip(ss) {
-            *t = base + dir * s / (1.0 - s);
+            *t = base + dir * l * s / (1.0 - s);
         }
         f(&ts[..n], out);
         for (o, &s) in out.iter_mut().zip(ss) {
-            let j = 1.0 / ((1.0 - s) * (1.0 - s));
+            let j = l / ((1.0 - s) * (1.0 - s));
             // 無限遠で 0 になる関数は、変換の重みが大きくても 0（0 · ∞ を NaN にしない）
             *o = if *o == 0.0 { 0.0 } else { *o * j };
         }
     };
-    finite(&mut g, 0.0, 1.0, tol, budget)
+    // 端の置き換えも使う（∫_N^∞ x^(−3/2) dx のように遅く 0 になる関数は、写した後に s = 1 で 1/√ の形に発散する）
+    integrate(&mut g, 0.0, 1.0, Tol { ends: true, ..tol }, budget)
+}
+
+/// base から dir の向きの無限の区間。写して積分し、収束しなければ（振動して遅く 0 になる関数。∫₀^∞ sin t / t dt）、
+/// 零点の間ごとに積分して部分和を Wynn の ε で加速する（[`oscillatory`]）
+fn infinite(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: Tol, budget: &Budget) -> f64 {
+    let was = budget.rough.replace(false);
+    let v = half_line(f, base, dir, tol, budget);
+    let rough = budget.rough.get();
+    if v.is_finite() && !rough {
+        budget.rough.set(was);
+        return v;
+    }
+    if let Some(w) = oscillatory(f, base, dir, tol, budget) {
+        budget.rough.set(was);
+        return w;
+    }
+    budget.rough.set(was || rough);
+    v
+}
+
+/// 振動する関数の、base から dir の向きの無限の区間の積分。零点を順に探し（間隔は直前の零点の間隔の 1/8 の歩幅で。
+/// 振動が速くなっていく sin(t²) にもついていく）、零点の間ごとの積分の部分和を Wynn の ε 算法で加速する。
+/// 部分和の数を 2 通り（32・48）にして、加速した値が合えば返す。零点が見つからない（振動しない）・合わなければ None
+fn oscillatory(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: Tol, budget: &Budget) -> Option<f64> {
+    let mut at = |x: f64| -> Option<f64> {
+        if !budget.take(1) {
+            return None;
+        }
+        let mut o = [0.0];
+        f(&[x], &mut o);
+        o[0].is_finite().then_some(o[0])
+    };
+    const ZEROS: usize = 49;
+    let mut zeros: Vec<f64> = Vec::with_capacity(ZEROS);
+    let mut step = 0.1f64;
+    let (mut x, mut fx) = (base, at(base)?);
+    let limit = 1e4 * (1.0 + base.abs());
+    while zeros.len() < ZEROS {
+        let nx = x + dir * step;
+        if (nx - base).abs() > limit && zeros.len() < 4 {
+            return None;
+        }
+        let fn_ = at(nx)?;
+        if fx != 0.0 && fn_ != 0.0 && fx.signum() != fn_.signum() {
+            // 符号の変わる所を二分法で詰める
+            let (mut lo, mut hi, flo) = (x, nx, fx);
+            for _ in 0..60 {
+                let m = 0.5 * (lo + hi);
+                if m == lo || m == hi {
+                    break;
+                }
+                let fm = at(m)?;
+                if fm.signum() == flo.signum() { lo = m } else { hi = m }
+            }
+            let z = 0.5 * (lo + hi);
+            if let Some(&last) = zeros.last() {
+                step = ((z - last).abs() / 8.0).max(1e-9 * (1.0 + z.abs()));
+            }
+            zeros.push(z);
+        }
+        (x, fx) = (nx, fn_);
+    }
+    // 部分和 S_k = ∫_base^{z_k} f
+    let inner = Tol { panels: 200, ..tol };
+    let mut sums = Vec::with_capacity(ZEROS);
+    let mut acc = 0.0;
+    let mut from = base;
+    for &z in &zeros {
+        let (a, b) = if dir > 0.0 { (from, z) } else { (z, from) };
+        let piece = dir * finite(f, a, b, inner, budget);
+        if !piece.is_finite() {
+            return None;
+        }
+        acc += if dir > 0.0 { piece } else { -piece };
+        sums.push(acc);
+        from = z;
+    }
+    let (e1, e2) = (wynn(&sums[..33]), wynn(&sums));
+    ((e1 - e2).abs() <= 1e-10 * e2.abs().max(1e-300) || (e1 - e2).abs() <= 1e-14).then_some(e2)
+}
+
+/// Wynn の ε 算法（数列の極限を加速する）。ε_{k+1}^{(j)} = ε_{k−1}^{(j+1)} + 1 / (ε_k^{(j+1)} − ε_k^{(j)}) の偶数の列の最後の値
+fn wynn(s: &[f64]) -> f64 {
+    let mut prev = vec![0.0; s.len() + 1];
+    let mut cur = s.to_vec();
+    let mut best = *s.last().unwrap_or(&f64::NAN);
+    let mut k = 0;
+    while cur.len() >= 2 {
+        let mut next = Vec::with_capacity(cur.len() - 1);
+        for j in 0..cur.len() - 1 {
+            let d = cur[j + 1] - cur[j];
+            if d == 0.0 {
+                return if k % 2 == 0 { cur[j + 1] } else { best };
+            }
+            next.push(prev[j + 1] + 1.0 / d);
+        }
+        k += 1;
+        if k % 2 == 0 {
+            best = *next.last().unwrap_or(&best);
+        }
+        prev = cur;
+        cur = next;
+    }
+    best
 }
 
 #[cfg(test)]
@@ -339,6 +489,9 @@ mod tests {
         close(int1(|x| x.min(1.0 - x * x), 0.0, 1.0), 0.5 * 0.618_033_988_749_895f64.powi(2) + (1.0 - 1.0 / 3.0) - (0.618_033_988_749_895 - 0.618_033_988_749_895f64.powi(3) / 3.0), 1e-12);
         close(int1(|x| (-x * x).exp(), f64::NEG_INFINITY, f64::INFINITY), PI.sqrt(), 1e-12);
         close(int1(|x| 1.0 / (1.0 + x * x), 0.0, f64::INFINITY), PI / 2.0, 1e-12);
+        close(int1(|x| x.powf(-1.5), 1.0, f64::INFINITY), 2.0, 1e-11);
+        close(int1(|x| if x == 0.0 { 1.0 } else { x.sin() / x }, 0.0, f64::INFINITY), PI / 2.0, 1e-9);
+        close(int1(|x| (x * x).sin(), 0.0, f64::INFINITY), (PI / 8.0).sqrt(), 1e-9);
         close(int1(|x| x, 1.0, 0.0), -0.5, 1e-15);
     }
 }

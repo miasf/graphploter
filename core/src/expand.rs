@@ -2341,12 +2341,36 @@ impl Expander<'_> {
     }
 
     /// Σ・Π: 束縛する変数に a, a + 1, …, b を入れた中身を、平衡のとれた木で足す・掛ける。b < a なら 0（Π は 1）
+    /// `Σ_{var=a}^{∞} body`（値が定数になるもの）。項の式をコンパイルして [`sum_to_infinity`] で計算する
+    fn infinite_sum(&mut self, var: &str, a: i64, body: &Expr) -> Result<f64, String> {
+        let g = self.scalar(body)?;
+        let f = crate::eval::Program::compile_with(&g, &[var], self.params)
+            .map_err(|_| "∞ までの総和は、値が数になる式（座標を含まない式）だけ計算できます".to_string())?;
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            for p in f.used_params() {
+                if !u.contains(p) {
+                    u.push(p.clone());
+                }
+            }
+        });
+        sum_to_infinity(&f, a)
+    }
+
     fn sum_or_prod(&mut self, sum: bool, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
         let sym = if sum { "Σ" } else { "Π" };
         let [lo, hi] = args else {
             return Err(format!("{sym} は、範囲を {sym}_{{{var}=1}}^{{10}} の形で書いてください"));
         };
         let what = format!("{sym} の範囲");
+        // 上の端が ∞: 値が定数になる総和だけ、級数の加速で計算する
+        if matches!(self.scalar(hi)?, Expr::Num(v) if v == f64::INFINITY) {
+            if !sum {
+                return Err("Π の範囲に ∞ は使えません（有限の範囲にしてください）".into());
+            }
+            let a = self.integer(lo, &what)?;
+            return self.infinite_sum(var, a, body).map(Expr::Num);
+        }
         let (a, b) = (self.integer(lo, &what)?, self.integer(hi, &what)?);
         if b < a {
             return Ok(Expr::Num(if sum { 0.0 } else { 1.0 }));
@@ -2561,6 +2585,97 @@ fn bound_of(u: &Expr, b: Expr, upper: bool, v: &str, lows: &mut Vec<Expr>, highs
     }
 }
 
+/// `Σ_{k=a}^{∞} f(k)`（計画 `docs/plan-render-algorithms.md` の P1-1。A33）。次の順に試し、2 通りの計算が合ったものを返す:
+/// 1. そのまま足す（項が和の 10⁻¹⁷ 倍より小さくなれば終わり。13 万項まで）
+/// 2. 交代級数（項の符号が交互で、絶対値が減っていく）: Cohen・Villegas・Zagier の加速（項 n 個で誤差 5.8⁻ⁿ ほど）。n = 30 と 40 で比べる
+/// 3. オイラー・マクローリンの和公式: Σ_{k=a}^{N−1} f(k) + ∫_N^∞ f(x) dx + f(N)/2 − f′(N)/12（f は整数でない x でも実数になること）。
+///    N を 2 通りに変えて比べる。∫ が収束しなければ発散
+///
+/// どれも合わなければ、発散するか収束が遅すぎるとして誤りにする
+fn sum_to_infinity(f: &crate::eval::Program, a: i64) -> Result<f64, String> {
+    use num_complex::Complex64 as C;
+    let eval = |xs: &[f64]| -> Vec<f64> {
+        let mut out = vec![C::new(0.0, 0.0); xs.len()];
+        f.eval_batch(&[xs], &mut out);
+        out.iter().map(|v| crate::eval::as_real(*v)).collect()
+    };
+    let terms = |from: i64, n: usize| eval(&(0..n).map(|k| (from + k as i64) as f64).collect::<Vec<_>>());
+    let close = |x: f64, y: f64| (x - y).abs() <= 1e-11 * x.abs().max(y.abs()).max(1e-300) || (x - y).abs() <= 1e-300;
+    let first = terms(a, 64);
+    if first.iter().any(|t| !t.is_finite()) {
+        return Err("Σ の項が実数の値になりません".into());
+    }
+    // 1. そのまま足す（Neumaier の補償つき和）
+    {
+        let (mut s, mut comp) = (0.0f64, 0.0f64);
+        let mut small = 0;
+        let mut k = a;
+        while k - a < 131_072 {
+            let ts = terms(k, 1024);
+            for t in ts {
+                if !t.is_finite() {
+                    return Err("Σ の項が実数の値になりません".into());
+                }
+                let n = s + t;
+                comp += if s.abs() >= t.abs() { (s - n) + t } else { (t - n) + s };
+                s = n;
+                small = if t.abs() <= 1e-17 * (s + comp).abs() { small + 1 } else { 0 };
+                if small >= 8 {
+                    return Ok(s + comp);
+                }
+            }
+            k += 1024;
+        }
+    }
+    // 2. 交代級数
+    let alternating = first.windows(2).all(|w| w[0] * w[1] < 0.0) && first.windows(2).skip(8).all(|w| w[1].abs() <= w[0].abs() * (1.0 + 1e-12));
+    // 発散する交代級数（1 − 1 + 1 − …）にも「自然な和」を返してしまうので、遠くの項が十分小さいことを先に確かめる
+    let far = eval(&[(a + 10_000) as f64])[0];
+    if alternating && far.is_finite() && far.abs() < 0.05 * first[0].abs() {
+        let cvz = |n: usize| {
+            let ak: Vec<f64> = first.iter().take(n).map(|t| t.abs()).collect();
+            let mut d = (3.0 + 8f64.sqrt()).powi(n as i32);
+            d = (d + 1.0 / d) / 2.0;
+            let (mut b, mut c, mut s) = (-1.0f64, -d, 0.0f64);
+            for (k, &v) in ak.iter().enumerate() {
+                c = b - c;
+                s += c * v;
+                let (kf, nf) = (k as f64, n as f64);
+                b *= (kf + nf) * (kf - nf) / ((kf + 0.5) * (kf + 1.0));
+            }
+            first[0].signum() * s / d
+        };
+        let (s30, s40) = (cvz(30), cvz(40));
+        if close(s30, s40) {
+            return Ok(s40);
+        }
+    }
+    // 3. オイラー・マクローリン（f′ と f‴ の補正まで。f‴ は中心差分）
+    let half = eval(&[a as f64 + 0.5]);
+    if half[0].is_finite() {
+        let mut rough = false;
+        let mut em = |n: i64| -> f64 {
+            let budget = crate::quad::Budget::new(300_000);
+            let head: f64 = terms(a, (n - a) as usize).iter().sum();
+            let mut g = |xs: &[f64], out: &mut [f64]| out.copy_from_slice(&eval(xs));
+            let tail = crate::quad::integrate(&mut g, n as f64, f64::INFINITY, crate::quad::Tol { rel: 1e-12, panels: 1000, ends: false }, &budget);
+            rough |= budget.rough.get();
+            let (x, h) = (n as f64, 0.05);
+            let v = eval(&[x, x + h, x - h, x + 2.0 * h, x - 2.0 * h]);
+            let d1 = (v[1] - v[2]) / (2.0 * h);
+            let d3 = (v[3] - 2.0 * v[1] + 2.0 * v[2] - v[4]) / (2.0 * h * h * h);
+            head + tail + v[0] / 2.0 - d1 / 12.0 + d3 / 720.0
+        };
+        let (s1, s2) = (em(a + 1024), em(a + 4096));
+        // 和公式の残りは N が大きいほど小さいので、差は大きい N の値の誤差の上限としては大きめに出る（sin(k)/k² で
+        // 差 4e-11、大きい N の値の誤差 4e-12）。差が 1e-9 以内なら大きい N の値を返す
+        if s1.is_finite() && s2.is_finite() && !rough && (s1 - s2).abs() <= 1e-9 * s2.abs().max(1e-300) {
+            return Ok(s2);
+        }
+    }
+    Err("Σ が収束しないようです（発散する・収束がとても遅い）".into())
+}
+
 /// 値が定数になる積分 1 つで、中身を計算してよい回数の上限（3 重積分でも 0.5 秒ほどで終わる数）
 const CLOSED_BUDGET: u64 = 6_000_000;
 
@@ -2592,7 +2707,7 @@ fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize
     };
     let (a, b) = (at(&bounds[i].0), at(&bounds[i].1));
     // 外側ほど目標を厳しくする（内側の積分の誤差は、外側の値の誤差として足される）
-    let tol = crate::quad::Tol { rel: if n == 1 { 1e-10 } else if i == 0 { 1e-9 } else { 1e-11 }, panels: [[600, 0, 0], [400, 200, 0], [200, 100, 100]][n - 1][i], ends: true };
+    let tol = crate::quad::Tol { rel: if n == 1 { 1e-10 } else if i == 0 { 1e-9 } else { 1e-11 }, panels: [[20_000, 0, 0], [400, 200, 0], [200, 100, 100]][n - 1][i], ends: true };
     if i + 1 == n {
         let mut g = |ts: &[f64], out: &mut [f64]| {
             let cols: Vec<Vec<f64>> = (0..n).map(|k| if k == i { ts.to_vec() } else { vec![p[k]; ts.len()] }).collect();
