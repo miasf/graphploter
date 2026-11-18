@@ -186,6 +186,7 @@ const RAY_MAIN = /* glsl */ `
       if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) nw = -rd;
     }
   }
+  gRayNW = normalize(nw);
   gRayN = normalize((viewMatrix * vec4(nw, 0.0)).xyz);
   // 当たった点での 1 画素の大きさ（面に沿った長さ）。格子線の太さの見積もりの上限に使う
   gRayFoot = uPixel * tHit / max(abs(dot(normalize(nw), rd)), 0.05);
@@ -221,11 +222,18 @@ export function createRaycastMaterial(glsl: string, n: number, grid: GridUniform
       .replace('float w = fwidth(c);', 'float w = min(fwidth(c), gRayFoot / spacing);')
       .replace('if (w <= 1e-5 * max(abs(c), 1.0)) return 0.0;', 'if (w <= max(1e-5 * max(abs(c), 1.0), 0.02 * gRayFoot / spacing)) return 0.0;')
     if (!header.includes('0.02 * gRayFoot')) throw new Error('格子線の差し込みの場所が見つからない（surfaceMaterial.ts の gridLine）')
+    // 面の向きが座標の軸にほぼそろっている（|n_k| > 0.995）面では、その座標の格子線を引かない。その座標は面の上で変わらないので、
+    // 格子線の座標の上にある面（floor の和の立方体の面は全部 x・y・z が整数の面）が、当たった点の座標の 32 ビットの揺れで線の点々に
+    // なっていた。揺れの大きさは GPU で違い、隣の画素との差（fwidth）での判定では消えない環境があった
     const apply = FRAGMENT_APPLY.replace('!gl_FrontFacing', 'gRayBack')
+      .replace('gridLine(vGridPos.x, uGridSpacing.x)', '(abs(gRayNW.x) > 0.995 ? 0.0 : gridLine(vGridPos.x, uGridSpacing.x))')
+      .replace('gridLine(vGridPos.y, uGridSpacing.y)', '(abs(gRayNW.y) > 0.995 ? 0.0 : gridLine(vGridPos.y, uGridSpacing.y))')
+      .replace('gridLine(vGridPos.z, uGridSpacing.z)', '(abs(gRayNW.z) > 0.995 ? 0.0 : gridLine(vGridPos.z, uGridSpacing.z))')
+    if (!apply.includes('gRayNW.z')) throw new Error('格子線の呼び出しの場所が見つからない（surfaceMaterial.ts の FRAGMENT_APPLY）')
     shader.fragmentShader = shader.fragmentShader
       // 光の計算が使う点の位置を、箱の面ではなく当たった点にする（同じ名前の変数にして、three.js の部品をそのまま使う）
       .replace('varying vec3 vViewPosition;', 'vec3 vViewPosition;')
-      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\nfloat gRayCover = 1.0;\n${header}\n${glsl}\n${RAY_GLSL}\n${RAY_RANGE}`)
+      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\nfloat gRayCover = 1.0;\nvec3 gRayNW = vec3(0.0);\n${header}\n${glsl}\n${RAY_GLSL}\n${RAY_RANGE}`)
       .replace('#include <clipping_planes_fragment>', RAY_MAIN)
       .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);\ndiffuseColor.a *= gRayCover;`)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = gRayN;\nnonPerturbedNormal = gRayN;')
