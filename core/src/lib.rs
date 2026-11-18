@@ -27,6 +27,9 @@ pub mod linalg;
 pub mod mesh;
 pub mod ode;
 pub mod pixel;
+pub mod groebner;
+pub mod quad;
+pub mod solve;
 mod region;
 pub mod parser;
 pub mod special;
@@ -1704,8 +1707,10 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             }
         }
         // 等式 3 本の点: 2 本の交わる線の上で 3 本目の符号が変わる所から寄せる。不等式を満たす点だけ残す
-        P::System { eqs, cuts, .. } if eqs.len() == 3 => {
+        P::System { eqs, cuts, exact, .. } if eqs.len() == 3 => {
             let pts = system::points_on_curve(eqs, dom, ctx.implicit_resolution, ctx.implicit_refine);
+            // 多項式なら、グレブナー基底で求めた解（接するだけの交点も）を合わせる
+            let pts = system::with_exact(pts, exact[0].as_deref(), dom, 3);
             let pts = system::points_inside(pts, cuts);
             b.curve = true;
             b.kind = format!("連立方程式の点（{} 個）", pts.len());
@@ -1744,8 +1749,8 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind.push_str(&format!("（霧、{n}³）"));
             b.volume = Some((region_distance(&g, dom, n), n));
         }
-        P::System { eqs, cuts, .. } if eqs.is_empty() => {
-            b.inner = system::region_faces(cuts, dom, ctx.implicit_resolution, ctx.implicit_refine);
+        P::System { eqs, cuts, faces, .. } if eqs.is_empty() => {
+            b.inner = system::region_faces(cuts, faces, dom, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine);
             b.fields.push(mesh::Field::region(cuts));
         }
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
@@ -1899,7 +1904,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = flat_finish(inner.inner, inner.curve, ctx.flat_slice);
         }
         // 縦の座標 = 0 の 2 次元の問題として描く（切り口、または縦の座標を使わない式）
-        P::System { eqs, cuts, strict, gpu, .. } => match eqs.len() {
+        P::System { eqs, cuts, strict, gpu, exact, .. } => match eqs.len() {
             0 => {
                 b.kind = "不等式の領域（2D）".into();
                 b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
@@ -1931,7 +1936,8 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 }
             }
             2 => {
-                let pts = system::points_inside(system::flat_points(&eqs[0], &eqs[1], dom, res2), cuts);
+                let pts = system::with_exact(system::flat_points(&eqs[0], &eqs[1], dom, res2), exact[1].as_deref(), dom, 2);
+                let pts = system::points_inside(pts, cuts);
                 b.curve = true;
                 b.kind = format!("連立方程式の点（{} 個）", pts.len());
                 b.inner = system::points_mesh(&pts);

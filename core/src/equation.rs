@@ -336,6 +336,13 @@ pub enum Plot {
         cuts: Vec<Program>,
         /// 不等式ごとに、厳密（`<`・`>`）か
         strict: Vec<bool>,
+        /// 不等式ごとの、境目の面 G_j = 0 を座標の 1 つについて解いた陽関数（軸, 式）の並び（解けなければ空。`solve.rs`）。
+        /// 解けた面は、陰関数（格子）ではなく陽関数の道で細かく作る（[`crate::system::region_faces`]）
+        faces: Vec<Vec<(usize, Program)>>,
+        /// 等式が多項式で、解が有限個のときの、グレブナー基底で求めた解（`groebner.rs`）。
+        /// [0] は 3 本の等式の 3D の点、[1] は 2 本の等式の 2D 表示の点（縦の座標を 0 にしたもの）。
+        /// 符号が変わらない解（接するだけの交点）も入る。解けなければ None
+        exact: [Option<Vec<[f64; 3]>>; 2],
         /// GPU の画素ごとの描き方（2D）に渡す、回転・断面を入れる前の元の座標の式（[`GpuSystem`]）
         gpu: Option<Box<GpuSystem>>,
     },
@@ -1820,15 +1827,42 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         Program::compile_with(&Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b)), &shown_refs, &consts)
     };
     let (mut eqs, mut cuts, mut strict) = (Vec::new(), Vec::new(), Vec::new());
+    let mut faces = Vec::new();
     let mut eq_rows = Vec::new();
+    // 境目の面 G = 0 を、表示中の座標の 1 つについて解く（解が 1 つになる座標を先に。同じなら z を先に）
+    let solve_face = |a: &Expr, b: &Expr| -> Vec<(usize, Program)> {
+        let (a, b) = match &rot {
+            Some(m) => (rotate_coords(a, m, space), rotate_coords(b, m, space)),
+            None => (a.clone(), b.clone()),
+        };
+        let g = Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b));
+        let mut best: Vec<(usize, Program)> = Vec::new();
+        for axis in [2, 0, 1] {
+            let Some(rs) = crate::solve::roots(&g, &shown[axis], &shown_refs, &consts) else { continue };
+            let (u, v) = others(axis);
+            let Some(progs) = rs.iter().map(|r| Program::compile_with(r, &[shown_refs[u], shown_refs[v]], &consts).ok()).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            if best.is_empty() || progs.len() < best.len() {
+                best = progs.into_iter().map(|p| (axis, p)).collect();
+            }
+        }
+        best
+    };
     for (l, rel, r) in &rels {
         match rel {
             Rel::Eq => {
                 eqs.push(diff(l, r)?);
                 eq_rows.push((l.clone(), r.clone()));
             }
-            Rel::Le | Rel::Lt => cuts.push(diff(l, r)?),
-            Rel::Ge | Rel::Gt => cuts.push(diff(r, l)?),
+            Rel::Le | Rel::Lt => {
+                cuts.push(diff(l, r)?);
+                faces.push(solve_face(l, r));
+            }
+            Rel::Ge | Rel::Gt => {
+                cuts.push(diff(r, l)?);
+                faces.push(solve_face(r, l));
+            }
         }
         if *rel != Rel::Eq {
             strict.push(matches!(rel, Rel::Lt | Rel::Gt));
@@ -1843,7 +1877,25 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         _ => None,
     };
     let gpu = gpu_system(&rels, params, space);
-    Ok(Plot::System { base, eqs, cuts, strict, gpu })
+    // 等式（左 − 右。回転した後の、表示中の座標の式）をグレブナー基底で解く
+    let eq_exprs: Vec<Expr> = eq_rows
+        .iter()
+        .map(|(l, r)| {
+            let (l, r) = match &rot {
+                Some(m) => (rotate_coords(l, m, space), rotate_coords(r, m, space)),
+                None => (l.clone(), r.clone()),
+            };
+            Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r))
+        })
+        .collect();
+    let exact3 = if eq_exprs.len() == 3 { crate::groebner::solve(&eq_exprs, &shown_refs, &consts) } else { None };
+    let exact2 = if eq_exprs.len() == 2 {
+        let flat: Vec<Expr> = eq_exprs.iter().map(|e| e.substitute(&|v: &str| (v == shown[2]).then_some(Expr::Num(0.0)))).collect();
+        crate::groebner::solve(&flat, &shown_refs[..2], &consts)
+    } else {
+        None
+    };
+    Ok(Plot::System { base, eqs, cuts, strict, faces, exact: [exact3, exact2], gpu })
 }
 
 /// 連立方程式・不等式の、GPU の描き方の式（[`GpuSystem`]）。どれかの式がコンパイルできなければ None（今までどおり、式に畳み込んだ形で描く）
