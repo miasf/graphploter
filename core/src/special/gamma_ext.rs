@@ -123,6 +123,11 @@ pub fn gamma_p(a: C, z: C) -> C {
 
 /// 正則化した上側不完全ガンマ関数 Q(a, z) = Γ(a, z) / Γ(a)
 pub fn gamma_q(a: C, z: C) -> C {
+    // 上側を連分数で求める範囲では、Γ(a, z) / Γ(a) をそのまま返す。1 − P にすると、Q が小さい所（gammaQ(0.5, 100) ≈ 2·10⁻⁴⁵）で
+    // 桁が全部消えて 0 になっていた（P のほうも 1 − Γ(a, z)/Γ(a) で計算しているので、二重に引き算していた）
+    if nonpositive_int(a).is_none() && z.re > 0.0 && z.norm() > a.norm() + 4.0 {
+        return gamma_upper(a, z) / gamma(a);
+    }
     1.0 - gamma_p(a, z)
 }
 
