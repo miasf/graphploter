@@ -2227,6 +2227,17 @@ export class Viewer {
     dots.userData.pos = pos
     dots.userData.scale = scale
     this.placeDots(dots)
+    // 視点が動いたら、画面の上の大きさの上限に合わせて置き直す（点が少ないときだけ。多い点の集まりは空間の大きさのまま）
+    if (pos.length / 3 <= 4096) {
+      dots.onBeforeRender = (_r, _s, camera) => {
+        const c = camera as THREE.PerspectiveCamera
+        const key = `${c.position.x},${c.position.y},${c.position.z},${c.fov},${this.viewH}`
+        if (dots.userData.camKey !== key) {
+          dots.userData.camKey = key
+          this.placeDots(dots)
+        }
+      }
+    }
     return dots
   }
 
@@ -2237,8 +2248,16 @@ export class Viewer {
     const r = span * 0.008 * dots.userData.scale
     const pos = dots.userData.pos as number[]
     const m = new THREE.Matrix4()
+    // 空間の大きさ（表示範囲の 0.8 %）のまま描くが、画面の上で半径 6 画素（太さの倍率をかける）を超えないようにする。
+    // 拡大して近づくと、点が画面を覆うほど大きな球になっていた（線積分の「今の点」）
+    const cam = this.camera
+    const perPixel = (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2)) / Math.max(1, this.viewH)
+    const cap = 6 * dots.userData.scale * perPixel
     for (let i = 0; i < dots.count; i++) {
-      m.makeScale(r, r, r).setPosition(pos[3 * i], pos[3 * i + 1], pos[3 * i + 2])
+      const x = pos[3 * i], y = pos[3 * i + 1], z = pos[3 * i + 2]
+      const dist = Math.hypot(x - cam.position.x, y - cam.position.y, z - cam.position.z)
+      const ri = Math.min(r, cap * dist)
+      m.makeScale(ri, ri, ri).setPosition(x, y, z)
       dots.setMatrixAt(i, m)
     }
     dots.instanceMatrix.needsUpdate = true

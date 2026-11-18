@@ -1305,7 +1305,7 @@
 
   /** 積分を描くための行 view の中身を、元の式 item から作り直す（添えて描く行も、足す・消す・作り直す） */
   function fillIntegral(view: PlotItem, item: PlotItem) {
-    const d = integralDisplay(item.latex, item.integralProgress ?? 1, arrowScale())
+    const d = integralDisplay(item.latex, item.integralProgress ?? 1, arrowScale(), flat)
     const failed = d === null ? '積分がありません' : 'error' in d ? d.error : undefined
     const ok = d !== null && !('error' in d) ? d : null
     const field = ok?.field ?? false

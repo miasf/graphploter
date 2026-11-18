@@ -354,6 +354,8 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   const inl = integralDisplay('\\oint_{\\left\\{\\left(2\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', 0.3)
   const oki = inl !== null && !('error' in inl) ? inl : null
   check('直書きの経路', oki && latexToText(oki.extras!.find((e) => e.role === 'path')!.latex), '⦃(2 cos t, sin t)∣0<=t<=2 pi⦄')
+  // 3D 表示の 1 変数の定積分: 軸の上に立てた高さ f（z）の幕（線積分と同じ向き）
+  check('1 変数の 3D', (() => { const v = integralDisplay('\\int_{0}^{2}t^2\\,dt', 1, 1, false); return v && !('error' in v) ? latexToText(v.latex) : null })(), '⦃(t,y,z)∣0<=t<=2,y=0, min (0,t^(2))<=z<= max (0,t^(2))⦄')
   check('1 変数の区間', (() => { const v = integralDisplay('\\int_{0}^{2}t^2\\,dt'); return v && !('error' in v) ? latexToText(v.extras![0].latex) : null })(), '⦃(x,y,z)∣0<=x<=2,y=0,z=0⦄')
   // ∇ · 𝐅 の体積分（媒介変数 3 つ）: 立体を描く
   setRegions({ W: '\\left\\{\\left(r\\cos v,r\\sin v,h\\right)\\mid0\\le r\\le2,0\\le v\\le2\\pi,0\\le h\\le1\\right\\}' })

@@ -1401,13 +1401,13 @@ function substitute(body: Token[], comps: Token[][]): Token[] {
  * - 平面の曲線の上の線積分: 曲線の上に立てた、高さが被積分関数の幕（F · dr は接線の成分）
  * - 曲面の上の面積分: 曲面を、法線の向きに被積分関数の分だけ厚くした立体（F · dS は法線の成分）
  */
-export function integralDisplay(latex: string, progress = 1, scale = 1): IntegralView | { error: string } | null {
+export function integralDisplay(latex: string, progress = 1, scale = 1, flat = true): IntegralView | { error: string } | null {
   if (!hasIntegral(latex)) return null
   const toks = tokenize(latex)
   const i = toks.findIndex((t) => INTEGRALS.has(t))
   if (i < 0) return null
   try {
-    return integralView(toks, i, Math.min(1, Math.max(0, progress)), scale)
+    return integralView(toks, i, Math.min(1, Math.max(0, progress)), scale, flat)
   } catch (e) {
     if (e instanceof LatexError) return { error: e.message }
     throw e
@@ -1471,7 +1471,7 @@ function fieldOf(body: Token[], vector: boolean): Token[] | null {
   return k === 0 && !nameOnly(body.slice(2)) ? body.slice(2) : null
 }
 
-function integralView(toks: Token[], i: number, progress: number, scale: number): IntegralView {
+function integralView(toks: Token[], i: number, progress: number, scale: number, flat = true): IntegralView {
   const multi = toks[i] === '\\iint' || toks[i] === '\\oiint' ? 2 : toks[i] === '\\iiint' ? 3 : 1
   const head = limitsAt(toks, i)
   let span = integrandSpan(toks, head.k, multi)
@@ -1562,6 +1562,14 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
     const betweenZero = (h: string) => `\\min\\left(0,${f}\\right)\\le ${h}\\le\\max\\left(0,${f}\\right)`
     if (names.length === 1) {
       const [h, k] = [extra.find((n) => n !== 'z') ?? extra[0], extra.find((n) => n === 'z') ?? extra[1]]
+      // 2D 表示: 横の軸の上に、縦（2 つ目の座標）の向きに高さ f の面。3D 表示: 線積分と同じく、横の軸の上に立てた高さ f（3 つ目の座標 z）の幕
+      if (!flat) {
+        return {
+          latex: set(paren(`${names[0]},${h},${k}`), `${joinToks(cond)},${h}=0,${betweenZero(k)}`),
+          note: '軸の上に立てた幕（高さが被積分関数。面積が積分の値。高さ 0 より下は負）',
+          ...swept,
+        }
+      }
       return {
         latex: set(paren(`${names[0]},${h},${k}`), `${joinToks(cond)},${betweenZero(h)},${k}=0`),
         note: '曲線と軸の間（面積が積分の値。軸より下は負）',
