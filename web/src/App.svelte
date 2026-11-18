@@ -1923,12 +1923,14 @@
     ])
   }
 
-  /** 座標の範囲を表示範囲に合わせるかを変える（やめたときは、今の値を書いた範囲として残す） */
+  /**
+   * 座標の範囲を表示範囲に合わせるかを変える。合わせている間も、書いた範囲（c.ranges）は書き換えないので、
+   * やめたときは合わせる前に書いた範囲に戻る（前は、やめたときの表示範囲で上書きして、元の範囲に戻せなかった）
+   */
   function setCoordFollow(cid: number, k: number, on: boolean) {
     const c = coordSystems.find((x) => x.id === cid)
     if (!c) return
     const follow = [...(c.follow ?? [false, false, false])] as [boolean, boolean, boolean]
-    if (!on) c.ranges[k] = [...coordRanges(c)[k]]
     follow[k] = on
     c.follow = follow
     for (const it of items) if (it.coordSys === cid) schedule(it)

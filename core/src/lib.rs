@@ -741,6 +741,13 @@ pub fn plot(
         coords::trim_to_domain(&mut inner, dom, curve, flat);
     }
     let mut outline = built.outline;
+    // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
+    outline.0.append(&mut inner.edge_lines);
+    // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
+    // 流線（点ごとの値つきの線）・座標系があるときは足さない
+    if !flat && !curve && coord.is_none() && built.outline_values.is_empty() {
+        outline.0.extend(mesh::box_edge_lines(&inner, dom));
+    }
     let mut outline_target = (Vec::new(), Vec::new());
     if let Some(c) = &coord {
         // 作る範囲からはみ出した所を落とす（媒介変数表示は、範囲が媒介変数で決まるので切らない）
@@ -1650,7 +1657,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.curve = true;
         }
         P::Implicit { prog, .. } => {
-            b.inner = mesh::implicit_solid_opt(prog, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
+            b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| mesh::implicit_solid_opt(prog, d, ctx.implicit_resolution, &[], 0, ctx.implicit_refine));
             b.kind.push_str(&b.inner.note);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
         }
@@ -1684,18 +1691,33 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
+        // 切り取った後の面が表示範囲に比べて小さければ（x² + y² = 1, 0 ≤ z ≤ 1 を ±6 で）、その周りだけで作り直す（fit_to_shape）
         P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
-            let inner = build(base, ctx)?.settle();
-            let mut m = match &inner.shape {
-                Some(sh) => mesh::project(sh, &ctx.view, dom),
-                None => inner.inner,
+            let made = std::cell::RefCell::new(None);
+            let trimmed = |d: mesh::Domain| -> mesh::Mesh {
+                let c = Ctx { dom: d, ..ctx.clone() };
+                let inner = match build(base, &c) {
+                    Ok(x) => x.settle(),
+                    Err(e) => {
+                        made.borrow_mut().get_or_insert(Err(e));
+                        return mesh::Mesh::default();
+                    }
+                };
+                let mut m = match &inner.shape {
+                    Some(sh) => mesh::project(sh, &ctx.view, d),
+                    None => inner.inner,
+                };
+                for g in cuts {
+                    system::trim_mesh(&mut m, &mut system::values_of(g), 8);
+                }
+                made.borrow_mut().get_or_insert(Ok((inner.curve, inner.kind)));
+                m
             };
-            for g in cuts {
-                system::trim_mesh(&mut m, &mut system::values_of(g), 8);
-            }
+            let m = if cuts.is_empty() { trimmed(dom) } else { fit_to_shape(dom, ctx.implicit_resolution, trimmed) };
+            let (curve, kind) = made.into_inner().unwrap_or_else(|| Err("内部エラー".into()))?;
             b.inner = m;
-            b.curve = inner.curve;
-            b.kind = if cuts.is_empty() { inner.kind } else { format!("{}（不等式で切り取り）", inner.kind) };
+            b.curve = curve;
+            b.kind = if cuts.is_empty() { kind } else { format!("{kind}（不等式で切り取り）") };
         }
         // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）。
         // 不等式があれば、線分を切る
@@ -1750,7 +1772,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.volume = Some((region_distance(&g, dom, n), n));
         }
         P::System { eqs, cuts, faces, .. } if eqs.is_empty() => {
-            b.inner = system::region_faces(cuts, faces, dom, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine);
+            b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| system::region_faces(cuts, faces, d, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine));
             b.fields.push(mesh::Field::region(cuts));
         }
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
@@ -2006,6 +2028,58 @@ fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]
     s
 }
 
+/// 表示範囲に比べて小さい図形を、図形の周りだけの格子で作り直す（表示範囲を広げると粗くなるのを防ぐ）。
+///
+/// 格子のマスの数は表示範囲の 1 辺あたり `n` なので、表示範囲を 4 倍に広げると、半径 1 の球は 1 辺 4 マスほどで粗くなっていた。
+/// まず表示範囲の格子で作り、できた面の外接箱（1.5 マスの余白つき）の 1 辺が表示範囲の 2/3 以下なら、その箱を立方体に広げた所
+/// （表示範囲に収まるように寄せる）に同じマスの数の格子を置いて作り直す。作り直した面が箱の端（表示範囲の端でない所）に触れたら、
+/// 粗い格子で見落とした部分が箱で切れたとみなして、表示範囲の格子の面のままにする
+fn fit_to_shape(dom: mesh::Domain, n: usize, make: impl Fn(mesh::Domain) -> mesh::Mesh) -> mesh::Mesh {
+    let n = n.max(2) as f64;
+    let side = |d: &mesh::Domain| (0..3).map(|a| d.hi[a] - d.lo[a]).fold(0.0, f64::max);
+    let (mut best, mut box_) = (make(dom), dom);
+    // 1 回目は表示範囲の 2/3 以下になるとき。粗い格子の余白（1.5 マス）が大きいので、作り直した面でもう一度だけ詰める（8 割以下になるとき）
+    for shrink in [2.0 / 3.0, 0.8] {
+        let Some((lo, hi)) = bounds(&best.positions) else { break };
+        let pad = 1.5 * side(&box_) / n;
+        let ext = (0..3).map(|a| (hi[a] - lo[a]) + 2.0 * pad).fold(0.0, f64::max);
+        if !(ext > 0.0 && ext <= side(&box_) * shrink) {
+            break;
+        }
+        let mut fit = dom;
+        for a in 0..3 {
+            let s = ext.min(dom.hi[a] - dom.lo[a]);
+            let l = (0.5 * (lo[a] + hi[a]) - 0.5 * s).clamp(dom.lo[a], dom.hi[a] - s);
+            fit.lo[a] = l;
+            fit.hi[a] = l + s;
+        }
+        let next = make(fit);
+        let Some((lo2, hi2)) = bounds(&next.positions) else { break };
+        let tol = 0.5 * ext / n;
+        let touches = (0..3).any(|a| (lo2[a] - fit.lo[a] < tol && fit.lo[a] > dom.lo[a] + tol) || (fit.hi[a] - hi2[a] < tol && fit.hi[a] < dom.hi[a] - tol));
+        if touches {
+            break;
+        }
+        (best, box_) = (next, fit);
+    }
+    best
+}
+
+/// 頂点の外接箱（有限な頂点だけ）。頂点が無ければ None
+fn bounds(positions: &[f32]) -> Option<([f64; 3], [f64; 3])> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in positions.chunks_exact(3) {
+        if p.iter().all(|v| v.is_finite()) {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a] as f64);
+                hi[a] = hi[a].max(p[a] as f64);
+            }
+        }
+    }
+    lo[0].is_finite().then_some((lo, hi))
+}
+
 /// 回した陽関数を計算する範囲（表示中の座標で）: 回転の中心から表示範囲の角までの距離 ρ の、中心の周りの立方体。
 /// 回転は中心からの距離を変えないので、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）
 fn rotated_domain(space: &equation::Space, dom: mesh::Domain) -> mesh::Domain {
@@ -2090,6 +2164,9 @@ impl Shape {
         } else {
             (field, solid)
         };
+        if !self.flat && !curve && self.coord.is_none() {
+            inner.edge_lines = mesh::box_edge_lines(&inner, dom);
+        }
         let end = timing::now_ms();
         record_stats(&mut inner, start, end, end);
         Ok(self.result(inner, field, solid && !self.flat, None))
@@ -2129,16 +2206,17 @@ impl Shape {
     /// 結果の入れ物（式の説明などは、この形のものを使う）
     fn result(
         &self,
-        inner: mesh::Mesh,
+        mut inner: mesh::Mesh,
         field: Option<(Vec<mesh::Field>, mesh::Domain)>,
         solid: bool,
         transform: Option<[f64; 12]>,
     ) -> MeshResult {
+        let lines = std::mem::take(&mut inner.edge_lines);
         MeshResult {
             inner,
             flat: self.flat,
             flat_slice: self.flat_slice,
-            outline: Default::default(),
+            outline: (lines, Vec::new()),
             outline_values: Vec::new(),
             vivid: false,
             outline_target: Default::default(),

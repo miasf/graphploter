@@ -77,9 +77,10 @@ fn reprojected_surface_matches_the_rotation() {
         let ix = m.indices();
         let ours = ix.chunks_exact(3).filter(|t| t.iter().all(|&k| inside(&pos[k as usize * 3..k as usize * 3 + 3]))).count();
         if xy != 0.0 {
-            // 回す前の形は、マスの数を表示範囲と同じにして、表示範囲より広い立方体に作る（マスが 1.5〜2.5 倍大きい）ので、三角形は少ない
+            // 回す前の形は、マスの数を表示範囲と同じにして、表示範囲より広い立方体に作る（マスが 1.5〜2.5 倍大きい）ので、三角形は少ない。
+            // 式から作る面は、表示範囲に見えている部分が小さいと、その周りだけの格子で作り直す（lib.rs の fit_to_shape）ので、さらに多い
             let ratio = ours as f64 / direct as f64;
-            assert!((0.15..1.5).contains(&ratio), "{xy}, {xz}: 三角形の数が {ours}（式から作ると {direct}）");
+            assert!((0.05..1.5).contains(&ratio), "{xy}, {xz}: 三角形の数が {ours}（式から作ると {direct}）");
         }
         // 切り口のふたも、その回転のもの（ふたの点は球の中）
         let caps = m.take_field().expect("ふたの元が無い");

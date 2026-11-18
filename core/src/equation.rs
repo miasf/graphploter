@@ -1812,6 +1812,18 @@ fn reduce_linear(rels: &[(Expr, Rel, Expr)], params: &Params, space: &Space) -> 
     Ok(Some(out))
 }
 
+/// 式が根号（√・整数でない指数の累乗）を含むか
+fn has_radical(e: &Expr) -> bool {
+    match e {
+        Expr::Call(crate::functions::Func::Sqrt, _) => true,
+        Expr::Bin(BinOp::Pow, a, b) => !matches!(**b, Expr::Num(k) if k.fract() == 0.0) || has_radical(a) || has_radical(b),
+        Expr::Neg(a) => has_radical(a),
+        Expr::Bin(_, a, b) => has_radical(a) || has_radical(b),
+        Expr::Call(_, args) => args.iter().any(has_radical),
+        _ => false,
+    }
+}
+
 /// 関係の列（リストを含まない）を [`Plot::System`] にする
 fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
@@ -1837,14 +1849,20 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         };
         let g = Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b));
         let mut best: Vec<(usize, Program)> = Vec::new();
+        let mut best_score = (usize::MAX, usize::MAX);
         for axis in [2, 0, 1] {
             let Some(rs) = crate::solve::roots(&g, &shown[axis], &shown_refs, &consts) else { continue };
             let (u, v) = others(axis);
             let Some(progs) = rs.iter().map(|r| Program::compile_with(r, &[shown_refs[u], shown_refs[v]], &consts).ok()).collect::<Option<Vec<_>>>() else {
                 continue;
             };
-            if best.is_empty() || progs.len() < best.len() {
+            // 解の数が少ない座標を選ぶ。同じなら、根号（√・奇数乗根）を含まない解（その座標の 1 次式）を選ぶ。
+            // 根号の解は、中身が 0 になる所で面が垂直になり、陽関数の格子では細長い三角形と縞になる
+            // （0 ≤ −y ≤ x³ + z³ の z = ∛(−y − x³) より、y = −x³ − z³）
+            let score = (progs.len(), rs.iter().any(has_radical) as usize);
+            if best.is_empty() || score < best_score {
                 best = progs.into_iter().map(|p| (axis, p)).collect();
+                best_score = score;
             }
         }
         best

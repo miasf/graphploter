@@ -4,6 +4,7 @@ use crate::equation::others;
 use crate::eval::{as_real, Program, ProgramSet};
 use num_complex::Complex64 as C;
 
+mod crease;
 mod pieces;
 mod singular;
 pub use pieces::in_inscribed_ball;
@@ -49,6 +50,9 @@ pub struct Mesh {
     pub stats: Stats,
     /// 座標系で移した先 T(q)（頂点ごとに 3 つ。[`crate::coords`]）。空なら座標系なし。描画側が位置と混ぜる
     pub target: Vec<f32>,
+    /// 2D の投影で、真上から見て面積が無くなる三角形（縦に立った面 y = x など）の代わりに引く線分（2 点ずつ、間は NaN）。
+    /// [`flatten`] が作り、`lib.rs` が境目の線（outline）に移す
+    pub edge_lines: Vec<f32>,
 }
 
 /// メッシュを作るのにかかった時間の内訳（ミリ秒）
@@ -2153,6 +2157,8 @@ pub fn implicit_solid_opt(prog: &Program, dom: Domain, n: usize, ranges: &[(f64,
         let cell = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
         // 面が自分と交わる線・尖った点を、X の字・円錐の先のまま描く（singular.rs）
         singular::sharpen_singularities(&mut mesh, prog, cell);
+        // 折れ目（鋭い辺・角。max(|x|, |y|, |z|) = 1 の立方体）を、Dual Contouring の頂点の置き方で立てる（crease.rs）
+        crease::sharpen_creases(&mut mesh, prog, cell);
         let h = cell * 1e-3;
         gradient_normals(&mut mesh, prog, h);
         if let Some(l) = mesh.lod_mesh.as_deref_mut() {
@@ -7747,6 +7753,7 @@ fn merge_inner(meshes: Vec<Mesh>, curve: bool) -> Mesh {
         out.positions.extend_from_slice(&m.positions);
         out.normals.extend_from_slice(&m.normals);
         out.indices.extend(m.indices.iter().map(|k| k + base));
+        out.edge_lines.extend_from_slice(&m.edge_lines);
         // 粗い版が無いメッシュは、そのままの三角形を使う
         if lod {
             let src = if m.lod.is_empty() { &m.indices } else { &m.lod };
@@ -7868,6 +7875,24 @@ fn grid_tris(m: usize, count: usize) -> Vec<u32> {
 /// 縦の座標を 0 にして平らにする（2D 表示）。曲面の法線はすべて +縦 の向きにする
 pub fn flatten(mesh: &mut Mesh, curve: bool) {
     mesh.lod_mesh = None; // 平らにした後の粗い版は作らない（2D 表示は軽い）
+    // 縦に立った面（y = x, x² + y² = 1 など）は、押しつぶすと三角形の面積が無くなって見えなくなる。
+    // 真上から見た面積が 3 次元の面積の 5% 以下の三角形は、押しつぶした後のいちばん長い辺を線として残す
+    if !curve {
+        let p = &mesh.positions;
+        let at = |k: u32| [0, 1, 2].map(|c| p[3 * k as usize + c] as f64);
+        for t in mesh.indices.chunks_exact(3) {
+            let (a, b, c) = (at(t[0]), at(t[1]), at(t[2]));
+            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if !(len > 0.0) || n[2].abs() > 0.05 * len {
+                continue;
+            }
+            let d2 = |x: [f64; 3], y: [f64; 3]| (x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2);
+            let (x, y) = [(a, b), (b, c), (c, a)].into_iter().max_by(|e, f| d2(e.0, e.1).total_cmp(&d2(f.0, f.1))).unwrap_or((a, b));
+            mesh.edge_lines.extend([x[0] as f32, x[1] as f32, 0.0, y[0] as f32, y[1] as f32, 0.0, f32::NAN, f32::NAN, f32::NAN]);
+        }
+    }
     for p in mesh.positions.chunks_exact_mut(3) {
         if p[2].is_finite() {
             p[2] = 0.0;
@@ -7876,6 +7901,61 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
     if !curve {
         mesh.normals = (0..mesh.positions.len() / 3).flat_map(|_| [0.0f32, 0.0, 1.0]).collect();
     }
+}
+
+/// 面が表示範囲の箱の面で切れている縁（箱の同じ面の上にある、三角形 1 つだけの辺）を線分にする（2 点ずつ、間は NaN）。
+///
+/// 縦に立った面（y = 0, y = x²）を真上から見ると、面が真横を向いて細くなり、ほとんど見えなくなる。箱の上下の面での縁を
+/// 面の色の線で引いておくと、真横から見ても線として見える（ふつうの向きでは、面の縁が少し濃くなるだけ）
+pub fn box_edge_lines(mesh: &Mesh, dom: Domain) -> Vec<f32> {
+    use std::collections::HashMap;
+    let p = &mesh.positions;
+    let size = (0..3).map(|a| dom.hi[a] - dom.lo[a]).fold(0.0, f64::max);
+    if !(size > 0.0) || mesh.indices.is_empty() {
+        return Vec::new();
+    }
+    let tol = 1e-5 * size;
+    let at = |k: u32| [0, 1, 2].map(|c| p[3 * k as usize + c] as f64);
+    // 点が乗っている箱の面（6 枚。ビットで）
+    let faces = |q: [f64; 3]| -> u8 {
+        let mut f = 0u8;
+        for a in 0..3 {
+            if (q[a] - dom.lo[a]).abs() <= tol {
+                f |= 1 << (2 * a);
+            }
+            if (q[a] - dom.hi[a]).abs() <= tol {
+                f |= 1 << (2 * a + 1);
+            }
+        }
+        f
+    };
+    let key = |q: [f64; 3]| q.map(|x| (x / tol).round() as i64);
+    let mut count: HashMap<([i64; 3], [i64; 3]), (u32, [f64; 3], [f64; 3])> = HashMap::new();
+    for t in mesh.indices.chunks_exact(3) {
+        let v = [at(t[0]), at(t[1]), at(t[2])];
+        let f = v.map(faces);
+        if f.iter().filter(|&&x| x != 0).count() < 2 {
+            continue;
+        }
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            if f[i] & f[j] == 0 {
+                continue;
+            }
+            let (ka, kb) = (key(v[i]), key(v[j]));
+            if ka == kb {
+                continue;
+            }
+            let k = if ka < kb { (ka, kb) } else { (kb, ka) };
+            count.entry(k).or_insert((0, v[i], v[j])).0 += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (c, a, b) in count.into_values() {
+        if c == 1 {
+            out.extend([a[0] as f32, a[1] as f32, a[2] as f32, b[0] as f32, b[1] as f32, b[2] as f32, f32::NAN, f32::NAN, f32::NAN]);
+        }
+    }
+    out
 }
 
 /// 2D の線分 a–b が、長さが無い・とても短い（大きさ `scale` の 10⁻⁶ 倍以下）か。
@@ -8535,6 +8615,7 @@ impl LocalMesh {
                 note: src.note.clone(),
                 stats: src.stats,
                 target: Vec::new(),
+                edge_lines: Vec::new(),
             }
         };
         let mut out = move_mesh(&self.mesh);
