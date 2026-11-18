@@ -2143,16 +2143,25 @@ impl Expander<'_> {
                 f.eval_batch(&inputs, &mut out);
                 (out[0] == out[1] && out[1] == out[2] && out[0].im == 0.0 && out[0].re.is_finite()).then_some(out[0].re)
             };
-            let eval_at = |p: &Program, pt: [f64; 2]| {
-                let mut out = [C::new(0.0, 0.0)];
-                p.eval_batch(&[&[pt[0]], &[pt[1]]], &mut out);
-                crate::eval::as_real(out[0])
+            // 範囲の端の式を、点の並びにまとめて計算する（1 点ずつ計算すると、呼び出しの手間が計算より大きい）
+            let ends = |progs: &[Program], inputs: &[&[f64]], init: f64, pick: fn(f64, f64) -> f64| -> Vec<f64> {
+                let len = inputs[0].len();
+                let mut acc = vec![init; len];
+                let mut vals = vec![C::new(0.0, 0.0); len];
+                for p in progs {
+                    p.eval_batch(inputs, &mut vals);
+                    for (a, v) in acc.iter_mut().zip(&vals) {
+                        *a = pick(*a, crate::eval::as_real(*v));
+                    }
+                }
+                acc
             };
             let integrand = |inputs: &[&[f64]], out: &mut [f64]| {
+                let los = ends(&low_p, inputs, f64::NEG_INFINITY, f64::max);
+                let his = ends(&high_p, inputs, f64::INFINITY, f64::min);
                 for (j, o) in out.iter_mut().enumerate() {
                     let pt = [inputs[0][j], inputs[1][j]];
-                    let lo = low_p.iter().map(|p| eval_at(p, pt)).fold(f64::NEG_INFINITY, f64::max);
-                    let hi = high_p.iter().map(|p| eval_at(p, pt)).fold(f64::INFINITY, f64::min);
+                    let (lo, hi) = (los[j], his[j]);
                     if hi <= lo || hi.is_nan() || lo.is_nan() {
                         *o = 0.0;
                         continue;
