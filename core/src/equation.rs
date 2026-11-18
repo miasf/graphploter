@@ -601,6 +601,10 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
+    // 重積分だけの行（∬_D f dA・∫∫ … dy dx）は、積分する領域を描き、値を説明に出す
+    if let Some(p) = integral_region(source, params, space)? {
+        return Ok(p);
+    }
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
@@ -846,13 +850,101 @@ fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, s
     parametric(items, params, space)
 }
 
+/// 重積分だけの行を、積分する領域の集合として描く（利用者の要望: 領域を直書きした重積分は、その領域を見せる）。
+/// `@intset((x, y), 条件…)(中身)`（∬_D・∭_D）と、入れ子の `@int(x, a, b) @int(y, c(x), d(x)) …`（累次積分）の、変数が 2 つか 3 つのもの。
+/// 2 重積分は 3D では平面 z = 0（3 つ目の表示中の座標 = 0）の上の領域、2D 表示ではそのままの領域。積分の値は説明に「積分の値」として出す。
+/// 線積分・面積分（点を媒介変数の式で書いたもの・`; {vec}`）・1 重の積分・ほかの式と組み合わせた行は、今までどおり
+fn integral_region(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    use crate::parser::{Chain, Formula, SetE};
+    if !source.trim_start().starts_with("@int") {
+        return Ok(None);
+    }
+    let Ok(e) = crate::parser::parse_with(source, &crate::expand::names()) else { return Ok(None) };
+    let rel_chain = |op: &str, args: &[Expr]| -> Option<Chain> {
+        let rels: Option<Vec<Rel>> = op
+            .strip_prefix("rel:")?
+            .chars()
+            .map(|c| match c {
+                '<' => Some(Rel::Lt),
+                '≤' => Some(Rel::Le),
+                '>' => Some(Rel::Gt),
+                '≥' => Some(Rel::Ge),
+                _ => None,
+            })
+            .collect();
+        Some(Chain { exprs: args.to_vec(), rels: rels?, pos: vec![0; args.len()] })
+    };
+    let (vars, conds): (Vec<String>, Vec<Formula>) = match &e {
+        Expr::Op { op, args } if op == "intset" && args.len() >= 3 => {
+            let vars: Option<Vec<String>> = match &args[0] {
+                Expr::Tuple(items) => items.iter().map(|v| if let Expr::Var(n) = v { Some(n.clone()) } else { None }).collect(),
+                _ => None,
+            };
+            let Some(vars) = vars else { return Ok(None) };
+            let mut conds = Vec::new();
+            for a in &args[1..args.len() - 1] {
+                match a {
+                    Expr::Op { op, args } if op.starts_with("rel:") => match rel_chain(op, args) {
+                        Some(c) => conds.push(Formula::Chain(c)),
+                        None => return Ok(None),
+                    },
+                    Expr::Cond(f) => conds.push((**f).clone()),
+                    _ => return Ok(None), // `; {vec}` など
+                }
+            }
+            (vars, conds)
+        }
+        Expr::Binder { op, .. } if op == "int" => {
+            // 外側から内側へ: @int(x, a, b) @int(y, c, d) 中身 は a ≤ x ≤ b, c ≤ y ≤ d
+            let (mut vars, mut conds) = (Vec::new(), Vec::new());
+            let mut cur = &e;
+            while let Expr::Binder { op, var, args, body } = cur {
+                if op != "int" || args.len() != 2 {
+                    break;
+                }
+                vars.push(var.clone());
+                conds.push(Formula::Chain(Chain { exprs: vec![args[0].clone(), Expr::Var(var.clone()), args[1].clone()], rels: vec![Rel::Le, Rel::Le], pos: vec![0; 3] }));
+                cur = body;
+            }
+            (vars, conds)
+        }
+        _ => return Ok(None),
+    };
+    let mut seen = vars.clone();
+    seen.sort();
+    seen.dedup();
+    if !(2..=3).contains(&vars.len()) || seen.len() != vars.len() {
+        return Ok(None);
+    }
+    // 点の名前は表示中の座標に順に読み替える（集合の内包的表記と同じ）。x・y・z だけなら座標の順にそろえる
+    let mut point: Vec<String> = vars.clone();
+    let coords = ["x", "y", "z"];
+    if point.iter().all(|v| coords.contains(&v.as_str())) {
+        point.sort_by_key(|v| coords.iter().position(|c| c == v));
+    }
+    let mut conds = conds;
+    if point.len() == 2 && !space.flat_slice && !(space.dims == 2) {
+        // 2 重積分を 3D に描くときは、3 つ目の座標 = 0 の平面の上
+        let third = "ζ₀".to_string();
+        conds.push(Formula::Chain(Chain { exprs: vec![Expr::Var(third.clone()), Expr::Num(0.0)], rels: vec![Rel::Eq], pos: vec![0, 0] }));
+        point.push(third);
+    }
+    let formula = Formula::Set(SetE::Builder { point: Expr::Tuple(point.into_iter().map(Expr::Var).collect()), cond: Box::new(Formula::And(conds)) });
+    let plot = compile_formula(formula, params, space)?;
+    let label = if vars.len() == 2 { "2 重積分の領域" } else { "3 重積分の領域" };
+    crate::expand::set_kind(match eval_constant_with(source, params) {
+        Ok((v, _)) => format!("{label}（値 {}）", (v * 1e10).round() / 1e10),
+        Err(_) => label.to_string(),
+    });
+    Ok(Some(plot))
+}
+
 /// 論理式・集合（計画 M11）を描く。選言標準形にして、かたまりが 1 つなら今の連立方程式・不等式の道で描く。
 /// 領域（等式の無いかたまり）どうしの「または」は、1 本の不等式 $\min_k \max_j g_{kj} \le 0$ にまとめる
 /// （重なった面を切り取らなくてよい。和集合の角は、格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
 /// ≠ は「かつ」の中では形を変えないので、除いた所（h = 0）を白丸（曲線）・点線（面・領域）で示す
 fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
-    use crate::logic::{Lit, Op};
-    use crate::parser::{Chain, Formula, SetE};
+    use crate::parser::{Formula, SetE};
     let names = crate::expand::names();
     // 集合の定義の行 `S = …` は、その集合を描く
     let set_line = source.split_once('=').map(|(n, _)| n.trim().trim_start_matches('{').trim_end_matches('}').to_string());
@@ -863,6 +955,13 @@ fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, S
         }
         None => crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?,
     };
+    compile_formula(formula, params, space)
+}
+
+/// 論理式・集合を描く（[`compile_logic`] の続き。積分の領域 [`integral_region`] からも使う）
+fn compile_formula(formula: crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
+    use crate::logic::{Lit, Op};
+    use crate::parser::{Chain, Formula, SetE};
     // 点を媒介変数の式で書いた集合 {(cos t, sin t) | 0 ≤ t ≤ π} は、媒介変数表示
     if let Formula::Set(SetE::Builder { point, cond }) = &formula {
         let comps: Vec<&Expr> = match point {
