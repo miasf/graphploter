@@ -791,6 +791,26 @@ impl Program {
         self.code.ops.iter().any(|op| matches!(op, Op::Var(j) if *j == k))
     }
 
+    /// 面に折れ目（勾配が跳ぶ所）ができうるか。なめらかな関数（三角関数・指数・対数など）と整数乗だけなら false。
+    /// 値が跳ぶ関数（floor・ceil・round・sign・mod）も false: 跳ぶ所の間では式がなめらかで、面は跳ぶ所で切れるだけ
+    /// （折れ曲がって続かない）。abs・min・max・√・整数でない累乗・ほかの関数を使っていれば true（分からない関数も true）
+    pub fn may_crease(&self) -> bool {
+        use Func::*;
+        let smooth = |f: &Func| {
+            matches!(
+                f,
+                Sin | Cos | Tan | Sec | Csc | Cot | Asin | Acos | Atan | Sinh | Cosh | Tanh | Asinh | Acosh | Atanh | Exp | Ln | Log10 | Sinc | Erf | Erfc | Erfi
+                    | Floor | Ceil | Round | Sign | Mod
+            )
+        };
+        let ops = &self.code.ops;
+        ops.iter().any(|op| match op {
+            Op::Call1(f, _) | Op::Call2(f, _, _) | Op::CallN(f, _) => !smooth(f),
+            Op::Bin(BinOp::Pow, _, e) => !matches!(&ops[*e], Op::Const(c) if c.im == 0.0 && c.re.fract() == 0.0),
+            _ => false,
+        })
+    }
+
     /// この式で使われたパラメータの名前
     pub fn used_params(&self) -> &[String] {
         &self.used_params
@@ -1192,6 +1212,17 @@ pub fn as_real(z: C) -> f64 {
 mod tests {
     use super::*;
     use crate::parser::parse;
+
+    #[test]
+    fn may_crease_only_for_kinks() {
+        let p = |src: &str| Program::compile(&parse(src).unwrap(), &["x", "y", "z"]).unwrap().may_crease();
+        for src in ["sin(x) sin(y) sin(z) - 0.001", "x^2 + y^2 - z^2", "mod(x y, z) - z/2", "floor(x) + floor(y) + z", "1/(x y) - z"] {
+            assert!(!p(src), "{src}");
+        }
+        for src in ["max(abs(x), abs(y), abs(z)) - 1", "abs(x) + abs(y) + abs(z) - 6", "min(x y, z) - mod(x, 2)", "x^(2/3) + y^(2/3) + z^(2/3) - 4", "sqrt(x^2 + y^2) - z", "x^y - z"] {
+            assert!(p(src), "{src}");
+        }
+    }
 
     fn eval_xy(src: &str, x: f64, y: f64) -> C {
         let p = Program::compile(&parse(src).unwrap(), &["x", "y"]).unwrap();

@@ -134,7 +134,9 @@ fn qef(planes: &[([f64; 3], [f64; 3])]) -> ([f64; 3], usize) {
 /// 折れ目（鋭い辺・角）の頂点を、Dual Contouring と同じ置き方で折れ目の上へ動かす。`cell` は格子の 1 マスの大きさ
 pub(crate) fn sharpen_creases(mesh: &mut Mesh, prog: &Program, cell: f64) {
     let count = mesh.positions.len() / 3;
-    if count == 0 || prog.vars().len() != 3 || !(cell > 0.0) {
+    // なめらかな式（sin(x) sin(y) sin(z) = 0.001 など）には折れ目が無い（面が交わる所は singular.rs が扱う）。
+    // 調べると、曲がりの急な所が候補になって時間だけかかる（shape_report で陰関数の時間が 2.5 倍になった式があった）
+    if count == 0 || prog.vars().len() != 3 || !(cell > 0.0) || !prog.may_crease() {
         return;
     }
     let pos = |k: usize| [0, 1, 2].map(|c| mesh.positions[3 * k + c] as f64);
