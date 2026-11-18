@@ -743,6 +743,11 @@ pub fn plot(
     let mut outline = built.outline;
     // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
     outline.0.append(&mut inner.edge_lines);
+    // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
+    // 流線（点ごとの値つきの線）・座標系があるときは足さない
+    if !flat && !curve && coord.is_none() && built.outline_values.is_empty() {
+        outline.0.extend(mesh::box_edge_lines(&inner, dom));
+    }
     let mut outline_target = (Vec::new(), Vec::new());
     if let Some(c) = &coord {
         // 作る範囲からはみ出した所を落とす（媒介変数表示は、範囲が媒介変数で決まるので切らない）
@@ -2159,6 +2164,9 @@ impl Shape {
         } else {
             (field, solid)
         };
+        if !self.flat && !curve && self.coord.is_none() {
+            inner.edge_lines = mesh::box_edge_lines(&inner, dom);
+        }
         let end = timing::now_ms();
         record_stats(&mut inner, start, end, end);
         Ok(self.result(inner, field, solid && !self.flat, None))

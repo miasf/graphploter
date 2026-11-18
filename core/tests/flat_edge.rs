@@ -38,3 +38,20 @@ fn lying_surfaces_add_no_lines() {
     let pts = lines.chunks_exact(3).filter(|p| p[0].is_finite()).count();
     assert!(pts < 20, "寝ている面に線が {pts} 点");
 }
+
+/// 3D: 縦に立った面は、表示範囲の箱で切れた縁が線になる（真上から見ると面が真横を向いて見えなくなるため）。
+/// 閉じた面（球）には線を足さない
+#[test]
+fn box_edges_in_3d() {
+    let lines = |src: &str| {
+        let mut m = plot(src, &[-10.0, 10.0, -10.0, 10.0, -5.0, 5.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0)
+            .unwrap_or_else(|_| panic!("{src}"));
+        m.take_outline()
+    };
+    for src in ["y = 0", "y = x^2", "x = 0"] {
+        let l = lines(src);
+        let top: Vec<&[f32]> = l.chunks_exact(3).filter(|p| p[0].is_finite() && (p[2] - 5.0).abs() < 1e-3).collect();
+        assert!(top.len() > 20, "{src}: 上の面の縁の線が {} 点", top.len());
+    }
+    assert!(lines("x^2 + y^2 + z^2 = 4").is_empty(), "球に線がある");
+}

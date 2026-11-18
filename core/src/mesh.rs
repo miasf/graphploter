@@ -7903,6 +7903,61 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
     }
 }
 
+/// 面が表示範囲の箱の面で切れている縁（箱の同じ面の上にある、三角形 1 つだけの辺）を線分にする（2 点ずつ、間は NaN）。
+///
+/// 縦に立った面（y = 0, y = x²）を真上から見ると、面が真横を向いて細くなり、ほとんど見えなくなる。箱の上下の面での縁を
+/// 面の色の線で引いておくと、真横から見ても線として見える（ふつうの向きでは、面の縁が少し濃くなるだけ）
+pub fn box_edge_lines(mesh: &Mesh, dom: Domain) -> Vec<f32> {
+    use std::collections::HashMap;
+    let p = &mesh.positions;
+    let size = (0..3).map(|a| dom.hi[a] - dom.lo[a]).fold(0.0, f64::max);
+    if !(size > 0.0) || mesh.indices.is_empty() {
+        return Vec::new();
+    }
+    let tol = 1e-5 * size;
+    let at = |k: u32| [0, 1, 2].map(|c| p[3 * k as usize + c] as f64);
+    // 点が乗っている箱の面（6 枚。ビットで）
+    let faces = |q: [f64; 3]| -> u8 {
+        let mut f = 0u8;
+        for a in 0..3 {
+            if (q[a] - dom.lo[a]).abs() <= tol {
+                f |= 1 << (2 * a);
+            }
+            if (q[a] - dom.hi[a]).abs() <= tol {
+                f |= 1 << (2 * a + 1);
+            }
+        }
+        f
+    };
+    let key = |q: [f64; 3]| q.map(|x| (x / tol).round() as i64);
+    let mut count: HashMap<([i64; 3], [i64; 3]), (u32, [f64; 3], [f64; 3])> = HashMap::new();
+    for t in mesh.indices.chunks_exact(3) {
+        let v = [at(t[0]), at(t[1]), at(t[2])];
+        let f = v.map(faces);
+        if f.iter().filter(|&&x| x != 0).count() < 2 {
+            continue;
+        }
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            if f[i] & f[j] == 0 {
+                continue;
+            }
+            let (ka, kb) = (key(v[i]), key(v[j]));
+            if ka == kb {
+                continue;
+            }
+            let k = if ka < kb { (ka, kb) } else { (kb, ka) };
+            count.entry(k).or_insert((0, v[i], v[j])).0 += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (c, a, b) in count.into_values() {
+        if c == 1 {
+            out.extend([a[0] as f32, a[1] as f32, a[2] as f32, b[0] as f32, b[1] as f32, b[2] as f32, f32::NAN, f32::NAN, f32::NAN]);
+        }
+    }
+    out
+}
+
 /// 2D の線分 a–b が、長さが無い・とても短い（大きさ `scale` の 10⁻⁶ 倍以下）か。
 /// 描画側は、ほぼ同じ点だけの線を「点」とみなして丸を付けるので、そうした線は描かない。
 /// 回した曲面の切り口では、格子点をちょうど通る所で、ちょうど同じではない（f32 の誤差ほど違う）点の組ができる
