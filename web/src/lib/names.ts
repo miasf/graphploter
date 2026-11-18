@@ -80,8 +80,8 @@ export function nameText(name: string): string | null {
   if (name in LETTERLIKE) return LETTERLIKE[name]
   const m = /^([a-z]+)_([A-Za-z]+)$/.exec(name)
   if (!m) return null
-  // ベクトルの名前は、太字の文字で出す（𝐅）。矢印を重ねる文字（U+20D7）は、字体によって □ になるため
-  if (m[1] === 'vec') return /^[A-Za-z]$/.test(m[2]) ? String.fromCodePoint((m[2] >= 'a' ? 0x1d41a - 97 : 0x1d400 - 65) + m[2].charCodeAt(0)) : null
+  // ベクトルの名前は「ベクトル F」と出す（矢印を重ねる文字 U+20D7 や太字の数学用文字は、スマホの字体によって □ になるため）
+  if (m[1] === 'vec') return /^[A-Za-z]$/.test(m[2]) ? `ベクトル ${m[2]}` : null
   if (m[1] in ACCENTS) {
     const l = letter(m[2])
     return l ? l.text + ACCENTS[m[1]] : null
