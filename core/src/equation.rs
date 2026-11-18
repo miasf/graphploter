@@ -849,7 +849,7 @@ fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, s
 /// 論理式・集合（計画 M11）を描く。選言標準形にして、かたまりが 1 つなら今の連立方程式・不等式の道で描く。
 /// 領域（等式の無いかたまり）どうしの「または」は、1 本の不等式 $\min_k \max_j g_{kj} \le 0$ にまとめる
 /// （重なった面を切り取らなくてよい。和集合の角は、格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
-/// ≠ は「かつ」の中では描き方が変わらないので無視し、説明に注意を出す
+/// ≠ は「かつ」の中では形を変えないので、除いた所（h = 0）を白丸（曲線）・点線（面・領域）で示す
 fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
     use crate::logic::{Lit, Op};
     use crate::parser::{Chain, Formula, SetE};
@@ -892,7 +892,17 @@ fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, S
         let mut out = Vec::new();
         for l in c {
             if l.op == Op::Ne {
-                crate::expand::add_note("≠ は描き方が変わらないので無視");
+                // ≠ は面積・長さの無い所を除くだけなので、形は変えずに、除いた所を白丸・点線で示す（lib.rs の mark_excluded）
+                let h = Expr::Bin(BinOp::Sub, Box::new(crate::expand::expand(&l.l, params)?), Box::new(crate::expand::expand(&l.r, params)?));
+                let h = match space.rotation_matrix() {
+                    Some(m) => rotate_coords(&h, &m, space),
+                    None => h,
+                };
+                let refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+                match Program::compile_with(&h, &refs, &space.with_hidden(params)) {
+                    Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(p),
+                    _ => crate::expand::add_note("≠ は描き方が変わらないので無視"),
+                }
                 continue;
             }
             out.push(Lit { l: crate::expand::expand(&l.l, params)?, op: l.op, r: crate::expand::expand(&l.r, params)? });

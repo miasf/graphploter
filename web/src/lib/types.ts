@@ -418,6 +418,8 @@ export interface MeshData {
   outline?: Float32Array
   /** outline の点ごとの値（ベクトル場の流線の大きさ ‖F‖。valueRange の色の対応表で塗る）。無ければ省略 */
   outlineValues?: Float32Array
+  /** ≠ で除いた点（点ごとに 3 つ）。白丸を描く */
+  holes?: Float32Array
   /** ベクトル場なら true（矢印・流線を、鮮やかな色の対応表 vivid で塗る） */
   vivid?: boolean
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */

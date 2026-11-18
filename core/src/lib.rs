@@ -95,6 +95,8 @@ pub struct MeshResult {
     gpu_reason: String,
     /// 常微分方程式なら、状態の成分の名前（`x`・`y'`。初期値の欄の見出し）
     ode_states: Vec<String>,
+    /// ≠ で除いた点（曲線が h = 0 を横切る所。点ごとに 3 つ）。描画側で白丸を描く
+    holes: Vec<f32>,
 }
 
 /// 3D の陰関数を光線で描くための GLSL と、uniform の値
@@ -193,6 +195,10 @@ impl MeshResult {
     /// 実線の点ごとの値（Float32Array。ベクトル場の流線の大きさ。無ければ空）
     pub fn take_outline_values(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline_values)
+    }
+    /// ≠ で除いた点（Float32Array。点ごとに 3 つ。無ければ空）。描画側で白丸を描く
+    pub fn take_holes(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.holes)
     }
     /// ベクトル場か（矢印・流線を鮮やかな色の対応表で塗る）
     #[wasm_bindgen(getter)]
@@ -454,6 +460,7 @@ pub fn coord_grid(
         gpu3d: None,
         gpu_reason: String::new(),
         ode_states: Vec::new(),
+        holes: Vec::new(),
     })
 }
 
@@ -743,6 +750,14 @@ pub fn plot(
     let mut outline = built.outline;
     // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
     outline.0.append(&mut inner.edge_lines);
+    // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
+    let excluded = expand::take_excluded();
+    let mut holes = Vec::new();
+    if !excluded.is_empty() && coord.is_none() {
+        let (h, dashed) = mark_excluded(&inner, curve, &excluded);
+        holes = h;
+        outline.1.extend(dashed);
+    }
     // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
     // 流線（点ごとの値つきの線）・座標系があるときは足さない
     if !flat && !curve && coord.is_none() && built.outline_values.is_empty() {
@@ -833,6 +848,7 @@ pub fn plot(
         coord,
         defs: (expand::used(), expand::def_line()),
         ode_states: expand::ode_states(),
+        holes,
     })
 }
 
@@ -2043,6 +2059,101 @@ fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]
     s
 }
 
+/// ≠ で除いた所 h = 0（`hs` のどれか）を示す。曲線なら、線分が h = 0 を横切る点（はさみうち法で寄せる）を白丸の点にし、
+/// 面・領域なら、三角形ごとに h = 0 の線分を求めて点線にする。曲線が h = 0 の上を走っている（頂点の半分以上で h = 0）なら、
+/// その h では何も出さない（図形全体が除かれる。点が多すぎるので）。戻り値は（白丸の点, 点線の線分）
+fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f32>, Vec<f32>) {
+    let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let eval_at = |h: &eval::Program, q: &[[f64; 3]]| -> Vec<f64> {
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| q.iter().map(|p| p[c]).collect());
+        let mut out = vec![num_complex::Complex64::new(0.0, 0.0); q.len()];
+        h.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+        out.iter().map(|v| if v.im.abs() <= 1e-9 * v.re.abs().max(1.0) { v.re } else { f64::NAN }).collect()
+    };
+    let lerp = |a: [f64; 3], b: [f64; 3], t: f64| [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c]));
+    let (mut holes, mut dashed) = (Vec::new(), Vec::new());
+    for h in hs {
+        let v = eval_at(h, &pts);
+        if curve {
+            let zeros = v.iter().filter(|x| **x == 0.0).count();
+            if zeros * 2 > v.iter().filter(|x| x.is_finite()).count() {
+                continue;
+            }
+            // 符号が変わる線分（はさみうち法で 30 回寄せる）と、ちょうど 0 の頂点
+            let mut found: Vec<[f64; 3]> = Vec::new();
+            let mut segs: Vec<([f64; 3], [f64; 3], f64, f64)> = Vec::new();
+            for k in 0..pts.len().saturating_sub(1) {
+                let (a, b) = (v[k], v[k + 1]);
+                if !(a.is_finite() && b.is_finite()) {
+                    continue;
+                }
+                if a == 0.0 {
+                    found.push(pts[k]);
+                } else if a * b < 0.0 {
+                    segs.push((pts[k], pts[k + 1], a, b));
+                }
+            }
+            if let Some(&last) = v.last() {
+                if last == 0.0 {
+                    found.push(pts[pts.len() - 1]);
+                }
+            }
+            for _ in 0..30 {
+                if segs.is_empty() {
+                    break;
+                }
+                let mids: Vec<[f64; 3]> = segs.iter().map(|&(a, b, fa, fb)| lerp(a, b, fa / (fa - fb))).collect();
+                let fm = eval_at(h, &mids);
+                for (s, (m, f)) in segs.iter_mut().zip(mids.iter().zip(fm)) {
+                    if !f.is_finite() || f == 0.0 {
+                        s.0 = *m;
+                        s.1 = *m;
+                        s.2 = 0.0;
+                        s.3 = 0.0;
+                    } else if f * s.2 < 0.0 {
+                        (s.1, s.3) = (*m, f);
+                    } else {
+                        (s.0, s.2) = (*m, f);
+                    }
+                }
+                segs.retain(|s| s.2 != 0.0 || s.0 != s.1);
+                // 寄り切った（端の値がとても小さい）線分は、点を決める
+                segs.retain(|&(a, b, fa, fb)| {
+                    let done = (0..3).all(|c| (a[c] - b[c]).abs() <= 1e-12 * (1.0 + a[c].abs()));
+                    if done {
+                        found.push(lerp(a, b, fa / (fa - fb)));
+                    }
+                    !done
+                });
+            }
+            for (a, b, fa, fb) in segs {
+                found.push(if fa == fb { a } else { lerp(a, b, fa / (fa - fb)) });
+            }
+            for p in found.into_iter().take(500) {
+                holes.extend(p.map(|x| x as f32));
+            }
+        } else {
+            for t in mesh.indices.chunks_exact(3) {
+                let ids = [t[0] as usize, t[1] as usize, t[2] as usize];
+                let f = ids.map(|i| v[i]);
+                if !f.iter().all(|x| x.is_finite()) {
+                    continue;
+                }
+                let mut cross = Vec::with_capacity(2);
+                for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                    if (f[i] < 0.0) != (f[j] < 0.0) {
+                        cross.push(lerp(pts[ids[i]], pts[ids[j]], f[i] / (f[i] - f[j])));
+                    }
+                }
+                if let [a, b] = cross[..] {
+                    dashed.extend([a[0] as f32, a[1] as f32, a[2] as f32, b[0] as f32, b[1] as f32, b[2] as f32, f32::NAN, f32::NAN, f32::NAN]);
+                }
+            }
+        }
+    }
+    (holes, dashed)
+}
+
 /// 表示範囲に比べて小さい図形を、図形の周りだけの格子で作り直す（表示範囲を広げると粗くなるのを防ぐ）。
 ///
 /// 格子のマスの数は表示範囲の 1 辺あたり `n` なので、表示範囲を 4 倍に広げると、半径 1 の球は 1 辺 4 マスほどで粗くなっていた。
@@ -2257,6 +2368,7 @@ impl Shape {
             gpu3d: self.gpu3d.clone(),
             gpu_reason: String::new(),
             ode_states: Vec::new(),
+            holes: Vec::new(),
         }
     }
 }
@@ -2358,6 +2470,7 @@ impl CapSource {
             gpu3d: None,
             gpu_reason: String::new(),
             ode_states: Vec::new(),
+            holes: Vec::new(),
         })
     }
 }

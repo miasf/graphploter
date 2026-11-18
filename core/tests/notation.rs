@@ -639,9 +639,11 @@ fn unions_of_regions() {
 
 #[test]
 fn not_equal_empty_and_parametric_sets() {
-    let m = run("x ≠ 0, x^2+y^2+z^2 ≤ 1", "", &[]).unwrap();
-    assert!(m.kind().contains("≠"), "{}", m.kind());
+    // ≠ は形を変えず、除いた所（球の中の x = 0 の円板の縁ではなく、領域の面の上の x = 0 の線）を点線で示す
+    let mut m = run("x ≠ 0, x^2+y^2+z^2 ≤ 1", "", &[]).unwrap();
+    assert!(!m.kind().contains("無視"), "{}", m.kind());
     assert_eq!(m.positions(), mesh("x^2+y^2+z^2 ≤ 1", "", &[]).0);
+    assert!(m.take_outline_dashed().iter().filter(|v| v.is_finite()).count() > 30, "除いた線が無い");
     let m = run("⊥ ∨ ∅", "", &[]).unwrap();
     assert!(m.positions().is_empty() && m.kind().contains("空集合"), "{}", m.kind());
     // 媒介変数で書いた集合: 条件が範囲になる（画面の範囲の欄 [0, 5] より優先。半円なので y ≥ 0）

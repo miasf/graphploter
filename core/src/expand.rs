@@ -298,6 +298,8 @@ thread_local! {
     static USED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 式の説明に足す注意
     static NOTES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// ≠ で除いた所 h = 左 − 右 ≠ 0 の h（表示中の座標の式）。曲線なら h = 0 の点に白丸、面・領域なら h = 0 の線を点線で描く
+    static EXCLUDED: RefCell<Vec<crate::eval::Program>> = const { RefCell::new(Vec::new()) };
     /// 集合の条件で決めた媒介変数の範囲
     static PARAM_RANGES: RefCell<Vec<(String, f64, f64)>> = const { RefCell::new(Vec::new()) };
     /// 近似を使った（範囲の形にならない条件で切り取った領域の積分）。画面の説明に「（積分は近似）」と出す
@@ -430,6 +432,7 @@ pub fn install(defs: Defs) -> Installed {
     USED_PARAMS.with(|u| u.borrow_mut().clear());
     APPROX.with(|a| *a.borrow_mut() = false);
     NOTES.with(|n| n.borrow_mut().clear());
+    EXCLUDED.with(|n| n.borrow_mut().clear());
     PARAM_RANGES.with(|r| r.borrow_mut().clear());
     DEF_LINE.with(|d| *d.borrow_mut() = None);
     REACH.with(|x| *x.borrow_mut() = 20.0);
@@ -461,6 +464,16 @@ pub fn set_def(name: &str) -> Option<crate::parser::SetE> {
 }
 
 /// 式の説明に足す注意（「≠ は描けないので無視」など）
+/// ≠ で除いた所の式 h（[`EXCLUDED`]）を足す
+pub fn add_excluded(h: crate::eval::Program) {
+    EXCLUDED.with(|n| n.borrow_mut().push(h));
+}
+
+/// ≠ で除いた所の式を取り出す（空にする）
+pub fn take_excluded() -> Vec<crate::eval::Program> {
+    EXCLUDED.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
 pub fn add_note(s: &str) {
     NOTES.with(|n| {
         let mut n = n.borrow_mut();

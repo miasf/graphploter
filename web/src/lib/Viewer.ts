@@ -1080,6 +1080,7 @@ export class Viewer {
     this.dirty = true
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
+    for (const h of this.holeMarks.values()) (h.material as THREE.ShaderMaterial).uniforms.uBg.value.set(this.theme.background)
     if (this.domain) this.buildFrame(this.domain)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
   }
@@ -1421,6 +1422,7 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
+    this.setHoles(id, mesh)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
     this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'), style.render === 'gpu')
@@ -2272,6 +2274,56 @@ export class Viewer {
 
   /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
   private styles = new Map<number, PlotStyle>()
+  /** ≠ で除いた点の白丸（式ごと）。曲線を GPU の 2D の描き方で描いて線を隠すときも見えるよう、図形とは別に置く */
+  private holeMarks = new Map<number, THREE.Points>()
+
+  /** ≠ で除いた点に白丸を置く（中を背景の色で塗り、縁を図形の色にする。画面の上の大きさは一定） */
+  private setHoles(id: number, mesh: MeshData) {
+    const old = this.holeMarks.get(id)
+    if (old) {
+      this.scene.remove(old)
+      old.geometry.dispose()
+      ;(old.material as THREE.Material).dispose()
+      this.holeMarks.delete(id)
+    }
+    if (!mesh.holes || mesh.holes.length === 0) return
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(mesh.holes, 3))
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(this.styles.get(id)?.color ?? '#2b6cb0') },
+        uBg: { value: new THREE.Color(this.theme.background) },
+        uSize: { value: 11 * this.renderer.getPixelRatio() },
+      },
+      vertexShader: `
+        uniform float uSize;
+        void main() {
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          // 線・面と同じ深さで重なってちらつかないよう、少し手前に出す
+          gl_Position.z -= 2e-3 * gl_Position.w;
+          gl_PointSize = uSize;
+        }`,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform vec3 uBg;
+        void main() {
+          float r = length(gl_PointCoord - 0.5) * 2.0;
+          if (r > 1.0) discard;
+          float ring = smoothstep(0.5, 0.62, r);
+          gl_FragColor = vec4(mix(uBg, uColor, ring), 1.0 - smoothstep(0.88, 1.0, r));
+          // 色は線形の値で持っているので、画面の色空間（sRGB）に直す（線・面の材質と同じ色に見えるように）
+          #include <colorspace_fragment>
+        }`,
+      transparent: true,
+    })
+    const pts = new THREE.Points(geo, mat)
+    pts.frustumCulled = false
+    pts.renderOrder = 10
+    pts.raycast = () => {}
+    pts.visible = this.styles.get(id)?.visible ?? true
+    this.holeMarks.set(id, pts)
+    this.scene.add(pts)
+  }
 
   /** 色・表示/非表示・格子線などの見た目だけを変える（計算し直さない） */
   setStyle(id: number, style: PlotStyle) {
@@ -2286,6 +2338,11 @@ export class Viewer {
     this.styles.set(id, style)
     this.dirty = true
     const c = new THREE.Color(style.color)
+    const holes = this.holeMarks.get(id)
+    if (holes) {
+      holes.visible = style.visible
+      ;(holes.material as THREE.ShaderMaterial).uniforms.uColor.value.copy(c)
+    }
 
     if (p.kind === 'curve') {
       p.line.visible = style.visible
@@ -2366,6 +2423,7 @@ export class Viewer {
   }
 
   removePlot(id: number) {
+    this.setHoles(id, { holes: undefined } as MeshData)
     this.removeGpu2d(id)
     this.removeGpu3d(id)
     this.gpuRejected.delete(id)
