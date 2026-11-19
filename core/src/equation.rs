@@ -932,7 +932,10 @@ fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, S
 }
 
 /// 点を媒介変数の式で書いた集合 {(cos t, sin t, 0) | 0 ≤ t ≤ π} を、媒介変数表示にする。
-/// 条件は媒介変数の範囲（a ≤ t ≤ b、t ≤ b など）だけ。範囲は画面の範囲の欄より優先する（[`crate::expand::param_range`]）
+/// 条件は媒介変数の範囲（a ≤ t ≤ b、t ≤ b など）だけ。範囲は画面の範囲の欄より優先する（[`crate::expand::param_range`]）。
+/// 媒介変数は、条件で範囲を書いた名前のうち点の式に出てくるもの（パラメータ・定義の名前は除く）で、t・u・v でなくてもよい
+/// （{(x, x²) | 0 ≤ x ≤ 1}・{(s, sin s) | …}・{(r cos θ, r sin θ) | …}）。t・u・v 以外の名前は、出てくる順に
+/// t（1 つ）・u, v（2 つ）・u, v, t（3 つ）に付け替えて描く
 fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
     use crate::parser::Formula;
     let mut chains = Vec::new();
@@ -948,6 +951,44 @@ fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, 
         }
     }
     flatten(cond, &mut chains)?;
+    // 媒介変数: 条件の両端に名前だけで出てくるもののうち、点の式に出てくるもの（点の式に出てくる順）
+    let defined = crate::expand::names();
+    let mut bounded: Vec<String> = Vec::new();
+    for c in &chains {
+        for e in &c.exprs {
+            if let Expr::Var(v) = e {
+                if !params.contains_key(v) && !defined.contains(v) && !bounded.contains(v) {
+                    bounded.push(v.clone());
+                }
+            }
+        }
+    }
+    let mut in_point = Vec::new();
+    point.collect_vars(&mut in_point);
+    let found: Vec<String> = in_point.iter().filter(|v| bounded.contains(v)).fold(Vec::new(), |mut acc, v| {
+        if !acc.contains(v) {
+            acc.push(v.clone());
+        }
+        acc
+    });
+    if found.len() > 3 {
+        return Err("媒介変数は 3 つまでにしてください".into());
+    }
+    // t・u・v 以外の名前があれば、全部を t・u・v に付け替える
+    let rename: Vec<(String, String)> = if found.iter().all(|v| is_param_var(v)) {
+        found.iter().map(|v| (v.clone(), v.clone())).collect()
+    } else {
+        if let Some(v) = in_point.iter().find(|v| is_param_var(v) && !found.contains(v)) {
+            return Err(format!("媒介変数 {v} の範囲も、0 ≤ {v} ≤ 1 のように書いてください"));
+        }
+        let targets: &[&str] = match found.len() {
+            1 => &["t"],
+            2 => &["u", "v"],
+            _ => &["u", "v", "t"],
+        };
+        found.iter().zip(targets).map(|(v, t)| (v.clone(), t.to_string())).collect()
+    };
+    let new_name = |v: &str| rename.iter().find(|(a, _)| a == v).map(|(_, b)| b.clone());
     let mut lo: Vec<(String, f64)> = Vec::new();
     let mut hi: Vec<(String, f64)> = Vec::new();
     let value = |e: &Expr| -> Result<f64, String> {
@@ -956,33 +997,45 @@ fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, 
         p.eval_batch(&[], &mut out);
         Ok(crate::eval::as_real(out[0]))
     };
+    let names = found.join(", ");
     for c in chains {
         for (k, rel) in c.rels.iter().enumerate() {
             let (a, b) = (&c.exprs[k], &c.exprs[k + 1]);
             let (small, big) = match rel {
                 Rel::Lt | Rel::Le => (a, b),
                 Rel::Gt | Rel::Ge => (b, a),
-                Rel::Eq => return Err("媒介変数で書いた集合の条件に = は使えません".into()),
+                Rel::Eq => {
+                    return Err("媒介変数で書いた集合の条件に = は使えません（座標の等式なら {(x, y) | y = x², 0 ≤ x ≤ 1} のように、点を (x, y) と書いてください）".into())
+                }
             };
             match (small, big) {
-                (_, Expr::Var(v)) if is_param_var(v) => lo.push((v.clone(), value(small)?)),
-                (Expr::Var(v), _) if is_param_var(v) => hi.push((v.clone(), value(big)?)),
-                _ => return Err("媒介変数で書いた集合の条件には、0 ≤ t ≤ 2π のような媒介変数（t, u, v）の範囲だけを書けます".into()),
+                (_, Expr::Var(v)) if new_name(v).is_some() => lo.push((new_name(v).unwrap_or_default(), value(small)?)),
+                (Expr::Var(v), _) if new_name(v).is_some() => hi.push((new_name(v).unwrap_or_default(), value(big)?)),
+                _ if found.is_empty() => {
+                    return Err("媒介変数で書いた集合の条件には、0 ≤ t ≤ 2π のような、点の式に出てくる媒介変数の範囲を書いてください".into())
+                }
+                _ => return Err(format!("媒介変数で書いた集合の条件には、媒介変数（{names}）の範囲だけを、0 ≤ {} ≤ 1 のように数で書けます", found[0])),
             }
         }
     }
     for (v, a) in &lo {
-        let Some((_, b)) = hi.iter().find(|(w, _)| w == v) else { return Err(format!("{v} の上の端を書いてください")) };
+        let Some((_, b)) = hi.iter().find(|(w, _)| w == v) else { return Err(format!("{} の上の端を書いてください", old_name(&rename, v))) };
         crate::expand::set_param_range(v, *a, *b);
     }
     if let Some((v, _)) = hi.iter().find(|(v, _)| !lo.iter().any(|(w, _)| w == v)) {
-        return Err(format!("{v} の下の端を書いてください"));
+        return Err(format!("{} の下の端を書いてください", old_name(&rename, v)));
     }
-    let items = match crate::expand::expand(point, params)? {
+    let point = point.substitute(&|v: &str| new_name(v).map(Expr::Var));
+    let items = match crate::expand::expand(&point, params)? {
         Expr::Tuple(items) => items,
         e => return Err(format!("媒介変数で書いた集合の点は、(x(t), y(t)) のように組で書いてください（{e:?}）")),
     };
     parametric(items, params, space)
+}
+
+/// 付け替えた媒介変数の、元の名前（誤りの文に使う）
+fn old_name(rename: &[(String, String)], new: &str) -> String {
+    rename.iter().find(|(_, b)| b == new).map(|(a, _)| a.clone()).unwrap_or_else(|| new.to_string())
 }
 
 /// 解析・展開した式（[`compile_with`]）をコンパイルする

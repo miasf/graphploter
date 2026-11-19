@@ -877,12 +877,19 @@ impl Parser<'_> {
                 }
             }
         }
-        // `; {vec}`: ベクトル場と向きの付いた要素の内積（F · dr、F · dS）
+        // `; {vec}`: ベクトル場と向きの付いた要素の内積（F · dr、F · dS）。`; {d_s}`・`; {d_x}, {d_y}` は積分の記号の d の後の文字
+        // （弧長 ds・面積 dS・dA・体積 dV・座標 dx。範囲の次元と合っているかを確かめる）。`,` で区切って並べられる
         if *self.peek() == Tok::Semi {
             self.next();
-            match self.next().tok {
-                Tok::Var(m) => args.push(Expr::Op { op: format!("mode:{m}"), args: Vec::new() }),
-                _ => return err("; の後には {vec} と書いてください", self.pos()),
+            loop {
+                match self.next().tok {
+                    Tok::Var(m) => args.push(Expr::Op { op: format!("mode:{m}"), args: Vec::new() }),
+                    _ => return err("; の後には {vec} か {d_s} のように書いてください", self.pos()),
+                }
+                if *self.peek() != Tok::Comma {
+                    break;
+                }
+                self.next();
             }
         }
         self.expect(Tok::RParen, "閉じ括弧 ')'")?;

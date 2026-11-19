@@ -187,6 +187,55 @@ const OPENERS: Record<string, string> = {
 type Token = string // "\\name"（コマンド）か 1 文字
 
 function tokenize(src: string): Token[] {
+  return normalizeSetTokens(rawTokenize(src))
+}
+
+/** 空白の命令（\, など）か */
+const isSpaceTok = (t: Token | undefined) => t === '\\,' || t === '\\;' || t === '\\:' || t === '\\ ' || t === '\\!' || t === '\\quad' || t === '\\qquad'
+
+/**
+ * 集合の書き方の揺れをそろえる。MathLive のキーボードで { を打つと \left\lbrace … \right\rbrace、集合の中で | を打つと
+ * \,\middle\vert\,（\middle{\vert}・\middle| も）になるので、\left\{ … \right\} と \mid に直す。
+ * \mid の両側の空白（\,）も消す（点と条件の区切りの判定・括弧の外し方が、空白で崩れないように）
+ */
+function normalizeSetTokens(toks: Token[]): Token[] {
+  const out: Token[] = []
+  for (let k = 0; k < toks.length; k++) {
+    const t = toks[k]
+    if (t === '\\lbrace') {
+      out.push('\\{')
+      continue
+    }
+    if (t === '\\rbrace') {
+      out.push('\\}')
+      continue
+    }
+    if (t === '\\middle') {
+      const bar = (u: Token | undefined) => u === '|' || u === '\\vert' || u === '\\mid' || u === '\\lvert' || u === '\\rvert'
+      if (bar(toks[k + 1])) {
+        k += 1
+      } else if (toks[k + 1] === '{' && bar(toks[k + 2]) && toks[k + 3] === '}') {
+        k += 3
+      } else {
+        continue // そのほかの \middle（\middle/ など）は、区切りの形だけ残す
+      }
+      while (isSpaceTok(out[out.length - 1])) out.pop()
+      out.push('\\mid')
+      while (isSpaceTok(toks[k + 1])) k++
+      continue
+    }
+    if (t === '\\mid') {
+      while (isSpaceTok(out[out.length - 1])) out.pop()
+      out.push(t)
+      while (isSpaceTok(toks[k + 1])) k++
+      continue
+    }
+    out.push(t)
+  }
+  return out
+}
+
+function rawTokenize(src: string): Token[] {
   const out: Token[] = []
   let i = 0
   while (i < src.length) {
@@ -704,11 +753,15 @@ class Converter {
           if (t2 === '_') subToks = this.rawTokens()
           else if (t2 === '^') hi = this.arg()
         }
-        const { body, vars, vector } = this.integrand(multi)
+        const integrand = this.integrand(multi)
+        const { body, vector } = integrand
+        const vars = integrand.vars.map(engineVar)
+        /** 積分の d の後の文字（計算エンジンが、範囲の次元と合うかを確かめる。ds の範囲が曲面なら誤り） */
+        const marks = (vs: string[]) => vs.map((v) => `{d_${v}}`).join(',')
         if (vector) {
           // ベクトル場の線積分・流束 ∫_C F · dr、∬_S F · dS: 曲線・曲面を集合で書く
           if (subToks === null || hi !== null) throw new LatexError('F · dr・F · dS の積分は、下に曲線・曲面を {(cos t, sin t) | 0 ≤ t ≤ 2π} の形で書いてください')
-          this.out += ` @intset(${regionOf(subToks, [])}; {vec})(${body}) `
+          this.out += ` @intset(${regionOf(subToks, [])}; {vec},${marks(vars)})(${body}) `
           return
         }
         if (subToks === null && hi === null) {
@@ -724,7 +777,32 @@ class Converter {
           return
         }
         if (subToks === null) throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
-        this.out += ` @intset(${regionOf(subToks, vars)})(${body}) `
+        const region = regionOf(subToks, vars)
+        let sum = ` @intset(${region}; ${marks(vars)})(${body}) `
+        // 曲線の上の P dx + Q dy (+ R dz): 続く「± 中身 d座標」も、同じ曲線の上の積分にして足す
+        if (vars.length === 1 && COORD_LETTERS.has(vars[0]) && isCurveRegion(subToks)) {
+          const used = new Set(vars)
+          for (;;) {
+            let k = this.i
+            while (SPACES.has(this.toks[k] ?? '')) k++
+            const sign = this.toks[k]
+            if (sign !== '+' && sign !== '-') break
+            let span
+            try {
+              span = integrandSpan(this.toks, k + 1, 1)
+            } catch {
+              break
+            }
+            if (span.vector || span.vars.length !== 1 || !COORD_LETTERS.has(span.vars[0]) || used.has(span.vars[0])) break // x, y, z だけ（名前の付け替えは要らない）
+            const term = new Converter(this.toks.slice(k + 1, span.end)).run()
+            if (term === '') break
+            used.add(span.vars[0])
+            sum += `${sign} @intset(${region}; ${marks(span.vars)})(${term}) `
+            this.i = span.next
+          }
+          if (used.size > 1) sum = ` (${sum}) `
+        }
+        this.out += sum
         return
       }
       case 'begin': {
@@ -920,11 +998,17 @@ function derivative(a: string, b: string): string | null {
 }
 
 /** 間に入ってよい空白の命令 */
-const SPACES = new Set(['\\,', '\;', '\\:', '\\ ', '\\!', '\\quad', '\\qquad'])
+const SPACES = new Set(['\\,', '\\;', '\\:', '\\ ', '\\!', '\\quad', '\\qquad'])
+
+/** 積分の d の後に書けるギリシャ文字（極座標の dθ、面積要素の dσ など） */
+const DIFF_GREEK = new Set(['\\theta', '\\vartheta', '\\phi', '\\varphi', '\\rho', '\\varrho', '\\sigma', '\\tau'])
+
+/** 積分の d の後の文字を、計算エンジンの名前にする（\\theta → theta、\\varphi → phi） */
+const engineVar = (v: string) => (v.startsWith('\\') ? v.slice(1).replace(/^var/, '') : v)
 
 /** 位置 p から「d + 文字 1 つ」（\mathrm{d}x・\differentialD x も）なら、変数と、d の部分のトークンの数（変数の手前まで） */
 function differentialAt(toks: Token[], p: number): { v: string; len: number; vector?: boolean } | null {
-  const letter = (k: number) => (/^[A-Za-z]$/.test(toks[k] ?? '') ? toks[k] : null)
+  const letter = (k: number) => (/^[A-Za-z]$/.test(toks[k] ?? '') || DIFF_GREEK.has(toks[k] ?? '') ? toks[k] : null)
   const t = toks[p]
   // ベクトルの微分 d\mathbf{r}・d\vec{S}（len は文字の手前まで。文字の後の } も読み飛ばすので、文字の位置に 1 足して返す）
   if ((t === 'd' || t === '\\differentialD') && ['\\mathbf', '\\vec', '\\boldsymbol', '\\overrightarrow', '\\mathbb'].includes(toks[p + 1] ?? '') && toks[p + 2] === '{' && letter(p + 3) && toks[p + 4] === '}') {
@@ -993,7 +1077,7 @@ function regionOf(toks: Token[], vars: string[]): string {
   const name = regionNameOf(toks)
   if (name !== null) {
     const def = (REGIONS[name] ?? '').trim()
-    if (def === '') throw new LatexError(`${regionLabel(name)} の範囲を、下の欄に書いてください（例: {(x, y) | x² + y² < 1}）`)
+    if (def === '' || def.includes('\\placeholder')) throw new LatexError(`${regionLabel(name)} の範囲を、下の欄に書いてください（例: {(x, y) | x² + y² < 1}、曲線なら {(cos t, sin t) | 0 ≤ t ≤ 2π}）`)
     toks = tokenize(def)
   }
   // 集合の括弧を外す
@@ -1027,12 +1111,23 @@ function regionOf(toks: Token[], vars: string[]): string {
   const boxes = text.split(/[*×]/).map((p) => p.trim())
   const ranges = boxes.map((b) => b.match(/^\[(.+),(.+)\]$/))
   if (ranges.every((m) => m) && ranges.length > 0) {
-    if (ranges.length !== vars.length) throw new LatexError(`区間が ${ranges.length} 個あるので、dx\\,dy のように変数を ${ranges.length} 個書いてください`)
-    const conds = ranges.map((m, k) => `${m![1].trim()}<=${vars[k]}<=${m![2].trim()}`)
-    const point = vars.length === 1 ? vars[0] : `(${vars.join(',')})`
+    // dA・dV（大文字 1 つ）なら、変数は x, y, z
+    const names = vars.length === 1 && /^[A-Z]$|^sigma$/.test(vars[0]) ? ['x', 'y', 'z'].slice(0, ranges.length) : vars
+    if (ranges.length !== names.length) throw new LatexError(`区間が ${ranges.length} 個あるので、dx\\,dy のように変数を ${ranges.length} 個書いてください`)
+    const conds = ranges.map((m, k) => `${m![1].trim()}<=${names[k]}<=${m![2].trim()}`)
+    const point = names.length === 1 ? names[0] : `(${names.join(',')})`
     return `${point},${conds.join(',')}`
   }
   throw new LatexError('積分する領域は、{(x,y) | 条件} か [0,1]×[0,2] の形で書いてください')
+}
+
+/** 曲線の上の dx・dy・dz として読む文字 */
+const COORD_LETTERS = new Set(['x', 'y', 'z'])
+
+/** 積分記号の下が、集合か範囲の名前（区間の直積 [0,1]×[0,2] ではない）か。P dx + Q dy を曲線の上の積分として読むのはこのときだけ */
+function isCurveRegion(sub: Token[]): boolean {
+  if (regionNameOf(sub) !== null) return true
+  return sub[0] === '\\{' || (sub[0] === '\\left' && sub[1] === '\\{')
 }
 
 // ---- 名前で書いた積分の範囲（∬_D f dA の D）----
@@ -1330,7 +1425,7 @@ function limitsAt(toks: Token[], i: number): { sub: Token[] | null; sup: Token[]
 }
 
 /** 積分する範囲: 変数の組と条件（{(x, y) | 条件}）か、点を式で書いた集合（{(r cos θ, r sin θ) | 範囲}） */
-type IntegralRegion = { names: string[]; cond: Token[] } | { comps: Token[][]; params: Token[]; cond: Token[] }
+type IntegralRegion = { names: string[]; cond: Token[] } | { comps: Token[][]; params: Token[]; cond: Token[]; label?: Map<Token, Token> }
 
 /** 積分記号の下の範囲（名前なら範囲の欄の中身）を読む。vars は dx\,dy の変数（区間の直積の変数の名前に使う） */
 function integralRegion(sub: Token[], vars: string[]): IntegralRegion {
@@ -1364,12 +1459,68 @@ function integralRegion(sub: Token[], vars: string[]): IntegralRegion {
   // 2 本目より後の | は、条件の中の絶対値。そのまま戻す
   const cond = expandListedRanges(parts.slice(1).reduce((a, b) => [...a, '|', ...b]))
   const comps = splitTop(stripParens(parts[0]), (t) => t === ',')
-  if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) return { names: comps.map((c) => c[0]), cond }
+  if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) {
+    const names = comps.map((c) => c[0])
+    // 等式の条件（y = x²・x = y = z）があれば、解いて曲線・曲面の点の式にする
+    return splitTop(cond, (t) => t === ',').some((p) => p.includes('=')) ? solveEqualities(names, cond) : { names, cond }
+  }
   // 媒介変数は、条件に出てくる文字のうち、点の式にも出てくるもの（点の式に出てくる順）
   const isName = (t: Token) => (/^[A-Za-z]$/.test(t) && t !== 'e' && t !== 'i' && t !== 'd') || PARAM_GREEK.has(t)
   const inCond = new Set(cond.filter(isName))
   const params = [...new Set(comps.flat().filter((t) => inCond.has(t)))]
-  return { comps, params, cond }
+  return renameCoordParams({ comps, params, cond })
+}
+
+/**
+ * 変数の組の範囲 {(x, y, z) | 条件} の等式（`y = x^2`・`x = y = z`）を、片方が名前 1 つのものだけ解いて、媒介変数で書いた範囲にする
+ * （計算エンジンの解き方より狭い。図にするためだけ）。解けなければ、描けない理由の LatexError
+ */
+function solveEqualities(names: string[], cond: Token[]): IntegralRegion {
+  const solved = new Map<string, Token[]>()
+  const put = (ts: Token[]): Token[] => ts.flatMap((t) => (solved.has(t) ? ['\\left', '(', ...solved.get(t)!, '\\right', ')'] : [t]))
+  const rest: Token[][] = []
+  for (const part of splitTop(cond, (t) => t === ',')) {
+    if (!part.includes('=')) {
+      rest.push(part)
+      continue
+    }
+    const sides = splitTop(part, (t) => t === '=')
+    if (sides.some((side) => side.length === 0 || side.some((t) => RELATIONS.has(t)))) throw new LatexError('等式と不等式を 1 つの条件にまとめた範囲は描けません（値は計算します）')
+    for (let k = 0; k + 1 < sides.length; k++) {
+      const [a, b] = [put(sides[k]), put(sides[k + 1])]
+      const single = (ts: Token[]) => (ts.length === 1 && names.includes(ts[0]) && !solved.has(ts[0]) ? ts[0] : null)
+      // 両方が名前なら、後ろの座標を前の座標で書く（x = y = z は y = x, z = x）
+      const [na, nb] = [single(a), single(b)]
+      const target = na && nb ? (names.indexOf(na) > names.indexOf(nb) ? na : nb) : (nb ?? na)
+      if (target === null) throw new LatexError('この等式の範囲は図にできません（y = x² のように、片方を座標 1 つにすると描けます。値は計算します）')
+      const value = target === nb && na !== target ? a : b
+      if (value.includes(target)) throw new LatexError('この等式の範囲は図にできません（値は計算します）')
+      for (const [n, v] of solved) solved.set(n, v.flatMap((t) => (t === target ? ['\\left', '(', ...value, '\\right', ')'] : [t])))
+      solved.set(target, value)
+    }
+  }
+  const params = names.filter((n) => !solved.has(n))
+  if (params.length === 0) throw new LatexError('等式で範囲が 1 点になります')
+  const comps = names.map((n) => (solved.has(n) ? solved.get(n)! : [n]))
+  const left = rest.map(put).reduce<Token[]>((a, b) => (a.length === 0 ? b : [...a, ',', ...b]), [])
+  return renameCoordParams({ comps, params, cond: left })
+}
+
+/**
+ * 座標と同じ名前の媒介変数（{(x, x²) | 0 ≤ x ≤ 1} の x）を、使われていない文字に付け替える。
+ * 被積分関数の x, y, z に点の成分を入れるとき、媒介変数の x と座標の x を取り違えないように
+ */
+function renameCoordParams(region: { comps: Token[][]; params: Token[]; cond: Token[] }): IntegralRegion {
+  // label: 付け替えた名前 → 書いた名前（進み具合のスライダーの見出しは、書いた名前で出す）
+  const clash = region.params.filter((p) => p === 'x' || p === 'y' || p === 'z')
+  if (clash.length === 0) return region
+  const used = new Set([...region.comps.flat(), ...region.cond])
+  const free = ['t', 's', 'u', 'v', 'p', 'q'].filter((n) => !used.has(n))
+  const to = new Map<Token, Token>()
+  for (const p of clash) to.set(p, free.shift() ?? p)
+  const re = (ts: Token[]) => ts.map((t) => to.get(t) ?? t)
+  const label = new Map([...to].map(([a, b]) => [b, a]))
+  return { comps: region.comps.map(re), params: region.params.map((p) => to.get(p) ?? p), cond: re(region.cond), label }
 }
 
 /** 中身の x, y, z に点の成分を入れる（\operatorname{max} などの名前の中の文字は変えない） */
@@ -1669,7 +1820,7 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
       }
     }
   }
-  const swept = { sweep: sw ? sw.name : undefined, partial, extras }
+  const swept = { sweep: sw ? (region.label?.get(sw.name) ?? sw.name) : undefined, partial, extras }
 
   if (params.length === 3) {
     // 媒介変数 3 つの立体（体積分）: 立体そのもの（進み具合で、最初の媒介変数の範囲まで）
