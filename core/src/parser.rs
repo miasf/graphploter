@@ -340,7 +340,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
-        "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" => OpKind::Func,
+        "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" | "eig" => OpKind::Func,
         // 点での値 @at(式, x, a, y, b, …)
         "at" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
@@ -981,7 +981,7 @@ impl Parser<'_> {
             }
             Some(OpKind::Prefix) => Ok(Expr::Op { op: name, args: vec![self.term()?] }),
             // 行列の演算子は、括弧が無ければ直後の 1 つに掛かる（det A・dim ker A。sin x と同じ読み方）
-            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank") && *self.peek() != Tok::LParen => {
+            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank" | "eig") && *self.peek() != Tok::LParen => {
                 Ok(Expr::Op { op: name, args: vec![self.power()?] })
             }
             Some(OpKind::Func) => {

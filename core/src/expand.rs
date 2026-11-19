@@ -903,6 +903,9 @@ impl Expander<'_> {
                 Val::S(self.matrix_op(op, args)?)
             }
             Expr::Op { op, args } if op == "dim" || op == "rank" => Val::S(Expr::Num(self.dimension(op, args)? as f64)),
+            Expr::Op { op, .. } if op == "eig" => {
+                return Err("@eig(A)（固有値・固有空間）は、1 行にそれだけを書いてください（決まった固有値 λ の固有空間は @ker(A − λI)）".into())
+            }
             Expr::Op { op, .. } if matches!(op.as_str(), "ker" | "im") => {
                 return Err(format!("@{op}(A) は、1 行にそれだけを書いてください（式の中では @dim(@{op}(A)) の形で使えます）"))
             }

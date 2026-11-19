@@ -46,10 +46,16 @@ impl Matrix {
     /// 部分ピボット付きの掃き出し。最初の `lead` 列だけをピボットに使う（残りの列は、拡大係数行列の右辺）。
     /// 0 とみなすしきい値は、成分の最大の絶対値 × 10⁻⁹
     pub fn reduce(&self, lead: usize) -> Reduced {
+        self.reduce_tol(lead, 1e-9)
+    }
+
+    /// [`Self::reduce`] の、0 とみなすしきい値（成分の最大の絶対値 × rel）を決められるもの。
+    /// 固有値に丸め誤差がある A − λI の零空間は、少し緩いしきい値で求める
+    pub fn reduce_tol(&self, lead: usize, rel: f64) -> Reduced {
         let (m, n) = (self.rows, self.cols);
         let mut a = self.a.clone();
         let scale = a.iter().fold(0.0f64, |s, v| s.max(v.abs()));
-        let tol = scale * 1e-9;
+        let tol = scale * rel;
         let mut pivots = Vec::new();
         let mut r = 0;
         for c in 0..lead.min(n) {
@@ -114,7 +120,12 @@ impl Matrix {
 
     /// 零空間の基底（掃き出した形のまま。自由変数の 1 つを 1、ほかを 0 にした解。式で見せるとき用）
     pub fn null_space_basis(&self) -> Vec<Vec<f64>> {
-        let red = self.reduce(self.cols);
+        self.null_space_basis_tol(1e-9)
+    }
+
+    /// [`Self::null_space_basis`] の、しきい値を決められるもの（[`Self::reduce_tol`]）
+    pub fn null_space_basis_tol(&self, rel: f64) -> Vec<Vec<f64>> {
+        let red = self.reduce_tol(self.cols, rel);
         (0..self.cols)
             .filter(|c| !red.pivots.contains(c))
             .map(|free| {
@@ -130,7 +141,12 @@ impl Matrix {
 
     /// 掃き出した形の 0 でない行（A x = 0 と同じ連立方程式の、独立な式の係数）
     pub fn reduced_rows(&self) -> Vec<Vec<f64>> {
-        let red = self.reduce(self.cols);
+        self.reduced_rows_tol(1e-9)
+    }
+
+    /// [`Self::reduced_rows`] の、しきい値を決められるもの（[`Self::reduce_tol`]）
+    pub fn reduced_rows_tol(&self, rel: f64) -> Vec<Vec<f64>> {
+        let red = self.reduce_tol(self.cols, rel);
         (0..red.pivots.len()).map(|r| red.rref.row(r).to_vec()).collect()
     }
 
@@ -231,5 +247,124 @@ mod tests {
         let red = m.reduce(3);
         assert_eq!(red.pivots.len(), 1);
         assert!(red.rref.at(1, 3).abs() > 0.5);
+    }
+}
+
+/// 固有値 1 つ（重なりをまとめたもの）。im が 0 なら実数
+#[derive(Debug, Clone, PartialEq)]
+pub struct Eigenvalue {
+    pub re: f64,
+    pub im: f64,
+    /// 重複度（固有多項式の根として何重か）
+    pub mult: usize,
+}
+
+impl Matrix {
+    /// 固有多項式 det(λI − A) の係数（λ⁰ から λⁿ の順。λⁿ の係数は 1）。ファデーエフ・ルヴェリエの方法
+    pub fn char_poly(&self) -> Vec<f64> {
+        let n = self.rows;
+        let mut c = vec![0.0; n + 1];
+        c[n] = 1.0;
+        let mut m = vec![0.0; n * n]; // M₀ = 0
+        for k in 1..=n {
+            // M_k = A M_{k−1} + c_{n−k+1} I
+            let mut next = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    let mut s = 0.0;
+                    for l in 0..n {
+                        s += self.at(i, l) * m[l * n + j];
+                    }
+                    next[i * n + j] = s + if i == j { c[n - k + 1] } else { 0.0 };
+                }
+            }
+            m = next;
+            // c_{n−k} = −tr(A M_k) / k
+            let mut tr = 0.0;
+            for i in 0..n {
+                for l in 0..n {
+                    tr += self.at(i, l) * m[l * n + i];
+                }
+            }
+            c[n - k] = -tr / k as f64;
+        }
+        c
+    }
+
+    /// 固有値（正方行列だけ）。固有多項式の根をデュラン・ケルナー法で求め、近い根をまとめて重複度にする。
+    /// 実数の固有値は小さい順、実数でないものは後ろ（実部の順）
+    pub fn eigenvalues(&self) -> Vec<Eigenvalue> {
+        use num_complex::Complex64 as C;
+        let n = self.rows;
+        if n == 0 || self.cols != n {
+            return Vec::new();
+        }
+        let c = self.char_poly();
+        let scale = self.a.iter().fold(0.0f64, |s, v| s.max(v.abs())).max(1e-300);
+        let eval = |z: C| c.iter().rev().fold(C::new(0.0, 0.0), |acc, &k| acc * z + k);
+        // 根の大きさの上限（コーシー）
+        let bound = 1.0 + c[..n].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let mut z: Vec<C> = (0..n).map(|k| C::from_polar(bound * 0.9, 0.4 + 2.0 * std::f64::consts::PI * k as f64 / n as f64)).collect();
+        for _ in 0..2000 {
+            let mut change = 0.0f64;
+            for i in 0..n {
+                let mut den = C::new(1.0, 0.0);
+                for j in 0..n {
+                    if i != j {
+                        den *= z[i] - z[j];
+                    }
+                }
+                if den.norm() == 0.0 {
+                    den = C::new(1e-300, 0.0);
+                }
+                let d = eval(z[i]) / den;
+                z[i] -= d;
+                change = change.max(d.norm());
+            }
+            if change <= 1e-15 * bound {
+                break;
+            }
+        }
+        // 近い根をまとめる（重根は 1e−5 くらいまでしか合わないので、平均をとる）
+        let tol = 1e-4 * scale.max(1.0);
+        let mut groups: Vec<(C, usize)> = Vec::new();
+        for r in z {
+            match groups.iter_mut().find(|(g, k)| (*g / *k as f64 - r).norm() < tol) {
+                Some((g, k)) => {
+                    *g += r;
+                    *k += 1;
+                }
+                None => groups.push((r, 1)),
+            }
+        }
+        let snap = |v: f64| -> f64 {
+            // 分母 12 までの分数に近ければ、その分数にする
+            for d in 1..=12 {
+                let q = (v * d as f64).round() / d as f64;
+                if (v - q).abs() < 1e-7 * scale.max(1.0) {
+                    return q;
+                }
+            }
+            v
+        };
+        let mut out: Vec<Eigenvalue> = groups
+            .into_iter()
+            .map(|(g, k)| {
+                let m = g / k as f64;
+                let im = if m.im.abs() < 1e-7 * scale.max(1.0) { 0.0 } else { snap(m.im) };
+                Eigenvalue { re: snap(m.re), im, mult: k }
+            })
+            .collect();
+        out.sort_by(|a, b| (a.im != 0.0).cmp(&(b.im != 0.0)).then(a.re.total_cmp(&b.re)).then(a.im.total_cmp(&b.im)));
+        out
+    }
+
+    /// A − λI（正方行列だけ）
+    pub fn shifted(&self, lambda: f64) -> Matrix {
+        let mut a = self.a.clone();
+        for i in 0..self.rows.min(self.cols) {
+            a[i * self.cols + i] -= lambda;
+        }
+        Matrix::new(self.rows, self.cols, a)
     }
 }

@@ -696,6 +696,13 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         })
     };
     match expr {
+        Expr::Op { op, args } if op == "eig" && args.len() == 1 => {
+            let label = matrix_label(&args[0]);
+            let Some(m) = numeric(&args[0])? else {
+                return Err(format!("eig {label} の行列の成分は、数とパラメータだけで書いてください"));
+            };
+            eigen(&label, &m, params, space).map(Some)
+        }
         Expr::Op { op, args } if (op == "ker" || op == "im") && args.len() == 1 => {
             let name = format!("{} {}", if op == "ker" { "ker" } else { "Im" }, matrix_label(&args[0]));
             let Some(m) = numeric(&args[0])? else {
@@ -792,11 +799,72 @@ fn segments(vectors: &[Vec<f64>], params: &Params, space: &Space) -> Result<Plot
     Ok(Plot::Curve { sets: all, vars: vec!["t".into()] })
 }
 
-/// 行列の引数の呼び名（名前ならその名前、そうでなければ A）
+/// 固有値と固有空間（`@eig(A)` だけの行）。説明に固有値ごとの重複度・固有空間の式を出し、図には実数の固有値の固有ベクトル
+/// （固有空間の基底。長さは表示範囲の 1/3）を矢印で描く。実数でない固有値は説明だけ
+fn eigen(label: &str, m: &crate::linalg::Matrix, params: &Params, space: &Space) -> Result<Plot, String> {
+    if m.rows != m.cols {
+        return Err(format!("固有値は正方行列で求めます（{label} は {}×{}）", m.rows, m.cols));
+    }
+    let n = m.rows;
+    let mut parts: Vec<String> = Vec::new();
+    let mut vectors: Vec<Vec<f64>> = Vec::new();
+    for ev in m.eigenvalues() {
+        let mult = if ev.mult > 1 { format!("（{} 重）", ev.mult) } else { String::new() };
+        if ev.im != 0.0 {
+            // 共役の組は、虚部が正のほうだけ書く
+            if ev.im > 0.0 {
+                let im = if ev.im == 1.0 { "i".to_string() } else { format!("{}i", format_number(ev.im)) };
+                let value = if ev.re == 0.0 { format!("±{im}") } else { format!("{} ± {im}", format_number(ev.re)) };
+                parts.push(format!("λ = {value}{mult}（実数でないので固有空間は描かない）"));
+            }
+            continue;
+        }
+        let shifted = m.shifted(ev.re);
+        let basis = shifted.null_space_basis_tol(1e-7);
+        let eqs = shifted.reduced_rows_tol(1e-7);
+        let geo = basis.len();
+        let short = if geo < ev.mult { format!("（固有空間は {geo} 次元で、重複度より小さい。対角化できない）") } else { String::new() };
+        parts.push(format!("λ = {}{mult}: {}{short}", format_number(ev.re), span_formula(&format!("E({})", format_number(ev.re)), n, &basis, &eqs)));
+        for b in &basis {
+            let len = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if len > 0.0 {
+                vectors.push(b.iter().map(|x| x / len).collect());
+            }
+        }
+    }
+    crate::expand::set_kind(format!("{label} の固有値 ／ {}", parts.join(" ／ ")));
+    if n > space.dims || vectors.is_empty() {
+        return Ok(Plot::Multi(Vec::new()));
+    }
+    // 長さは表示範囲の 1/3（単位ベクトルでは小さすぎて見えない）
+    let reach = crate::expand::reach() / 3.0;
+    let vectors: Vec<Vec<f64>> = vectors.iter().map(|v| v.iter().map(|x| x * reach).collect()).collect();
+    if space.dims == 3 && space.axes == [0, 1, 2] && space.rotation_matrix().is_none() && !space.complex_coords {
+        let vectors = vectors.iter().map(|v| [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)]).collect();
+        return Ok(Plot::Arrows { vectors });
+    }
+    let vectors: Vec<Vec<f64>> = vectors.iter().map(|v| (0..space.dims).map(|i| v.get(i).copied().unwrap_or(0.0)).collect()).collect();
+    segments(&vectors, params, space)
+}
+
+/// 行列の引数の呼び名（名前ならその名前、A − 3I のような式なら括弧で囲んだ式、そのほかは A）
 fn matrix_label(e: &Expr) -> String {
+    fn text(e: &Expr) -> Option<String> {
+        Some(match e {
+            Expr::Var(n) => n.strip_prefix("vec_").unwrap_or(n).to_string(),
+            Expr::Num(v) => format_number(*v),
+            Expr::Const(_) => return None,
+            Expr::Neg(x) => format!("−{}", text(x)?),
+            Expr::Bin(BinOp::Add, a, b) => format!("{} + {}", text(a)?, text(b)?),
+            Expr::Bin(BinOp::Sub, a, b) => format!("{} − {}", text(a)?, text(b)?),
+            Expr::Bin(BinOp::Mul, a, b) => format!("{}{}", text(a)?, text(b)?),
+            Expr::Bin(BinOp::Pow, a, b) => format!("{}^{}", text(a)?, text(b)?),
+            _ => return None,
+        })
+    }
     match e {
-        Expr::Var(n) => n.strip_prefix("vec_").unwrap_or(n).to_string(),
-        _ => "A".into(),
+        Expr::Var(_) => text(e).unwrap_or_else(|| "A".into()),
+        e => text(e).map(|t| format!("({t})")).unwrap_or_else(|| "A".into()),
     }
 }
 
@@ -856,9 +924,16 @@ fn equation_text(c: &[f64], names: &[String]) -> String {
 /// ker Aᵀ のベクトル n ごとの n · y = 0 が方程式
 fn subspace_formula(name: &str, m: &crate::linalg::Matrix, ker: bool) -> String {
     let ambient = if ker { m.cols } else { m.rows };
+    let basis = if ker { m.null_space_basis() } else { m.pivot_columns() };
+    let eqs = if ker { m.reduced_rows() } else { m.transpose().null_space_basis() };
+    span_formula(name, ambient, &basis, &eqs)
+}
+
+/// 部分空間の式: 張るベクトル basis・方程式の係数 eqs（どちらも見やすくして出す）
+fn span_formula(name: &str, ambient: usize, basis: &[Vec<f64>], eqs: &[Vec<f64>]) -> String {
     let names: Vec<String> = (0..ambient).map(coord_name).collect();
-    let basis: Vec<Vec<f64>> = if ker { m.null_space_basis() } else { m.pivot_columns() }.iter().map(|v| nice_vector(v)).collect();
-    let eqs: Vec<Vec<f64>> = if ker { m.reduced_rows() } else { m.transpose().null_space_basis() }.iter().map(|v| nice_vector(v)).collect();
+    let basis: Vec<Vec<f64>> = basis.iter().map(|v| nice_vector(v)).collect();
+    let eqs: Vec<Vec<f64>> = eqs.iter().map(|v| nice_vector(v)).collect();
     let k = basis.len();
     let space_name = format!("ℝ{}", if ambient <= 9 { ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'][ambient].to_string() } else { format!("^{ambient}") });
     if k == 0 {

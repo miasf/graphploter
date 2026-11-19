@@ -1341,3 +1341,21 @@ fn im_is_image_only_for_real_matrices() {
     same("Im {vec_b}", "(1, 0, 3)", "{vec_b}=(1+i,2,3i)");
     same("z = Im((x + i y)^(2))", "z = 2 x y", "");
 }
+
+#[test]
+fn eigenvalues_and_eigenspaces() {
+    let kind = |defs: &str, src: &str| run(src, defs, &[]).unwrap().kind().to_string();
+    // 固有値ごとの固有空間（重複度・対角化できないこと・実数でない固有値も）
+    assert_eq!(
+        kind("A= ⟦2,1;1,2⟧", "@eig A"),
+        "A の固有値 ／ λ = 1: E(1) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0 ／ λ = 3: E(3) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0"
+    );
+    assert!(kind("B= ⟦1,1;0,1⟧", "@eig B").contains("λ = 1（2 重）: E(1) = span{(1, 0)}") && kind("B= ⟦1,1;0,1⟧", "@eig B").contains("対角化できない"));
+    assert!(kind("C= ⟦0,-1;1,0⟧", "@eig C").contains("λ = ±i（実数でないので固有空間は描かない）"));
+    assert!(kind("D= ⟦2,0,0;0,2,0;0,0,3⟧", "@eig D").contains("λ = 2（2 重）: E(2) = span{(1, 0, 0), (0, 1, 0)}"));
+    assert!(error_of("@eig J", "J= ⟦1,2,3;4,5,6⟧").contains("正方行列"));
+    // 決まった固有値の固有空間 ker(A − λI)。単位行列は I か E
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(A-3I)"), "ker (A − 3I) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0（1 次元。直線）");
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(1E - A)"), "ker (1E − A) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）");
+    assert!(error_of("@ker(A - 3)", "A= ⟦2,1;1,2⟧").contains("単位行列は I か E"));
+}

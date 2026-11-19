@@ -667,6 +667,11 @@ class Converter {
           this.out += ' Im '
           return
         }
+        // 固有値・固有空間 eig A（Eig・Eigen も）
+        if (['eig', 'Eig', 'eigen', 'Eigen'].includes(s)) {
+          this.out += ' @eig '
+          return
+        }
         // 行列の演算子の名前
         if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
           this.out += ` @${s} `
