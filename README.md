@@ -860,6 +860,12 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
   （$\mathbb{R}, \mathbb{Z}, \mathbb{N}, \mathbb{Q}, \mathbb{C}$ は今までどおり集合）も、`\vec{F}` と同じ名前
   （印刷物の太字・手書きの矢印・黒板の二重線のどれで書いてもよい。v⃗ の長押しで 𝐅・𝔽）。定義の行の説明・ボタンなどの画面の文字では、ベクトルの名前を「ベクトル F」と出す（矢印を重ねる文字や太字の数学用文字は、スマホの字体によって □ になるため。キーの表示は MathLive の数式の字体で描く）。値が組の関数は、名前だけで書くと座標 x, y, z に当てはめた場になる（`\vec{F}` だけの行は矢印の場、
   `\vec{F}\cdot\left(1,0,0\right)` は場の成分）。値がスカラーの関数は、今までどおり f(x) のように引数を書く
+- **定積分の近似（リーマン和・台形則・シンプソン則）**: 1 変数の定積分 `\int_a^b f\,dx` の「∫ 積分を描く」を押すと、「近似」の欄が出る。
+  左端・右端・中点のリーマン和、台形則、シンプソン則から選び、分割数 $n$（スライダーは 1〜64、欄には 400 まで）を変えると、
+  近似の図形（長方形・台形・放物線の下の領域。青）と、近似の値・正確な値・誤差が出る。▶ で $n$ を 1 から 64 まで増やしていく。
+  誤差の減り方（$O(1/n)$・$O(1/n^2)$・$O(1/n^4)$）も添える。シンプソン則の $n$ は偶数に切り上げる。
+  図形は 1 つの集合で、$\Delta x = \frac{b-a}{n}$、$K = \min(\lfloor (x-a)/\Delta x \rfloor, n-1)$ として高さ $f(a + (K + c)\Delta x)$ の段差の関数の下の領域
+  （`web/src/lib/latex.ts` の `riemannDisplay`）。近似の値は $\Delta x \sum_{k} f(x_k)$ の式を計算エンジンで計算する
 - **テイラー多項式**: `\operatorname{Taylor}\left(f, x, a, n\right)`（計算エンジンでは `@taylor(f, x, a, n)`。数式キーボードの「∑∫∈」→「微積」の Tₙ）は
   $T_n(x) = \sum_{k=0}^{n} \frac{f^{(k)}(a)}{k!}(x-a)^k$。多変数は `\operatorname{Taylor}\left(f, \left(x, y\right), \left(a, b\right), n\right)` で
   $T_n(\mathbf x) = \sum_{|\alpha| \le n} \frac{\partial^\alpha f(\mathbf a)}{\alpha!}(\mathbf x - \mathbf a)^\alpha$（変数は 3 つまで。$n = 1$ が接線・接平面）。

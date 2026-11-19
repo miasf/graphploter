@@ -1721,8 +1721,8 @@ export interface IntegralView {
 
 /** 積分の図に添える図形 */
 export interface IntegralExtra {
-  /** path: 積分する経路・領域そのもの（範囲全体）、field: ベクトル場の矢印、point: 今の点、tangent: 接線（単位）、normal: 法線（単位）、vector: 場の向き、component: 場の接線・法線の成分 */
-  role: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
+  /** path: 積分する経路・領域そのもの（範囲全体）、field: ベクトル場の矢印、point: 今の点、tangent: 接線（単位）、normal: 法線（単位）、vector: 場の向き、component: 場の接線・法線の成分、riemann: リーマン和などの近似の図形 */
+  role: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component' | 'riemann'
   latex: string
   /** 説明（式の下に色と一緒に出す） */
   label: string
@@ -1980,6 +1980,93 @@ export function integralDisplay(latex: string, progress = 1, scale = 1): Integra
   if (i < 0) return null
   try {
     return integralView(toks, i, Math.min(1, Math.max(0, progress)), scale)
+  } catch (e) {
+    if (e instanceof LatexError) return { error: e.message }
+    throw e
+  }
+}
+
+/** 定積分の近似の方法（左端・右端・中点のリーマン和、台形則、シンプソン則） */
+export type RiemannMethod = 'left' | 'right' | 'mid' | 'trap' | 'simpson'
+
+export const RIEMANN_METHODS: { id: RiemannMethod; label: string; order: string }[] = [
+  { id: 'left', label: '左端', order: 'O(1/n)' },
+  { id: 'right', label: '右端', order: 'O(1/n)' },
+  { id: 'mid', label: '中点', order: 'O(1/n²)' },
+  { id: 'trap', label: '台形', order: 'O(1/n²)' },
+  { id: 'simpson', label: 'シンプソン', order: 'O(1/n⁴)' },
+]
+
+/** 近似の図形（latex）・近似の値の式（sum）・正確な積分の式（exact） */
+export interface RiemannView {
+  latex: string
+  sum: string
+  exact: string
+  /** 説明（「左端のリーマン和（n = 8）」） */
+  label: string
+  /** 実際に使った n（シンプソンは偶数に切り上げる） */
+  n: number
+}
+
+/**
+ * 1 変数の定積分 ∫_a^b f dx を、n 等分した近似で描く（学習用。計画のおすすめ 2）。
+ * 図形は 1 つの集合: Δx = (b − a)/n、K = min(⌊(x − a)/Δx⌋, n − 1) として、
+ * 長方形の高さ f(a + (K + c)Δx)（左端 c = 0・右端 c = 1・中点 c = 1/2）、台形は両端を結ぶ線分、シンプソンは 2 区間ごとの放物線
+ * の、0 との間の領域 { (x, h, k) | a ≤ x ≤ b, min(0, F) ≤ h ≤ max(0, F), k = 0 }
+ */
+export function riemannDisplay(latex: string, method: RiemannMethod, nIn: number): RiemannView | { error: string } | null {
+  if (!hasIntegral(latex)) return null
+  try {
+    const toks = tokenize(latex)
+    const i = toks.findIndex((t) => INTEGRALS.has(t))
+    if (i < 0) return null
+    if (toks[i] !== '\\int') throw new LatexError('近似は、1 変数の定積分 ∫_a^b f dx で描けます')
+    const head = limitsAt(toks, i)
+    if (head.sub === null || head.sup === null || head.sub.length === 0 || head.sup.length === 0) throw new LatexError('近似は、上下の端のある定積分で描けます')
+    const span = integrandSpan(toks, head.k, 1)
+    if (span.vector) throw new LatexError('近似は、値が数になる被積分関数で描けます')
+    const body = toks.slice(head.k, span.end)
+    if (body.length === 0) throw new LatexError('積分する式を書いてください')
+    if (INTEGRALS.has(body[0])) throw new LatexError('近似は、1 変数の定積分（入れ子でないもの）で描けます')
+    const v = span.vars[0]
+    const used = new Set([...body, ...head.sub, ...head.sup].filter((t) => /^[A-Za-z]$/.test(t)))
+    const free = ['x', 'y', 'z'].find((c) => used.has(c) && c !== v)
+    if (free) throw new LatexError(`範囲か中身に、積分の変数でない ${free} があるので描けません`)
+    if ([...head.sub, ...head.sup].includes(v)) throw new LatexError('積分の端に、積分の変数は使えません')
+    let n = Math.max(1, Math.min(400, Math.round(nIn)))
+    if (method === 'simpson' && n % 2 === 1) n += 1
+    const paren = (x: string) => `\\left(${x}\\right)`
+    const a = paren(joinToks(head.sub))
+    const b = paren(joinToks(head.sup))
+    const D = `\\frac{${b}-${a}}{${n}}`
+    /** 被積分関数の、点 p での値 */
+    const f = (p: string) => paren(joinToks(body.flatMap((t) => (t === v ? tokenize(paren(p)) : [t]))))
+    const idx = ['k', 'j', 'm', 'p', 'q'].find((c) => !used.has(c) && c !== v) ?? 'k'
+    const [h, kk] = ['y', 'z', 'w', 'h', 'q', 'p'].filter((c) => c !== v && !used.has(c) && c !== idx)
+    const X = (c: string) => `${a}+${paren(c)}${D}`
+    const K = `\\min\\left(\\left\\lfloor\\frac{${v}-${a}}{${D}}\\right\\rfloor,${n - 1}\\right)`
+    let F: string
+    let sum: string
+    if (method === 'left' || method === 'right' || method === 'mid') {
+      const c = method === 'left' ? '0' : method === 'right' ? '1' : '\\frac{1}{2}'
+      F = f(X(`${K}+${c}`))
+      sum = `${D}\\sum_{${idx}=0}^{${n - 1}}${f(X(`${idx}+${c}`))}`
+    } else if (method === 'trap') {
+      const x0 = X(K)
+      F = `${f(x0)}+\\frac{${f(X(`${K}+1`))}-${f(x0)}}{${D}}${paren(`${v}-${paren(x0)}`)}`
+      sum = `\\frac{${D}}{2}\\left(${f(a)}+${f(b)}\\right)+${D}\\sum_{${idx}=1}^{${n - 1}}${f(X(idx))}`
+    } else {
+      const P = `\\min\\left(\\left\\lfloor\\frac{${v}-${a}}{2${D}}\\right\\rfloor,${n / 2 - 1}\\right)`
+      const [x0, x1, x2] = [X(`2${paren(P)}`), X(`2${paren(P)}+1`), X(`2${paren(P)}+2`)]
+      const d = (p: string, q: string) => paren(`${v}-${paren(p)}`) + paren(`${v}-${paren(q)}`)
+      F = `\\frac{${f(x0)}${d(x1, x2)}-2${f(x1)}${d(x0, x2)}+${f(x2)}${d(x0, x1)}}{2${paren(D)}^{2}}`
+      sum = `\\frac{${D}}{3}\\left(${f(a)}+${f(b)}+4\\sum_{${idx}=1}^{${n / 2}}${f(X(`2${idx}-1`))}+2\\sum_{${idx}=1}^{${n / 2 - 1}}${f(X(`2${idx}`))}\\right)`
+    }
+    const set = `\\left\\{\\left(${v},${h},${kk}\\right)\\mid ${a}\\le ${v}\\le ${b},\\min\\left(0,${F}\\right)\\le ${h}\\le\\max\\left(0,${F}\\right),${kk}=0\\right\\}`
+    const exact = `\\int_{${joinToks(head.sub)}}^{${joinToks(head.sup)}}${joinToks(body)}\\,d${v}`
+    const name = RIEMANN_METHODS.find((m) => m.id === method)!.label
+    const label = method === 'trap' ? `台形則（n = ${n}）` : method === 'simpson' ? `シンプソン則（n = ${n}）` : `${name}のリーマン和（n = ${n}）`
+    return { latex: set, sum, exact, label, n }
   } catch (e) {
     if (e instanceof LatexError) return { error: e.message }
     throw e

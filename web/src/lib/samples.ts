@@ -28,6 +28,8 @@ export interface Sample {
    */
   /** 追加したら、積分のある式の「∫ 積分を描く」を押して、進み具合をこの値（0〜1）にする */
   integral?: number
+  /** 積分の図を出すとき、定積分の近似（リーマン和など）も出す */
+  riemann?: { method: 'left' | 'right' | 'mid' | 'trap' | 'simpson'; n: number }
   coord?: { preset: CoordPreset; morph: number; play?: boolean; flat?: boolean; ranges?: [[string, string], [string, string], [string, string]] }
 }
 
@@ -263,6 +265,13 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
       {
         label: '球が通る領域 ∃a ∈ [0, 3]',
         items: [{ latex: '\\exists a\\in\\left[0,3\\right],x^2+y^2+\\left(z-a\\right)^2=1', options: { color: '#6042a6', opacity: 0.6 } }],
+      },
+      {
+        label: 'リーマン和と定積分 ∫₀³ (x²/3 + 1) dx（近似の方法と n を変える）',
+        flat: true,
+        integral: 1,
+        riemann: { method: 'left', n: 6 },
+        items: [{ latex: '\\int_{0}^{3}\\frac{x^2}{3}+1\\,dx', options: { color: '#c74440' } }],
       },
       {
         label: 'テイラー多項式 sin x の近似（N を再生して次数を上げる）',

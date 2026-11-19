@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { hasIntegral, inlineRegions, integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { hasIntegral, inlineRegions, integralDisplay, riemannDisplay, type RiemannMethod, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
@@ -1473,6 +1473,7 @@
     normal: '#2d70b3',
     vector: '#c74440',
     component: '#fa7e19',
+    riemann: '#2d70b3',
   }
 
   /** 矢印の長さ（表示範囲の一番短い辺の 1/6） */
@@ -1528,8 +1529,11 @@
     }
     view.auxSweep = ok?.sweep
     updateIntegralValue(item, ok?.partial)
-    // 添えて描くもの
-    const want = ok?.extras ?? []
+    // 添えて描くもの（定積分の近似の図も、ここに足す）
+    const want = [...(ok?.extras ?? [])]
+    const rv = ok && item.riemann ? riemannDisplay(item.latex, item.riemann.method, item.riemann.n) : null
+    if (rv && !('error' in rv)) want.push({ role: 'riemann', latex: rv.latex, label: rv.label })
+    updateRiemannValues(item, rv)
     for (const old of integralExtras(item)) {
       if (!want.some((e) => e.role === old.integralRole)) removeItem(old)
     }
@@ -1542,9 +1546,9 @@
           integralRole: e.role,
           vertical: false,
           color: EXTRA_COLORS[e.role],
-          lineWidth: e.role === 'point' ? 7 : e.role === 'field' || e.role === 'path' ? 3 : 5,
-          // 経路・領域は、積分の図の下に薄く（曲線はくっきり、面は透かす）
-          opacity: e.role === 'field' ? 0.8 : e.role === 'path' ? 0.45 : 1,
+          lineWidth: e.role === 'point' ? 7 : e.role === 'field' || e.role === 'path' || e.role === 'riemann' ? 3 : 5,
+          // 経路・領域は、積分の図の下に薄く（曲線はくっきり、面は透かす）。近似の長方形は、積分の図と重なっても見分けられる濃さ
+          opacity: e.role === 'field' ? 0.8 : e.role === 'path' ? 0.45 : e.role === 'riemann' ? 0.6 : 1,
           ranges: { t: ['0', '1'], u: ['0', '1'], v: ['0', '1'] },
         })
         items.push(x)
@@ -1556,6 +1560,38 @@
         schedule(x, fresh ? 0 : 60)
       }
     }
+  }
+
+  /** 定積分の近似の値（式の id → 近似の値・正確な値・誤り） */
+  let riemannValues = $state<Record<number, { approx?: number; exact?: number; error?: string }>>({})
+  const riemannTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+  /** 近似の値と正確な積分の値を計算し直す（n を動かし続けても固まらないよう、少し待ってから） */
+  function updateRiemannValues(item: PlotItem, rv: ReturnType<typeof riemannDisplay>) {
+    clearTimeout(riemannTimers.get(item.id))
+    if (!rv) {
+      delete riemannValues[item.id]
+      return
+    }
+    if ('error' in rv) {
+      riemannValues[item.id] = { error: rv.error }
+      return
+    }
+    const run = () => {
+      const defs = currentDefinitions(item)
+      const a = evalValue(rv.sum, currentParams(), run, defs)
+      const e = evalValue(rv.exact, currentParams(), run, defs)
+      if (a === null || e === null) return
+      const err = 'error' in a ? a.error : 'error' in e ? e.error : undefined
+      riemannValues[item.id] = { approx: 'value' in a ? a.value : undefined, exact: 'value' in e ? e.value : undefined, error: err }
+    }
+    riemannTimers.set(item.id, setTimeout(run, 60))
+  }
+
+  /** 定積分の近似の方法と分割数を変える（method が null なら近似を消す） */
+  function setRiemann(item: PlotItem, method: RiemannMethod | null, n: number) {
+    item.riemann = method ? { method, n: Math.max(1, Math.min(400, Math.round(n))) } : undefined
+    updateIntegral(item, 30)
   }
 
   /** 積分の図の進み具合を変える（スライダー・再生） */
@@ -1662,6 +1698,13 @@
               value: val?.value,
               valueError: val?.error,
               legend: extras.map((x) => ({ color: x.color, label: x.auxNote ?? '', error: x.error })),
+              riemann: (() => {
+                // 1 変数の定積分だけ、近似の操作を出す
+                const probe = source ? riemannDisplay(source.latex, 'left', 4) : null
+                if (!probe || 'error' in probe) return undefined
+                const rv = riemannValues[source!.id]
+                return { method: source!.riemann?.method ?? null, n: source!.riemann?.n ?? 8, ...(source!.riemann ? rv : {}) }
+              })(),
             },
           ],
         ]
@@ -2609,6 +2652,7 @@
         if (!hasIntegral(it.latex) || integralItem(it)) continue
         toggleIntegral(it)
         setIntegralProgress(it, sample.integral)
+        if (sample.riemann) setRiemann(it, sample.riemann.method, sample.riemann.n)
       }
     }
     // パラメータを再生する例
@@ -2852,6 +2896,7 @@
               setIntegralProgress(item, v)
             }}
             onIntegralPlay={() => togglePlayIntegral(item)}
+            onRiemann={(m, n) => setRiemann(item, m, n)}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}

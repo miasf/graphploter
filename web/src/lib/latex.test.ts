@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
+import { riemannDisplay, fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -477,6 +477,31 @@ check(
     ['\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right.', '\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right\\rbrace'],
   ]
   for (const [broken, good] of fixed) check(`崩れた括弧 ${broken}`, latexToText(broken), latexToText(good))
+}
+
+// 定積分の近似（リーマン和・台形則・シンプソン則）
+{
+  const ok = (m: 'left' | 'right' | 'mid' | 'trap' | 'simpson', n: number) => {
+    const r = riemannDisplay('\\int_0^2x^2\\,dx', m, n)
+    if (!r || 'error' in r) throw new Error(`近似が作れない: ${m}`)
+    return r
+  }
+  check('左端の和', latexToText(ok('left', 4).sum), '(((2)-(0))/(4)) @sum(k,0,3) (((0)+(k+0)(((2)-(0))/(4)))^(2))')
+  check('左端の説明', ok('left', 4).label, '左端のリーマン和（n = 4）')
+  check('シンプソンは偶数', ok('simpson', 5).n, 6)
+  check('近似の図は集合', latexToText(ok('mid', 3).latex).startsWith('⦃(x,y,z)∣(0)<=x<=(2),'), true)
+  check('正確な積分', latexToText(ok('trap', 3).exact), '@int(x,0,2)(x^(2))')
+  // 中身に k がある式では、和の添字を別の文字にする
+  const rk = riemannDisplay('\\int_0^1kx\\,dx', 'left', 2)
+  check('添字の文字', rk !== null && !('error' in rk) && latexToText(rk.sum).includes('@sum(j,'), true)
+  // 描けない形
+  const err = (l: string) => {
+    const r = riemannDisplay(l, 'left', 4)
+    return r !== null && 'error' in r
+  }
+  check('2 重積分は近似しない', err('\\iint_{x^2+y^2\\le1}1\\,dA'), true)
+  check('端に座標がある', err('\\int_0^xt\\,dt'), true)
+  check('不定積分', err('\\int x\\,dx'), true)
 }
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)

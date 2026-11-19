@@ -7,6 +7,8 @@ import { latexToText } from './latex'
 import type { ParamValue } from './types'
 
 let wasm: 'none' | 'loading' | 'ready' = 'none'
+/** 読み込み中に値を頼んだ所（読み込み終わったら全部呼ぶ。前は最初の 1 つだけを呼んでいたので、ほかの欄は計算中のままになった） */
+const waiting = new Set<() => void>()
 
 /** 式の値。WASM の準備がまだなら null（準備ができたら onReady を呼ぶ） */
 function evaluate(latex: string, params: Record<string, ParamValue>, onReady: () => void, defs = ''): number | null {
@@ -14,11 +16,14 @@ function evaluate(latex: string, params: Record<string, ParamValue>, onReady: ()
   if (text === '') throw new Error('値を入れてください')
   if (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(text)) return Number(text)
   if (wasm !== 'ready') {
+    waiting.add(onReady)
     if (wasm === 'none') {
       wasm = 'loading'
       init().then(() => {
         wasm = 'ready'
-        onReady()
+        const all = [...waiting]
+        waiting.clear()
+        for (const f of all) f()
       })
     }
     return null
