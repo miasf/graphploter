@@ -88,6 +88,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('Aᵀ', '#@^{T}', '転置'),
         key('A⁻¹', '#@^{-1}', '逆行列'),
         key('ker', '\\ker', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
+        key('Im', '\\operatorname{Im}', '像 Im A（列ベクトルが張る空間）'),
         key(vecLabel('v'), '\\vec{#@}', '直前の文字をベクトルの名前にする（v の後に押すと \\vec{v}。v とは別の名前）'),
       ],
     ],
@@ -180,7 +181,8 @@ export const MATRIX_ROWS: CalcKey[][] = [
     key('A⁻¹', '#@^{-1}', '逆行列'),
     key('Aⁿ', '#@^{#?}', '行列のべき（20 までの整数）'),
     key('A†', '#@^{\\dagger}', '共役転置'),
-    key('ker', '\\ker #?', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
+    key('ker', '\\ker #?', '零空間 ker A（1 行にそれだけなら、点・直線・平面。説明に式も出る）'),
+    key('Im', '\\operatorname{Im}#?', '像 Im A（列ベクトルが張る空間。1 行にそれだけなら、点・直線・平面。説明に式も出る）'),
   ],
   [
     {

@@ -112,6 +112,34 @@ impl Matrix {
         orthonormalize(basis)
     }
 
+    /// 零空間の基底（掃き出した形のまま。自由変数の 1 つを 1、ほかを 0 にした解。式で見せるとき用）
+    pub fn null_space_basis(&self) -> Vec<Vec<f64>> {
+        let red = self.reduce(self.cols);
+        (0..self.cols)
+            .filter(|c| !red.pivots.contains(c))
+            .map(|free| {
+                let mut v = vec![0.0; self.cols];
+                v[free] = 1.0;
+                for (r, &p) in red.pivots.iter().enumerate() {
+                    v[p] = -red.rref.at(r, free);
+                }
+                v
+            })
+            .collect()
+    }
+
+    /// 掃き出した形の 0 でない行（A x = 0 と同じ連立方程式の、独立な式の係数）
+    pub fn reduced_rows(&self) -> Vec<Vec<f64>> {
+        let red = self.reduce(self.cols);
+        (0..red.pivots.len()).map(|r| red.rref.row(r).to_vec()).collect()
+    }
+
+    /// 列空間の基底（ピボットの列そのもの。式で見せるとき用）
+    pub fn pivot_columns(&self) -> Vec<Vec<f64>> {
+        let red = self.reduce(self.cols);
+        red.pivots.iter().map(|&c| (0..self.rows).map(|i| self.at(i, c)).collect()).collect()
+    }
+
     /// 列空間（像）の正規直交基底
     pub fn column_space(&self) -> Vec<Vec<f64>> {
         let red = self.reduce(self.cols);

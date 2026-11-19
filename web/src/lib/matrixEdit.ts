@@ -200,3 +200,63 @@ export function matrixDefinition(latex: string): { name: string; size: 2 | 3 } |
   if (!m || rowsOf(m) !== colsOf(m) || (rowsOf(m) !== 2 && rowsOf(m) !== 3)) return null
   return { name, size: rowsOf(m) as 2 | 3 }
 }
+
+// ---- 小さくした分を覚えておく（大きさを戻すと、元の成分が戻る）----
+// 「覚え」は、今の行列と、大きさを小さくしたときに外れた成分を合わせた表（今の大きさ以上）。今の行列の成分がいつも優先
+
+/** 覚え ghost に、今の行列 m を重ねる（m の成分で上書きし、外の成分は残す） */
+export function remember(ghost: Matrix | null, m: Matrix): Matrix {
+  const rows = Math.max(rowsOf(m), ghost ? rowsOf(ghost) : 0)
+  const cols = Math.max(colsOf(m), ghost ? colsOf(ghost) : 0)
+  const cells = Array.from({ length: rows }, (_, i) =>
+    Array.from({ length: cols }, (_, j) => (i < rowsOf(m) && j < colsOf(m) ? m.cells[i][j] : (ghost?.cells[i]?.[j] ?? ''))),
+  )
+  return { env: m.env, cells }
+}
+
+/** 行列の編集 */
+export type MatrixOp = { op: 'row+' | 'col+'; at: number } | { op: 'row-' | 'col-'; at: number } | { op: 'size'; rows: number; cols: number }
+
+/**
+ * 覚えを使って行列を編集する。結果の行列と、新しい覚え。
+ * - 大きさを小さくする・最後の行（列）を消す: 外れた成分は覚えに残す
+ * - 大きさを大きくする・最後に行（列）を足す: 覚えにある成分を戻す（無ければ空欄）
+ * - 途中の行（列）を足す・消す: 覚えの行（列）も一緒にずらす（消した行は、覚えからも消す）
+ */
+export function editWithMemory(m: Matrix, ghost: Matrix | null, e: MatrixOp): { next: Matrix; ghost: Matrix } {
+  const g = remember(ghost, m)
+  const take = (src: Matrix, rows: number, cols: number): Matrix => ({
+    env: m.env,
+    cells: Array.from({ length: rows }, (_, i) => Array.from({ length: cols }, (_, j) => src.cells[i]?.[j] ?? '')),
+  })
+  const [R, C] = [rowsOf(m), colsOf(m)]
+  const clamp = (n: number) => Math.max(1, Math.min(MAX_SIZE, Math.round(n)))
+  switch (e.op) {
+    case 'size':
+      return { next: take(g, clamp(e.rows), clamp(e.cols)), ghost: g }
+    case 'row+': {
+      if (R >= MAX_SIZE) return { next: m, ghost: g }
+      if (e.at >= R) return { next: take(g, R + 1, C), ghost: g }
+      const g2 = insertRow(g.cells.length >= MAX_SIZE ? removeRow(g, rowsOf(g) - 1) : g, e.at)
+      return { next: take(g2, R + 1, C), ghost: g2 }
+    }
+    case 'col+': {
+      if (C >= MAX_SIZE) return { next: m, ghost: g }
+      if (e.at >= C) return { next: take(g, R, C + 1), ghost: g }
+      const g2 = insertCol(colsOf(g) >= MAX_SIZE ? removeCol(g, colsOf(g) - 1) : g, e.at)
+      return { next: take(g2, R, C + 1), ghost: g2 }
+    }
+    case 'row-': {
+      if (R <= 1 || e.at < 0 || e.at >= R) return { next: m, ghost: g }
+      if (e.at === R - 1) return { next: take(g, R - 1, C), ghost: g }
+      const g2 = removeRow(g, e.at)
+      return { next: take(g2, R - 1, C), ghost: g2 }
+    }
+    case 'col-': {
+      if (C <= 1 || e.at < 0 || e.at >= C) return { next: m, ghost: g }
+      if (e.at === C - 1) return { next: take(g, R, C - 1), ghost: g }
+      const g2 = removeCol(g, e.at)
+      return { next: take(g2, R, C - 1), ghost: g2 }
+    }
+  }
+}

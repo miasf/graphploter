@@ -662,6 +662,11 @@ class Converter {
           this.out += ` ${s} `
           return
         }
+        // 像 im A・Image A・range A（Im A と同じ。引数がスカラーなら虚部）
+        if (['im', 'Image', 'image', 'Ran', 'ran', 'range'].includes(s)) {
+          this.out += ' Im '
+          return
+        }
         // 行列の演算子の名前
         if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
           this.out += ` @${s} `
