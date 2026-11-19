@@ -230,3 +230,30 @@ fn points_of_interest_on_surfaces() {
     assert!(ps.iter().any(|p| (p[0] - 1.0).abs() < 1e-6 && p[1].abs() < 1e-6 && (p[2] + 2.0).abs() < 1e-6 && p[3] == 1.0), "{ps:?}");
     assert!(ps.iter().any(|p| (p[0] + 1.0).abs() < 1e-6 && p[1].abs() < 1e-6 && (p[2] - 2.0).abs() < 1e-6 && p[3] == 2.0), "{ps:?}");
 }
+
+#[test]
+fn infinite_sums_with_coordinates() {
+    // ワイエルシュトラウス関数 W(x) = Σ aⁿ cos(bⁿ π x)（a = 1/2, b = 3）: 項が 10⁻¹² 倍より小さくなる所で打ち切る
+    let m = run("y = @sum(n,0,∞) (a^(n) cos(b^(n) π x))", "", &[("a", 0.5), ("b", 3.0)]).unwrap();
+    assert!(m.kind().contains("Σ の ∞ は n = ") && m.kind().contains("までの和"), "{}", m.kind());
+    assert!(!m.positions().is_empty());
+    // W(0) = Σ (1/2)ⁿ = 2
+    let v = graph_core::equation::eval_constant("@at(@sum(n,0,∞) ((1/2)^(n) cos(3^(n) π x)), x, 0)").unwrap();
+    assert!((v - 2.0).abs() < 1e-9, "{v}");
+    // 収束の遅い級数は 400 項で打ち切って、そう書く
+    let m = run("y = @sum(n,1,∞) (sin(n x)/n)", "", &[]).unwrap();
+    assert!(m.kind().contains("打ち切り"), "{}", m.kind());
+    // 値が数になる ∞ の和は、今までどおり（級数の加速）
+    let v = graph_core::equation::eval_constant("@sum(n,1,∞) (1/n^(2))").unwrap();
+    assert!((v - std::f64::consts::PI.powi(2) / 6.0).abs() < 1e-9);
+}
+
+#[test]
+#[ignore]
+fn weierstrass_speed() {
+    for src in ["y = @sum(n,0,∞) (a^(n) cos(b^(n) π x))", "y = @sum(n,0,20) (a^(n) cos(b^(n) π x))", "y = @sum(n,0,8) (a^(n) cos(b^(n) π x))"] {
+        let t = std::time::Instant::now();
+        let r = run(src, "", &[("a", 0.6), ("b", 3.0)]).unwrap();
+        println!("{src}: {:?} {} 点 {}", t.elapsed(), r.positions().len() / 3, r.kind());
+    }
+}

@@ -40,6 +40,8 @@
     onIntegralPlay: () => void
     /** 定積分の近似（リーマン和など）の方法と分割数を変えた（方法が null なら近似を消す） */
     onRiemann?: (method: RiemannMethod | null, n: number) => void
+    /** パラメータの行: 条件の行があるとき、スライダーの範囲の点ごとに、その値にできるか */
+    paramAllowed?: boolean[]
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -143,6 +145,7 @@
     onIntegralProgress,
     onIntegralPlay,
     onRiemann,
+    paramAllowed,
     onColor,
     onGrid,
     onOpacity,
@@ -802,6 +805,7 @@
         {onSlider}
         playing={paramPlaying}
         onPlay={onPlayParam}
+        allowed={paramAllowed}
       />
     {/if}
     {#if item.error}

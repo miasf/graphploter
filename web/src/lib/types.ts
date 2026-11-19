@@ -307,6 +307,8 @@ export interface PlotItem extends PlotStyle {
   folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
+  /** スライダーの値の条件の行（ab > 1 のような、パラメータだけの不等式）なら true。図形は描かない。保存しない */
+  condition?: boolean
   /** 座標系の番号（CoordSystem.id。無ければ直交座標） */
   coordSys?: number
   /**
