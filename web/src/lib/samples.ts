@@ -267,6 +267,16 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         items: [{ latex: '\\exists a\\in\\left[0,3\\right],x^2+y^2+\\left(z-a\\right)^2=1', options: { color: '#6042a6', opacity: 0.6 } }],
       },
       {
+        label: 'ワイエルシュトラウス関数（連続だがどこでも微分できない。条件 ab > 1 + 3π/2 でスライダーを制限）',
+        flat: true,
+        items: [
+          { latex: 'a=0.5', param: 'a', options: { slider: { min: 0, max: 1, complex: false, stack: false } } },
+          { latex: 'b=13', param: 'b', options: { slider: { min: 1, max: 21, complex: false, stack: false, stepExpr: '2', step: 2 } } },
+          { latex: '0<a<1,\\ ab>1+\\frac{3\\pi}{2}', options: { color: '#6042a6' } },
+          { latex: 'y=\\sum_{n=0}^{\\infty}a^n\\cos\\left(b^n\\pi x\\right)', options: { color: '#c74440' } },
+        ],
+      },
+      {
         label: 'リーマン和と定積分 ∫₀³ (x²/3 + 1) dx（近似の方法と n を変える）',
         flat: true,
         integral: 1,

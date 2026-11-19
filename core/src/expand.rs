@@ -2853,6 +2853,106 @@ impl Expander<'_> {
         sum_to_infinity(&f, a)
     }
 
+    /// `Σ_{var=a}^{∞} body` で、中身に座標などの変数があるもの。項の大きさを表示範囲の点（決まった 257 点）で調べ、
+    /// 項の最大が、それまでの和の大きさの 10⁻⁹ 倍より小さい項が 4 つ続いたら、そこまでの和にする（説明に打ち切った所を出す）。
+    /// 400 項までに小さくならなければ、400 項で打ち切る（収束しない・遅い級数。説明に出す）
+    fn truncated_sum(&mut self, var: &str, a: i64, g: &Expr) -> Result<Expr, String> {
+        const CAP: i64 = 400;
+        let mut vars: Vec<String> = Vec::new();
+        g.collect_vars(&mut vars);
+        vars.retain(|v| v != var && !self.params.contains_key(v));
+        vars.dedup();
+        let mut sorted = vars.clone();
+        sorted.sort();
+        sorted.dedup();
+        let vars = sorted;
+        let names: Vec<&str> = vars.iter().map(|s| s.as_str()).collect();
+        // 変数ごとの範囲: 表示中の座標は表示範囲、そのほかは [−10, 10]
+        let vb = view_box();
+        let range = |v: &str| -> (f64, f64) {
+            match crate::equation::coord_index(v) {
+                Some(0) => (vb[0], vb[1]),
+                Some(1) => (vb[2], vb[3]),
+                Some(2) => (vb[4], vb[5]),
+                _ => (-10.0, 10.0),
+            }
+        };
+        // 決まった点（ファン・デル・コルプト列。変数ごとに別の素数の基数）と、範囲の両端・真ん中
+        const PRIMES: [u32; 8] = [2, 3, 5, 7, 11, 13, 17, 19];
+        let radical = |mut i: u32, b: u32| {
+            let (mut f, mut r) = (1.0, 0.0);
+            while i > 0 {
+                f /= b as f64;
+                r += f * (i % b) as f64;
+                i /= b;
+            }
+            r
+        };
+        let m = 257usize;
+        let samples: Vec<Vec<f64>> = vars
+            .iter()
+            .enumerate()
+            .map(|(j, v)| {
+                let (lo, hi) = range(v);
+                (0..m).map(|i| lo + (hi - lo) * if i == 0 { 0.5 } else { radical(i as u32, PRIMES[j % 8]) }).collect()
+            })
+            .collect();
+        let inputs: Vec<&[f64]> = samples.iter().map(|s| s.as_slice()).collect();
+        let mut terms = Vec::new();
+        let mut partial = vec![num_complex::Complex64::new(0.0, 0.0); m];
+        let mut small = 0;
+        let mut nodes = 0;
+        let mut n = a;
+        let mut converged = false;
+        while n - a < CAP {
+            let t = g.substitute(&|v: &str| (v == var).then_some(Expr::Num(n as f64)));
+            let prog = crate::eval::Program::compile_with(&t, &names, self.params)
+                .map_err(|e| format!("∞ までの総和の項を計算できません（{e}）"))?;
+            USED_PARAMS.with(|u| {
+                let mut u = u.borrow_mut();
+                for p in prog.used_params() {
+                    if !u.contains(p) {
+                        u.push(p.clone());
+                    }
+                }
+            });
+            let mut out = vec![num_complex::Complex64::new(0.0, 0.0); m];
+            prog.eval_batch(&inputs, &mut out);
+            let mut biggest = 0.0f64;
+            let mut size = 0.0f64;
+            for (s, o) in partial.iter_mut().zip(&out) {
+                if o.re.is_finite() && o.im.is_finite() {
+                    *s += *o;
+                    biggest = biggest.max(o.norm());
+                }
+                if s.re.is_finite() && s.im.is_finite() {
+                    size = size.max(s.norm());
+                }
+            }
+            nodes += t.node_count();
+            if nodes > MAX_NODES {
+                return Err("∞ までの総和の式が大きくなりすぎます".into());
+            }
+            terms.push(t);
+            n += 1;
+            if biggest <= 1e-9 * size.max(1e-300) || biggest == 0.0 {
+                small += 1;
+                if small >= 4 {
+                    converged = true;
+                    break;
+                }
+            } else {
+                small = 0;
+            }
+        }
+        add_note(&if converged {
+            format!("Σ の ∞ は {var} = {} までの和。その先の項は表示範囲で和の 10⁻⁹ 倍より小さい", n - 1)
+        } else {
+            format!("Σ の ∞ は {var} = {} までで打ち切り（項がまだ小さくならない）", n - 1)
+        });
+        Ok(balanced(terms, BinOp::Add))
+    }
+
     fn sum_or_prod(&mut self, sum: bool, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
         let sym = if sum { "Σ" } else { "Π" };
         let [lo, hi] = args else {
@@ -2865,6 +2965,12 @@ impl Expander<'_> {
                 return Err("Π の範囲に ∞ は使えません（有限の範囲にしてください）".into());
             }
             let a = self.integer(lo, &what)?;
+            // 中身に座標など（値が 1 つの数にならない変数）があれば、項が表示範囲で十分小さくなる所で打ち切った和にする
+            // （ワイエルシュトラウス関数 Σ aⁿ cos(bⁿ π x) など）
+            let g = self.scalar(body)?;
+            if crate::eval::Program::compile_with(&g, &[var], self.params).is_err() {
+                return self.truncated_sum(var, a, &g);
+            }
             return self.infinite_sum(var, a, body).map(Expr::Num);
         }
         let (a, b) = (self.integer(lo, &what)?, self.integer(hi, &what)?);

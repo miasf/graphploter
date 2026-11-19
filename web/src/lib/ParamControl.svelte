@@ -19,8 +19,23 @@
     /** 値を自動で動かしているか */
     playing: boolean
     onPlay: () => void
+    /** 条件の行（ab > 1 など）があるとき、スライダーの範囲を等分した点ごとに、その値にできるか。無ければ undefined */
+    allowed?: boolean[]
   }
-  let { name, value, slider, error, onAddSlider, onChange, onSlider, playing, onPlay }: Props = $props()
+  let { name, value, slider, error, onAddSlider, onChange, onSlider, playing, onPlay, allowed }: Props = $props()
+
+  /** 動かせる所を色、条件で動かせない所を灰色の斜線にした帯の背景 */
+  const allowedBar = $derived.by(() => {
+    if (!allowed || allowed.length < 2 || allowed.every(Boolean)) return null
+    const n = allowed.length
+    const stops: string[] = []
+    for (let k = 0; k < n; k++) {
+      const [a, b] = [(k / n) * 100, ((k + 1) / n) * 100]
+      const c = allowed[k] ? 'var(--accent, #2d70b3)' : 'transparent'
+      stops.push(`${c} ${a}%`, `${c} ${b}%`)
+    }
+    return `linear-gradient(90deg, ${stops.join(', ')})`
+  })
 
   /** 値を丸める刻み（範囲のおよそ 1/200） */
   const step = $derived(sliderStep(slider))
@@ -69,16 +84,25 @@
       aria-label="{name} を{playing ? '止める' : '自動で動かす'}"
       title={playing ? '止める' : '最小値から最大値まで自動で動かす'}>{playing ? '❚❚' : '▶'}</button
     >
-    <input
-      class="slider"
-      type="range"
-      min={slider.min}
-      max={slider.max}
-      {step}
-      value={value.re}
-      aria-label="{name} の値"
-      oninput={(e) => onChange(e.currentTarget.valueAsNumber, 0)}
-    />
+    <div class="slider-wrap">
+      <input
+        class="slider"
+        type="range"
+        min={slider.min}
+        max={slider.max}
+        {step}
+        value={value.re}
+        aria-label="{name} の値"
+        oninput={(e) => {
+          onChange(e.currentTarget.valueAsNumber, 0)
+          // 条件で止めたら、つまみも止めた値に戻す
+          e.currentTarget.value = String(value.re)
+        }}
+      />
+      {#if allowedBar}
+        <div class="allowed" style:background-image={allowedBar} title="色の所だけ動かせます（灰色の所は、条件の行が成り立たない）"></div>
+      {/if}
+    </div>
     </div>
   {/if}
 
@@ -127,9 +151,26 @@
     align-items: center;
     gap: 8px;
   }
-  .slider {
+  .slider-wrap {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .slider {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+  }
+  /* 条件で動かせる範囲の帯（スライダーの下。つまみの幅の分だけ内側に寄せる） */
+  .allowed {
+    height: 4px;
+    margin: 0 7px;
+    border-radius: 2px;
+    background-color: var(--border-strong);
+    background-blend-mode: normal;
+    opacity: 0.85;
   }
   .play {
     width: 28px;
