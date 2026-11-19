@@ -43,10 +43,21 @@ export interface GridUniforms {
    * 回す前の形で作った陰関数は、オブジェクトを回して描くので、そのままでは格子線も一緒に回ってしまう
    */
   uGridWorld: { value: number }
+  /**
+   * 表示範囲の箱（全部の曲面で共有する）。箱の面の上にある面（不等式の領域・立体を箱で切った所の壁）の格子線は、
+   * 面の濃さと一緒に薄くする（面の濃さ 0 で、箱の壁が格子線だけ残って消えないように見えないように）
+   */
+  uBoxLo: { value: THREE.Vector3 }
+  uBoxHi: { value: THREE.Vector3 }
 }
 
-export function createGridUniforms(pixelScale: { value: number } = { value: 1 }): GridUniforms {
+export function createGridUniforms(
+  pixelScale: { value: number } = { value: 1 },
+  box: { lo: { value: THREE.Vector3 }; hi: { value: THREE.Vector3 } } = { lo: { value: new THREE.Vector3(-1e30, -1e30, -1e30) }, hi: { value: new THREE.Vector3(1e30, 1e30, 1e30) } },
+): GridUniforms {
   return {
+    uBoxLo: box.lo,
+    uBoxHi: box.hi,
     uPixelScale: pixelScale,
     uGridSpacing: { value: new THREE.Vector3() },
     uGridColor: { value: new THREE.Color() },
@@ -262,6 +273,27 @@ uniform float uGridStrength;
 uniform float uGridWidth;
 uniform float uPixelScale;
 uniform float uFillOpacity;
+#ifdef GRID_WALLS
+varying vec3 vWallPos;
+uniform vec3 uBoxLo;
+uniform vec3 uBoxHi;
+uniform float uWallAll;
+// 箱の壁（表示範囲の箱の面の上にあり、その面に平行な面）・切り口のふたなら 1。その格子線は面の濃さと一緒に薄くする
+float gWall() {
+  if (uWallAll > 0.5) return 1.0;
+  vec3 n = cross(dFdx(vWallPos), dFdy(vWallPos));
+  float len = length(n);
+  if (!(len > 0.0)) return 0.0;
+  n /= len;
+  vec3 eps = max((uBoxHi - uBoxLo) * 1e-3, vec3(1e-9));
+  vec3 dLo = abs(vWallPos - uBoxLo);
+  vec3 dHi = abs(vWallPos - uBoxHi);
+  for (int k = 0; k < 3; k++) {
+    if (abs(n[k]) > 0.995 && (dLo[k] < eps[k] || dHi[k] < eps[k])) return 1.0;
+  }
+  return 0.0;
+}
+#endif
 
 // 座標 coord が spacing の整数倍の近くなら 1、離れていれば 0（太さ uGridWidth 画素）
 float gridLine(float coord, float spacing) {
@@ -314,6 +346,10 @@ export const FRAGMENT_APPLY = /* glsl */ `
   float g = max(max(gridLine(vGridPos.x, uGridSpacing.x),
                     gridLine(vGridPos.y, uGridSpacing.y)),
                 gridLine(vGridPos.z, uGridSpacing.z));
+#ifdef GRID_WALLS
+  // 箱の壁・切り口のふたは図形そのものではないので、格子線も面の濃さと一緒に薄くする（面の濃さ 0 で消える）
+  if (gWall() > 0.5) g *= uFillOpacity;
+#endif
   diffuseColor.rgb = mix(diffuseColor.rgb, uGridColor, g * uGridStrength);
   // 面は uFillOpacity の濃さ、線の上は不透明にする。ほぼ透明な所は描かない
   diffuseColor.a = max(uFillOpacity, g);
@@ -321,25 +357,30 @@ export const FRAGMENT_APPLY = /* glsl */ `
 }
 `
 
-/** 曲面の材質（表と裏の両面を描く。裏面はシェーダーで暗くする） */
-export function createSurfaceMaterial(grid: GridUniforms, clippingPlanes: THREE.Plane[]): THREE.MeshStandardMaterial {
+/**
+ * 曲面の材質（表と裏の両面を描く。裏面はシェーダーで暗くする）。cap なら切り口のふた（面全体を箱の壁と同じに扱い、
+ * 格子線を面の濃さと一緒に薄くする）
+ */
+export function createSurfaceMaterial(grid: GridUniforms, clippingPlanes: THREE.Plane[], cap = false): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({
     side: THREE.DoubleSide,
     roughness: 0.55,
     metalness: 0.05,
     clippingPlanes,
   })
+  m.defines = { GRID_WALLS: '' }
+  const wallAll = { value: cap ? 1 : 0 }
   // Three.js が作るシェーダーのコードに、格子線の処理を差し込む
   m.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, grid)
+    Object.assign(shader.uniforms, grid, { uWallAll: wallAll })
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
-        '#include <common>\nattribute vec3 gridCoord;\nattribute vec3 complexValue;\nvarying vec3 vGridPos;\nvarying vec3 vComplex;\nuniform float uGridWorld;',
+        '#include <common>\nattribute vec3 gridCoord;\nattribute vec3 complexValue;\nvarying vec3 vGridPos;\nvarying vec3 vComplex;\nuniform float uGridWorld;\nvarying vec3 vWallPos;',
       )
       .replace(
         '#include <begin_vertex>',
-        '#include <begin_vertex>\nvGridPos = uGridWorld > 0.5 ? (modelMatrix * vec4(gridCoord, 1.0)).xyz : gridCoord;\nvComplex = complexValue;',
+        '#include <begin_vertex>\nvGridPos = uGridWorld > 0.5 ? (modelMatrix * vec4(gridCoord, 1.0)).xyz : gridCoord;\nvComplex = complexValue;\nvWallPos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
       )
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\n' + FRAGMENT_HEADER)

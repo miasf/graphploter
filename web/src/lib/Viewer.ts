@@ -714,6 +714,17 @@ export class Viewer {
 
   /** 格子線の太さの倍率（全部の曲面の材質で共有する。今の画素密度 ÷ ふつうのときの画素密度） */
   private pixelScale = { value: 1 }
+  /** 表示範囲の箱（曲面の材質で共有する。箱の壁の格子線を、面の濃さと一緒に薄くするのに使う。2D では z の壁は無い） */
+  private boxUniforms = { lo: { value: new THREE.Vector3(-1e30, -1e30, -1e30) }, hi: { value: new THREE.Vector3(1e30, 1e30, 1e30) } }
+
+  /** 曲面の材質の箱を、今の表示範囲にする */
+  private updateBoxUniforms() {
+    const d = this.domain
+    if (!d) return
+    const far = 1e30
+    this.boxUniforms.lo.value.set(d.xmin, d.ymin, this.flat ? -far : d.zmin)
+    this.boxUniforms.hi.value.set(d.xmax, d.ymax, this.flat ? far : d.zmax)
+  }
 
   /**
    * 画素密度を下げている間も、線が太って見えないようにする。
@@ -1109,6 +1120,7 @@ export class Viewer {
       )
     }
     this.applyClipping()
+    this.updateBoxUniforms()
     for (const p of this.plots.values()) {
       if (p.kind === 'surface') p.grid.uHeatRange.value.set(d.zmin, d.zmax)
       else this.placeDots(p.dots)
@@ -1125,6 +1137,7 @@ export class Viewer {
   setFlat(on: boolean) {
     if (this.flat === on) return
     this.flat = on
+    this.updateBoxUniforms()
     this.controls.enableRotate = !on
     this.applyButtons()
     this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
@@ -1851,7 +1864,7 @@ export class Viewer {
       p.cap.geometry = geo
     } else {
       // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
-      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes))
+      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes, true))
       p.cap.frustumCulled = false // 切り口は表示範囲の中（外接球を求めない。下の曲面と同じ）
       p.group.add(p.cap)
       this.setStyle(id, style)
@@ -2000,7 +2013,7 @@ export class Viewer {
 
   private setSurface(id: number, mesh: MeshData) {
     // 表と裏は1つの材質で描く（裏面はシェーダーで暗くする）
-    const grid = createGridUniforms(this.pixelScale)
+    const grid = createGridUniforms(this.pixelScale, this.boxUniforms)
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
     const surface = new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes))
@@ -2345,7 +2358,8 @@ export class Viewer {
         }
       }
       const q = p.stencil.quad.material as THREE.MeshStandardMaterial
-      q.opacity = Math.max(opacity, 0.15)
+      // 面の濃さ 0 なら、ふたも見えなくする（透明でも描いて、ステンシルは 0 に戻す）
+      q.opacity = opacity
       q.depthWrite = !transparent
     }
     for (const mesh of p.cap ? [mesh0, p.cap] : [mesh0]) {
