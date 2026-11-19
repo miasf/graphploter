@@ -2512,3 +2512,53 @@ export function splitTuple(latex: string): string[] | null {
 export function joinTuple(parts: string[]): string {
   return `\\left(${parts.join(',')}\\right)`
 }
+
+
+/** スライダーの値の条件（`ab > 1`・`0 < a < 1, b \ge 1` のような、不等式だけの行）。左から順の式（LaTeX）と不等号 */
+export interface ParamCondition {
+  parts: string[]
+  /** 不等号（'<' | '<=' | '>' | '>='）。parts[k] と parts[k + 1] の間 */
+  rels: ('<' | '<=' | '>' | '>=')[]
+}
+
+/**
+ * 不等式だけの行を、条件の並びに分ける（括弧の外の `,`・`\land` で区切り、不等号の連鎖 0 < a < 1 も読む）。
+ * 等号・≠・集合の記号など、不等式だけでない行なら null（値が数になるか＝座標を使わないかは、呼ぶ側が計算して確かめる）
+ */
+export function paramConditions(latex: string): ParamCondition[] | null {
+  if (!/[<>]|\\(?:le|ge|lt|gt|leq|geq|leqslant|geqslant|leqq|geqq)(?![A-Za-z])/.test(latex)) return null
+  let toks: Token[]
+  try {
+    toks = tokenize(latex)
+  } catch {
+    return null
+  }
+  if (toks.some((t) => t === '=' || t === '\\ne' || t === '\\neq' || t === '\\mid' || t === '\\{' || t === '\\in' || t === '\\lor' || t === '\\vee' || t === '\\neg')) return null
+  const chains = splitTop(toks, (t) => t === ',' || t === '\\land' || t === '\\wedge').map((c) => c.filter((t) => !SPACES.has(t)))
+  const out: ParamCondition[] = []
+  for (const c of chains) {
+    if (c.length === 0) continue
+    const pieces = splitTop(c, (t) => RELATIONS.has(t))
+    const rels = c.filter((t) => RELATIONS.has(t))
+    // 括弧の中の不等号は数えない（splitTop と同じ深さだけ）
+    if (pieces.length < 2 || pieces.length !== rels.length + 1 || pieces.some((p) => p.length === 0)) return null
+    out.push({
+      parts: pieces.map(joinToks),
+      rels: rels.map((r) => {
+        const less = LESS.has(r)
+        const strict = r === '<' || r === '>' || r === '\\lt' || r === '\\gt'
+        return less ? (strict ? '<' : '<=') : strict ? '>' : '>='
+      }),
+    })
+  }
+  return out.length > 0 ? out : null
+}
+
+/** 条件が成り立つか（値は parts の順） */
+export function conditionHolds(rels: ParamCondition['rels'], values: number[]): boolean {
+  return rels.every((r, k) => {
+    const [a, b] = [values[k], values[k + 1]]
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false
+    return r === '<' ? a < b : r === '<=' ? a <= b : r === '>' ? a > b : a >= b
+  })
+}

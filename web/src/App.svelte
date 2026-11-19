@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { hasIntegral, inlineRegions, integralDisplay, riemannDisplay, type RiemannMethod, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { conditionHolds, paramConditions, hasIntegral, inlineRegions, integralDisplay, riemannDisplay, type ParamCondition, type RiemannMethod, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
@@ -983,6 +983,14 @@
 
   async function replotNow(item: PlotItem, full = false) {
     if (!viewer) return
+    // スライダーの値の条件の行（ab > 1）: 図形は描かず、説明だけ出す
+    item.condition = isCondition(item)
+    if (item.condition) {
+      viewer.removePlot(item.id)
+      item.error = undefined
+      refreshConditions()
+      return
+    }
     const token = (latest.get(item.id) ?? 0) + 1
     latest.set(item.id, token)
     item.stale = false
@@ -1441,17 +1449,138 @@
   }
 
   /** スライダー・複素平面でパラメータの値を変えたとき */
+  // ---- スライダーの値の条件（ab > 1 のような、パラメータだけの不等式の行）----
+  //
+  // 不等式だけで、値が数になる（座標を使わない）行は、図形を描かずに「条件」にする。
+  // スライダーを動かして、いま成り立っている条件が成り立たなくなる値にしようとしたら、境目の手前で止める
+  // （前の値と新しい値の間を二分法で詰める。どんな不等式でも使える）。非表示にした条件の行は使わない
+
+  /** 式（LaTeX）→ 条件の並び（不等式だけの行でなければ null） */
+  const conditionCache = new Map<string, ParamCondition[] | null>()
+  function parsedConditions(latex: string): ParamCondition[] | null {
+    if (!conditionCache.has(latex)) {
+      if (conditionCache.size > 500) conditionCache.clear()
+      conditionCache.set(latex, paramConditions(latex))
+    }
+    return conditionCache.get(latex)!
+  }
+
+  /**
+   * 条件の並びの成り立ち（params の値で）。true / false、計算できない（座標を使う・準備中など）なら null
+   */
+  function conditionValue(conds: ParamCondition[], params: Record<string, ParamValue>, item?: PlotItem, onReady: () => void = () => {}): boolean | null {
+    const defs = item ? currentDefinitions(item) : ''
+    let all = true
+    for (const c of conds) {
+      const vals: number[] = []
+      for (const part of c.parts) {
+        const v = evalValue(part, params, onReady, defs)
+        if (!v || !('value' in v)) return null
+        vals.push(v.value)
+      }
+      if (!conditionHolds(c.rels, vals)) all = false
+    }
+    return all
+  }
+
+  /** 条件の行か（不等式だけで、今のパラメータで値が計算できる） */
+  function isCondition(item: PlotItem): boolean {
+    if (item.param || isAux(item)) return false
+    const conds = parsedConditions(item.latex)
+    // 計算エンジンの準備がまだなら、準備ができてから読み直す
+    return conds !== null && conditionValue(conds, currentParams(), item, () => schedule(item, 0)) !== null
+  }
+
+  /** 使う条件の行（表示中のもの）と、その条件 */
+  function activeConditions(): { item: PlotItem; conds: ParamCondition[] }[] {
+    return items.flatMap((it) => (it.visible && it.condition ? [{ item: it, conds: parsedConditions(it.latex)! }] : []))
+  }
+
+  /**
+   * パラメータ item を値 re にしたいとき、条件で止めた値。いま成り立っている条件だけを守る
+   * （いま成り立っていない条件は、動かすのを止めない。止めると動かせなくなる）
+   */
+  function constrained(item: PlotItem, re: number): { value: number; clamped: boolean } {
+    const name = item.param?.name
+    const free = { value: re, clamped: false }
+    if (!name || item.slider.complex) return free
+    const conds = activeConditions()
+    if (conds.length === 0) return free
+    const base = currentParams()
+    const at = (v: number) => ({ ...base, [name]: { re: v, im: 0, complex: false } })
+    const holding = conds.filter((c) => conditionValue(c.conds, base, c.item) === true)
+    if (holding.length === 0) return free
+    const ok = (v: number) => holding.every((c) => conditionValue(c.conds, at(v), c.item) !== false)
+    if (ok(re)) return free
+    // 前の値（成り立つ）と新しい値の間を詰める
+    let good = item.param!.re
+    let bad = re
+    if (!ok(good)) return free
+    for (let k = 0; k < 50; k++) {
+      const mid = (good + bad) / 2
+      if (ok(mid)) good = mid
+      else bad = mid
+    }
+    // 刻みにそろえる（そろえて成り立たなくなるなら、前の値の側の刻みにする）
+    const snapped = snapToStep(good, item.slider)
+    if (snapped !== good && ok(snapped)) return { value: snapped, clamped: true }
+    const step = sliderStep(item.slider)
+    const toward = snapped + Math.sign(item.param!.re - snapped) * step
+    if (snapped !== good && ok(toward)) return { value: toward, clamped: true }
+    // 刻みが自動なら、書いたときに成り立つ、いちばん短い桁数の値にする（丸めて 1 になると a < 1 が成り立たない）
+    for (let d = 2; d <= 12; d++) {
+      const f = 10 ** d
+      const t = (good > bad ? Math.ceil(good * f) : Math.floor(good * f)) / f
+      if (ok(t)) return { value: t, clamped: true }
+    }
+    return { value: good, clamped: true }
+  }
+
+  /** 条件の行の説明（成り立っているか）を今の値で更新する */
+  function refreshConditions() {
+    const ps = currentParams()
+    for (const it of items) {
+      if (!it.condition) continue
+      const v = conditionValue(parsedConditions(it.latex)!, ps, it)
+      it.kind = v === false ? '条件（今の値では成り立っていません。動かしても止めません）' : '条件（スライダーの値を、この不等式が成り立つ範囲に制限）'
+      it.info = it.kind
+    }
+  }
+
+  /** パラメータの行ごとの、スライダーの範囲の点（48 等分）でその値にできるか（条件の行が無ければ無い） */
+  function allowedMask(item: PlotItem): boolean[] | undefined {
+    const name = item.param?.name
+    if (!name || item.slider.complex) return undefined
+    const conds = activeConditions()
+    if (conds.length === 0) return undefined
+    const base = currentParams()
+    const holding = conds.filter((c) => conditionValue(c.conds, base, c.item) === true)
+    if (holding.length === 0) return undefined
+    const n = 48
+    const { min, max } = item.slider
+    return Array.from({ length: n }, (_, k) => {
+      const v = min + ((k + 0.5) / n) * (max - min)
+      const ps = { ...base, [name]: { re: v, im: 0, complex: false } }
+      return holding.every((c) => conditionValue(c.conds, ps, c.item) !== false)
+    })
+  }
+
   function setParam(item: PlotItem, re: number, im: number, fromPlay = false) {
     if (!item.param) return
     if (!fromPlay) playPos.delete(item.id) // 手で動かしたら、再生はその値から続ける
     const step = sliderStep(item.slider)
     // 刻みを決めているなら、最小値から刻みの整数倍の所にそろえる（Desmos の Step と同じ）
     re = snapToStep(re, item.slider)
+    // 条件の行（ab > 1 など）が成り立たなくなる値なら、境目の手前で止める
+    const limit = im === 0 ? constrained(item, re) : { value: re, clamped: false }
+    re = limit.value
     if (im !== 0) im = snapToStep(im, item.slider) // 実数のときの虚部 0 はそのまま
     item.param.re = re
     item.param.im = im
-    item.latex = `${latexName(item.param.name)}=${complexLatex(re, im, step, item.slider.min)}`
+    // 条件で止めた値は、丸めずに書く（丸めると境目を越えて、条件が成り立たなくなる）
+    item.latex = `${latexName(item.param.name)}=${limit.clamped ? String(re) : complexLatex(re, im, step, item.slider.min)}`
     paramsChanged([item.param.name], item)
+    refreshConditions()
     // 光線で描く式は、計算し直しを待たずに uniform を変える（計画 G7）
     const ps = currentParams()
     viewer?.setGpuParams(Object.fromEntries(Object.entries(ps).map(([k, v]) => [k, v.re])))
@@ -2997,6 +3126,7 @@
             }}
             onIntegralPlay={() => togglePlayIntegral(item)}
             onRiemann={(m, n) => setRiemann(item, m, n)}
+            paramAllowed={item.param ? allowedMask(item) : undefined}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}

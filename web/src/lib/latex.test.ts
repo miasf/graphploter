@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { riemannDisplay, fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
+import { conditionHolds, paramConditions, riemannDisplay, fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -502,6 +502,19 @@ check(
   check('2 重積分は近似しない', err('\\iint_{x^2+y^2\\le1}1\\,dA'), true)
   check('端に座標がある', err('\\int_0^xt\\,dt'), true)
   check('不定積分', err('\\int x\\,dx'), true)
+}
+
+// スライダーの値の条件（不等式だけの行）
+{
+  check('ab > 1', JSON.stringify(paramConditions('ab>1')), JSON.stringify([{ parts: ['ab', '1'], rels: ['>'] }]))
+  check('連鎖とカンマ', JSON.stringify(paramConditions('0<a<1,\\ b\\ge1')), JSON.stringify([{ parts: ['0', 'a', '1'], rels: ['<', '<'] }, { parts: ['b', '1'], rels: ['>='] }]))
+  check('かつ', paramConditions('a<b\\land b<2')?.length, 2)
+  check('等式は条件でない', paramConditions('a=1'), null)
+  check('集合は条件でない', paramConditions('\\left\\{(x,y)\\mid x<a\\right\\}'), null)
+  check('成り立つ', conditionHolds(['<', '<'], [0, 0.5, 1]), true)
+  check('境目（<）', conditionHolds(['<'], [1, 1]), false)
+  check('境目（≤）', conditionHolds(['<='], [1, 1]), true)
+  check('値が無い', conditionHolds(['>'], [NaN, 1]), false)
 }
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
