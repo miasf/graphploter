@@ -183,6 +183,31 @@
 
   // ---- 点を押すと値が出る（学習用）----
 
+  /**
+   * グラフを押したら値を出すか（標準はオフ。タッチで操作すると印が出て見づらいため）。端末ごとの好みなので、共有リンクには入れず、このブラウザにだけ覚える
+   */
+  const PICK_KEY = 'graphploter.pickValues'
+  let pickValues = $state(
+    (() => {
+      try {
+        return localStorage.getItem(PICK_KEY) === '1'
+      } catch {
+        return false
+      }
+    })(),
+  )
+  function setPickValues(on: boolean) {
+    pickValues = on
+    try {
+      localStorage.setItem(PICK_KEY, on ? '1' : '0')
+    } catch {
+      // 保存できない環境では、この画面の間だけ
+    }
+    if (!on) clearPick()
+    // 注目する点（極値・零点）は、オンのときだけ求めるので、オンにしたら計算し直す
+    else for (const it of items) if (it.visible && it.latex.trim() !== '') schedule(it, 0)
+  }
+
   /** 印を出している式の id（無ければ null） */
   let pickedId: number | null = null
   /** 押した順の番号（古い計算の結果を捨てる） */
@@ -208,6 +233,7 @@
    * （画面の線・三角形は折れ線なので、そのままでは少しずれる）。注目する点（極値・零点など）は計算エンジンが求めた正確な点
    */
   function handlePick(r: PickResult | null) {
+    if (!pickValues) return
     if (!r) {
       clearPick()
       return
@@ -663,7 +689,7 @@
     { id: 'range', icon: '⬚', label: '表示範囲', desc: 'x, y, z の最小値・最大値' },
     { id: 'detail', icon: '▦', label: '細かさ', desc: '曲面・陰関数の細かさ、重ねる枚数' },
     { id: 'look', icon: '◎', label: '見え方', desc: '動かしている間の画質、遠近感、視点のリセット、背景' },
-    { id: 'control', icon: '✥', label: 'マウス操作', desc: '操作モード A / B の切り替え' },
+    { id: 'control', icon: '✥', label: '操作', desc: 'マウスの操作モード A / B、グラフを押したら値を出す' },
     { id: 'cut', icon: '✂', label: '切り口', desc: '立体を平面で切る' },
     { id: 'save', icon: '⇪', label: '保存・共有', desc: 'グラフの一覧、共有リンク、最初の状態に戻す' },
     { id: 'help', icon: '?', label: '書き方のヒント', desc: '式の書き方と操作' },
@@ -1025,7 +1051,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse ? 0 : PLOT_POI),
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse || !pickValues ? 0 : PLOT_POI),
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
@@ -3411,6 +3437,14 @@
               ['中ドラッグ', '平行移動'],
             ])}
             <p class="note">パソコンのマウスの操作だけが変わります（スマホの指の操作は同じ）。</p>
+            <label class="check-row">
+              <input type="checkbox" checked={pickValues} onchange={(e) => setPickValues(e.currentTarget.checked)} />
+              グラフを押したら値を出す
+            </label>
+            <p class="note">
+              オンにすると、曲線・曲面を押した所に印と座標が出ます。y = f(x)・z = f(x, y) の式では、極大・極小・零点などの点も灰色の印で出て、押すと種類と座標が出ます。
+              タッチで操作すると印が出て見づらいので、標準はオフです（このブラウザに覚えます）。
+            </p>
           {:else if settingsCat === 'cut'}
             {#if flat}<p class="note">2D 表示では使えません</p>{/if}
             <label class="check-row" class:disabled={flat}>
