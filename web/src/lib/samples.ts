@@ -265,6 +265,31 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         items: [{ latex: '\\exists a\\in\\left[0,3\\right],x^2+y^2+\\left(z-a\\right)^2=1', options: { color: '#6042a6', opacity: 0.6 } }],
       },
       {
+        label: 'テイラー多項式 sin x の近似（N を再生して次数を上げる）',
+        flat: true,
+        play: 'N',
+        items: [
+          { latex: 'N=1', param: 'N', options: { slider: { min: 0, max: 19, complex: false, stack: false, stepExpr: '1', step: 1 } } },
+          { latex: 'y=\\sin x', options: { color: '#2d70b3' } },
+          { latex: 'y=\\operatorname{Taylor}\\left(\\sin x,x,0,N\\right)', options: { color: '#c74440' } },
+        ],
+      },
+      {
+        label: '接平面と 2 次近似 Taylor(f, (x, y), (a, b), n)',
+        items: [
+          { latex: 'f\\left(x,y\\right)=\\sin x\\cos y+1', options: { color: '#2d70b3', opacity: 0.7 } },
+          { latex: 'z=\\operatorname{Taylor}\\left(f,\\left(x,y\\right),\\left(1,0.5\\right),1\\right)', options: { color: '#c74440', opacity: 0.6 } },
+          { latex: 'z=\\operatorname{Taylor}\\left(f,\\left(x,y\\right),\\left(1,0.5\\right),2\\right)', options: { color: '#388c46', opacity: 0.6 } },
+        ],
+      },
+      {
+        label: '停留点の分類 crit f（極大・極小・鞍点）',
+        items: [
+          { latex: 'z=x^3-3x+y^2', options: { color: '#2d70b3', opacity: 0.7 } },
+          { latex: '\\operatorname{crit}\\left(x^3-3x+y^2\\right)', options: { color: '#c74440' } },
+        ],
+      },
+      {
         label: '最大公約数 z = gcd(x, y)/3',
         items: [{ latex: 'z=\\frac{\\gcd\\left(x,y\\right)}{3}', options: { color: '#fa7e19', walls: true } }],
       },

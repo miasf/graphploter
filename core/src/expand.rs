@@ -251,6 +251,15 @@ pub fn view_x() -> (f64, f64) {
     VIEW_X.with(|x| x.get())
 }
 
+/// 表示中の 3 つの座標の表示範囲（横・奥・縦の順に下端・上端。停留点を探す範囲に使う。`lib.rs` が入れる）
+pub fn set_view_box(b: [f64; 6]) {
+    VIEW_BOX.with(|x| x.set(b));
+}
+
+pub fn view_box() -> [f64; 6] {
+    VIEW_BOX.with(|x| x.get())
+}
+
 /// 数字の添字の付いた名前 `a1` が、定義した数列の項の名前か
 pub fn is_term_name(name: &str) -> bool {
     split_subscript(name).is_some_and(|(h, _)| current().seq(h).is_some()) && crate::equation::coord_index(name).is_none()
@@ -315,6 +324,7 @@ thread_local! {
     static KIND: RefCell<Option<String>> = const { RefCell::new(None) };
     /// 横の座標の表示範囲
     static VIEW_X: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((-10.0, 10.0)) };
+    static VIEW_BOX: std::cell::Cell<[f64; 6]> = const { std::cell::Cell::new([-10.0, 10.0, -10.0, 10.0, -10.0, 10.0]) };
     /// 常微分方程式の初期値の欄（状態の成分ごとの式。計画 M9。`lib.rs` が入れる）
     static ODE_INIT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 常微分方程式の状態の名前（`x`・`y'` など。初期値の欄の見出しに使う）
@@ -886,6 +896,8 @@ impl Expander<'_> {
                 };
                 Val::S(body.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone())))
             }
+            // テイラー多項式 `@taylor(f, x, a, n)`・`@taylor(f, (x, y), (a, b), n)`
+            Expr::Op { op, args } if op == "taylor" => Val::S(self.taylor(args)?),
             Expr::Op { op, args } if op == "compose" => {
                 let (f, g) = (self.val(&args[0])?, self.val(&args[1])?);
                 match (f, g) {
@@ -2661,6 +2673,160 @@ impl Expander<'_> {
     }
 
     /// 整数の値（整数から 10⁻⁹ より離れていればエラー）
+    /// テイラー多項式 $T_n(\mathbf x) = \sum_{|\alpha| \le n} \frac{\partial^\alpha f(\mathbf a)}{\alpha!} (\mathbf x - \mathbf a)^\alpha$。
+    /// 偏導関数は記号微分（[`crate::diff::diff`]）で作り、中心 $\mathbf a$ を入れる。係数が数（とパラメータ）だけなら数にし、
+    /// 説明に多項式を出す（`T₅(x) = x − x³/6 + x⁵/120`）
+    fn taylor(&mut self, args: &[Expr]) -> Result<Expr, String> {
+        let [f, vars, centers, order] = args else {
+            return Err("テイラー展開は Taylor(f, x, a, n)（多変数なら Taylor(f, (x, y), (a, b), n)）の形で書いてください".into());
+        };
+        let names: Vec<String> = match vars {
+            Expr::Var(v) => vec![v.clone()],
+            Expr::Tuple(items) => items
+                .iter()
+                .map(|v| match v {
+                    Expr::Var(v) => Ok(v.clone()),
+                    _ => Err("テイラー展開の 2 つ目には、変数の名前（x か (x, y)）を書いてください".to_string()),
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err("テイラー展開の 2 つ目には、変数の名前（x か (x, y)）を書いてください".into()),
+        };
+        let k = names.len();
+        if !(1..=3).contains(&k) || names.iter().enumerate().any(|(i, n)| names[..i].contains(n)) {
+            return Err("テイラー展開の変数は、違う名前を 1〜3 個にしてください".into());
+        }
+        let centers: Vec<Expr> = match (centers, k) {
+            (Expr::Tuple(items), _) if items.len() == k => items.iter().map(|c| self.scalar(c)).collect::<Result<_, _>>()?,
+            (Expr::Tuple(_), 1) => return Err("1 変数のテイラー展開の中心は、数 1 つにしてください".into()),
+            (c, 1) => vec![self.scalar(c)?],
+            _ => return Err(format!("テイラー展開の中心は、変数と同じ {k} 個の組 (a, b{}) にしてください", if k == 3 { ", c" } else { "" })),
+        };
+        if centers.iter().any(|c| names.iter().any(|v| c.uses_var(v))) {
+            return Err("テイラー展開の中心に、展開する変数は使えません".into());
+        }
+        let n = self.integer(order, "テイラー展開の次数")?;
+        let max = [20, 10, 6][k - 1];
+        if !(0..=max).contains(&n) {
+            return Err(format!("{k} 変数のテイラー展開の次数は 0〜{max} にしてください"));
+        }
+        let n = n as usize;
+        // f は式か、引数が変数の数と同じ関数（関数の名前だけでもよい）
+        let body = match self.val(f)? {
+            Val::S(s) => s,
+            Val::Fn { arity, body } if arity == k => apply_body(&body, &names.iter().map(|v| Expr::Var(v.clone())).collect::<Vec<_>>()),
+            Val::Fn { .. } => return Err(format!("テイラー展開する関数の引数の数を、変数の数（{k}）にそろえてください")),
+        };
+        if matches!(body, Expr::Tuple(_) | Expr::List(_)) || Mat::of(&body).is_some() {
+            return Err("テイラー展開できるのは、値が数になる式です（ベクトル・リストは成分ごとに書いてください）".into());
+        }
+        // 1 変数で中心が数なら、べき級数の計算で係数を直接求める（記号微分で 20 階まで微分すると式が大きくなりすぎる。[`crate::series`]）
+        if k == 1 {
+            if let Some(a) = self.constant_value(&centers[0]) {
+                let value = |e: &Expr| self.constant_value(e);
+                if let Some(coefs) = crate::series::taylor(&body, &names[0], a, n, &value) {
+                    let real = coefs.iter().all(|c| c.im.abs() <= 1e-12 * c.re.abs().max(1.0)) && a.im == 0.0;
+                    let mut terms = Vec::new();
+                    for (j, c) in coefs.iter().enumerate() {
+                        if c.norm() < 1e-14 {
+                            continue;
+                        }
+                        let coef = if c.im.abs() <= 1e-12 * c.re.abs().max(1.0) {
+                            Expr::Num(c.re)
+                        } else {
+                            crate::diff::add(Expr::Num(c.re), crate::diff::mul(Expr::Num(c.im), Expr::Const(crate::parser::Constant::I)))
+                        };
+                        let shift = crate::diff::sub(Expr::Var(names[0].clone()), centers[0].clone());
+                        terms.push(if j == 0 { coef } else { crate::diff::mul(coef, crate::diff::pow(shift, Expr::Num(j as f64))) });
+                    }
+                    if real {
+                        let shown: Vec<(Vec<usize>, num_complex::Complex64)> = coefs.iter().enumerate().map(|(j, c)| (vec![j], num_complex::Complex64::new(c.re, 0.0))).collect();
+                        add_note(&taylor_text(n, &names, &[a.re], &shown));
+                    }
+                    return Ok(balanced(terms, BinOp::Add));
+                }
+            }
+        }
+        // 多重指数 α を次数の順に。∂^α f は、α から 1 つ減らした指数の偏導関数をもう 1 回微分して作る
+        let mut indices: Vec<Vec<usize>> = vec![vec![0; k]];
+        let mut derivs: Vec<Expr> = vec![body];
+        let mut terms: Vec<Expr> = Vec::new();
+        let mut shown: Vec<(Vec<usize>, num_complex::Complex64)> = Vec::new();
+        let mut numeric = true;
+        let at = |e: &Expr| e.substitute(&|v: &str| names.iter().position(|n| n == v).map(|i| centers[i].clone()));
+        let mut start = 0;
+        for degree in 0..=n {
+            if degree > 0 {
+                let end = indices.len();
+                for p in start..end {
+                    // 最後に 0 でない成分以降だけを増やす（同じ指数を 2 回作らない）
+                    let last = indices[p].iter().rposition(|&a| a > 0).unwrap_or(0);
+                    for j in last..k {
+                        let mut a = indices[p].clone();
+                        a[j] += 1;
+                        let d = crate::diff::diff(&derivs[p], &names[j])?;
+                        if d.node_count() > 200_000 {
+                            return Err("テイラー展開の導関数が大きくなりすぎました（次数を下げてください）".into());
+                        }
+                        indices.push(a);
+                        derivs.push(d);
+                    }
+                }
+                start = end;
+            } else {
+                start = 0;
+            }
+            for p in start..indices.len() {
+                let alpha = &indices[p];
+                let fact: f64 = alpha.iter().map(|&a| (1..=a).map(|i| i as f64).product::<f64>()).product();
+                let coef = crate::diff::div(at(&derivs[p]), Expr::Num(fact));
+                // 数とパラメータだけの係数は、数にする（式が短くなり、説明にも出せる）
+                let coef = match self.constant_value(&coef) {
+                    Some(c) if c.im.abs() <= 1e-12 * c.re.abs().max(1.0) => {
+                        shown.push((alpha.clone(), num_complex::Complex64::new(c.re, 0.0)));
+                        Expr::Num(c.re)
+                    }
+                    _ => {
+                        numeric = false;
+                        coef
+                    }
+                };
+                if matches!(coef, Expr::Num(v) if v.abs() < 1e-14) {
+                    continue;
+                }
+                let mut term = coef;
+                for (i, &a) in alpha.iter().enumerate() {
+                    if a > 0 {
+                        let shift = crate::diff::sub(Expr::Var(names[i].clone()), centers[i].clone());
+                        term = crate::diff::mul(term, crate::diff::pow(shift, Expr::Num(a as f64)));
+                    }
+                }
+                terms.push(term);
+            }
+        }
+        // 中心が数なら、説明に多項式を出す
+        let center_values: Option<Vec<f64>> = centers.iter().map(|c| self.constant_value(c).filter(|c| c.im == 0.0).map(|c| c.re)).collect();
+        if let (true, Some(cv)) = (numeric, center_values) {
+            add_note(&taylor_text(n, &names, &cv, &shown));
+        }
+        Ok(balanced(terms, BinOp::Add))
+    }
+
+    /// 数とパラメータだけの式の値（変数を含めば None）。使ったパラメータを覚える
+    fn constant_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
+        let prog = crate::eval::Program::compile_with(e, &[], self.params).ok()?;
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            for p in prog.used_params() {
+                if !u.contains(p) {
+                    u.push(p.clone());
+                }
+            }
+        });
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        prog.eval_batch(&[], &mut out);
+        (out[0].re.is_finite() && out[0].im.is_finite()).then_some(out[0])
+    }
+
     fn integer(&mut self, e: &Expr, what: &str) -> Result<i64, String> {
         let v = self.number(e, what)?;
         let r = v.round();
@@ -3298,4 +3464,107 @@ pub fn definition_line(l: &Expr) -> Option<(String, usize, bool)> {
             false,
         ),
     })
+}
+
+/// 係数を、小さい分母の分数で書けるなら分数で（1/6・−3/2）。書けなければ有効 6 桁
+fn coefficient_text(v: f64) -> (bool, String) {
+    let neg = v < 0.0;
+    let a = v.abs();
+    // 連分数で、値が浮動小数点の誤差の範囲で一致する分数を探す（e・π のような数は分数にしない）
+    let (mut h0, mut h1, mut k0, mut k1) = (0.0f64, 1.0f64, 1.0f64, 0.0f64);
+    let mut x = a;
+    let mut frac = None;
+    for _ in 0..30 {
+        let q = x.floor();
+        let (h2, k2) = (q * h1 + h0, q * k1 + k0);
+        // 分母は 10⁷ まで。分子が 1000 以下なら分母は 10¹⁸ まで（1/20! のような階乗の逆数も分数で出す）。
+        // 分子も分母も大きい分数（4551459/808579796）は、無理数をたまたま近似しただけなので使わない
+        if k2 > 1e18 || h2 > 1e7 || (k2 > 1e7 && h2 > 1000.0) {
+            break;
+        }
+        (h0, h1, k0, k1) = (h1, h2, k1, k2);
+        if (h1 / k1 - a).abs() <= 4e-16 * a.max(1e-300) {
+            frac = Some((h1, k1));
+            break;
+        }
+        let r = x - q;
+        if r < 1e-15 {
+            break;
+        }
+        x = 1.0 / r;
+    }
+    let text = match frac {
+        Some((h, k)) if k == 1.0 => format!("{h}"),
+        Some((h, k)) => format!("{h}/{k}"),
+        // 小さすぎる・大きすぎる数は、有効 6 桁の指数表記（2.50521×10⁻⁸）
+        None if a != 0.0 && (a < 1e-3 || a >= 1e7) => {
+            let e = a.log10().floor() as i32;
+            let m = format!("{:.5}", a / 10f64.powi(e));
+            let m = m.trim_end_matches('0').trim_end_matches('.');
+            let sup: String = e.to_string().chars().map(|c| if c == '-' { '⁻' } else { "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap() }).collect();
+            format!("{m}×10{sup}")
+        }
+        None => {
+            let s = format!("{a:.6}");
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        }
+    };
+    (neg, text)
+}
+
+/// 上付きの数字（² ³ …）
+fn superscript(n: usize) -> String {
+    if n == 1 {
+        return String::new();
+    }
+    n.to_string().chars().map(|c| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect()
+}
+
+/// 説明に出すテイラー多項式（`T₃(x) = x − x³/6`、`T₂(x, y) = 1 + (x − 1) + …`）
+fn taylor_text(n: usize, names: &[String], centers: &[f64], terms: &[(Vec<usize>, num_complex::Complex64)]) -> String {
+    let sub: String = n.to_string().chars().map(|c| "₀₁₂₃₄₅₆₇₈₉".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect();
+    let shift = |i: usize, wrap: bool| -> String {
+        let c = centers[i];
+        if c == 0.0 {
+            names[i].clone()
+        } else {
+            let (neg, t) = coefficient_text(c);
+            let s = format!("{} {} {t}", names[i], if neg { "+" } else { "−" });
+            if wrap { format!("({s})") } else { s }
+        }
+    };
+    let mut out = String::new();
+    for (alpha, c) in terms {
+        let v = c.re;
+        if v.abs() < 1e-14 {
+            continue;
+        }
+        let factors: Vec<usize> = (0..alpha.len()).filter(|&i| alpha[i] > 0).collect();
+        let mono: String = factors
+            .iter()
+            .map(|&i| {
+                format!("{}{}", shift(i, true), superscript(alpha[i]))
+            })
+            .collect();
+        let (neg, t) = coefficient_text(v);
+        let body = if mono.is_empty() {
+            t
+        } else if t == "1" {
+            mono
+        } else if let Some((p, q)) = t.split_once('/') {
+            if p == "1" { format!("{mono}/{q}") } else { format!("{p}{mono}/{q}") }
+        } else {
+            format!("{t}{mono}")
+        };
+        if out.is_empty() {
+            out = if neg { format!("−{body}") } else { body };
+        } else {
+            out.push_str(if neg { " − " } else { " + " });
+            out.push_str(&body);
+        }
+    }
+    if out.is_empty() {
+        out = "0".into();
+    }
+    format!("T{sub}({}) = {out}", names.join(", "))
 }

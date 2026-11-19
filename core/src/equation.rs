@@ -610,6 +610,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if let Some(p) = ode_line(source, params, space)? {
         return Ok(p);
     }
+    // 停留点 `@crit f` だけの行（計画 N4 の前半）
+    if let Some(p) = critical_line(source, params, space)? {
+        return Ok(p);
+    }
     // 行列を描く行（ker・Im・行列式だけの行・行列だけの行・行列やベクトルの定義。計画 M7）
     if let Some(p) = matrix_line(source, params, space)? {
         return Ok(p);
@@ -646,6 +650,98 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         return Ok(Plot::Multi(plots));
     }
     compile_chains(chains, params, space)
+}
+
+/// 停留点 `@crit f` だけの行（計画 N4 の前半。[`crate::critical`]）。f が使う表示中の座標（1〜3 個）について
+/// $\nabla f = \mathbf 0$ の点を表示範囲の中で探し、極大・極小・鞍点に分けて説明に出す。図には点を描く:
+/// 1 変数 f(x) は (x, f(x))、2 変数 f(x, y) は曲面 z = f(x, y) の上の点 (x, y, f)、3 変数はその点
+fn critical_line(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>, String> {
+    if !source.contains("@crit") {
+        return Ok(None);
+    }
+    let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
+    let [chain] = chains.as_slice() else { return Err("@crit f は、1 行にそれだけを書いてください".into()) };
+    let (rels, exprs) = (&chain.rels, &chain.exprs);
+    let arg = match (rels.as_slice(), exprs.as_slice()) {
+        ([], [Expr::Op { op, args }]) if op == "crit" && args.len() == 1 => &args[0],
+        _ => return Err("@crit f は、1 行にそれだけを書いてください".into()),
+    };
+    // 関数の名前だけ（`@crit f`）なら、表示中の座標を引数にして呼ぶ（f(x)・f(x, y)・f(x, y, z) の、引数の数が合うもの）
+    let f = match (arg, crate::expand::expand(arg, params)) {
+        (_, Ok(f)) => f,
+        (Expr::Var(name), Err(e)) => (1..=3)
+            .find_map(|n| {
+                let args = (0..n).map(|a| Expr::Var(coord_name(space.axes[a]))).collect();
+                crate::expand::expand(&Expr::Apply { name: name.clone(), primes: 0, args }, params).ok()
+            })
+            .ok_or(e)?,
+        (_, Err(e)) => return Err(e),
+    };
+    if matches!(f, Expr::Tuple(_) | Expr::List(_) | Expr::Matrix { .. }) {
+        return Err("停留点は、値が数になる関数で求めます（ベクトル・リストは使えません）".into());
+    }
+    if space.rotation_matrix().is_some() || space.complex_coords || space.coord_names.is_some() {
+        return Err("停留点は、回転・座標系・座標の複素数化をしていないときに求めます".into());
+    }
+    let mut used = Vec::new();
+    f.collect_vars(&mut used);
+    let mut axes: Vec<usize> = Vec::new();
+    for v in &used {
+        if let Some(c) = coord_index(v) {
+            match space.axes.iter().position(|&a| a == c) {
+                Some(a) if !axes.contains(&a) => axes.push(a),
+                Some(_) => {}
+                None => return Err(format!("停留点は、表示中の座標の関数で求めます（{v} は表示していません）")),
+            }
+        }
+    }
+    axes.sort();
+    if axes.is_empty() {
+        return Err("停留点を求める関数に、座標（x, y, z）がありません".into());
+    }
+    let vars: Vec<String> = axes.iter().map(|&a| coord_name(space.axes[a])).collect();
+    let vb = crate::expand::view_box();
+    let boxes: Vec<(f64, f64)> = axes.iter().map(|&a| (vb[2 * a].min(vb[2 * a + 1]), vb[2 * a].max(vb[2 * a + 1]))).collect();
+    let found = crate::critical::find(&f, &vars, &boxes, params)?;
+    // 値を置く軸（1 変数は、横なら奥（2D の縦）、それ以外は横。2 変数は残りの軸。3 変数は無し）
+    let value_axis = match axes.len() {
+        1 => Some(if axes[0] == 1 { 0 } else { 1 }),
+        2 => (0..3).find(|a| !axes.contains(a)),
+        _ => None,
+    };
+    let points: Vec<[f64; 3]> = found
+        .points
+        .iter()
+        .filter(|c| c.value.is_finite())
+        .map(|c| {
+            let mut p = [0.0; 3];
+            for (j, &a) in axes.iter().enumerate() {
+                p[a] = c.point[j];
+            }
+            if let Some(a) = value_axis {
+                p[a] = c.value;
+            }
+            p
+        })
+        .collect();
+    let at = |c: &crate::critical::Critical| {
+        let xs: Vec<String> = c.point.iter().map(|v| crate::critical::num_text(*v)).collect();
+        if xs.len() == 1 { format!("{} = {}", vars[0], xs[0]) } else { format!("({})", xs.join(", ")) }
+    };
+    // 判定できない点がたくさんあれば、停留点は孤立していない（(x − y)² の直線・sin x sin y sin z の座標軸など）
+    let degenerate = found.points.iter().filter(|c| c.class == crate::critical::Class::Degenerate).count();
+    let spread = if degenerate >= 5 && !found.more { "。判定できない点が多いので、線・面に沿って続いている可能性" } else { "" };
+    let mut parts = vec![format!(
+        "停留点 ∇f = 0（{} の範囲で {} 個{}{spread}。種のマスより狭く固まった点は見落とすことがある）",
+        boxes.iter().zip(&vars).map(|((lo, hi), v)| format!("{} ≤ {v} ≤ {}", crate::critical::num_text(*lo), crate::critical::num_text(*hi))).collect::<Vec<_>>().join(", "),
+        found.points.len(),
+        if found.more { " 以上（多すぎるので打ち切り。線・面に沿って続いている可能性もある）" } else { "" }
+    )];
+    for c in &found.points {
+        parts.push(format!("{}: {} f = {}（{}）", at(c), crate::critical::class_name(c.class), crate::critical::num_text(c.value), c.reason));
+    }
+    crate::expand::set_kind(parts.join(" ／ "));
+    Ok(Some(Plot::Points { points, line: false }))
 }
 
 /// 行列を描く行（計画 M7 の 3.4）。そうでなければ None（今までの道へ）

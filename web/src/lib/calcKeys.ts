@@ -57,6 +57,8 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('f∘g', '\\circ', '関数の合成'),
         key('Σ∈', '\\sum_{n\\in#?}#?', '集合の上の総和 Σ_{n ∈ S}（S は {1, 4, 9}・1 ≤ n ≤ 10, …・d ∣ 12 など）'),
         key('f(x)=', 'f\\left(x\\right)=#?', '関数の定義'),
+        key('Tₙ', '\\operatorname{Taylor}\\left(#?,x,0,#?\\right)', 'テイラー多項式 Taylor(f, x, a, n)（中心 a・n 次。多変数は Taylor(f, (x, y), (a, b), n)。説明に多項式が出る。n をスライダーにすると次数を動かせる）'),
+        key('crit', '\\operatorname{crit}#?', '停留点 crit f（∇f = 0 の点を探し、ヘッセ行列で極大・極小・鞍点に分ける。1 行にそれだけ。説明に一覧、図に点）'),
       ],
     ],
   },

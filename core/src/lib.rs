@@ -13,6 +13,7 @@
 
 pub mod adaptive;
 pub mod coords;
+pub mod critical;
 pub mod diff;
 pub mod equation;
 pub mod eval;
@@ -29,6 +30,7 @@ pub mod ode;
 pub mod pixel;
 pub mod groebner;
 pub mod quad;
+pub mod series;
 pub mod solve;
 mod region;
 pub mod parser;
@@ -657,6 +659,7 @@ pub fn plot(
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
     expand::set_view_x(domain[0], domain[1]);
+    expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
     if !coord_src.trim().is_empty() && matches!(plot, equation::Plot::Field { .. }) {

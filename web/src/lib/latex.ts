@@ -672,6 +672,16 @@ class Converter {
           this.out += ' @eig '
           return
         }
+        // テイラー多項式 Taylor(f, x, a, n)・Taylor(f, (x, y), (a, b), n)
+        if (s === 'Taylor' || s === 'taylor') {
+          this.out += ' @taylor '
+          return
+        }
+        // 停留点（∇f = 0 の点）を求めて分類する crit f
+        if (s === 'crit' || s === 'Crit') {
+          this.out += ' @crit '
+          return
+        }
         // 行列の演算子の名前
         if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
           this.out += ` @${s} `

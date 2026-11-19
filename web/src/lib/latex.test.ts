@@ -36,6 +36,8 @@ const cases: [string, string][] = [
   ['A_{1,2}+\\vec{v}_{2}+w_{2}', 'A_(1,2)+ {vec_v}_2+w_2'],
   ['x_{a}', 'x_(a)'],
   ['\\dim\\ker A', '@dim @ker A'],
+  ['\\operatorname{Taylor}\\left(\\sin x,x,0,5\\right)', '@taylor ( sin x,x,0,5)'],
+  ['\\operatorname{crit}\\left(x^3-3x+y^2\\right)', '@crit (x^(3)-3x+y^(2))'],
   // 常微分方程式（M9）
   ["x'=-y,\\ y'=x", "x'=-y, y'=x"],
   ['\\dot{x}=10\\left(y-x\\right)', "x'=10(y-x)"],
