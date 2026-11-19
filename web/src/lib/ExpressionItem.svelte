@@ -77,6 +77,8 @@
     onToggleSettings: () => void
     onToggleVertical: () => void
     onRemove: () => void
+    /** 式を複製して、すぐ下に置く */
+    onDuplicate: () => void
     /** パラメータの値を変えたとき */
     onParam: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
@@ -165,6 +167,7 @@
     onToggleSettings,
     onToggleVertical,
     onRemove,
+    onDuplicate,
     onParam,
     onSlider,
     paramPlaying,
@@ -1262,6 +1265,7 @@
       aria-expanded={choosingFolder}
       onclick={() => (choosingFolder = !choosingFolder)}>▤</button
     >
+    <button class="icon" title="複製（すぐ下に同じ式を足す）" aria-label="複製" onclick={onDuplicate}>⧉</button>
     <button class="icon" title="削除" aria-label="削除" onclick={onRemove}>×</button>
   </div>
 </li>

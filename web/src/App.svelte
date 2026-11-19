@@ -178,38 +178,43 @@
   /** 保存した状態を読み込み終わったか（それまでは自動保存しない） */
   let loaded = $state(false)
 
+  /** 式 1 つの、保存する分の設定 */
+  function savedItem(it: PlotItem) {
+    return {
+      latex: it.latex,
+      color: it.color,
+      visible: it.visible,
+      opacity: it.opacity,
+      grid: it.grid,
+      lineWidth: it.lineWidth,
+      complexMode: it.complexMode,
+      // 断面のままでも、霧の濃さ・陰影などを変えていれば残す
+      hidden: it.hidden && JSON.stringify(it.hidden) !== JSON.stringify(DEFAULT_HIDDEN) ? it.hidden : undefined,
+      complexCoords: it.complexCoords || undefined,
+      slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
+      walls: it.walls,
+      field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
+      ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
+      layers: it.layers,
+      edges: it.edges || undefined,
+      render: it.render && it.render !== 'auto' ? it.render : undefined,
+      ranges: it.ranges,
+      vertical: it.vertical,
+      slider: it.slider,
+      rotGroup: it.rotGroup,
+      rotation: it.rotGroup === undefined ? it.rotation : undefined,
+      center: it.rotGroup === undefined ? it.center : undefined,
+      folder: it.folder,
+      coordSys: coordOf(it) ? it.coordSys : undefined,
+      angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
+    }
+  }
+
   /** 今の式と設定（保存する分だけ） */
   function snapshot(): SavedState {
     return $state.snapshot({
       version: 1 as const,
-      items: listed().map((it) => ({
-        latex: it.latex,
-        color: it.color,
-        visible: it.visible,
-        opacity: it.opacity,
-        grid: it.grid,
-        lineWidth: it.lineWidth,
-        complexMode: it.complexMode,
-        // 断面のままでも、霧の濃さ・陰影などを変えていれば残す
-        hidden: it.hidden && JSON.stringify(it.hidden) !== JSON.stringify(DEFAULT_HIDDEN) ? it.hidden : undefined,
-        complexCoords: it.complexCoords || undefined,
-        slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
-        walls: it.walls,
-        field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
-        ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
-        layers: it.layers,
-        edges: it.edges || undefined,
-        render: it.render && it.render !== 'auto' ? it.render : undefined,
-        ranges: it.ranges,
-        vertical: it.vertical,
-        slider: it.slider,
-        rotGroup: it.rotGroup,
-        rotation: it.rotGroup === undefined ? it.rotation : undefined,
-        center: it.rotGroup === undefined ? it.center : undefined,
-        folder: it.folder,
-        coordSys: coordOf(it) ? it.coordSys : undefined,
-        angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
-      })),
+      items: listed().map(savedItem),
       groups,
       coordSystems: coordSystems.length > 0 ? coordSystems : undefined,
       folders,
@@ -1023,6 +1028,18 @@
     await tick()
     const added = items.find((it) => it.id === item.id)
     if (added) added.autofocus = false
+  }
+
+  /**
+   * 式を複製して、すぐ下に置く（式・見た目・範囲・回転・フォルダなど、保存する設定を全部写す）。
+   * 色は、元の式と見分けられるように次の色にする
+   */
+  function duplicateItem(item: PlotItem) {
+    const { color: _color, ...saved } = $state.snapshot(savedItem(item)) as ReturnType<typeof savedItem>
+    const copy = newItem(saved.latex, structuredClone(saved))
+    const k = items.indexOf(item) + 1
+    items.splice(k, 0, copy)
+    schedule(items[k], 0)
   }
 
   /** エンター: その式のすぐ下に空の式を足して、そこに入力を始める */
@@ -2708,6 +2725,7 @@
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
+            onDuplicate={() => duplicateItem(item)}
             onParam={(re, im) => setParam(item, re, im)}
             onSlider={(sl) => setSlider(item, sl)}
             paramPlaying={playingParams.includes(item.id)}
