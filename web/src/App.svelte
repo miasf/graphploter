@@ -2,7 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { hasIntegral, integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { hasIntegral, inlineRegions, integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
@@ -226,7 +226,8 @@
       controlMode,
       // 今の式で使っている範囲だけを残す
       regionsShown: (() => {
-        const shown = items.flatMap((it) => (it.regionName ? [it.regionName] : []))
+        // 直書きの範囲（#式の id:番号）は式の id が保存で変わるので残さない
+        const shown = items.flatMap((it) => (it.regionName && !it.regionName.startsWith('#') ? [it.regionName] : []))
         return shown.length > 0 ? shown : undefined
       })(),
       integralsShown: (() => {
@@ -1226,6 +1227,7 @@
     }
     setRegions(regions)
     pruneRegionItems()
+    refreshInlineRegions(item)
     updateIntegral(item)
     schedule(item)
   }
@@ -1250,10 +1252,23 @@
   /** 範囲 name を描くための行（描いていなければ undefined） */
   const regionItem = (name: string) => items.find((it) => it.regionName === name)
 
+  /** 積分記号の下に直接書いた範囲の、描くための行の名前（式の id と、式の中で何番目の直書きの範囲か） */
+  const inlineKey = (id: number, k: number) => `#${id}:${k}`
+  /** 式 item の直書きの範囲の名前（出てきた順） */
+  const inlineKeys = (item: PlotItem) => inlineRegions(item.latex).map((_, k) => inlineKey(item.id, k))
+
+  /** 範囲 name の中身（LaTeX）。名前で書いた範囲は範囲の欄、直書きの範囲は式の中の積分記号の下 */
+  function regionSource(name: string): string {
+    const m = /^#(\d+):(\d+)$/.exec(name)
+    if (!m) return regions[name] ?? ''
+    const it = items.find((x) => x.id === Number(m[1]))
+    return it ? (inlineRegions(it.latex)[Number(m[2])] ?? '') : ''
+  }
+
   /** 範囲 name をグラフに描く（半透明の面・線） */
   function showRegion(name: string) {
     if (regionItem(name)) return
-    items.push(newItem(regionDisplayLatex(regions[name] ?? '') ?? '', { regionName: name, opacity: 0.45, vertical: false }))
+    items.push(newItem(regionDisplayLatex(regionSource(name)) ?? '', { regionName: name, opacity: 0.45, vertical: false }))
     schedule(items[items.length - 1], 0)
   }
 
@@ -1266,8 +1281,20 @@
 
   /** どの式も使わなくなった範囲は、描くのをやめる */
   function pruneRegionItems() {
-    const used = new Set(listed().flatMap((it) => regionsUsed(it.latex).map((r) => r.name)))
+    const used = new Set(listed().flatMap((it) => [...regionsUsed(it.latex).map((r) => r.name), ...inlineKeys(it)]))
     for (const it of items.filter((x) => x.regionName && !used.has(x.regionName))) removeItem(it)
+  }
+
+  /** 式 item の直書きの範囲を描いている行を、今の式に合わせて描き直す */
+  function refreshInlineRegions(item: PlotItem) {
+    for (const key of inlineKeys(item)) {
+      const shown = regionItem(key)
+      if (!shown) continue
+      const latex = regionDisplayLatex(regionSource(key)) ?? ''
+      if (latex === shown.latex) continue
+      shown.latex = latex
+      schedule(shown, 300)
+    }
   }
 
   /** 範囲の欄に出す、描いている範囲の色と誤り（描いていない範囲は入れない） */
@@ -1317,7 +1344,8 @@
 
   function updateIntegralValue(item: PlotItem, partial: string | undefined) {
     clearTimeout(integralValueTimer)
-    if (!partial || (item.integralProgress ?? 1) >= 1) {
+    // 100% のときも計算する（範囲全体の積分の値を、スライダーの下に出し続ける）
+    if (!partial) {
       integralValues[item.id] = {}
       return
     }
