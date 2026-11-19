@@ -703,15 +703,13 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
             };
             subspace(&name, &m, op == "ker", params, space, &dim_word).map(Some)
         }
-        // Im(行列) は像。引数がスカラーなら、今までどおり虚部
+        // 行全体が Im(行列) なら像。像にするのは、列が 2 つ以上で、成分が全部実数の行列だけ。
+        // スカラー・ベクトル（列が 1 つ）・複素数の成分がある行列は、今までどおり虚部（成分ごと）
         Expr::Call(Func::Im, args) if args.len() == 1 => match crate::expand::matrix_value(&args[0], params) {
-            Ok(Some((rows, cols, items))) if cols > 1 || rows > 1 => {
-                let name = format!("Im {}", matrix_label(&args[0]));
-                let Some(a) = crate::expand::numbers(&items, params) else {
-                    return Err(format!("{name} の行列の成分は、数とパラメータだけで書いてください"));
-                };
-                subspace(&name, &Matrix::new(rows, cols, a), false, params, space, &dim_word).map(Some)
-            }
+            Ok(Some((rows, cols, items))) if cols > 1 => match crate::expand::numbers(&items, params) {
+                Some(a) => subspace(&format!("Im {}", matrix_label(&args[0])), &Matrix::new(rows, cols, a), false, params, space, &dim_word).map(Some),
+                None => Ok(None),
+            },
             _ => Ok(None),
         },
         Expr::Op { op, args } if op == "det" && args.len() == 1 => {

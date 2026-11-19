@@ -1333,3 +1333,11 @@ fn non_square_matrix_definitions_draw_columns() {
     let m = run("H= ⟦1,2;0,1;1,1⟧", "H= ⟦1,2;0,1;1,1⟧", &[]).unwrap();
     assert!(!m.positions().is_empty() || m.kind().contains("列ベクトル"));
 }
+
+#[test]
+fn im_is_image_only_for_real_matrices() {
+    // 行全体が Im(実数の行列（列が 2 つ以上）) なら像。ベクトル・複素数の成分・式の中は虚部（成分ごと）
+    assert!(run("Im A", "A= ⟦1,2;2,4⟧", &[]).unwrap().kind().starts_with("Im A = span{(1, 2)}"));
+    same("Im {vec_b}", "(1, 0, 3)", "{vec_b}=(1+i,2,3i)");
+    same("z = Im((x + i y)^(2))", "z = 2 x y", "");
+}
