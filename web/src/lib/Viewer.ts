@@ -2571,14 +2571,14 @@ export class Viewer {
   private placeDots(dots: THREE.InstancedMesh) {
     const d = this.domain
     const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin, this.flat ? 0 : d.zmax - d.zmin) : 10
-    const r = span * 0.008 * dots.userData.scale
+    const r = span * 0.006 * dots.userData.scale
     const pos = dots.userData.pos as number[]
     const m = new THREE.Matrix4()
-    // 空間の大きさ（表示範囲の 0.8 %）のまま描くが、画面の上で半径 6 画素（太さの倍率をかける）を超えないようにする。
+    // 空間の大きさ（表示範囲の 0.6 %）のまま描くが、画面の上で半径 4 画素（太さの倍率をかける）を超えないようにする。
     // 拡大して近づくと、点が画面を覆うほど大きな球になっていた（線積分の「今の点」）
     const cam = this.camera
     const perPixel = (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2)) / Math.max(1, this.viewH)
-    const cap = 6 * dots.userData.scale * perPixel
+    const cap = 4 * dots.userData.scale * perPixel
     for (let i = 0; i < dots.count; i++) {
       const x = pos[3 * i], y = pos[3 * i + 1], z = pos[3 * i + 2]
       const dist = Math.hypot(x - cam.position.x, y - cam.position.y, z - cam.position.z)
