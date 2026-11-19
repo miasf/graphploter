@@ -187,7 +187,81 @@ const OPENERS: Record<string, string> = {
 type Token = string // "\\name"（コマンド）か 1 文字
 
 function tokenize(src: string): Token[] {
-  return normalizeSetTokens(rawTokenize(src))
+  return repairSetBraces(normalizeSetTokens(rawTokenize(src)))
+}
+
+/**
+ * 入力の途中で崩れた集合の括弧を直す（MathLive で } を消してから打ち直したときなど）。
+ * - `\left\{ … \right.` の後に、同じ深さで単独の `\}` があれば、`\right.` を消して `\}` を `\right\}` にする
+ *   （} を消すと MathLive は閉じ括弧を見えない `\right.` にし、打ち直した } は別の `\rbrace` になる）
+ * - 対応する開き括弧の無い単独の `\}` は、その深さのかたまりの始まり（区切り `=`・`\in` などの後）に `\{` を補う
+ *   （積分記号の下で打った { が添字の括弧になり、集合の { が消えた形 `_{(x,y)\mid … \}}`）
+ */
+export function repairSetBraces(toks: Token[]): Token[] {
+  type Frame = { kind: 'group' | 'left' | 'brace'; start: number; open?: Token; pending?: number }
+  const stack: Frame[] = [{ kind: 'group', start: 0 }]
+  const drop = new Set<number>()
+  const replace = new Map<number, Token[]>()
+  const insertBefore = new Map<number, Token[]>()
+  const SEPS = new Set(['=', '\\in', '\\notin', '\\cap', '\\cup', '\\setminus', ',', '\\times', '\\ni'])
+  let changed = false
+  for (let k = 0; k < toks.length; k++) {
+    const t = toks[k]
+    const top = stack[stack.length - 1]
+    if (t === '{') stack.push({ kind: 'group', start: k + 1 })
+    else if (t === '}') {
+      if (stack.length > 1 && top.kind === 'group') stack.pop()
+    } else if (t === '\\left') {
+      stack.push({ kind: 'left', start: k + 2, open: toks[k + 1] })
+      k++
+    } else if (t === '\\right') {
+      // 対応する \left まで戻る（途中の単独の \{ は閉じていないまま捨てる）
+      while (stack.length > 1 && stack[stack.length - 1].kind === 'brace') stack.pop()
+      const f = stack[stack.length - 1]
+      if (stack.length > 1 && f.kind === 'left') {
+        stack.pop()
+        // 見えない閉じ括弧の集合: 後で単独の \} が来たら、そこまでを集合にする
+        if (f.open === '\\{' && toks[k + 1] === '.') stack[stack.length - 1].pending = k
+      }
+      k++
+    } else if (t === '\\{') {
+      stack.push({ kind: 'brace', start: k + 1 })
+    } else if (t === '\\}') {
+      if (top.kind === 'brace') {
+        stack.pop()
+      } else if (top.pending !== undefined) {
+        drop.add(top.pending)
+        drop.add(top.pending + 1)
+        replace.set(k, ['\\right', '\\}'])
+        top.pending = undefined
+        changed = true
+      } else {
+        // 開き括弧の無い \}: かたまりの始まり（\mid より前の、最後の区切りの後）に \{ を補う
+        let depth = 0
+        let at = top.start
+        for (let j = top.start; j < k; j++) {
+          const u = toks[j]
+          // \\left を付けない ( ) も深さに数える（点 (x, y) の中のカンマを区切りにしない）
+          if (u === '{' || u === '\\left' || u === '(') depth++
+          else if (u === '}' || u === '\\right' || u === ')') depth = Math.max(0, depth - 1)
+          else if (depth === 0 && u === '\\mid') break
+          else if (depth === 0 && SEPS.has(u)) at = j + 1
+        }
+        insertBefore.set(at, [...(insertBefore.get(at) ?? []), '\\{'])
+        changed = true
+      }
+    }
+  }
+  if (!changed) return toks
+  const out: Token[] = []
+  for (let k = 0; k <= toks.length; k++) {
+    if (insertBefore.has(k)) out.push(...insertBefore.get(k)!)
+    if (k === toks.length) break
+    if (drop.has(k)) continue
+    if (replace.has(k)) out.push(...replace.get(k)!)
+    else out.push(toks[k])
+  }
+  return out
 }
 
 /** 空白の命令（\, など）か */

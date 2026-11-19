@@ -466,5 +466,18 @@ check(
   check('x + y + z = 1 の図', plane !== null && !('error' in plane), true)
 }
 
+// 入力の途中で崩れた集合の括弧（} を消して打ち直す・積分記号の下で { が添字の括弧になる）は、そろえた形と同じに読む
+{
+  const fixed: [string, string][] = [
+    ['\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right.\\rbrace', '\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right\\rbrace'],
+    ['\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right.,y>0\\rbrace', '\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1,y>0\\right\\rbrace'],
+    ['\\iint_{(x,y)|x^2+y^2<1\\rbrace}1\\,dA', '\\iint_{\\left\\{(x,y)\\mid x^2+y^2<1\\right\\}}1\\,dA'],
+    ['\\left(x,y\\right)\\mid x^2<1\\rbrace', '\\left\\{\\left(x,y\\right)\\mid x^2<1\\right\\}'],
+    ['A=\\left(x,y\\right)\\mid x^2<1\\rbrace', 'A=\\left\\{\\left(x,y\\right)\\mid x^2<1\\right\\}'],
+    ['\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right.', '\\left\\lbrace\\left(x,y\\right)\\,\\middle{\\vert}\\,x^2<1\\right\\rbrace'],
+  ]
+  for (const [broken, good] of fixed) check(`崩れた括弧 ${broken}`, latexToText(broken), latexToText(good))
+}
+
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')
