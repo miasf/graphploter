@@ -565,13 +565,13 @@ fn line_surface_volume_integrals() {
     close("@intset((cos(t), sin(t), t), 0 ≤ t ≤ 2pi)(1)", 2.0 * PI * 2f64.sqrt(), 1e-9);
     // スカラーの線積分 ∫_C x² ds（単位円）= π
     close("@intset((cos(t), sin(t)), 0 ≤ t ≤ 2pi)(x^2)", PI, 1e-9);
-    // 仕事 ∮ (−y, x) · dr = 2π
+    // ベクトル場の線積分 ∮ (−y, x) · dr = 2π
     close("@intset((cos(t), sin(t)), 0 ≤ t ≤ 2pi; {vec})((-y, x))", 2.0 * PI, 1e-9);
-    // 球面の面積 4π、流束 ∯ (x, y, z) · dS = 4π（外向き）
+    // 球面の面積 4π、ベクトル場の面積分 ∯ (x, y, z) · dS = 4π（外向きの法線）
     let sphere = "(sin(u) cos(v), sin(u) sin(v), cos(u)), 0 ≤ u ≤ pi, 0 ≤ v ≤ 2pi";
     close(&format!("@intset({sphere})(1)"), 4.0 * PI, 1e-6);
     close(&format!("@intset({sphere}; {{vec}})((x, y, z))"), 4.0 * PI, 1e-6);
-    // 流束 ∯ (x³, y³, z³) · dS = 12π/5（ガウスの発散定理で ∭ div F dV と同じ値）
+    // ベクトル場の面積分 ∯ (x³, y³, z³) · dS = 12π/5（ガウスの発散定理で ∭ div F dV と同じ値）
     close(&format!("@intset({sphere}; {{vec}})((x^3, y^3, z^3))"), 12.0 * PI / 5.0, 1e-4);
     // 体積の側（立方体 [0, 1]³ の上の ∭ div F = 3）
     close("@intset((x, y, z), 0 ≤ x ≤ 1, 0 ≤ y ≤ 1, 0 ≤ z ≤ 1)(@div((x^3, y^3, z^3)))", 3.0, 1e-12);
@@ -1195,10 +1195,10 @@ fn trace_line_shows_value() {
 fn vector_named_field_in_integrals() {
     let defs = "{vec_F} (x,y,z)=(-y,x,0)\n{vec_G} (x,y,z)=(x,y,z)";
     let pi = std::f64::consts::PI;
-    // 仕事: 単位円を 1 周 → 2π（点を入れる形と、名前だけの形）
+    // ベクトル場の線積分: 単位円を 1 周 → 2π（点を入れる形と、名前だけの形）
     assert!((value_with("@intset(( cos t, sin t,0),0<=t<=2 pi; {vec})({vec_F})", defs) - 2.0 * pi).abs() < 1e-9);
     assert!((value_with("@intset(( cos t, sin t,0),0<=t<=2 pi; {vec})({vec_F} (x,y,z))", defs) - 2.0 * pi).abs() < 1e-9);
-    // 流束: 単位球面を通る G = r の流束は 4π
+    // ベクトル場の面積分: 単位球面の上の ∯ G · dS（G = r、外向き）は 4π
     let sphere = "@intset(( sin u cos v, sin u sin v, cos u),0<=u<=pi,0<=v<=2 pi; {vec})({vec_G})";
     assert!((value_with(sphere, defs) - 4.0 * pi).abs() < 1e-6, "{}", value_with(sphere, defs));
     // 体積分: ∭ ∇·G dV（単位球）= 3 · 4π/3 = 4π（ガウスの定理と同じ値）
@@ -1254,8 +1254,57 @@ fn regions_written_with_equations() {
     close("@intset((x,y), x = 1, 0<=y<=2; {d_s})(y)", 2.0, 1e-12);
     // 曲面 z = x² + y²（円板の上）: 面積 π(5√5 − 1)/6
     close("@intset((x,y,z),z=x^2+y^2,x^2+y^2<=1; {d_S})(1)", std::f64::consts::PI * (5.0 * 5f64.sqrt() - 1.0) / 6.0, 1e-5);
-    // 1 次式にならない等式は、媒介変数で書くように言う
-    assert!(graph_core::equation::eval_constant("@intset((x,y),x^2+y^2=1; {d_s})(1)").unwrap_err().contains("媒介変数"));
+    // 1 次式にならない等式（円・球面）も、点を数値で探して積分する（implicit_sets_without_parameters）
+    close("@intset((x,y),x^2+y^2=1; {d_s})(1)", 2.0 * std::f64::consts::PI, 1e-9);
+}
+
+/// 1 次式に解けない等式で書いた曲線・曲面（集合の書き方 {(x, y) | x² + y² = 1}）の上の積分。媒介変数で書いたものと同じ値
+#[test]
+fn implicit_sets_without_parameters() {
+    let pi = std::f64::consts::PI;
+    // 平面の曲線: 円周・楕円の周（媒介変数で書いた値）・∫ x² ds・向き（{F < 0} を左に見る = 反時計回り）
+    close("@intset((x,y),x^2+y^2=1; {d_s})(x^2)", pi, 1e-9);
+    close("@intset((x,y),x^2/4+y^2=1; {d_s})(1)", value("@intset((2cos(t), sin(t)),0<=t<=2pi; {d_s})(1)"), 1e-9);
+    close("@intset((x,y),x^2+y^2=1; {vec},{d_r})((-y,x))", 2.0 * pi, 1e-9);
+    close("@intset((x,y),1=x^2+y^2; {vec},{d_r})((-y,x))", -2.0 * pi, 1e-9);
+    close("@intset((x,y),x^2+y^2=1; {d_x})(-y)", pi, 1e-9);
+    // 不等式で切った弧（座標の端・斜めの端）
+    close("@intset((x,y),x^2+y^2=1, y>=0; {d_s})(1)", pi, 1e-9);
+    close("@intset((x,y),x^2+y^2=1, x+y>=1; {d_s})(1)", pi / 2.0, 1e-7);
+    // 曲面: 球面の面積・外向きの法線での F · dS（ガウスの定理の値 ∭ div F dV）・半球・円柱の側面（斜めに切る）
+    close("@intset((x,y,z),x^2+y^2+z^2=1; {d_S})(1)", 4.0 * pi, 1e-7);
+    close("@intset((x,y,z),x^2+y^2+z^2=1; {vec},{d_S})((x^3,y^3,z^3))", 12.0 * pi / 5.0, 1e-7);
+    close("@intset((x,y,z),x^2+y^2+z^2=1, z>=0; {d_S})(1)", 2.0 * pi, 1e-7);
+    close("@intset((x,y,z),x^2+y^2=1, 0<=z<=2-x; {d_S})(1)", 4.0 * pi, 1e-6);
+    // トーラス（R = 2, r = 1）の面積 4π²Rr
+    close("@intset((x,y,z),(x^2+y^2+z^2+3)^2=16(x^2+y^2); {d_S})(1)", 8.0 * pi * pi, 1e-4);
+    // 頂点（特異点）のある円錐の側面 π√2
+    close("@intset((x,y,z),x^2+y^2=z^2, 0<=z<=1; {d_S})(1)", pi * 2f64.sqrt(), 1e-3);
+    // 空間の曲線: 1 次式に解ける等式が 1 つ（z = 1）・解けない等式が 2 つ（球面と円柱の交わり = 2 つの円）
+    close("@intset((x,y,z),x^2+y^2=1, z=1; {d_s})(1)", 2.0 * pi, 1e-9);
+    close("@intset((x,y,z),x^2+y^2+z^2=2, x^2+y^2=1; {d_s})(1)", 4.0 * pi, 1e-7);
+    // 被積分関数にほかの変数（外側の積分の変数）があっても、点ごとの和にする: ∫₀¹ ∮ a x² ds da = π/2
+    close("@int(a,0,1)(@intset((x,y),x^2+y^2=1; {d_s})(a x^2))", pi / 2.0, 1e-9);
+    // 限りなく続く曲線・見つからない曲線・点になる範囲
+    let err = |s: &str| graph_core::equation::eval_constant(s).unwrap_err();
+    assert!(err("@intset((x,y),x^2-y^2=1; {d_s})(1)").contains("限りなく"));
+    assert!(err("@intset((x,y),x^2+y^2=-1; {d_s})(1)").contains("見つかりません"));
+    assert!(err("@intset((x,y),x^2+y^2=1, x^2-y^2=0; {d_s})(1)").contains("点"));
+    assert!(err("@intset((x,y,z),x^2+y^2+z^2=1; {d_s})(1)").contains("dS"));
+}
+
+/// 等式で書いた曲線・曲面の上の積分の図（画面側の latex.ts の implicitView が作る集合）が、図形になること
+#[test]
+fn implicit_integral_drawings() {
+    // 平面の曲線 x² + y² = 1 の上の幕、球面を法線の向きに厚くした殻、球面と円柱の交わり（空間の曲線）
+    for src in [
+        "⦃(x,y,z)∣x^(2)+y^(2)=1, min (0,x^(2))<=z<= max (0,x^(2))⦄",
+        "⦃(x,y,z)∣min (0,1)<=(((x^(2)+y^(2)+z^(2))-(1))/(abs(( @diff(x) ((x^(2)+y^(2)+z^(2))-(1)), @diff(y) ((x^(2)+y^(2)+z^(2))-(1)), @diff(z) ((x^(2)+y^(2)+z^(2))-(1))))))<= max (0,1)⦄",
+        "⦃(x,y,z)∣x^(2)+y^(2)+z^(2)=2,x^(2)+y^(2)=1⦄",
+    ] {
+        let (p, _) = mesh(src, "", &[]);
+        assert!(!p.is_empty(), "{src} が空");
+    }
 }
 
 #[test]

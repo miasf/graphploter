@@ -33,6 +33,7 @@ pub mod quad;
 pub mod series;
 pub mod solve;
 mod region;
+pub mod implicit;
 pub mod parser;
 pub mod special;
 pub mod system;

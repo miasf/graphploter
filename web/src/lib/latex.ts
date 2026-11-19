@@ -895,7 +895,7 @@ class Converter {
         /** 積分の d の後の文字（計算エンジンが、範囲の次元と合うかを確かめる。ds の範囲が曲面なら誤り） */
         const marks = (vs: string[]) => vs.map((v) => `{d_${v}}`).join(',')
         if (vector) {
-          // ベクトル場の線積分・流束 ∫_C F · dr、∬_S F · dS: 曲線・曲面を集合で書く
+          // ベクトル場の線積分 ∫_C F · dr・ベクトル場の面積分 ∬_S F · dS: 曲線・曲面を集合で書く
           if (subToks === null || hi !== null) throw new LatexError('F · dr・F · dS の積分は、下に曲線・曲面を {(cos t, sin t) | 0 ≤ t ≤ 2π} の形で書いてください')
           const pieces = regionsOf(subToks, [], multi).map((r) => ` @intset(${r}; {vec},${marks(vars)})(${body}) `)
           this.out += pieces.length === 1 ? pieces[0] : ` (${pieces.join('+')}) `
@@ -1803,8 +1803,14 @@ function limitsAt(toks: Token[], i: number): { sub: Token[] | null; sup: Token[]
   return { sub, sup, k }
 }
 
-/** 積分する範囲: 変数の組と条件（{(x, y) | 条件}）か、点を式で書いた集合（{(r cos θ, r sin θ) | 範囲}） */
-type IntegralRegion = { names: string[]; cond: Token[] } | { comps: Token[][]; params: Token[]; cond: Token[]; label?: Map<Token, Token> }
+/**
+ * 積分する範囲: 変数の組と条件（{(x, y) | 条件}）か、点を式で書いた集合（{(r cos θ, r sin θ) | 範囲}）か、
+ * 1 次式に解けない等式で書いた曲線・曲面（{(x, y) | x² + y² = 1}。eqs は等式ごとの左辺 − 右辺）
+ */
+type IntegralRegion =
+  | { names: string[]; cond: Token[] }
+  | { comps: Token[][]; params: Token[]; cond: Token[]; label?: Map<Token, Token> }
+  | { implicit: true; names: string[]; eqs: Token[][]; cond: Token[] }
 
 /** 積分記号の下の範囲（名前なら範囲の欄の中身）を読む。vars は dx\,dy の変数（区間の直積の変数の名前に使う） */
 function integralRegion(sub: Token[], vars: string[], multi = 1): IntegralRegion {
@@ -1836,8 +1842,19 @@ function integralRegion(sub: Token[], vars: string[], multi = 1): IntegralRegion
   const comps = splitTop(stripParens(parts[0]), (t) => t === ',')
   if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) {
     const names = comps.map((c) => c[0])
-    // 等式の条件（y = x²・x = y = z）があれば、解いて曲線・曲面の点の式にする
-    return splitTop(cond, (t) => t === ',').some((p) => p.includes('=')) ? solveEqualities(names, cond) : { names, cond }
+    // 等式の条件（y = x²・x = y = z）があれば、解いて曲線・曲面の点の式にする。解けない等式（x² + y² = 1）は、そのまま描く
+    const parts = splitTop(cond, (t) => t === ',')
+    if (!parts.some((p) => p.includes('='))) return { names, cond }
+    try {
+      return solveEqualities(names, cond)
+    } catch (e) {
+      if (!(e instanceof LatexError) || !e.message.startsWith('この等式の範囲は図にできません')) throw e
+      const eqs = parts.flatMap((p) => {
+        const sides = splitTop(p, (t) => t === '=')
+        return sides.slice(1).map((r, k) => ['\\left', '(', ...sides[k], '\\right', ')', '-', '\\left', '(', ...r, '\\right', ')'])
+      })
+      return { implicit: true, names, eqs, cond }
+    }
   }
   // 媒介変数は、条件に出てくる文字のうち、点の式にも出てくるもの（点の式に出てくる順）
   const isName = (t: Token) => (/^[A-Za-z]$/.test(t) && t !== 'e' && t !== 'i' && t !== 'd') || PARAM_GREEK.has(t)
@@ -1964,6 +1981,228 @@ function substitute(body: Token[], comps: Token[][]): Token[] {
     else out.push(t)
   }
   return out
+}
+
+// ---- 積分の分類（何の積分か）----
+// 積分記号は自由に書ける（∫・∬・∭・∮・∯ のどれでも、範囲は区間・集合・媒介変数表示・等式のどれでも）。
+// 書いた範囲の次元 k と、点の成分の数 n（範囲が入っている空間の次元）、被積分関数の形（スカラー場 f か、F · dr・F · dS か）、
+// d の後の文字から、何の積分かを決める。どれも「k 次元の範囲 M の上で、k 次元の大きさ（長さ・面積・体積）について足し合わせる」
+// ∫_M f dμ の場合で、定積分（区間）・2 重積分（平面の領域）・3 重積分（空間の領域）の範囲を、曲げた曲線・曲面に広げたものが
+// 線積分・面積分
+
+/** 積分 1 つの分類 */
+export interface IntegralKind {
+  /** 何の積分か（「スカラー場の線積分」など） */
+  kind: string
+  /** 範囲の書き方と形（「媒介変数表示の平面の曲線（媒介変数 t）」） */
+  region: string
+  /** 媒介変数で書いたときの式・性質（「∫_C f ds = ∫_a^b f(r(t)) |r′(t)| dt」） */
+  formula: string
+}
+
+/** 媒介変数のギリシャ文字の表示 */
+const PARAM_SYMBOL: Record<string, string> = {
+  '\\theta': 'θ', '\\vartheta': 'ϑ', '\\varphi': 'φ', '\\phi': 'ϕ', '\\rho': 'ρ', '\\sigma': 'σ', '\\tau': 'τ',
+  '\\alpha': 'α', '\\beta': 'β', '\\psi': 'ψ', '\\omega': 'ω', '\\lambda': 'λ', '\\mu': 'μ', '\\nu': 'ν',
+}
+
+/** 範囲の形の名前（k 次元の範囲が n 次元の空間にある） */
+function shapeOf(k: number, n: number): string {
+  if (k <= 0) return '点'
+  if (k === 1) return n === 1 ? '区間' : n === 2 ? '平面の曲線' : '空間の曲線'
+  if (k === 2) return n === 2 ? '平面の領域' : '曲面'
+  return k === 3 && n === 3 ? '空間の領域' : `${k} 次元の範囲`
+}
+
+/**
+ * 式の中の積分を、出てきた順に分類する（入れ子の累次積分 ∫∫ … dx dy は 1 つにまとめる）。
+ * regions は名前で書いた範囲（∬_D の D）の中身。書いている途中で読めない積分は飛ばす
+ */
+export function integralKinds(latex: string, regions: Record<string, string> = REGIONS): IntegralKind[] {
+  if (!hasIntegral(latex)) return []
+  let toks: Token[]
+  try {
+    toks = tokenize(latex)
+  } catch {
+    return []
+  }
+  const out: IntegralKind[] = []
+  const skip = new Set<number>()
+  for (let i = 0; i < toks.length; i++) {
+    if (!INTEGRALS.has(toks[i]) || skip.has(i)) continue
+    try {
+      const k = classifyIntegral(toks, i, regions, skip)
+      if (k) out.push(k)
+    } catch {
+      // 書いている途中（d が無いなど）
+    }
+  }
+  return out
+}
+
+function classifyIntegral(toks: Token[], i: number, regions: Record<string, string>, skip: Set<number>): IntegralKind | null {
+  const sym = toks[i]
+  const multi = sym === '\\iint' || sym === '\\oiint' ? 2 : sym === '\\iiint' ? 3 : 1
+  const closed = sym === '\\oint' || sym === '\\oiint'
+  const head = limitsAt(toks, i)
+  const span = integrandSpan(toks, head.k, multi)
+  const body = toks.slice(head.k, span.end)
+  const ds = span.vars.map((v) => PARAM_SYMBOL[v] ?? v)
+  const dText = ds.map((v) => `d${v}`).join(' ')
+  const ring = closed ? `（${sym === '\\oint' ? '∮' : '∯'} は、閉じた${sym === '\\oint' ? '曲線' : '曲面'}の上の積分であることを表す記号。計算は ${sym === '\\oint' ? '∫' : '∬'} と同じ）` : ''
+  if (head.sub === null && head.sup === null) {
+    return { kind: '不定積分', region: '範囲なし', formula: `∫ f ${dText}（f の原始関数。積分定数を省く）` }
+  }
+  if (head.sup !== null) {
+    // 上下の端のある積分。中身が丸ごと、上下の端のある積分なら累次積分
+    let depth = 1
+    let pos = head.k
+    while (toks[pos] === '\\int') {
+      const h = limitsAt(toks, pos)
+      if (h.sub === null || h.sup === null) break
+      skip.add(pos)
+      depth++
+      pos = h.k
+    }
+    if (depth === 1) {
+      return {
+        kind: '定積分',
+        region: '区間 [a, b]（1 次元の範囲）',
+        formula: `∫_a^b f ${dText}（区間を曲線に曲げたものが線積分 ∫_C f ds）`,
+      }
+    }
+    return {
+      kind: `累次積分（${depth} 重）`,
+      region: `端で書いた ${depth} 次元の領域`,
+      formula: `内側の定積分から順に計算する。領域の上の ${depth} 重積分と同じ値（フビニの定理）`,
+    }
+  }
+  // 範囲（名前なら、その欄の中身）
+  if (head.sub === null) return null
+  let sub: Token[] = head.sub
+  const name = regionNameOf(sub)
+  if (name !== null) {
+    const def = (regions[name] ?? '').trim()
+    if (def === '' || def.includes('\\placeholder')) {
+      return { kind: '範囲を書くと決まります', region: `${regionLabel(name)} の範囲（下の欄）がまだ空です`, formula: '集合 {(x, y) | 条件} か、媒介変数表示 {(x(t), y(t)) | a ≤ t ≤ b} で書けます' }
+    }
+    sub = tokenize(def)
+  }
+  const rt = regionTokens(sub, span.vars, multi)
+  const { parts } = splitSetOps(rt)
+  const unionNote = parts.length > 1 ? '（∪・∩・∖ でつないだ範囲）' : ''
+  const part = parts[0]
+  // 範囲の次元 k・点の成分の数 n・書き方
+  let k: number
+  let n: number
+  let how: 'box' | 'set' | 'equation' | 'param'
+  let params: string[] = []
+  // 媒介変数のトークン（d の後の文字と比べる。\theta など）
+  let raw: string[] = []
+  const point = setPoint(part)
+  if (point === null) {
+    // 区間の直積 [a, b] × [c, d]
+    n = splitTop(part, (t) => t === '\\times').length
+    k = n
+    how = 'box'
+  } else {
+    const comps = splitTop(stripParens(point), (t) => t === ',')
+    const open = part[0] === '\\left' ? 2 : 1
+    const inner = part.slice(open, part.length - open)
+    const cond = splitTop(inner, (t) => t === '\\mid' || t === '|' || t === ':' || t === '\\vert' || t === '\\colon').slice(1).flat()
+    const eqs = splitTop(cond, (t) => t === ',').reduce((s, p) => s + splitTop(p, (t) => t === '=').length - 1, 0)
+    n = comps.length
+    if (comps.every((c) => c.length === 1 && /^[A-Za-z]$/.test(c[0]))) {
+      params = comps.map((c) => c[0])
+      how = eqs > 0 ? 'equation' : 'set'
+    } else {
+      const isName = (t: Token) => (/^[A-Za-z]$/.test(t) && t !== 'e' && t !== 'i' && t !== 'd') || PARAM_GREEK.has(t)
+      const inCond = new Set(cond.filter(isName))
+      raw = [...new Set(comps.flat().filter((t) => inCond.has(t)))]
+      params = raw.map((t) => PARAM_SYMBOL[t] ?? t)
+      how = 'param'
+    }
+    k = params.length - eqs
+  }
+  const shape = shapeOf(k, n)
+  const region =
+    (how === 'box'
+      ? `区間の直積（${shape}）`
+      : how === 'set'
+        ? `集合 {(${params.join(', ')}) | 不等式} で書いた${shape}`
+        : how === 'equation'
+          ? `等式で書いた${shape}（集合の書き方。媒介変数を使わない）`
+          : `媒介変数表示の${shape}（媒介変数 ${params.join(', ')}）`) + unionNote
+  const coordD = ds.length > 0 && ds.every((v) => COORD_LETTERS.has(v)) && how !== 'box' && how !== 'set'
+  const paramD = how === 'param' && span.vars.length > 0 && span.vars.every((v) => raw.includes(v))
+  const divergence = body[0] === '\\nabla' && body[1] === '\\cdot'
+  if (k <= 0) return { kind: '範囲が点', region, formula: '大きさ 0 の範囲の上の積分は 0' }
+  if (paramD) {
+    return { kind: '媒介変数についての積分', region, formula: `∫ f ${dText}（媒介変数の範囲の上の、ふつうの重積分。長さ・面積の要素 |r′|・|r_u × r_v| は掛けない）${ring}` }
+  }
+  if (k === 1 && n === 1) return { kind: '定積分', region, formula: `区間の上の ∫ f ${dText}${ring}` }
+  if (k === 1) {
+    if (span.vector) {
+      return {
+        kind: 'ベクトル場の線積分',
+        region,
+        formula: `∫_C F · dr = ∫_a^b F(r(t)) · r′(t) dt（F の接線成分 F · T を弧長で積分したもの。C の向きを逆にすると符号が変わる）${ring}`,
+      }
+    }
+    if (coordD) {
+      return {
+        kind: '座標についての線積分（P dx + Q dy の形）',
+        region,
+        formula: `∫_C P dx = ∫_a^b P(r(t)) x′(t) dt（向きのある線積分。P dx + Q dy + R dz は (P, Q, R) · dr と同じ）${ring}`,
+      }
+    }
+    return {
+      kind: 'スカラー場の線積分（弧長についての線積分）',
+      region,
+      formula: `∫_C f ds = ∫_a^b f(r(t)) |r′(t)| dt（向きに依らない。f = 1 なら C の長さ。C が x 軸の区間なら定積分）${ring}`,
+    }
+  }
+  if (k === 2 && n === 2) {
+    return {
+      kind: '2 重積分（平面の領域の上の積分）',
+      region,
+      formula:
+        how === 'param'
+          ? `∬_D f dA = ∬ f(r(u, v)) |det J| du dv（変数変換。J は r のヤコビ行列。極座標なら |det J| = r）${ring}`
+          : `∬_D f dA（f = 1 なら D の面積。条件から累次積分にして計算する）${ring}`,
+    }
+  }
+  if (k === 2) {
+    if (span.vector) {
+      return {
+        kind: 'ベクトル場の面積分',
+        region,
+        formula: `∬_S F · dS = ∬ F(r(u, v)) · (r_u × r_v) du dv（F の法線成分 F · n を面積で積分したもの。法線の向きを逆にすると符号が変わる）${ring}`,
+      }
+    }
+    if (coordD) {
+      return {
+        kind: '座標についての面積分（f dx dy の形）',
+        region,
+        formula: `∬_S f dx dy = ∬ f(r(u, v)) (r_u × r_v)_z du dv（向きのある面積分。曲面を xy 平面に映した、符号付きの面積で積分する）${ring}`,
+      }
+    }
+    return {
+      kind: 'スカラー場の面積分（面積についての面積分）',
+      region,
+      formula: `∬_S f dS = ∬ f(r(u, v)) |r_u × r_v| du dv（向きに依らない。f = 1 なら S の面積。S が平面の領域なら 2 重積分）${ring}`,
+    }
+  }
+  if (k === 3 && n === 3) {
+    return {
+      kind: divergence ? '3 重積分（体積分）: 発散 ∇ · F の体積分' : '3 重積分（体積分）',
+      region,
+      formula:
+        (how === 'param' ? '∭_V f dV = ∭ f(r(u, v, w)) |det J| du dv dw（変数変換。球座標なら |det J| = ρ² sin φ）' : '∭_V f dV（f = 1 なら V の体積。条件から累次積分にして計算する）') +
+        (divergence ? '。ガウスの発散定理で、V の境界の面の外向きの面積分 ∯_{∂V} F · dS と等しい' : ''),
+    }
+  }
+  return { kind: `${k} 次元の範囲の上の積分`, region, formula: '4 次元以上の範囲の積分は計算できません' }
 }
 
 /**
@@ -2172,6 +2411,15 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
     throw new LatexError('不定積分は描けません（範囲のある積分を描きます）')
   }
   if (body.length === 0) throw new LatexError('積分する式を書いてください')
+  if ('implicit' in region) {
+    // 曲線の上の P dx + Q dy: 続く項もまとめて、接線の成分 P T_x + Q T_y を高さにする
+    const v = span.vars[0]
+    const forms =
+      span.vars.length === 1 && COORD_LETTERS.has(v) && region.names.includes(v)
+        ? [{ v, body }, ...formTerms(toks, span.next, v).terms.map((t) => ({ v: t.v, body: [...(t.sign === '-' ? ['-'] : []), ...toks.slice(t.from, t.end)] }))]
+        : null
+    return implicitView(region, body, span.vector, forms)
+  }
   const paren = (ts: Token[] | string) => `\\left(${typeof ts === 'string' ? ts : joinToks(ts)}\\right)`
   const set = (point: string, cond: string) => `\\left\\{${point}\\mid ${cond}\\right\\}`
   // 媒介変数そのものを使う被積分関数（(t + 1, t²)）は、空間の場ではないので矢印の場を添えない
@@ -2354,7 +2602,7 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
       latex: finish(set(r, joinToks(cond))),
       note:
         body[0] === '\\nabla' && body[1] === '\\cdot'
-          ? '積分する立体（発散を足し合わせる。値は、境目の面を通る外向きの流束と同じ: ガウスの定理）'
+          ? '積分する立体（発散 ∇ · F を体積で足し合わせる。値は、境界の面の外向きの面積分 ∯ F · dS と同じ: ガウスの発散定理）'
           : '積分する立体（体積要素 |det J| で被積分関数を足し合わせる）',
       ...swept,
     }
@@ -2400,6 +2648,72 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
     latex: finish(set(`${r}+${s}${thick}${normal}`, range)),
     note: span.vector ? '曲面を、法線の向きに F の法線の成分だけ厚くした立体（体積が積分の値）' : '曲面を、法線の向きに被積分関数の分だけ厚くした立体（体積が積分の値）',
     ...swept,
+  }
+}
+
+/**
+ * 1 次式に解けない等式で書いた範囲（{(x, y) | x² + y² = 1}・{(x, y, z) | x² + y² + z² = 1}）の上の積分の図。
+ * 媒介変数が無いので、等式と不等式の集合のまま描く（進み具合のスライダーは無い）:
+ * - 平面の曲線 G(x, y) = 0: 曲線の上に立てた、高さが被積分関数の幕。F · dr は接線 (−G_y, G_x)/|∇G| の向きの成分
+ *   （計算エンジンと同じ向き: 左辺 < 右辺 の側を左に見る向き）
+ * - 曲面 G(x, y, z) = 0: 法線 ∇G/|∇G| の向きに、被積分関数の分だけ厚くした殻 0 ≤ G/|∇G| ≤ f（G/|∇G| は曲面からの距離の近似）
+ * - 空間の曲線（等式 2 つ）: 曲線そのもの
+ */
+function implicitView(region: { names: string[]; eqs: Token[][]; cond: Token[] }, body: Token[], vector: boolean, forms: { v: string; body: Token[] }[] | null): IntegralView {
+  const { names, eqs, cond } = region
+  const k = names.length - eqs.length
+  if (k < 1) throw new LatexError('等式で範囲が点になります（積分は 0）')
+  const used = new Set(body.filter((t) => /^[A-Za-z]$/.test(t)))
+  const free = ['x', 'y', 'z'].find((n) => used.has(n) && !names.includes(n))
+  if (free) throw new LatexError(`中身に、範囲の変数でない ${free} があるので描けません`)
+  const paren = (ts: string) => `\\left(${ts}\\right)`
+  const set = (point: string, c: string) => `\\left\\{${paren(point)}\\mid ${c}\\right\\}`
+  const field = fieldOf(body, vector)
+  const region0 = set(names.join(','), joinToks(cond))
+  const extras: IntegralExtra[] = [
+    { role: 'path', latex: regionDisplayLatex(region0) ?? region0, label: k === 1 ? '経路' : '積分する曲面' },
+    ...(field ? [{ role: 'field' as const, latex: joinToks(field), label: 'ベクトル場' }] : []),
+  ]
+  const f = joinToks(body)
+  const g = joinToks(eqs[0])
+  const d = (v: string) => `\\frac{\\partial}{\\partial ${v}}\\left(${g}\\right)`
+  const between = (h: string, v: string) => `\\min\\left(0,${h}\\right)\\le ${v}\\le\\max\\left(0,${h}\\right)`
+  if (names.length === 2 && k === 1) {
+    const e = ['z', 'w', 'h', 'k', 'q'].find((n) => !names.includes(n) && !used.has(n)) ?? 'z'
+    const T = paren(`-${d(names[1])},${d(names[0])}`)
+    // P dx + Q dy は、単位接線 T/|T| の成分を掛けて足す（dx = T_x ds）
+    const tx = (v: string) => (v === names[0] ? `-${d(names[1])}` : d(names[0]))
+    const h = forms
+      ? `\\frac{${forms.map((t) => `${paren(joinToks(t.body))}${paren(tx(t.v))}`).join('+')}}{\\left|${T}\\right|}`
+      : vector
+        ? `\\frac{${paren(f)}\\cdot ${T}}{\\left|${T}\\right|}`
+        : f
+    return {
+      latex: set(`${names.join(',')},${e}`, `${joinToks(cond)},${between(h, e)}`),
+      note:
+        vector || forms
+          ? '曲線の上の幕（高さは接線の向きの成分。向きは、左辺 < 右辺 の側を左に見る向き。面積が積分の値）'
+          : '曲線の上の幕（高さが被積分関数。面積が積分の値）',
+      extras,
+    }
+  }
+  if (names.length === 3 && k === 2) {
+    const grad = paren(names.map(d).join(','))
+    const rest = splitTop(cond, (t) => t === ',').filter((p) => !p.includes('='))
+    const h = vector ? `\\frac{${paren(f)}\\cdot ${grad}}{\\left|${grad}\\right|}` : f
+    const shell = between(h, `\\frac{${g}}{\\left|${grad}\\right|}`)
+    return {
+      latex: set(names.join(','), [...rest.map(joinToks), shell].join(',')),
+      note: vector
+        ? '曲面を、法線（左辺 − 右辺 が増える向き）の向きに F の法線の成分だけ厚くした殻（厚みは近似。体積がほぼ積分の値）'
+        : '曲面を、法線の向きに被積分関数の分だけ厚くした殻（厚みは近似。体積がほぼ積分の値）',
+      extras,
+    }
+  }
+  return {
+    latex: region0,
+    note: '積分する曲線（等式 2 つで書いた空間の曲線は、帯を描けません。値は計算します）',
+    extras: extras.slice(1),
   }
 }
 

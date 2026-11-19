@@ -14,9 +14,10 @@ setRegions({
 let failures = 0
 for (const page of [...CALC_PAGES, { title: '行列', rows: MATRIX_ROWS }]) {
   for (const row of page.rows) {
-    for (const k of row) {
+    // 長押しで出る別のキー（∮・∯ など）も
+    for (const [k, insert] of row.flatMap((k) => [k.insert, ...(k.variants ?? [])].map((ins) => [k, ins] as const))) {
       // 空欄と、選んでいた部分（#0・#@）を埋める
-      let latex = k.insert.replace(/#\?/g, ' x').replace(/#0/g, ' x').replace(/#@/g, 'f')
+      let latex = insert.replace(/#\?/g, ' x').replace(/#0/g, ' x').replace(/#@/g, 'f')
       // 単独では式にならない記号（関係・∃・≡ (mod n)）は、使う形の中で試す
       if (/^\\(perp|parallel|bmod|equiv)$/.test(latex)) latex = `x${latex} 1`
       if (/^\\(exists|forall)/.test(latex)) latex = `${latex}x<1`
