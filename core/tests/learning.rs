@@ -189,3 +189,44 @@ fn taylor_small_coefficients_are_readable() {
     let k = kind("y = @taylor(e^(x/(3π)), x, 0, 3)", "");
     assert!(k.contains("×10⁻⁴x³"), "{k}");
 }
+
+/// 注目する点を頼んで描く（2D 表示なら flat）。[x, y, z, 種類] の並び
+fn poi(src: &str, flat: bool) -> Vec<[f64; 4]> {
+    definitions("");
+    plot(
+        src, &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3],
+        &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, false, 16,
+    )
+    .map_err(|_| ())
+    .unwrap();
+    graph_core::last_poi().chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+}
+
+fn has(ps: &[[f64; 4]], x: f64, y: f64, kind: f64) -> bool {
+    ps.iter().any(|p| (p[0] - x).abs() < 1e-6 && (p[1] - y).abs() < 1e-6 && p[3] == kind)
+}
+
+#[test]
+fn points_of_interest_on_curves() {
+    // y = x³ − 3x: 極大 (−1, 2)・極小 (1, −2)・零点 0, ±√3・縦軸との交点 (0, 0)
+    let ps = poi("y = x^(3) - 3x", true);
+    assert!(has(&ps, -1.0, 2.0, 0.0) && has(&ps, 1.0, -2.0, 1.0), "{ps:?}");
+    let r3 = 3f64.sqrt();
+    assert!(has(&ps, -r3, 0.0, 3.0) && has(&ps, 0.0, 0.0, 3.0) && has(&ps, r3, 0.0, 3.0), "{ps:?}");
+    assert!(has(&ps, 0.0, 0.0, 4.0), "{ps:?}");
+    // tan x の極（±π/2）は零点にしない
+    let ps = poi("y = tan(x)", true);
+    let zeros: Vec<f64> = ps.iter().filter(|p| p[3] == 3.0).map(|p| p[0]).collect();
+    assert_eq!(zeros.len(), 1, "{ps:?}");
+    // 頼まなければ空
+    run("y = x^(2)", "", &[]).unwrap();
+    assert!(graph_core::last_poi().is_empty());
+}
+
+#[test]
+fn points_of_interest_on_surfaces() {
+    // z = x³ − 3x + y²: (1, 0, −2) は極小、(−1, 0, 2) は鞍点
+    let ps = poi("z = x^(3) - 3x + y^(2)", false);
+    assert!(ps.iter().any(|p| (p[0] - 1.0).abs() < 1e-6 && p[1].abs() < 1e-6 && (p[2] + 2.0).abs() < 1e-6 && p[3] == 1.0), "{ps:?}");
+    assert!(ps.iter().any(|p| (p[0] + 1.0).abs() < 1e-6 && p[1].abs() < 1e-6 && (p[2] - 2.0).abs() < 1e-6 && p[3] == 2.0), "{ps:?}");
+}

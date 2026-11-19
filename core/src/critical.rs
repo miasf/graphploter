@@ -344,3 +344,132 @@ pub fn class_name(c: Class) -> &'static str {
         Class::Degenerate => "判定できない",
     }
 }
+
+/// 注目する点の種類（画面側の番号と同じ）
+pub const POI_MAX: f64 = 0.0;
+pub const POI_MIN: f64 = 1.0;
+pub const POI_SADDLE: f64 = 2.0;
+pub const POI_ZERO: f64 = 3.0;
+pub const POI_INTERCEPT: f64 = 4.0;
+pub const POI_OTHER: f64 = 5.0;
+
+/// 陽関数（縦の軸 `axis` の座標 = e）の、表示範囲の中の注目する点（点を押すと値が出る機能。計画のおすすめ 1）。
+/// 1 変数なら極値・零点・縦軸との交点、2 変数なら停留点（極大・極小・鞍点）。
+/// 結果は表示中の座標の点と種類の並び [p₀, p₁, p₂, 種類, …]。`flat`（2D 表示）なら奥の座標は 0
+pub fn points_of_interest(axis: usize, e: &Expr, shown: &[String; 3], domain: &[f64; 6], params: &Params, flat: bool) -> Vec<f64> {
+    let others: Vec<usize> = (0..3).filter(|&k| k != axis).collect();
+    let used: Vec<usize> = others.iter().copied().filter(|&k| e.uses_var(&shown[k])).collect();
+    let range = |k: usize| (domain[2 * k].min(domain[2 * k + 1]), domain[2 * k].max(domain[2 * k + 1]));
+    let (vlo, vhi) = range(axis);
+    let margin = 1e-9 * (vhi - vlo).abs().max(1e-300);
+    let in_view = |v: f64| v.is_finite() && v >= vlo - margin && v <= vhi + margin;
+    let mut out = Vec::new();
+    // 使わない座標の値（2D 表示では 0。3D では 0 が範囲に入らなければ真ん中）
+    let rest = |k: usize| {
+        let (lo, hi) = range(k);
+        if flat || (lo <= 0.0 && 0.0 <= hi) { 0.0 } else { (lo + hi) / 2.0 }
+    };
+    let push = |coords: &[(usize, f64)], value: f64, kind: f64, out: &mut Vec<f64>| {
+        let mut p = [0.0; 3];
+        for k in 0..3 {
+            p[k] = rest(k);
+        }
+        for &(k, v) in coords {
+            p[k] = v;
+        }
+        p[axis] = value;
+        out.extend_from_slice(&[p[0], p[1], p[2], kind]);
+    };
+    if used.is_empty() || used.len() > 2 || (flat && used.iter().any(|&k| k == 2)) {
+        return out;
+    }
+    let vars: Vec<String> = used.iter().map(|&k| shown[k].clone()).collect();
+    let boxes: Vec<(f64, f64)> = used.iter().map(|&k| range(k)).collect();
+    if let Ok(found) = find(e, &vars, &boxes, params) {
+        for c in found.points.iter().take(60) {
+            if !in_view(c.value) {
+                continue;
+            }
+            let kind = match c.class {
+                Class::Max => POI_MAX,
+                Class::Min => POI_MIN,
+                Class::Saddle => POI_SADDLE,
+                _ => POI_OTHER,
+            };
+            let coords: Vec<(usize, f64)> = used.iter().copied().zip(c.point.iter().copied()).collect();
+            push(&coords, c.value, kind, &mut out);
+        }
+    }
+    if used.len() == 1 {
+        let k = used[0];
+        let Ok(prog) = Program::compile_with(e, &[vars[0].as_str()], params) else { return out };
+        let f = |x: f64| -> f64 {
+            let mut o = [C::new(0.0, 0.0)];
+            prog.eval_batch(&[&[x]], &mut o);
+            as_real(o[0])
+        };
+        let (lo, hi) = boxes[0];
+        // 零点: 符号が変わる所を二分法で詰める（極をはさむ所は、詰めても値が小さくならないので捨てる）
+        let m = 1600;
+        let xs: Vec<f64> = (0..=m).map(|i| lo + (hi - lo) * i as f64 / m as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| f(x)).collect();
+        let mut zeros = 0;
+        for i in 0..m {
+            if zeros >= 60 {
+                break;
+            }
+            let (y0, y1) = (ys[i], ys[i + 1]);
+            if !(y0.is_finite() && y1.is_finite()) {
+                continue;
+            }
+            if y0 == 0.0 {
+                push(&[(k, xs[i])], 0.0, POI_ZERO, &mut out);
+                zeros += 1;
+                continue;
+            }
+            if y0.signum() == y1.signum() || y1 == 0.0 {
+                continue;
+            }
+            let (mut a, mut b, mut fa) = (xs[i], xs[i + 1], y0);
+            for _ in 0..100 {
+                let c = 0.5 * (a + b);
+                let fc = f(c);
+                if !fc.is_finite() {
+                    break;
+                }
+                if fc == 0.0 {
+                    a = c;
+                    b = c;
+                    break;
+                }
+                if fc.signum() == fa.signum() {
+                    a = c;
+                    fa = fc;
+                } else {
+                    b = c;
+                }
+                if b - a <= 1e-15 * a.abs().max(b.abs()).max(1e-300) {
+                    break;
+                }
+            }
+            let r = 0.5 * (a + b);
+            let fr = f(r);
+            if fr.is_finite() && fr.abs() <= 1e-7 * (y0.abs() + y1.abs()) {
+                let r = if r.abs() < 1e-12 * (hi - lo) { 0.0 } else { r };
+                push(&[(k, r)], 0.0, POI_ZERO, &mut out);
+                zeros += 1;
+            }
+        }
+        if ys[m] == 0.0 {
+            push(&[(k, xs[m])], 0.0, POI_ZERO, &mut out);
+        }
+        // 縦の軸との交点（変数 = 0 での値）
+        if lo <= 0.0 && 0.0 <= hi {
+            let v = f(0.0);
+            if in_view(v) {
+                push(&[(k, 0.0)], v, POI_INTERCEPT, &mut out);
+            }
+        }
+    }
+    out
+}

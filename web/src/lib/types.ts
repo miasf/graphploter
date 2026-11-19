@@ -425,6 +425,8 @@ export interface MeshData {
   gpu3d?: Gpu3dInfo
   /** GPU の描き方を使えない理由（式の ⚙ に出す）。使えるなら空 */
   gpuReason?: string
+  /** 陽関数の注目する点（[x, y, z, 種類, …]。種類は 0: 極大, 1: 極小, 2: 鞍点, 3: 零点, 4: 縦軸との交点, 5: そのほかの停留点）。無ければ省略 */
+  poi?: Float64Array
   /** 2D 表示の不等式の領域の境目の線（実線。点の列で、途切れる所に NaN）。無ければ省略 */
   outline?: Float32Array
   /** outline の点ごとの値（ベクトル場の流線の大きさ ‖F‖。valueRange の色の対応表で塗る）。無ければ省略 */
@@ -531,6 +533,8 @@ export const PLOT_LOCAL = 8
 export const PLOT_THOROUGH = 2
 /** PlotRequest.flags のビット 2: 媒介変数が3つ以上の図形を、辺だけで描く */
 export const PLOT_EDGES = 4
+/** ビット 4: 陽関数の注目する点（極値・零点など）も求める（点を押すと値が出る機能。止まっているときだけ） */
+export const PLOT_POI = 16
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
 export interface CapRequest {
