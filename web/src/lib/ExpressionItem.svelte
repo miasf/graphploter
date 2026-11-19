@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { hasIntegral, joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
+  import { hasIntegral, inlineRegions, joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
   import { matrixDefinition } from './matrixEdit'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
@@ -206,7 +206,7 @@
    */
   const auxMissing = $derived.by(() => {
     if (missing) return null
-    const errors = [integralView?.error, integralView?.valueError, ...regionNames.map((n) => regionViews[n]?.error)]
+    const errors = [integralView?.error, integralView?.valueError, ...[...regionNames, ...inlineNames].map((n) => regionViews[n]?.error)]
     for (const e of errors) {
       const m = missingParam(e)
       if (m) return m
@@ -226,6 +226,8 @@
   const parts = $derived(splitTuple(item.latex))
   /** この式で使っている、名前で書いた積分の範囲（∬_D の D） */
   const regionNames = $derived(regionsUsed(item.latex).map((r) => r.name))
+  /** 積分記号の下に直接書いた範囲を描くための名前（App の inlineKey と同じ形） */
+  const inlineNames = $derived(inlineRegions(item.latex).map((_, k) => `#${item.id}:${k}`))
   const showVertical = $derived(item.vertical && parts !== null && !editingLine)
 
   function setPart(k: number, value: string) {
@@ -544,6 +546,23 @@
           aria-pressed={!!integralView}
           title={integralView ? '積分の図をグラフから消す' : '被積分関数を、積分する範囲の上に描く（面積・体積が積分の値になる図形）'}
           onclick={onIntegralShow}>{integralView ? '∫ 表示中' : '∫ 積分を描く'}</button>
+        <!-- 積分記号の下に直接書いた範囲も、名前で書いた範囲と同じように描ける -->
+        {#each inlineNames as name, k (name)}
+          <button
+            class="region-show"
+            class:on={name in regionViews}
+            style:--region-color={regionViews[name]?.color}
+            aria-pressed={name in regionViews}
+            title={name in regionViews ? '積分の範囲をグラフから消す' : '積分記号の下に書いた範囲をグラフに描く'}
+            onclick={() => onRegionShow(name)}
+            >{name in regionViews ? '範囲 表示中' : '範囲を表示'}{inlineNames.length > 1 ? ` ${k + 1}` : ''}</button
+          >
+        {/each}
+        {#each inlineNames as name (name)}
+          {#if regionViews[name]?.error}
+            <span class="region-error">範囲を描けません: {regionViews[name].error}</span>
+          {/if}
+        {/each}
         {#if integralView?.error}
           <span class="region-error">描けません: {integralView.error}</span>
         {:else if integralView?.note}
@@ -574,7 +593,14 @@
         </div>
         <div class="integral-value">
           {#if integralView.progress >= 1}
-            範囲全体（{sweepName(integralView.sweep)} を動かすと、途中までの積分の値と図が出ます）
+            {#if integralView.valueError}
+              積分の値: 計算できません（{integralView.valueError}）
+            {:else if integralView.value !== undefined}
+              範囲全体の積分 = <b>{formatValue(integralView.value)}</b>
+            {:else}
+              積分の値を計算中…
+            {/if}
+            <span class="sweep-hint">（{sweepName(integralView.sweep)} を動かすと、途中までの積分の値と図が出ます）</span>
           {:else if integralView.valueError}
             途中までの値: 計算できません（{integralView.valueError}）
           {:else if integralView.value !== undefined}
@@ -1500,6 +1526,10 @@
   .integral-value {
     font-size: 12px;
     color: var(--muted);
+  }
+  .integral-value .sweep-hint {
+    display: block;
+    font-size: 11px;
   }
   .integral-value b {
     color: var(--text);

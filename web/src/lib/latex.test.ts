@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { fenceBareDelimiters, joinTuple, latexToText, regionDisplayLatex, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
+import { fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -285,7 +285,14 @@ for (const [def, want] of shown) {
 // 条件の並びの省略形 a ≤ x, y, z ≤ b
 check('省略形（集合）', latexToText('\\left\\{\\left(x,y,z\\right)\\mid-1\\le x,y,z\\le1\\right\\}'), '⦃(x,y,z)∣-1<=x<=1,-1<=y<=1,-1<=z<=1⦄')
 check('省略形（積分）', latexToText('\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x,y,z\\le1,x+y\\le z\\right\\}}1\\,dV'), '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1,x+y<=z; {d_V})(1)')
-check('省略形でない', latexToText('\\left\\{\\left(x,y\\right)\\mid0\\le x,y\\le1\\right\\}'), '⦃(x,y)∣0<=x,y<=1⦄')
+check('省略形（2 つ）', latexToText('\\left\\{\\left(x,y\\right)\\mid0\\le x,y\\le1\\right\\}'), '⦃(x,y)∣0<=x<=1,0<=y<=1⦄')
+check('省略形（集合でない連立）', latexToText('-1\\le x,y\\le1'), latexToText('-1\\le x\\le1,-1\\le y\\le1'))
+check('省略形（≦・パラメータの端）', latexToText('\\left\\{\\left(x,y\\right)\\mid-a\\leqq x,y\\leqq a\\right\\}'), '⦃(x,y)∣-a<=x<=a,-a<=y<=a⦄')
+check('省略形（範囲を描く式）', regionDisplayLatex('\\left\\{\\left(x,y\\right)\\mid-1\\le x,y\\le1\\right\\}'), regionDisplayLatex('\\left\\{\\left(x,y\\right)\\mid-1\\le x\\le1,-1\\le y\\le1\\right\\}'))
+// 省略形にしない: 端に座標がある・向きが違う・同じ文字
+check('省略形でない（端に座標）', latexToText('\\left\\{\\left(x,y,z\\right)\\mid x\\le y,z\\le1\\right\\}'), '⦃(x,y,z)∣x<=y,z<=1⦄')
+check('省略形でない（向きが違う）', latexToText('0\\le x,y\\ge1'), '0<=x,y>=1')
+check('省略形でない（同じ文字）', latexToText('0\\le x,x\\le1'), '0<=x,x<=1')
 
 // 積分を描くための式（被積分関数を、積分する範囲の上に描く）
 setRegions({
@@ -395,7 +402,19 @@ const marks: [string, string][] = [
   ['\\iint_{\\left\\{\\left(u,v,uv\\right)\\mid0\\le u\\le1,0\\le v\\le1\\right\\}}1\\,d\\sigma', '@intset((u,v,uv),0<=u<=1,0<=v<=1; {d_sigma})(1)'],
 ]
 for (const [latex, want] of marks) check(latex, latexToText(latex), want)
+// 途中までの積分（と 100% の値）は、P dx + Q dy の続く項も含める
+{
+  const v = integralDisplay('\\oint_C-y\\,dx+x\\,dy', 1)
+  const ok = v !== null && !('error' in v) ? v : null
+  check('P dx + Q dy の値の式', ok?.partial && latexToText(ok.partial), latexToText('\\oint_C-y\\,dx+x\\,dy').replace(/^\s*\(\s*|\s*\)\s*$/g, ''))
+}
 setRegions({})
+// 積分記号の下に直接書いた範囲（範囲を描くボタン）。名前で書いた範囲・上下の端のある積分は入れない
+check(
+  '直書きの範囲',
+  inlineRegions('\\int_C x\\,ds+\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}1\\,dA+\\int_0^1x\\,dx+\\int_{\\left\\lbrace\\left(t,t^2\\right)\\middle\\vert0\\le t\\le1\\right\\rbrace}1\\,ds').map((r) => latexToText(regionDisplayLatex(r) ?? '')),
+  ['⦃(x,y,z)∣0<=x<=1,0<=y<=2,z=0⦄', '⦃(t,t^(2))∣0<=t<=1⦄'],
+)
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')

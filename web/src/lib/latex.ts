@@ -268,7 +268,8 @@ class Converter {
   private toks: Token[]
 
   constructor(toks: Token[]) {
-    this.toks = toks
+    // 条件の並びの省略形 a ≤ x, y ≤ b（関係の連立・集合・場合分け・Σ の下、どこに書いても同じに読む）
+    this.toks = toks.length > 4 && toks.includes(',') ? expandListedRanges(toks) : toks
   }
 
   run(): string {
@@ -781,26 +782,13 @@ class Converter {
         let sum = ` @intset(${region}; ${marks(vars)})(${body}) `
         // 曲線の上の P dx + Q dy (+ R dz): 続く「± 中身 d座標」も、同じ曲線の上の積分にして足す
         if (vars.length === 1 && COORD_LETTERS.has(vars[0]) && isCurveRegion(subToks)) {
-          const used = new Set(vars)
-          for (;;) {
-            let k = this.i
-            while (SPACES.has(this.toks[k] ?? '')) k++
-            const sign = this.toks[k]
-            if (sign !== '+' && sign !== '-') break
-            let span
-            try {
-              span = integrandSpan(this.toks, k + 1, 1)
-            } catch {
-              break
-            }
-            if (span.vector || span.vars.length !== 1 || !COORD_LETTERS.has(span.vars[0]) || used.has(span.vars[0])) break // x, y, z だけ（名前の付け替えは要らない）
-            const term = new Converter(this.toks.slice(k + 1, span.end)).run()
-            if (term === '') break
-            used.add(span.vars[0])
-            sum += `${sign} @intset(${region}; ${marks(span.vars)})(${term}) `
-            this.i = span.next
+          const more = formTerms(this.toks, this.i, vars[0])
+          for (const t of more.terms) {
+            const term = new Converter(this.toks.slice(t.from, t.end)).run()
+            sum += `${t.sign} @intset(${region}; ${marks([t.v])})(${term}) `
           }
-          if (used.size > 1) sum = ` (${sum}) `
+          if (more.terms.length > 0) sum = ` (${sum}) `
+          this.i = more.next
         }
         this.out += sum
         return
@@ -1036,8 +1024,8 @@ function integrandSpan(toks: Token[], start: number, multi: number): { end: numb
       depth--
     }
     if (depth !== 0) continue
-    if (t2 === '\\int' || t2 === '\\intop' || t2 === '\\smallint') pending += 1
-    else if (t2 === '\\iint') pending += 2
+    if (t2 === '\\int' || t2 === '\\intop' || t2 === '\\smallint' || t2 === '\\oint') pending += 1
+    else if (t2 === '\\iint' || t2 === '\\oiint') pending += 2
     else if (t2 === '\\iiint') pending += 3
     const d = differentialAt(toks, p)
     if (!d) continue
@@ -1119,6 +1107,49 @@ function regionOf(toks: Token[], vars: string[]): string {
     return `${point},${conds.join(',')}`
   }
   throw new LatexError('積分する領域は、{(x,y) | 条件} か [0,1]×[0,2] の形で書いてください')
+}
+
+/**
+ * 曲線の上の P dx に続く「± Q dy」「± R dz」（座標の d が 1 つずつで、重ならないもの）。toks[start] から読み、
+ * 項ごとの符号・中身の範囲・d の文字と、読み終わった位置を返す（続かなければ terms は空、next は start）
+ */
+function formTerms(toks: Token[], start: number, first: string): { terms: { sign: string; from: number; end: number; next: number; v: string }[]; next: number } {
+  const used = new Set([first])
+  const terms: { sign: string; from: number; end: number; next: number; v: string }[] = []
+  let next = start
+  for (;;) {
+    let k = next
+    while (SPACES.has(toks[k] ?? '')) k++
+    const sign = toks[k]
+    if (sign !== '+' && sign !== '-') break
+    let span
+    try {
+      span = integrandSpan(toks, k + 1, 1)
+    } catch {
+      break
+    }
+    if (span.vector || span.vars.length !== 1 || !COORD_LETTERS.has(span.vars[0]) || used.has(span.vars[0]) || span.end <= k + 1) break
+    if (toks.slice(k + 1, span.end).some((t) => INTEGRALS.has(t))) break // 別の積分の項
+    used.add(span.vars[0])
+    terms.push({ sign, from: k + 1, end: span.end, next: span.next, v: span.vars[0] })
+    next = span.next
+  }
+  return { terms, next }
+}
+
+/**
+ * 式の中の、積分記号の下に直接書いた範囲（集合・区間の直積。名前で書いた範囲と、上下の端のある積分は除く）。出てきた順
+ */
+export function inlineRegions(latex: string): string[] {
+  const toks = tokenize(latex)
+  const out: string[] = []
+  for (let i = 0; i < toks.length; i++) {
+    if (!INTEGRALS.has(toks[i])) continue
+    const { sub, sup } = limitsAt(toks, i)
+    if (sub === null || sup !== null || sub.length === 0 || regionNameOf(sub) !== null) continue
+    out.push(joinToks(sub))
+  }
+  return out
 }
 
 /** 曲線の上の dx・dy・dz として読む文字 */
@@ -1296,13 +1327,18 @@ export function regionDisplayLatex(def: string): string | null {
 /** 不等号のトークン */
 const RELATIONS = new Set(['<', '>', '\\lt', '\\gt', '\\le', '\\leq', '\\ge', '\\geq', '\\leqslant', '\\geqslant', '\\leqq', '\\geqq'])
 
+/** 小さい方から書く不等号（≤・<）か */
+const LESS = new Set(['<', '\\lt', '\\le', '\\leq', '\\leqslant', '\\leqq'])
+
 /**
- * 条件の並びの省略形「a ≤ x, y, z ≤ b」（x, y, z がどれも a 以上 b 以下）を、「a ≤ x ≤ b, a ≤ y ≤ b, a ≤ z ≤ b」に直す。
- * 間に文字だけの条件（y）が 1 つ以上あるときだけ直す（「0 ≤ x, y ≤ 1」は、0 ≤ x と y ≤ 1 の 2 つの条件のまま）
+ * 条件の並びの省略形「a ≤ x, y ≤ b」「a ≤ x, y, z ≤ b」（どの文字も a 以上 b 以下）を、「a ≤ x ≤ b, a ≤ y ≤ b, …」に直す。
+ * 先頭の条件が「… 不等号 文字」、最後の条件が「文字 不等号 …」で、不等号の向きがそろっていて、文字がどれも違い、
+ * 両端（a・b）に並べた文字も座標（x, y, z, w）も出てこないときだけ直す（「x ≤ y, z ≤ 1」は x ≤ y と z ≤ 1 のまま）
  */
 export function expandListedRanges(cond: Token[]): Token[] {
   const items = splitTop(cond, (t) => t === ',')
-  const isVar = (it: Token[]) => it.length === 1 && /^[A-Za-z]$/.test(it[0])
+  const letter = (t: Token | undefined) => t !== undefined && /^[A-Za-z]$/.test(t)
+  const isVar = (it: Token[]) => it.length === 1 && letter(it[0])
   const out: Token[][] = []
   for (let k = 0; k < items.length; k++) {
     const first = items[k]
@@ -1311,12 +1347,19 @@ export function expandListedRanges(cond: Token[]): Token[] {
     let j = k + 1
     while (j < items.length && isVar(items[j])) j++
     const last = items[j]
-    if (relAt > 0 && relAt === first.length - 2 && /^[A-Za-z]$/.test(first[relAt + 1]) && j > k + 1 && last && last.length > 2 && /^[A-Za-z]$/.test(last[0]) && RELATIONS.has(last[1])) {
+    if (relAt > 0 && relAt === first.length - 2 && letter(first[relAt + 1]) && last && last.length > 2 && letter(last[0]) && RELATIONS.has(last[1])) {
       const lo = first.slice(0, relAt + 1)
       const hi = last.slice(1)
-      for (const v of [first[relAt + 1], ...items.slice(k + 1, j).map((it) => it[0]), last[0]]) out.push([...lo, v, ...hi])
-      k = j
-      continue
+      const vars = [first[relAt + 1], ...items.slice(k + 1, j).map((it) => it[0]), last[0]]
+      const sameWay = LESS.has(first[relAt]) === LESS.has(last[1])
+      const distinct = new Set(vars).size === vars.length
+      const blocked = new Set([...vars, 'x', 'y', 'z', 'w'])
+      const plainEnds = ![...lo, ...hi].some((t) => blocked.has(t))
+      if (sameWay && distinct && plainEnds) {
+        for (const v of vars) out.push([...lo, v, ...hi])
+        k = j
+        continue
+      }
     }
     out.push(first)
   }
@@ -1759,7 +1802,12 @@ function integralView(toks: Token[], i: number, progress: number, scale: number)
     parts[sw.part] = [...sw.lo, '\\le', sw.name, '\\le', ...tokenize(between(sw.lo, sw.hi, progress))]
     cond = parts.flatMap((p, k) => (k === 0 ? p : [',', ...p]))
   }
-  const partial = sw ? `${toks[i]}_{${set(paren(comps.map(joinToks).join(',')), joinToks(cond))}}${joinToks(toks.slice(head.k, span.next))}` : undefined
+  // 曲線の上の P dx + Q dy は、続く項も同じ曲線の上の積分にして足す
+  const tail = span.vars.length === 1 && COORD_LETTERS.has(span.vars[0]) && params.length === 1 ? formTerms(toks, span.next, span.vars[0]) : { terms: [], next: span.next }
+  const partialRegion = set(paren(comps.map(joinToks).join(',')), joinToks(cond))
+  const partial = sw
+    ? `${toks[i]}_{${partialRegion}}${joinToks(toks.slice(head.k, span.next))}${tail.terms.map((t) => `${t.sign}${toks[i]}_{${partialRegion}}${joinToks(toks.slice(t.from, t.next))}`).join('')}`
+    : undefined
 
   // 媒介変数を、計算エンジンが読める u・v・t に付け替える（足す 1 つは、残った名前）
   // 曲線の幕は媒介変数 2 つの曲面なので u・v（t と u を混ぜると、計算エンジンは 3 つの媒介変数の立体として読む）
