@@ -1338,25 +1338,37 @@
   /** 矢印の長さ（表示範囲の一番短い辺の 1/6） */
   const arrowScale = () => Math.min(domain.xmax - domain.xmin, domain.ymax - domain.ymin, flat ? Infinity : domain.zmax - domain.zmin) / 6
 
-  /** 積分の図の、進み具合までの積分の値（式の id → 値・誤り）。重いので、少し待ってから計算する */
+  /** 積分の図の、進み具合までの積分の値（式の id → 値・誤り） */
   let integralValues = $state<Record<number, { partial?: string; value?: number; error?: string }>>({})
-  let integralValueTimer: ReturnType<typeof setTimeout> | undefined
+  /** 式ごとの、値の計算の予定・最後に計算した時刻・最後の計算にかかった時間 */
+  const integralValueJobs = new Map<number, { timer?: ReturnType<typeof setTimeout>; last: number; cost: number }>()
 
+  /**
+   * 進み具合までの積分の値を計算し直す。スライダーを動かし続けている間（ドラッグ・▶ の再生）も、間をあけて計算する
+   * （呼ばれるたびに予定を取り消して待ち直すと、動かしている間は一度も計算されない）。間は 80 ms か、
+   * 前の計算にかかった時間の 2 倍の長いほう（重い積分で画面が止まらないように）。動かし終わった後の値も、必ず 1 回計算する
+   */
   function updateIntegralValue(item: PlotItem, partial: string | undefined) {
-    clearTimeout(integralValueTimer)
-    // 100% のときも計算する（範囲全体の積分の値を、スライダーの下に出し続ける）
+    const job = integralValueJobs.get(item.id) ?? { last: -Infinity, cost: 0 }
+    integralValueJobs.set(item.id, job)
+    clearTimeout(job.timer)
     if (!partial) {
       integralValues[item.id] = {}
       return
     }
-    integralValueTimer = setTimeout(() => {
-      const run = () => {
-        const r = evalValue(partial, currentParams(), run, currentDefinitions(item))
-        if (r === null) return
-        integralValues[item.id] = 'error' in r ? { partial, error: r.error } : { partial, value: r.value }
-      }
+    const run = () => {
+      const t0 = performance.now()
+      const r = evalValue(partial, currentParams(), run, currentDefinitions(item))
+      job.cost = performance.now() - t0
+      if (r === null) return
+      integralValues[item.id] = 'error' in r ? { partial, error: r.error } : { partial, value: r.value }
+    }
+    const gap = Math.max(80, 2 * job.cost)
+    const wait = Math.max(0, job.last + gap - performance.now())
+    job.timer = setTimeout(() => {
+      job.last = performance.now()
       run()
-    }, 120)
+    }, wait)
   }
 
   /** 積分を描くための行 view の中身を、元の式 item から作り直す（添えて描く行も、足す・消す・作り直す） */
