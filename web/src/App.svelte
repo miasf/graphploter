@@ -2,12 +2,16 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
-  import { hasIntegral, integralDisplay, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
+  import { hasIntegral, inlineRegions, integralDisplay, riemannDisplay, type RiemannMethod, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
-  import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
+  import { loadInitial, shareUrl, type SavedState } from './lib/persist'
+  import {
+    UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
+  } from './lib/library'
+  import GraphsDialog from './lib/GraphsDialog.svelte'
   import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
   import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
@@ -36,8 +40,8 @@
     Space,
     RenderMode,
   } from './lib/types'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
-  import { Viewer } from './lib/Viewer'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_THOROUGH } from './lib/types'
+  import { Viewer, type PickResult } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -132,6 +136,7 @@
 
   onMount(() => {
     viewer = new Viewer(viewerEl)
+    viewer.onPick = handlePick
     // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
     viewer.onGpuFallback = (id, reason) => {
       const it = items.find((x) => x.id === id)
@@ -149,8 +154,11 @@
       return () => viewer?.dispose()
     }
     ;(async () => {
-      // 共有リンクで開いた、またはブラウザに保存してあるなら、その状態に戻す
-      const saved = await loadInitial()
+      // 共有リンクで開いたならその状態、そうでなければ最後に開いたグラフに戻す（どちらも無ければ新しいグラフ）
+      blankState = snapshot()
+      const init = await loadInitial()
+      graphId = init.id
+      const saved = init.state
       if (saved) {
         // 読み込めない保存データ（別の版のものなど）で止まると、開き直しても同じ所で止まり続ける。最初の状態に戻して続ける
         const fresh = snapshot()
@@ -173,43 +181,227 @@
     return () => viewer?.dispose()
   })
 
+  // ---- 点を押すと値が出る（学習用）----
+
+  /** 印を出している式の id（無ければ null） */
+  let pickedId: number | null = null
+  /** 押した順の番号（古い計算の結果を捨てる） */
+  let pickSeq = 0
+
+  const POI_NAMES = ['極大', '極小', '鞍点', '零点', '', '停留点']
+
+  function clearPick() {
+    pickedId = null
+    pickSeq++
+    viewer?.showPick(null)
+  }
+
+  /** 札に出す数（有効 6 桁。ごく小さい数は 0） */
+  function pickNum(v: number, span: number) {
+    if (Math.abs(v) < 1e-9 * Math.max(1, span)) return '0'
+    return Number(v.toPrecision(6)).toString().replace('-', '−')
+  }
+
+  /**
+   * グラフを押したとき: 押した所の式の点に印を付け、座標を札に出す。
+   * 陽関数の行（y = f(x)・z = f(x, y)）は、押した横・奥の座標で式の値を計算し直して、縦の座標を正確な値にする
+   * （画面の線・三角形は折れ線なので、そのままでは少しずれる）。注目する点（極値・零点など）は計算エンジンが求めた正確な点
+   */
+  function handlePick(r: PickResult | null) {
+    if (!r) {
+      clearPick()
+      return
+    }
+    const item = items.find((it) => it.id === r.id)
+    if (!item) {
+      clearPick()
+      return
+    }
+    const seq = ++pickSeq
+    pickedId = item.id
+    const names = axisNames
+    const shownAxes = flat ? [0, 1] : [0, 1, 2]
+    const spans = [domain.xmax - domain.xmin, domain.ymax - domain.ymin, domain.zmax - domain.zmin]
+    const pt: [number, number, number] = [...r.point]
+    const label = () => {
+      const kindName = (k: number) => (k === 4 ? `${prettyName(names[flat ? 1 : 2])} 切片` : (POI_NAMES[k] ?? ''))
+      const head = r.poi === undefined ? '' : `${(r.kinds ?? [r.poi]).map(kindName).join('・')}\n`
+      const coords = `(${shownAxes.map((k) => pickNum(pt[k], spans[k])).join(', ')})`
+      return head + coords
+    }
+    viewer?.showPick(pt, label(), item.color, item.id)
+    if (r.poi !== undefined) return
+    // 陽関数の行なら、縦の座標を式から計算し直す
+    const m = /^\s*([a-z])\s*=(.*)$/s.exec(item.latex)
+    if (!m || item.integralOf !== undefined || item.regionName !== undefined) return
+    const lhs = m[1]
+    const axis = names.indexOf(lhs)
+    const rhs = m[2]
+    if (axis < 0 || (flat && axis === 2) || new RegExp(`(^|[^a-zA-Z\\\\])${lhs}(?![a-zA-Z])`).test(rhs) || /,/.test(rhs.replace(/\\left\(.*?\\right\)/g, ''))) return
+    const others = shownAxes.filter((k) => k !== axis)
+    const at = `\\left.${rhs}\\right|_{${others.map((k) => `${names[k]}=${pt[k].toFixed(12)}`).join(',')}}`
+    const run = () => {
+      if (seq !== pickSeq) return
+      const v = evalValue(at, currentParams(), run, currentDefinitions(item))
+      if (!v || !('value' in v)) return
+      // 押した点から遠すぎる値（式の読み違い）は使わない
+      if (Math.abs(v.value - pt[axis]) > 0.08 * Math.max(spans[axis], 1e-9)) return
+      pt[axis] = v.value
+      viewer?.showPick(pt, label(), item.color, item.id)
+    }
+    run()
+  }
+
   // ---- 保存・共有 ----
 
   /** 保存した状態を読み込み終わったか（それまでは自動保存しない） */
   let loaded = $state(false)
 
+  // ---- グラフの一覧（lib/library.ts。このブラウザに、グラフごとに保存する）----
+
+  /** 開いているグラフの id と名前 */
+  let graphId = $state('')
+  let graphTitle = $state(UNTITLED)
+  /** 何も書いていない最初の状態（「新しいグラフ」「最初の状態に戻す」に使う） */
+  let blankState: SavedState | null = null
+  /** 一覧の画面を開いているか・一覧の中身 */
+  let graphsOpen = $state(false)
+  let graphList = $state<GraphMeta[]>([])
+  /** 最後の保存に失敗したか（容量がいっぱいなど） */
+  let saveFailed = $state(false)
+  /** 最後に小さな絵を撮った時刻 */
+  let lastThumb = 0
+
+  $effect(() => {
+    document.title = graphTitle && graphTitle !== UNTITLED ? `${graphTitle} – graphploter` : 'graphploter'
+  })
+
+  /** 今のグラフの小さな絵を撮って一覧に付ける */
+  function takeThumb() {
+    if (!graphId || !viewer) return
+    const t = viewer.thumbnail()
+    if (t) setThumb(graphId, t)
+    lastThumb = Date.now()
+  }
+
+  function refreshGraphs() {
+    graphList = listGraphs()
+  }
+
+  function openGraphs() {
+    flushSave()
+    takeThumb()
+    refreshGraphs()
+    graphsOpen = true
+  }
+
+  /** 今のグラフが空（式が 1 つも無い）か */
+  function currentEmpty() {
+    return isEmptyState(snapshot())
+  }
+
+  /** 読み込み直して、次のグラフを開く（式・計算・再生の状態を確実に入れ替えるため、ページごと読み込み直す） */
+  function reloadInto(prepare: () => void) {
+    flushSave()
+    takeThumb()
+    // 何も書いていない今のグラフは、一覧に残さない
+    if (currentEmpty()) deleteGraph(graphId)
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
+    prepare()
+    location.reload()
+  }
+
+  function openGraph(id: string) {
+    if (id === graphId) {
+      graphsOpen = false
+      return
+    }
+    reloadInto(() => setCurrent(id))
+  }
+
+  function newGraph() {
+    if (currentEmpty()) {
+      graphsOpen = false
+      return
+    }
+    reloadInto(markNew)
+  }
+
+  function removeGraph(id: string) {
+    const title = graphList.find((m) => m.id === id)?.title ?? UNTITLED
+    if (!confirm(`「${title}」を削除します。元に戻せません。よろしいですか？`)) return
+    if (id !== graphId) {
+      deleteGraph(id)
+      refreshGraphs()
+      return
+    }
+    // 開いているグラフを消したら、次に新しいものを開く（無ければ新しいグラフ）
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
+    deleteGraph(id)
+    const next = lastGraphId()
+    if (next) setCurrent(next)
+    else markNew()
+    location.reload()
+  }
+
+  function copyGraph(id: string) {
+    flushSave()
+    const nid = duplicateGraph(id)
+    if (nid) reloadInto(() => setCurrent(nid))
+  }
+
+  function renameAny(id: string, title: string) {
+    if (id === graphId) {
+      graphTitle = title.trim() || UNTITLED
+      flushSave()
+    } else {
+      renameGraph(id, title)
+    }
+    refreshGraphs()
+  }
+
+  /** 式 1 つの、保存する分の設定 */
+  function savedItem(it: PlotItem) {
+    return {
+      latex: it.latex,
+      color: it.color,
+      visible: it.visible,
+      opacity: it.opacity,
+      grid: it.grid,
+      lineWidth: it.lineWidth,
+      complexMode: it.complexMode,
+      // 断面のままでも、霧の濃さ・陰影などを変えていれば残す
+      hidden: it.hidden && JSON.stringify(it.hidden) !== JSON.stringify(DEFAULT_HIDDEN) ? it.hidden : undefined,
+      complexCoords: it.complexCoords || undefined,
+      slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
+      walls: it.walls,
+      field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
+      ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
+      layers: it.layers,
+      edges: it.edges || undefined,
+      render: it.render && it.render !== 'auto' ? it.render : undefined,
+      ranges: it.ranges,
+      vertical: it.vertical,
+      slider: it.slider,
+      rotGroup: it.rotGroup,
+      rotation: it.rotGroup === undefined ? it.rotation : undefined,
+      center: it.rotGroup === undefined ? it.center : undefined,
+      folder: it.folder,
+      coordSys: coordOf(it) ? it.coordSys : undefined,
+      angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
+    }
+  }
+
   /** 今の式と設定（保存する分だけ） */
   function snapshot(): SavedState {
     return $state.snapshot({
       version: 1 as const,
-      items: listed().map((it) => ({
-        latex: it.latex,
-        color: it.color,
-        visible: it.visible,
-        opacity: it.opacity,
-        grid: it.grid,
-        lineWidth: it.lineWidth,
-        complexMode: it.complexMode,
-        // 断面のままでも、霧の濃さ・陰影などを変えていれば残す
-        hidden: it.hidden && JSON.stringify(it.hidden) !== JSON.stringify(DEFAULT_HIDDEN) ? it.hidden : undefined,
-        complexCoords: it.complexCoords || undefined,
-        slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
-        walls: it.walls,
-        field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
-        ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
-        layers: it.layers,
-        edges: it.edges || undefined,
-        render: it.render && it.render !== 'auto' ? it.render : undefined,
-        ranges: it.ranges,
-        vertical: it.vertical,
-        slider: it.slider,
-        rotGroup: it.rotGroup,
-        rotation: it.rotGroup === undefined ? it.rotation : undefined,
-        center: it.rotGroup === undefined ? it.center : undefined,
-        folder: it.folder,
-        coordSys: coordOf(it) ? it.coordSys : undefined,
-        angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
-      })),
+      title: graphTitle,
+      items: listed().map(savedItem),
       groups,
       coordSystems: coordSystems.length > 0 ? coordSystems : undefined,
       folders,
@@ -226,7 +418,8 @@
       controlMode,
       // 今の式で使っている範囲だけを残す
       regionsShown: (() => {
-        const shown = items.flatMap((it) => (it.regionName ? [it.regionName] : []))
+        // 直書きの範囲（#式の id:番号）は式の id が保存で変わるので残さない
+        const shown = items.flatMap((it) => (it.regionName && !it.regionName.startsWith('#') ? [it.regionName] : []))
         return shown.length > 0 ? shown : undefined
       })(),
       integralsShown: (() => {
@@ -245,6 +438,7 @@
 
   function restore(s: SavedState) {
     nextId = 1
+    graphTitle = typeof s.title === 'string' && s.title.trim() ? s.title : UNTITLED
     regions = { ...(s.regions ?? {}) }
     setRegions(regions)
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
@@ -296,7 +490,14 @@
   function flushSave() {
     clearTimeout(saveTimer)
     saveTimer = undefined
-    if (unsaved) saveLocal(unsaved)
+    if (unsaved && graphId) {
+      // 開いただけの空のグラフは一覧に入れない（式を書いたら入る）
+      if (!isEmptyState(unsaved) || listGraphs().some((m) => m.id === graphId)) {
+        saveFailed = !saveGraph(graphId, unsaved)
+        // 小さな絵は、変わってから 10 秒ごとまで（描き直しの手間を減らす）
+        if (!saveFailed && Date.now() - lastThumb > 10000) takeThumb()
+      }
+    }
     unsaved = null
   }
   $effect(() => {
@@ -325,12 +526,12 @@
   }
 
   function resetAll() {
-    if (!confirm('式と設定をすべて最初の状態に戻します。よろしいですか？')) return
+    if (!confirm('このグラフの式と設定をすべて最初の状態に戻します（名前は残します）。よろしいですか？')) return
     // 読み込み直す前（ページを閉じるとき）に今の状態が保存し直されないようにする
     loaded = false
     unsaved = null
     clearTimeout(saveTimer)
-    clearLocal()
+    if (blankState) saveGraph(graphId, { ...blankState, title: graphTitle })
     location.reload()
   }
 
@@ -464,7 +665,7 @@
     { id: 'look', icon: '◎', label: '見え方', desc: '動かしている間の画質、遠近感、視点のリセット、背景' },
     { id: 'control', icon: '✥', label: 'マウス操作', desc: '操作モード A / B の切り替え' },
     { id: 'cut', icon: '✂', label: '切り口', desc: '立体を平面で切る' },
-    { id: 'save', icon: '⇪', label: '保存・共有', desc: '共有リンク、最初の状態に戻す' },
+    { id: 'save', icon: '⇪', label: '保存・共有', desc: 'グラフの一覧、共有リンク、最初の状態に戻す' },
     { id: 'help', icon: '?', label: '書き方のヒント', desc: '式の書き方と操作' },
   ]
   let settingsCat = $state<SettingsCat | null>(null)
@@ -824,7 +1025,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse ? 0 : PLOT_POI),
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
@@ -1024,6 +1225,18 @@
     if (added) added.autofocus = false
   }
 
+  /**
+   * 式を複製して、すぐ下に置く（式・見た目・範囲・回転・フォルダなど、保存する設定を全部写す）。
+   * 色は、元の式と見分けられるように次の色にする
+   */
+  function duplicateItem(item: PlotItem) {
+    const { color: _color, ...saved } = $state.snapshot(savedItem(item)) as ReturnType<typeof savedItem>
+    const copy = newItem(saved.latex, structuredClone(saved))
+    const k = items.indexOf(item) + 1
+    items.splice(k, 0, copy)
+    schedule(items[k], 0)
+  }
+
   /** エンター: その式のすぐ下に空の式を足して、そこに入力を始める */
   async function insertAfter(item: PlotItem) {
     const k = items.indexOf(item) + 1
@@ -1219,6 +1432,8 @@
   }
 
   function setLatex(item: PlotItem, latex: string) {
+    // 押した点の印を出している式が書き換わったら、印を消す（値が古くなる）
+    if (pickedId === item.id) clearPick()
     item.latex = latex
     // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
     for (const r of regionsUsed(latex)) {
@@ -1226,6 +1441,7 @@
     }
     setRegions(regions)
     pruneRegionItems()
+    refreshInlineRegions(item)
     updateIntegral(item)
     schedule(item)
   }
@@ -1250,10 +1466,23 @@
   /** 範囲 name を描くための行（描いていなければ undefined） */
   const regionItem = (name: string) => items.find((it) => it.regionName === name)
 
+  /** 積分記号の下に直接書いた範囲の、描くための行の名前（式の id と、式の中で何番目の直書きの範囲か） */
+  const inlineKey = (id: number, k: number) => `#${id}:${k}`
+  /** 式 item の直書きの範囲の名前（出てきた順） */
+  const inlineKeys = (item: PlotItem) => inlineRegions(item.latex).map((_, k) => inlineKey(item.id, k))
+
+  /** 範囲 name の中身（LaTeX）。名前で書いた範囲は範囲の欄、直書きの範囲は式の中の積分記号の下 */
+  function regionSource(name: string): string {
+    const m = /^#(\d+):(\d+)$/.exec(name)
+    if (!m) return regions[name] ?? ''
+    const it = items.find((x) => x.id === Number(m[1]))
+    return it ? (inlineRegions(it.latex)[Number(m[2])] ?? '') : ''
+  }
+
   /** 範囲 name をグラフに描く（半透明の面・線） */
   function showRegion(name: string) {
     if (regionItem(name)) return
-    items.push(newItem(regionDisplayLatex(regions[name] ?? '') ?? '', { regionName: name, opacity: 0.45, vertical: false }))
+    items.push(newItem(regionDisplayLatex(regionSource(name)) ?? '', { regionName: name, opacity: 0.45, vertical: false }))
     schedule(items[items.length - 1], 0)
   }
 
@@ -1266,8 +1495,20 @@
 
   /** どの式も使わなくなった範囲は、描くのをやめる */
   function pruneRegionItems() {
-    const used = new Set(listed().flatMap((it) => regionsUsed(it.latex).map((r) => r.name)))
+    const used = new Set(listed().flatMap((it) => [...regionsUsed(it.latex).map((r) => r.name), ...inlineKeys(it)]))
     for (const it of items.filter((x) => x.regionName && !used.has(x.regionName))) removeItem(it)
+  }
+
+  /** 式 item の直書きの範囲を描いている行を、今の式に合わせて描き直す */
+  function refreshInlineRegions(item: PlotItem) {
+    for (const key of inlineKeys(item)) {
+      const shown = regionItem(key)
+      if (!shown) continue
+      const latex = regionDisplayLatex(regionSource(key)) ?? ''
+      if (latex === shown.latex) continue
+      shown.latex = latex
+      schedule(shown, 300)
+    }
   }
 
   /** 範囲の欄に出す、描いている範囲の色と誤り（描いていない範囲は入れない） */
@@ -1306,29 +1547,43 @@
     normal: '#2d70b3',
     vector: '#c74440',
     component: '#fa7e19',
+    riemann: '#2d70b3',
   }
 
   /** 矢印の長さ（表示範囲の一番短い辺の 1/6） */
   const arrowScale = () => Math.min(domain.xmax - domain.xmin, domain.ymax - domain.ymin, flat ? Infinity : domain.zmax - domain.zmin) / 6
 
-  /** 積分の図の、進み具合までの積分の値（式の id → 値・誤り）。重いので、少し待ってから計算する */
+  /** 積分の図の、進み具合までの積分の値（式の id → 値・誤り） */
   let integralValues = $state<Record<number, { partial?: string; value?: number; error?: string }>>({})
-  let integralValueTimer: ReturnType<typeof setTimeout> | undefined
+  /** 式ごとの、値の計算の予定・最後に計算した時刻・最後の計算にかかった時間 */
+  const integralValueJobs = new Map<number, { timer?: ReturnType<typeof setTimeout>; last: number; cost: number }>()
 
+  /**
+   * 進み具合までの積分の値を計算し直す。スライダーを動かし続けている間（ドラッグ・▶ の再生）も、間をあけて計算する
+   * （呼ばれるたびに予定を取り消して待ち直すと、動かしている間は一度も計算されない）。間は 80 ms か、
+   * 前の計算にかかった時間の 2 倍の長いほう（重い積分で画面が止まらないように）。動かし終わった後の値も、必ず 1 回計算する
+   */
   function updateIntegralValue(item: PlotItem, partial: string | undefined) {
-    clearTimeout(integralValueTimer)
-    if (!partial || (item.integralProgress ?? 1) >= 1) {
+    const job = integralValueJobs.get(item.id) ?? { last: -Infinity, cost: 0 }
+    integralValueJobs.set(item.id, job)
+    clearTimeout(job.timer)
+    if (!partial) {
       integralValues[item.id] = {}
       return
     }
-    integralValueTimer = setTimeout(() => {
-      const run = () => {
-        const r = evalValue(partial, currentParams(), run, currentDefinitions(item))
-        if (r === null) return
-        integralValues[item.id] = 'error' in r ? { partial, error: r.error } : { partial, value: r.value }
-      }
+    const run = () => {
+      const t0 = performance.now()
+      const r = evalValue(partial, currentParams(), run, currentDefinitions(item))
+      job.cost = performance.now() - t0
+      if (r === null) return
+      integralValues[item.id] = 'error' in r ? { partial, error: r.error } : { partial, value: r.value }
+    }
+    const gap = Math.max(80, 2 * job.cost)
+    const wait = Math.max(0, job.last + gap - performance.now())
+    job.timer = setTimeout(() => {
+      job.last = performance.now()
       run()
-    }, 120)
+    }, wait)
   }
 
   /** 積分を描くための行 view の中身を、元の式 item から作り直す（添えて描く行も、足す・消す・作り直す） */
@@ -1348,8 +1603,11 @@
     }
     view.auxSweep = ok?.sweep
     updateIntegralValue(item, ok?.partial)
-    // 添えて描くもの
-    const want = ok?.extras ?? []
+    // 添えて描くもの（定積分の近似の図も、ここに足す）
+    const want = [...(ok?.extras ?? [])]
+    const rv = ok && item.riemann ? riemannDisplay(item.latex, item.riemann.method, item.riemann.n) : null
+    if (rv && !('error' in rv)) want.push({ role: 'riemann', latex: rv.latex, label: rv.label })
+    updateRiemannValues(item, rv)
     for (const old of integralExtras(item)) {
       if (!want.some((e) => e.role === old.integralRole)) removeItem(old)
     }
@@ -1362,9 +1620,9 @@
           integralRole: e.role,
           vertical: false,
           color: EXTRA_COLORS[e.role],
-          lineWidth: e.role === 'point' ? 7 : e.role === 'field' || e.role === 'path' ? 3 : 5,
-          // 経路・領域は、積分の図の下に薄く（曲線はくっきり、面は透かす）
-          opacity: e.role === 'field' ? 0.8 : e.role === 'path' ? 0.45 : 1,
+          lineWidth: e.role === 'point' ? 7 : e.role === 'field' || e.role === 'path' || e.role === 'riemann' ? 3 : 5,
+          // 経路・領域は、積分の図の下に薄く（曲線はくっきり、面は透かす）。近似の長方形は、積分の図と重なっても見分けられる濃さ
+          opacity: e.role === 'field' ? 0.8 : e.role === 'path' ? 0.45 : e.role === 'riemann' ? 0.6 : 1,
           ranges: { t: ['0', '1'], u: ['0', '1'], v: ['0', '1'] },
         })
         items.push(x)
@@ -1376,6 +1634,38 @@
         schedule(x, fresh ? 0 : 60)
       }
     }
+  }
+
+  /** 定積分の近似の値（式の id → 近似の値・正確な値・誤り） */
+  let riemannValues = $state<Record<number, { approx?: number; exact?: number; error?: string }>>({})
+  const riemannTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+  /** 近似の値と正確な積分の値を計算し直す（n を動かし続けても固まらないよう、少し待ってから） */
+  function updateRiemannValues(item: PlotItem, rv: ReturnType<typeof riemannDisplay>) {
+    clearTimeout(riemannTimers.get(item.id))
+    if (!rv) {
+      delete riemannValues[item.id]
+      return
+    }
+    if ('error' in rv) {
+      riemannValues[item.id] = { error: rv.error }
+      return
+    }
+    const run = () => {
+      const defs = currentDefinitions(item)
+      const a = evalValue(rv.sum, currentParams(), run, defs)
+      const e = evalValue(rv.exact, currentParams(), run, defs)
+      if (a === null || e === null) return
+      const err = 'error' in a ? a.error : 'error' in e ? e.error : undefined
+      riemannValues[item.id] = { approx: 'value' in a ? a.value : undefined, exact: 'value' in e ? e.value : undefined, error: err }
+    }
+    riemannTimers.set(item.id, setTimeout(run, 60))
+  }
+
+  /** 定積分の近似の方法と分割数を変える（method が null なら近似を消す） */
+  function setRiemann(item: PlotItem, method: RiemannMethod | null, n: number) {
+    item.riemann = method ? { method, n: Math.max(1, Math.min(400, Math.round(n))) } : undefined
+    updateIntegral(item, 30)
   }
 
   /** 積分の図の進み具合を変える（スライダー・再生） */
@@ -1482,6 +1772,13 @@
               value: val?.value,
               valueError: val?.error,
               legend: extras.map((x) => ({ color: x.color, label: x.auxNote ?? '', error: x.error })),
+              riemann: (() => {
+                // 1 変数の定積分だけ、近似の操作を出す
+                const probe = source ? riemannDisplay(source.latex, 'left', 4) : null
+                if (!probe || 'error' in probe) return undefined
+                const rv = riemannValues[source!.id]
+                return { method: source!.riemann?.method ?? null, n: source!.riemann?.n ?? 8, ...(source!.riemann ? rv : {}) }
+              })(),
             },
           ],
         ]
@@ -2429,6 +2726,7 @@
         if (!hasIntegral(it.latex) || integralItem(it)) continue
         toggleIntegral(it)
         setIntegralProgress(it, sample.integral)
+        if (sample.riemann) setRiemann(it, sample.riemann.method, sample.riemann.n)
       }
     }
     // パラメータを再生する例
@@ -2570,6 +2868,22 @@
   onkeydown={(e) => e.key === 'Escape' && settingsOpen && closeSettings()}
 />
 
+{#if graphsOpen}
+  <GraphsDialog
+    graphs={graphList}
+    currentId={graphId}
+    {saveFailed}
+    {shareMessage}
+    onClose={() => (graphsOpen = false)}
+    onOpen={openGraph}
+    onNew={newGraph}
+    onDelete={removeGraph}
+    onDuplicate={copyGraph}
+    onRename={renameAny}
+    onShare={copyShareLink}
+  />
+{/if}
+
 <div class="app" style:--panel-w={panelWidth === null ? null : `${panelWidth}px`}>
   <aside
     class="panel"
@@ -2591,7 +2905,26 @@
     >
       <span class="grip"></span>
       <h1>graphploter</h1>
-      <span class="subtitle">3D グラフ</span>
+      <!-- グラフの名前とグラフの一覧。シートのつまみのドラッグにならないよう、押した操作をここで止める -->
+      <input
+        class="graph-title"
+        value={graphTitle}
+        aria-label="グラフの名前"
+        title="グラフの名前（押して変える）"
+        onpointerdown={(e) => e.stopPropagation()}
+        onkeydown={(e) => {
+          e.stopPropagation()
+          if (e.key === 'Enter') e.currentTarget.blur()
+        }}
+        onchange={(e) => (graphTitle = e.currentTarget.value.trim() || UNTITLED)}
+      />
+      <button
+        class="graphs-btn"
+        onpointerdown={(e) => e.stopPropagation()}
+        onclick={openGraphs}
+        title="グラフの一覧（新しいグラフ・開く・共有）"
+        aria-label="グラフの一覧"
+      >☰ グラフ</button>
     </header>
 
     <div class="panel-body">
@@ -2637,6 +2970,7 @@
               setIntegralProgress(item, v)
             }}
             onIntegralPlay={() => togglePlayIntegral(item)}
+            onRiemann={(m, n) => setRiemann(item, m, n)}
             onColor={(c) => setColor(item, c)}
             onGrid={(g) => setGrid(item, g)}
             onOpacity={(o) => setOpacity(item, o)}
@@ -2668,6 +3002,7 @@
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
+            onDuplicate={() => duplicateItem(item)}
             onParam={(re, im) => setParam(item, re, im)}
             onSlider={(sl) => setSlider(item, sl)}
             paramPlaying={playingParams.includes(item.id)}
@@ -3132,8 +3467,12 @@
 
 
           {:else if settingsCat === 'save'}
-            <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
+            <p class="note">
+              式と設定は、グラフごとにこのブラウザに自動で保存されます。次にサイトを開くと、最後に開いたグラフが開きます。
+              共有リンクには、グラフの中身がまるごと入ります（サーバーには送りません）。リンクを開いた人の一覧には、新しいグラフとして入ります。
+            </p>
             <div class="buttons">
+              <button class="secondary" onclick={() => { closeSettings(); openGraphs() }}>グラフの一覧</button>
               <button class="secondary" onclick={copyShareLink}>共有リンクをコピー</button>
               <button class="secondary" onclick={resetAll}>最初の状態に戻す</button>
             </div>
@@ -3289,7 +3628,7 @@
   }
   .title {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -3302,9 +3641,37 @@
     margin: 0;
     font-size: 18px;
   }
-  .subtitle {
-    color: var(--muted);
+  .graph-title {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 3px 6px;
+    text-overflow: ellipsis;
+  }
+  .graph-title:hover,
+  .graph-title:focus {
+    border-color: var(--border);
+    outline: none;
+  }
+  .graphs-btn {
+    flex-shrink: 0;
+    font: inherit;
     font-size: 13px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .graphs-btn:hover {
+    background: var(--hover);
   }
   .list {
     list-style: none;

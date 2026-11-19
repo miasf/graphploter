@@ -260,11 +260,13 @@ export interface PlotItem extends PlotStyle {
    * 積分を描くための行のうち、添えて描くもの（ベクトル場の矢印・今の点・接線・法線・場の向きと成分）なら、その役。
    * 積分の図そのものの行は undefined
    */
-  integralRole?: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
+  integralRole?: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component' | 'riemann'
   /** 積分を描くための行: 進み具合のスライダーで動かす積分の変数（無ければスライダーを出さない） */
   auxSweep?: string
   /** 積分の式（元の式）の、図の進み具合（0〜1。積分の範囲を下の端から途中までにする。無ければ 1）。保存しない */
   integralProgress?: number
+  /** 積分の式（元の式）の、定積分の近似の図（リーマン和・台形則・シンプソン則と分割数 n）。無ければ描かない。保存しない */
+  riemann?: { method: import('./latex').RiemannMethod; n: number }
   /** 積分を描くための行: 何を描いているかの説明（描けない形なら、その理由を auxError に入れる） */
   auxNote?: string
   auxError?: string
@@ -335,6 +337,15 @@ export interface IntegralViewInfo {
   valueError?: string
   /** 添えて描いているもの（色と説明） */
   legend: { color: string; label: string; error?: string }[]
+  /** 定積分の近似（1 変数の定積分だけ。描けない形なら error） */
+  riemann?: {
+    method: import('./latex').RiemannMethod | null
+    n: number
+    /** 近似の値・正確な積分の値 */
+    approx?: number
+    exact?: number
+    error?: string
+  }
 }
 
 /** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */
@@ -414,6 +425,8 @@ export interface MeshData {
   gpu3d?: Gpu3dInfo
   /** GPU の描き方を使えない理由（式の ⚙ に出す）。使えるなら空 */
   gpuReason?: string
+  /** 陽関数の注目する点（[x, y, z, 種類, …]。種類は 0: 極大, 1: 極小, 2: 鞍点, 3: 零点, 4: 縦軸との交点, 5: そのほかの停留点）。無ければ省略 */
+  poi?: Float64Array
   /** 2D 表示の不等式の領域の境目の線（実線。点の列で、途切れる所に NaN）。無ければ省略 */
   outline?: Float32Array
   /** outline の点ごとの値（ベクトル場の流線の大きさ ‖F‖。valueRange の色の対応表で塗る）。無ければ省略 */
@@ -522,6 +535,8 @@ export const PLOT_LOCAL = 8
 export const PLOT_THOROUGH = 2
 /** PlotRequest.flags のビット 2: 媒介変数が3つ以上の図形を、辺だけで描く */
 export const PLOT_EDGES = 4
+/** ビット 4: 陽関数の注目する点（極値・零点など）も求める（点を押すと値が出る機能。止まっているときだけ） */
+export const PLOT_POI = 16
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
 export interface CapRequest {

@@ -254,15 +254,50 @@ pub fn binary(op: BinOp, a: &Expr, b: &Expr) -> Result<Option<Expr>, String> {
         },
         (Some(u), None) if !matches!(b, Expr::List(_)) => match op {
             BinOp::Mul | BinOp::Div => u.map(|x| bin(x.clone(), b.clone())).into_expr(),
-            _ => return Err(format!("{}とスカラーは、掛け算・割り算だけが使えます", u.describe())),
+            // 単位行列 I（E）の倍との足し算・引き算: A − 3I・A − λE
+            BinOp::Add | BinOp::Sub if u.rows == u.cols && identity_multiple(b).is_some() => {
+                let c = identity_multiple(b).unwrap_or(Expr::Num(0.0));
+                with_diagonal(&u, |x| bin(x.clone(), c.clone()))
+            }
+            _ => return Err(format!("{}とスカラーは、掛け算・割り算だけが使えます（単位行列は I か E: A − 3I）", u.describe())),
         },
         (None, Some(v)) if !matches!(a, Expr::List(_)) => match op {
             BinOp::Mul => v.map(|x| bin(a.clone(), x.clone())).into_expr(),
             BinOp::Div => return Err("行列・ベクトルでは割れません（逆行列 A^(-1) を掛けてください）".into()),
-            _ => return Err(format!("スカラーと{}は、掛け算だけが使えます", v.describe())),
+            // λI − A・3E + A
+            BinOp::Add | BinOp::Sub if v.rows == v.cols && identity_multiple(a).is_some() => {
+                let c = identity_multiple(a).unwrap_or(Expr::Num(0.0));
+                let negated = if op == BinOp::Sub { v.map(|x| crate::diff::neg(x.clone())) } else { v };
+                with_diagonal(&negated, |x| add(c.clone(), x.clone()))
+            }
+            _ => return Err(format!("スカラーと{}は、掛け算だけが使えます（単位行列は I か E: 3I − A）", v.describe())),
         },
         _ => return Ok(None),
     }))
+}
+
+/// 単位行列の名前（I・E。定義・パラメータに無いときだけ、行列との足し算・引き算で単位行列として読む）
+const IDENTITY: [&str; 2] = ["I", "E"];
+
+/// 式が単位行列の何倍か（I・3I・λI・−2E・I/2）。単位行列を含まない・ほかの形なら None
+fn identity_multiple(e: &Expr) -> Option<Expr> {
+    let is_id = |e: &Expr| matches!(e, Expr::Var(n) if IDENTITY.contains(&n.as_str()));
+    let no_id = |e: &Expr| !IDENTITY.iter().any(|n| e.uses_var(n));
+    match e {
+        e if is_id(e) => Some(Expr::Num(1.0)),
+        Expr::Neg(x) => identity_multiple(x).map(crate::diff::neg),
+        Expr::Bin(BinOp::Mul, x, y) if is_id(y) && no_id(x) => Some((**x).clone()),
+        Expr::Bin(BinOp::Mul, x, y) if is_id(x) && no_id(y) => Some((**y).clone()),
+        Expr::Bin(BinOp::Mul, x, y) if no_id(x) => identity_multiple(y).map(|c| mul((**x).clone(), c)),
+        Expr::Bin(BinOp::Div, x, y) if no_id(y) => identity_multiple(x).map(|c| Expr::Bin(BinOp::Div, Box::new(c), y.clone())),
+        _ => None,
+    }
+}
+
+/// 正方行列 m の対角成分だけを f で変えたもの
+fn with_diagonal(m: &Mat, f: impl Fn(&Expr) -> Expr) -> Expr {
+    let items = m.items.iter().enumerate().map(|(k, x)| if k / m.cols == k % m.cols { f(x) } else { x.clone() }).collect();
+    Mat { rows: m.rows, cols: m.cols, items }.into_expr()
 }
 
 /// 大きさの上限（6 × 6）を確かめる

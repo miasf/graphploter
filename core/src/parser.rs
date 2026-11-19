@@ -340,7 +340,11 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
-        "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" => OpKind::Func,
+        "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" | "eig" => OpKind::Func,
+        // テイラー多項式 @taylor(f, x, a, n)
+        "taylor" => OpKind::Func,
+        // 停留点 @crit f（1 行にそれだけ。equation.rs が行ごと読む）
+        "crit" => OpKind::Func,
         // 点での値 @at(式, x, a, y, b, …)
         "at" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
@@ -977,12 +981,19 @@ impl Parser<'_> {
                 }
             }
         }
-        // `; {vec}`: ベクトル場と向きの付いた要素の内積（F · dr、F · dS）
+        // `; {vec}`: ベクトル場と向きの付いた要素の内積（F · dr、F · dS）。`; {d_s}`・`; {d_x}, {d_y}` は積分の記号の d の後の文字
+        // （弧長 ds・面積 dS・dA・体積 dV・座標 dx。範囲の次元と合っているかを確かめる）。`,` で区切って並べられる
         if *self.peek() == Tok::Semi {
             self.next();
-            match self.next().tok {
-                Tok::Var(m) => args.push(Expr::Op { op: format!("mode:{m}"), args: Vec::new() }),
-                _ => return err("; の後には {vec} と書いてください", self.pos()),
+            loop {
+                match self.next().tok {
+                    Tok::Var(m) => args.push(Expr::Op { op: format!("mode:{m}"), args: Vec::new() }),
+                    _ => return err("; の後には {vec} か {d_s} のように書いてください", self.pos()),
+                }
+                if *self.peek() != Tok::Comma {
+                    break;
+                }
+                self.next();
             }
         }
         self.expect(Tok::RParen, "閉じ括弧 ')'")?;
@@ -1074,7 +1085,7 @@ impl Parser<'_> {
             }
             Some(OpKind::Prefix) => Ok(Expr::Op { op: name, args: vec![self.term()?] }),
             // 行列の演算子は、括弧が無ければ直後の 1 つに掛かる（det A・dim ker A。sin x と同じ読み方）
-            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank") && *self.peek() != Tok::LParen => {
+            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank" | "eig" | "crit") && *self.peek() != Tok::LParen => {
                 Ok(Expr::Op { op: name, args: vec![self.power()?] })
             }
             Some(OpKind::Func) => {

@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { hasIntegral, joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
+  import { RIEMANN_METHODS, hasIntegral, inlineRegions, joinTuple, regionLabel, regionsUsed, splitTuple, type RiemannMethod } from './latex'
   import { matrixDefinition } from './matrixEdit'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
@@ -38,6 +38,8 @@
     onIntegralProgress: (v: number) => void
     /** 進み具合の再生・停止 */
     onIntegralPlay: () => void
+    /** 定積分の近似（リーマン和など）の方法と分割数を変えた（方法が null なら近似を消す） */
+    onRiemann?: (method: RiemannMethod | null, n: number) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -77,6 +79,8 @@
     onToggleSettings: () => void
     onToggleVertical: () => void
     onRemove: () => void
+    /** 式を複製して、すぐ下に置く */
+    onDuplicate: () => void
     /** パラメータの値を変えたとき */
     onParam: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
@@ -138,6 +142,7 @@
     onIntegralShow,
     onIntegralProgress,
     onIntegralPlay,
+    onRiemann,
     onColor,
     onGrid,
     onOpacity,
@@ -165,6 +170,7 @@
     onToggleSettings,
     onToggleVertical,
     onRemove,
+    onDuplicate,
     onParam,
     onSlider,
     paramPlaying,
@@ -206,7 +212,7 @@
    */
   const auxMissing = $derived.by(() => {
     if (missing) return null
-    const errors = [integralView?.error, integralView?.valueError, ...regionNames.map((n) => regionViews[n]?.error)]
+    const errors = [integralView?.error, integralView?.valueError, ...[...regionNames, ...inlineNames].map((n) => regionViews[n]?.error)]
     for (const e of errors) {
       const m = missingParam(e)
       if (m) return m
@@ -226,6 +232,8 @@
   const parts = $derived(splitTuple(item.latex))
   /** この式で使っている、名前で書いた積分の範囲（∬_D の D） */
   const regionNames = $derived(regionsUsed(item.latex).map((r) => r.name))
+  /** 積分記号の下に直接書いた範囲を描くための名前（App の inlineKey と同じ形） */
+  const inlineNames = $derived(inlineRegions(item.latex).map((_, k) => `#${item.id}:${k}`))
   const showVertical = $derived(item.vertical && parts !== null && !editingLine)
 
   function setPart(k: number, value: string) {
@@ -434,6 +442,42 @@
 
   /** 積分の値を短く出す（有効 6 桁） */
   const formatValue = (v: number) => (Math.abs(v) < 1e-12 ? '0' : Number(v.toPrecision(6)).toString().replace('-', '−'))
+  /** 誤差（小さい数は指数表記） */
+  const formatError = (v: number) => {
+    const a = Math.abs(v)
+    if (a === 0) return '0'
+    if (a >= 1e-3 && a < 1e5) return formatValue(v)
+    const [m, e] = v.toExponential(2).split('e')
+    return `${m.replace('-', '−')} × 10^${Number(e)}`.replace(/\^(-?\d+)/, (_, x) => [...String(x)].map((c) => '⁻⁰¹²³⁴⁵⁶⁷⁸⁹'['-0123456789'.indexOf(c)]).join(''))
+  }
+
+  // ---- 定積分の近似: n を 1 から増やしていく再生 ----
+  let riemannPlaying = $state(false)
+  let riemannTimer: ReturnType<typeof setInterval> | undefined
+  function toggleRiemannPlay() {
+    const r = integralView?.riemann
+    if (!r?.method) return
+    if (riemannPlaying) {
+      riemannPlaying = false
+      clearInterval(riemannTimer)
+      return
+    }
+    riemannPlaying = true
+    let n = r.n >= 64 ? 1 : r.n
+    onRiemann?.(r.method, n)
+    riemannTimer = setInterval(() => {
+      const m = integralView?.riemann?.method
+      // 増やし方は、小さい n はゆっくり、大きい n は速く（1, 2, 3, …, 10, 12, 14, …）
+      n = n < 10 ? n + 1 : n < 32 ? n + 2 : n + 4
+      if (!m || n > 64) {
+        riemannPlaying = false
+        clearInterval(riemannTimer)
+        return
+      }
+      onRiemann?.(m, n)
+    }, 450)
+  }
+  $effect(() => () => clearInterval(riemannTimer))
 </script>
 
 <li class="item" class:has-error={!!item.error} class:dragging class:in-folder={!!item.folder} data-item-id={item.id}>
@@ -544,6 +588,23 @@
           aria-pressed={!!integralView}
           title={integralView ? '積分の図をグラフから消す' : '被積分関数を、積分する範囲の上に描く（面積・体積が積分の値になる図形）'}
           onclick={onIntegralShow}>{integralView ? '∫ 表示中' : '∫ 積分を描く'}</button>
+        <!-- 積分記号の下に直接書いた範囲も、名前で書いた範囲と同じように描ける -->
+        {#each inlineNames as name, k (name)}
+          <button
+            class="region-show"
+            class:on={name in regionViews}
+            style:--region-color={regionViews[name]?.color}
+            aria-pressed={name in regionViews}
+            title={name in regionViews ? '積分の範囲をグラフから消す' : '積分記号の下に書いた範囲をグラフに描く'}
+            onclick={() => onRegionShow(name)}
+            >{name in regionViews ? '範囲 表示中' : '範囲を表示'}{inlineNames.length > 1 ? ` ${k + 1}` : ''}</button
+          >
+        {/each}
+        {#each inlineNames as name (name)}
+          {#if regionViews[name]?.error}
+            <span class="region-error">範囲を描けません: {regionViews[name].error}</span>
+          {/if}
+        {/each}
         {#if integralView?.error}
           <span class="region-error">描けません: {integralView.error}</span>
         {:else if integralView?.note}
@@ -574,13 +635,76 @@
         </div>
         <div class="integral-value">
           {#if integralView.progress >= 1}
-            範囲全体（{sweepName(integralView.sweep)} を動かすと、途中までの積分の値と図が出ます）
+            {#if integralView.valueError}
+              積分の値: 計算できません（{integralView.valueError}）
+            {:else if integralView.value !== undefined}
+              範囲全体の積分 = <b>{formatValue(integralView.value)}</b>
+            {:else}
+              積分の値を計算中…
+            {/if}
+            <span class="sweep-hint">（{sweepName(integralView.sweep)} を動かすと、途中までの積分の値と図が出ます）</span>
           {:else if integralView.valueError}
             途中までの値: 計算できません（{integralView.valueError}）
           {:else if integralView.value !== undefined}
             途中までの積分 = <b>{formatValue(integralView.value)}</b>
           {:else}
             途中までの積分を計算中…
+          {/if}
+        </div>
+      {/if}
+      {#if integralView && !integralView.error && integralView.riemann && onRiemann}
+        {@const r = integralView.riemann}
+        <!-- 定積分の近似（リーマン和・台形則・シンプソン則）: 図と、近似の値・正確な値・誤差 -->
+        <div class="riemann">
+          <div class="riemann-methods" role="group" aria-label="定積分の近似の方法">
+            <span class="riemann-title">近似</span>
+            <button class="riemann-chip" class:on={r.method === null} aria-pressed={r.method === null} onclick={() => onRiemann(null, r.n)}>なし</button>
+            {#each RIEMANN_METHODS as m (m.id)}
+              <button
+                class="riemann-chip"
+                class:on={r.method === m.id}
+                aria-pressed={r.method === m.id}
+                title="{m.label}{m.id === 'trap' || m.id === 'simpson' ? '' : 'のリーマン和'}（誤差は {m.order}）"
+                onclick={() => onRiemann(m.id, r.n)}>{m.label}</button
+              >
+            {/each}
+          </div>
+          {#if r.method}
+            <div class="integral-sweep">
+              <span class="sweep-name" title="区間を n 等分する">n</span>
+              <input
+                type="range"
+                min="1"
+                max="64"
+                step="1"
+                value={Math.min(64, r.n)}
+                aria-label="分割数 n"
+                oninput={(e) => onRiemann(r.method, e.currentTarget.valueAsNumber)}
+              />
+              <EditableValue chars={4} value={r.n} label="分割数 n" onChange={(v) => onRiemann(r.method, v)} />
+              <button
+                class="sweep-play"
+                class:on={riemannPlaying}
+                onclick={toggleRiemannPlay}
+                aria-label={riemannPlaying ? '止める' : 'n を増やしていく'}
+                title={riemannPlaying ? '止める' : 'n を 1 から 64 まで増やしていく'}>{riemannPlaying ? '❚❚' : '▶'}</button
+              >
+            </div>
+            <div class="integral-value riemann-values">
+              {#if r.error}
+                近似の値: 計算できません（{r.error}）
+              {:else if r.approx !== undefined && r.exact !== undefined}
+                <span>近似 = <b>{formatValue(r.approx)}</b></span>
+                <span>正確な値 = <b>{formatValue(r.exact)}</b></span>
+                <span>誤差 = <b>{Math.abs(r.approx - r.exact) <= 1e-12 * Math.max(1, Math.abs(r.exact)) ? '0（丸め誤差の範囲）' : formatError(r.approx - r.exact)}</b></span>
+                <span class="sweep-hint">
+                  {RIEMANN_METHODS.find((m) => m.id === r.method)?.label}{r.method === 'trap' || r.method === 'simpson' ? '則' : 'のリーマン和'}の誤差は
+                  {RIEMANN_METHODS.find((m) => m.id === r.method)?.order}（n を 2 倍にすると、{r.method === 'simpson' ? 'およそ 1/16' : r.method === 'mid' || r.method === 'trap' ? 'およそ 1/4' : 'およそ 1/2'} になる）。{r.method === 'simpson' ? 'n は偶数にそろえる。' : ''}
+                </span>
+              {:else}
+                近似の値を計算中…
+              {/if}
+            </div>
           {/if}
         </div>
       {/if}
@@ -1236,6 +1360,7 @@
       aria-expanded={choosingFolder}
       onclick={() => (choosingFolder = !choosingFolder)}>▤</button
     >
+    <button class="icon" title="複製（すぐ下に同じ式を足す）" aria-label="複製" onclick={onDuplicate}>⧉</button>
     <button class="icon" title="削除" aria-label="削除" onclick={onRemove}>×</button>
   </div>
 </li>
@@ -1500,6 +1625,49 @@
   .integral-value {
     font-size: 12px;
     color: var(--muted);
+  }
+  .riemann {
+    display: grid;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .riemann-methods {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+  }
+  .riemann-title {
+    font-size: 12px;
+    color: var(--muted);
+    margin-right: 2px;
+  }
+  .riemann-chip {
+    font: inherit;
+    font-size: 12px;
+    padding: 1px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .riemann-chip.on {
+    background: #2d70b3;
+    border-color: #2d70b3;
+    color: #fff;
+  }
+  .riemann-values {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 12px;
+  }
+  .riemann-values .sweep-hint {
+    flex-basis: 100%;
+  }
+  .integral-value .sweep-hint {
+    display: block;
+    font-size: 11px;
   }
   .integral-value b {
     color: var(--text);

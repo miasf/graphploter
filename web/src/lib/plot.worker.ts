@@ -15,6 +15,7 @@ import init, {
   coord_system,
   coord_grid,
   definitions,
+  last_poi,
   last_used_params,
   plot,
   take_field_values,
@@ -390,6 +391,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       return
     }
     let r: MeshResult | null = null
+    let poi: Float64Array | undefined
     /** メッシュの配列を取り出す結果（回す前の形のメッシュを返すときは、r とは別） */
     let geom: MeshResult | null = null
     let localTransform: Float64Array | null = null
@@ -453,6 +455,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         cached.ires === implicitResolution &&
         cached.thorough === thorough
       r = callPlot()
+      // 注目する点（陽関数の極値・零点。頼んだときだけ。plot のすぐ後に読む）
+      poi = last_poi()
       lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null, ode: r.ode_states.split(',').filter((s) => s !== '') })
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
@@ -546,6 +550,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
           }
         : undefined
     const mesh = {
+      ...(poi && poi.length > 0 ? { poi } : {}),
       ...(gpu2d ? { gpu2d } : {}),
       ...(gpu3d ? { gpu3d } : {}),
       ...(gpuReason ? { gpuReason } : {}),

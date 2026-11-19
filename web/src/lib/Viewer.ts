@@ -95,6 +95,15 @@ interface StencilCap {
   quad: THREE.Mesh
 }
 
+/** 押した所にあった式の点。poi は注目する点の種類（0: 極大, 1: 極小, 2: 鞍点, 3: 零点, 4: 縦軸との交点, 5: そのほかの停留点） */
+export interface PickResult {
+  id: number
+  point: [number, number, number]
+  poi?: number
+  /** 同じ点にある注目する点の種類（全部） */
+  kinds?: number[]
+}
+
 /** 1つの式の描画物 */
 type PlotObject =
   | {
@@ -246,6 +255,7 @@ export class Viewer {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.setupMouse()
     this.setupWheel()
+    this.setupPick()
     this.applyButtons()
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.1 // 指を離した後の慣性の回転を、少し早めに止める
@@ -400,6 +410,258 @@ export class Viewer {
     }
     el.addEventListener('pointerup', end)
     el.addEventListener('pointercancel', end)
+  }
+
+  // ---- 点を押すと値が出る（学習用。計画のおすすめ 1）----
+  //
+  // グラフをクリック（タップ）すると、押した所に一番近い曲線の点・曲面の点・注目する点（極値・零点など）を探して、
+  // onPick で画面側に知らせる。画面側は値を計算して showPick で印と札を出す。ドラッグ（視点の操作）は押したことにしない
+
+  /** 式ごとの、注目する点（[x, y, z, 種類, …]）と、曲線の点の列（途切れる所に NaN） */
+  private poiData = new Map<number, Float64Array>()
+  private curvePts = new Map<number, Float32Array>()
+  /** 押した点の印・その式の注目する点の印・札 */
+  private pickMarker: THREE.Mesh | null = null
+  private poiDots: THREE.InstancedMesh | null = null
+  private pickLabel: HTMLDivElement | null = null
+  private pickAt: THREE.Vector3 | null = null
+  /** 印を出している式 */
+  private pickFor: number | null = null
+  /** 押した所の結果を受け取る（何も無い所なら null） */
+  onPick: ((r: PickResult | null) => void) | null = null
+
+  /** 押したときに探す、曲線の点の列と注目する点を覚える（applyPlot の後に呼ぶ。applyPlot は種類が変わると removePlot を呼ぶため） */
+  private notePickData(id: number, mesh: MeshData) {
+    if (mesh.curve && mesh.positions.length > 0) this.curvePts.set(id, mesh.positions)
+    else this.curvePts.delete(id)
+    this.setPoi(id, mesh.poi)
+  }
+
+  private setPoi(id: number, poi: Float64Array | undefined) {
+    if (poi && poi.length >= 4) this.poiData.set(id, poi)
+    else this.poiData.delete(id)
+    if (this.pickFor === id) this.placePoiDots()
+  }
+
+  private setupPick() {
+    const el = this.renderer.domElement
+    let down: { x: number; y: number; t: number; id: number; n: number } | null = null
+    let pointers = 0
+    el.addEventListener('pointerdown', (e) => {
+      pointers++
+      down = e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey ? { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, n: pointers } : null
+    })
+    const up = (e: PointerEvent) => {
+      pointers = Math.max(0, pointers - 1)
+      const d = down
+      down = null
+      // 動かさずに短く押して離したときだけ（2 本指の操作・ドラッグは除く）
+      if (!d || d.id !== e.pointerId || d.n > 1 || e.timeStamp - d.t > 450 || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) return
+      this.onPick?.(this.pickAtScreen(e.clientX, e.clientY))
+    }
+    el.addEventListener('pointerup', up)
+    el.addEventListener('pointercancel', () => {
+      pointers = Math.max(0, pointers - 1)
+      down = null
+    })
+  }
+
+  /** 空間の点の、画面の上の位置（CSS ピクセル。描く所の左上から）。カメラの後ろなら null */
+  private toScreen(p: THREE.Vector3): { x: number; y: number } | null {
+    const v = p.clone().project(this.camera)
+    if (v.z > 1 || v.z < -1) return null
+    return { x: ((v.x + 1) / 2) * this.viewW, y: ((1 - v.y) / 2) * this.viewH }
+  }
+
+  /** 画面の上の点 (clientX, clientY) にある、式の点（注目する点 → 曲線 → 曲面の順に探す） */
+  pickAtScreen(clientX: number, clientY: number): PickResult | null {
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const sx = clientX - rect.left
+    const sy = clientY - rect.top
+    const shown = (id: number) => this.styles.get(id)?.visible !== false
+    const inside = (pt: THREE.Vector3) => this.clipPlanes.every((pl) => pl.distanceToPoint(pt) >= -1e-6)
+    // 注目する点（印を出している式の点は灰色の球が見えているので 12 画素以内、ほかの式の点は 6 画素以内）
+    let best: { r: PickResult; d: number } | null = null
+    for (const [id, poi] of this.poiData) {
+      if (!shown(id)) continue
+      const near = id === this.pickFor ? 12 : 6
+      for (let k = 0; k + 3 < poi.length; k += 4) {
+        const p = new THREE.Vector3(poi[k], poi[k + 1], this.flat ? 0 : poi[k + 2])
+        const q = this.toScreen(p)
+        if (!q) continue
+        const d = Math.hypot(q.x - sx, q.y - sy)
+        if (d <= near && (!best || d < best.d)) best = { r: { id, point: [poi[k], poi[k + 1], poi[k + 2]], poi: poi[k + 3] }, d }
+      }
+    }
+    if (best) {
+      // 同じ点にある注目する点の種類をまとめる（原点が零点でも縦軸との交点でもある、など）
+      const poi = this.poiData.get(best.r.id)!
+      const [x, y, z] = best.r.point
+      const kinds: number[] = []
+      for (let k = 0; k + 3 < poi.length; k += 4) {
+        const same = Math.abs(poi[k] - x) + Math.abs(poi[k + 1] - y) + Math.abs(poi[k + 2] - z) <= 1e-9 * (1 + Math.abs(x) + Math.abs(y) + Math.abs(z))
+        if (same && !kinds.includes(poi[k + 3])) kinds.push(poi[k + 3])
+      }
+      return { ...best.r, kinds: kinds.sort((a, b) => a - b) }
+    }
+    // 曲線（10 画素以内の、一番近い線分の上の点）
+    for (const [id, pts] of this.curvePts) {
+      const obj = this.plots.get(id)
+      if (!shown(id) || !obj || obj.kind !== 'curve') continue
+      obj.line.updateMatrixWorld()
+      const m = obj.line.matrixWorld
+      let prev: { p: THREE.Vector3; q: { x: number; y: number } | null } | null = null
+      for (let k = 0; k + 2 < pts.length; k += 3) {
+        if (!(Number.isFinite(pts[k]) && Number.isFinite(pts[k + 1]) && Number.isFinite(pts[k + 2]))) {
+          prev = null
+          continue
+        }
+        const p = new THREE.Vector3(pts[k], pts[k + 1], pts[k + 2]).applyMatrix4(m)
+        const q = this.toScreen(p)
+        if (prev && prev.q && q && inside(p)) {
+          const [ax, ay, bx, by] = [prev.q.x, prev.q.y, q.x, q.y]
+          const L = (bx - ax) ** 2 + (by - ay) ** 2
+          const t = L > 0 ? Math.min(1, Math.max(0, ((sx - ax) * (bx - ax) + (sy - ay) * (by - ay)) / L)) : 0
+          const d = Math.hypot(ax + t * (bx - ax) - sx, ay + t * (by - ay) - sy)
+          if (d <= 10 && (!best || d < best.d)) {
+            const w = prev.p.clone().lerp(p, t)
+            best = { r: { id, point: [w.x, w.y, w.z] }, d }
+          }
+        }
+        prev = { p, q }
+      }
+    }
+    if (best) return best.r
+    // 曲面（視線と三角形の交点のうち、表示範囲の中で一番手前）
+    const ray = this.rayAt(clientX, clientY)
+    const meshes: THREE.Object3D[] = []
+    const owner = new Map<THREE.Object3D, number>()
+    for (const [id, p] of this.plots) {
+      if (p.kind === 'surface' && shown(id) && p.group.children[0]) {
+        meshes.push(p.group.children[0])
+        owner.set(p.group.children[0], id)
+      }
+    }
+    for (const hit of ray.intersectObjects(meshes, false)) {
+      if (!inside(hit.point)) continue
+      const id = owner.get(hit.object)
+      if (id !== undefined) return { id, point: [hit.point.x, hit.point.y, hit.point.z] }
+    }
+    return null
+  }
+
+  /** 表示範囲の大きさから決める、印の球の半径 */
+  private markRadius(k: number) {
+    const d = this.domain
+    const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin, this.flat ? 0 : d.zmax - d.zmin) : 10
+    return span * k
+  }
+
+  /**
+   * 押した点の印と札を出す（point が null なら消す）。`id` の式の注目する点も、灰色の小さな球で出す。
+   * 札の中身は HTML ではなく文字（textContent）で入れる
+   */
+  showPick(point: [number, number, number] | null, text = '', color = '#222222', id: number | null = null) {
+    this.dirty = true
+    if (!point) {
+      if (this.pickMarker) {
+        this.scene.remove(this.pickMarker) // 球の形は共有なので捨てない
+        ;(this.pickMarker.material as THREE.Material).dispose()
+        this.pickMarker = null
+      }
+      this.pickAt = null
+      this.pickFor = null
+      this.placePoiDots()
+      if (this.pickLabel) this.pickLabel.hidden = true
+      return
+    }
+    const p = new THREE.Vector3(point[0], point[1], this.flat ? 0.001 : point[2])
+    if (!this.pickMarker) {
+      // 面に半分埋まらないよう、いつも手前に描く
+      // （半透明の扱いにして、ほかの全部を描いた後に描く。不透明のままだと、後から描く面に上書きされる）
+      this.pickMarker = new THREE.Mesh(dotSphere(), new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.05, depthTest: false, depthWrite: false, transparent: true }))
+      this.pickMarker.renderOrder = 1e6
+      this.scene.add(this.pickMarker)
+    }
+    // 曲面の上の点は、面と同じ色だと見えないので、濃い色にする
+    const onSurface = id !== null && this.plots.get(id)?.kind === 'surface'
+    ;(this.pickMarker.material as THREE.MeshStandardMaterial).color.set(onSurface ? '#1b1b1f' : color)
+    const r = this.markRadius(0.012)
+    this.pickMarker.scale.set(r, r, r)
+    this.pickMarker.position.copy(p)
+    this.pickAt = p
+    this.pickFor = id
+    this.placePoiDots()
+    if (!this.pickLabel) {
+      const l = document.createElement('div')
+      l.className = 'pick-label'
+      Object.assign(l.style, {
+        position: 'absolute',
+        left: '0',
+        top: '0',
+        pointerEvents: 'none',
+        padding: '4px 9px',
+        borderRadius: '6px',
+        font: '13px/1.4 var(--mono, monospace)',
+        whiteSpace: 'pre',
+        background: 'var(--panel, #fff)',
+        color: 'var(--text, #222)',
+        border: '1px solid var(--border-strong, #ccc)',
+        boxShadow: '0 2px 8px rgb(0 0 0 / 0.18)',
+        zIndex: '5',
+      })
+      this.container.style.position ||= 'relative'
+      this.container.appendChild(l)
+      this.pickLabel = l
+    }
+    this.pickLabel.textContent = text
+    this.pickLabel.style.borderLeft = `4px solid ${color}`
+    this.pickLabel.hidden = false
+    this.placePickLabel()
+  }
+
+  /** 印を出している式の注目する点を、灰色の小さな球で置く */
+  private placePoiDots() {
+    if (this.poiDots) {
+      this.scene.remove(this.poiDots)
+      this.poiDots.dispose()
+      ;(this.poiDots.material as THREE.Material).dispose()
+      this.poiDots = null
+    }
+    const poi = this.pickFor === null ? undefined : this.poiData.get(this.pickFor)
+    if (!poi) return
+    const n = Math.floor(poi.length / 4)
+    const dots = new THREE.InstancedMesh(dotSphere(), new THREE.MeshStandardMaterial({ color: 0x8a8f98, roughness: 0.5 }), n)
+    dots.frustumCulled = false
+    dots.raycast = () => {}
+    const r = this.markRadius(0.008)
+    const m = new THREE.Matrix4()
+    for (let i = 0; i < n; i++) {
+      m.makeScale(r, r, r).setPosition(poi[4 * i], poi[4 * i + 1], this.flat ? 0.0005 : poi[4 * i + 2])
+      dots.setMatrixAt(i, m)
+    }
+    dots.instanceMatrix.needsUpdate = true
+    this.scene.add(dots)
+    this.poiDots = dots
+    this.dirty = true
+  }
+
+  /** 札を、押した点の右上に置く（視点が動いたら付いていく） */
+  private placePickLabel() {
+    const l = this.pickLabel
+    if (!l || l.hidden || !this.pickAt) return
+    const q = this.toScreen(this.pickAt)
+    if (!q || q.x < 0 || q.y < 0 || q.x > this.viewW || q.y > this.viewH) {
+      l.style.visibility = 'hidden'
+      return
+    }
+    l.style.visibility = 'visible'
+    const w = l.offsetWidth
+    const h = l.offsetHeight
+    // 右上に置けなければ、左・下にずらす
+    const x = q.x + 12 + w > this.viewW ? q.x - 12 - w : q.x + 12
+    const y = q.y - 12 - h < 0 ? q.y + 12 : q.y - 12 - h
+    l.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`
   }
 
   /** 点 pivot を通る、カメラの右向きの軸の周りに、カメラと注視点を angle（ラジアン）回す（見下ろす角度を変える）。
@@ -714,6 +976,17 @@ export class Viewer {
 
   /** 格子線の太さの倍率（全部の曲面の材質で共有する。今の画素密度 ÷ ふつうのときの画素密度） */
   private pixelScale = { value: 1 }
+  /** 表示範囲の箱（曲面の材質で共有する。箱の壁の格子線を、面の濃さと一緒に薄くするのに使う。2D では z の壁は無い） */
+  private boxUniforms = { lo: { value: new THREE.Vector3(-1e30, -1e30, -1e30) }, hi: { value: new THREE.Vector3(1e30, 1e30, 1e30) } }
+
+  /** 曲面の材質の箱を、今の表示範囲にする */
+  private updateBoxUniforms() {
+    const d = this.domain
+    if (!d) return
+    const far = 1e30
+    this.boxUniforms.lo.value.set(d.xmin, d.ymin, this.flat ? -far : d.zmin)
+    this.boxUniforms.hi.value.set(d.xmax, d.ymax, this.flat ? far : d.zmax)
+  }
 
   /**
    * 画素密度を下げている間も、線が太って見えないようにする。
@@ -870,6 +1143,7 @@ export class Viewer {
     this.notMotion = false
     if (this.frameLog) this.renderMeasured(renderedBefore ? dt : null)
     else this.renderer.render(this.scene, this.camera)
+    this.placePickLabel()
   }
   private renderedLastTick = false
   /** 前に描いてから今までに、形の差し替え・視点の跳びがあったか（そのコマの時間は quality に数えない） */
@@ -1019,6 +1293,36 @@ export class Viewer {
   }
 
   /**
+   * グラフの一覧に出す小さな絵（JPEG の data URL）。今の視点で 1 コマをすぐ描いて、横 w の大きさに縮める（縦横比は画面のまま）。
+   * 描けなければ null
+   */
+  thumbnail(w = 192): string | null {
+    try {
+      this.controls.update()
+      this.updateClipRange()
+      this.updateLabelSizes()
+      this.updateStencilSides()
+      this.renderer.render(this.scene, this.camera)
+      const src = this.renderer.domElement
+      if (!src.width || !src.height) return null
+      // 縦長の画面（スマホ）でも一覧で見やすいよう、横 : 縦 = 4 : 3 に中央を切り抜く
+      const h = Math.round((w * 3) / 4)
+      const k = Math.min(src.width / w, src.height / h)
+      const sw = w * k
+      const sh = h * k
+      const c = document.createElement('canvas')
+      c.width = w
+      c.height = h
+      const ctx = c.getContext('2d')
+      if (!ctx) return null
+      ctx.drawImage(src, (src.width - sw) / 2, (src.height - sh) / 2, sw, sh, 0, 0, w, h)
+      return c.toDataURL('image/jpeg', 0.7)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 文字の画面上の大きさを、CSS ピクセルで一定にする。
    * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
    */
@@ -1110,6 +1414,7 @@ export class Viewer {
       )
     }
     this.applyClipping()
+    this.updateBoxUniforms()
     for (const p of this.plots.values()) {
       if (p.kind === 'surface') p.grid.uHeatRange.value.set(d.zmin, d.zmax)
       else this.placeDots(p.dots)
@@ -1126,6 +1431,7 @@ export class Viewer {
   setFlat(on: boolean) {
     if (this.flat === on) return
     this.flat = on
+    this.updateBoxUniforms()
     this.controls.enableRotate = !on
     this.applyButtons()
     this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
@@ -1315,6 +1621,7 @@ export class Viewer {
       mesh = this.morphed(id, m)
     } else this.morphSources.delete(id)
     this.applyPlot(id, mesh, style)
+    this.notePickData(id, mesh)
   }
 
   /**
@@ -1327,7 +1634,11 @@ export class Viewer {
     this.morphValues.set(id, v)
     const m = this.morphSources.get(id)
     const style = this.styles.get(id)
-    if (m && style) this.applyPlot(id, this.morphed(id, m), style)
+    if (m && style) {
+      const mm = this.morphed(id, m)
+      this.applyPlot(id, mm, style)
+      this.notePickData(id, mm)
+    }
   }
 
   /**
@@ -1878,7 +2189,7 @@ export class Viewer {
       p.cap.geometry = geo
     } else {
       // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
-      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes))
+      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes, true))
       p.cap.frustumCulled = false // 切り口は表示範囲の中（外接球を求めない。下の曲面と同じ）
       p.group.add(p.cap)
       this.setStyle(id, style)
@@ -2027,7 +2338,7 @@ export class Viewer {
 
   private setSurface(id: number, mesh: MeshData) {
     // 表と裏は1つの材質で描く（裏面はシェーダーで暗くする）
-    const grid = createGridUniforms(this.pixelScale)
+    const grid = createGridUniforms(this.pixelScale, this.boxUniforms)
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
     const surface = new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes))
@@ -2446,7 +2757,8 @@ export class Viewer {
         }
       }
       const q = p.stencil.quad.material as THREE.MeshStandardMaterial
-      q.opacity = Math.max(opacity, 0.15)
+      // 面の濃さ 0 なら、ふたも見えなくする（透明でも描いて、ステンシルは 0 に戻す）
+      q.opacity = opacity
       q.depthWrite = !transparent
     }
     for (const mesh of p.cap ? [mesh0, p.cap] : [mesh0]) {
@@ -2483,6 +2795,9 @@ export class Viewer {
 
   removePlot(id: number) {
     this.setHoles(id, { holes: undefined } as MeshData)
+    this.setPoi(id, undefined)
+    this.curvePts.delete(id)
+    if (this.pickFor === id) this.showPick(null)
     this.removeGpu2d(id)
     this.removeGpu3d(id)
     this.gpuRejected.delete(id)

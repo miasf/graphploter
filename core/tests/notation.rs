@@ -804,8 +804,9 @@ fn matrices_draw_the_same_mesh() {
 fn matrix_errors_and_sizes() {
     assert!(error_of("z = @det(⟦1,2,3;4,5,6⟧ ⟦1,2;3,4⟧) + x", "").contains("2×3 の行列と 2×2 の行列は掛けられません"));
     assert!(error_of("z = @det(⟦1,2,3;4,5,6⟧) + x", "").contains("正方行列"));
-    // 正方でない行列だけの行は描けない（2×2・3×3 は、列ベクトルを描く。M7）
-    assert!(error_of("⟦1,2,3;4,5,6⟧", "").contains("行列だけの行"));
+    // 行が 2・3 の行列だけの行は、正方でなくても列ベクトルを描く。行が 4 以上なら描けない
+    assert_eq!(error_of("⟦1,2,3;4,5,6⟧", ""), "");
+    assert!(error_of("⟦1,2;3,4;5,6;7,8⟧", "").contains("行列だけの行"));
     assert_eq!(error_of("⟦1,2;3,4⟧", ""), "");
     assert!(error_of("z = @tr(⟦1,2;2,4⟧^(-1)) + x", "").contains("逆行列はありません"));
     assert!(error_of("z = A_(3,1) + x", "A = ⟦1,2;3,4⟧").contains("成分はありません"));
@@ -854,7 +855,7 @@ fn linear_systems_are_reduced() {
 fn kernel_and_image() {
     // ker ⟦1, 1, 1⟧ は平面 x + y + z = 0（表示範囲の箱の中だけ）
     let m = run("@ker(⟦1, 1, 1⟧)", "", &[]).unwrap();
-    assert!(m.kind().contains("ker A（2 次元。平面）"), "{}", m.kind());
+    assert!(m.kind().contains("x + y + z = 0（2 次元。平面）"), "{}", m.kind());
     let p = points("@ker(⟦1, 1, 1⟧)", "");
     assert!(p.len() > 100);
     assert!(p.iter().all(|v| (v[0] + v[1] + v[2]).abs() < 1e-5 && v.iter().all(|c| c.abs() <= 3.0 + 1e-5)));
@@ -1228,4 +1229,135 @@ fn dim_forms() {
     }
     assert_eq!(value_with("@dim(Im(A))", defs), 1.0);
     assert!(error_of("@dim(A)", defs).contains("dim ker A"), "{}", error_of("@dim(A)", defs));
+}
+
+// ---- 集合・積分の範囲の書き方の自由度: 媒介変数の名前・等式で書いた曲線と曲面・積分の d の文字 ----
+
+#[test]
+fn parametric_sets_with_any_parameter_name() {
+    // 点の式の媒介変数は t・u・v でなくてもよい（座標と同じ名前 x でも）
+    same("⦃(x,x^(2))∣0<=x<=1⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
+    same("⦃(s, sin(s))∣0<=s<=6⦄", "⦃(t, sin(t))∣0<=t<=6⦄", "");
+    same("⦃(x,y,x^(2)+y^(2))∣-1<=x<=1,-1<=y<=1⦄", "⦃(u,v,u^(2)+v^(2))∣-1<=u<=1,-1<=v<=1⦄", "");
+    // 範囲の無い t・u・v を、付け替えた名前と混ぜない
+    assert!(error_of("⦃(s, t, s)∣0<=s<=1⦄", "").contains("t の範囲"));
+}
+
+#[test]
+fn regions_written_with_equations() {
+    let sqrt3 = 3f64.sqrt();
+    // 曲線 y = x²（弧長）・x = y = z（直線）
+    let arc = (5f64.sqrt() / 2.0) + (2.0 + 5f64.sqrt()).ln() / 4.0;
+    close("@intset((x,y),y=x^2,0<=x<=1; {d_s})(1)", arc, 1e-9);
+    close("@intset((x,y),y=x^2,0<=x<=1)(1)", arc, 1e-9);
+    close("@intset((x,y,z),x=y=z,0<=x<=1; {d_s})(x+y+z)", 1.5 * sqrt3, 1e-12);
+    close("@intset((x,y), x = 1, 0<=y<=2; {d_s})(y)", 2.0, 1e-12);
+    // 曲面 z = x² + y²（円板の上）: 面積 π(5√5 − 1)/6
+    close("@intset((x,y,z),z=x^2+y^2,x^2+y^2<=1; {d_S})(1)", std::f64::consts::PI * (5.0 * 5f64.sqrt() - 1.0) / 6.0, 1e-5);
+    // 1 次式にならない等式は、媒介変数で書くように言う
+    assert!(graph_core::equation::eval_constant("@intset((x,y),x^2+y^2=1; {d_s})(1)").unwrap_err().contains("媒介変数"));
+}
+
+#[test]
+fn differentials_must_match_the_region() {
+    let err = |s: &str| graph_core::equation::eval_constant(s).unwrap_err();
+    // ds の範囲が曲面・平面の領域、dA の範囲が曲線、F · dS の範囲が曲線
+    assert!(err("@intset((u, v, u v),0<=u<=1, 0<=v<=1; {d_s})(1)").contains("曲面なら dS"));
+    assert!(err("@intset((x,y),x^2+y^2<=1; {d_s})(1)").contains("平面の領域なら dA"));
+    assert!(err("@intset((x,y,z),z=x^2+y^2,x^2+y^2<=1; {d_s})(1)").contains("ds は曲線"));
+    assert!(err("@intset((x,y),y=x^2,0<=x<=1; {d_A})(1)").contains("曲線なら ds"));
+    assert!(err("@intset((cos t, sin t),0<=t<=2pi; {vec},{d_S})((-y,x))").contains("F · dr"));
+    assert!(err("@intset((x,y),x^2+y^2<=1; {d_x})(1)").contains("dx dy"));
+    // 合っていれば今までどおり
+    close("@intset((x,y),x^2+y^2<=1; {d_A})(1)", std::f64::consts::PI, 1e-6);
+    close("@intset((x,y),x^2+y^2<=1; {d_x},{d_y})(1)", std::f64::consts::PI, 1e-6);
+    close("@intset((u, v, u v),0<=u<=1, 0<=v<=1; {d_S})(1)", value("@intset((u, v, u v),0<=u<=1, 0<=v<=1)(1)"), 1e-12);
+    close("@intset((cos t, sin t),0<=t<=2pi; {vec},{d_r})((-y,x))", 2.0 * std::f64::consts::PI, 1e-9);
+    close("@intset((r cos(theta), r sin(theta)),0<=r<=1,0<=theta<=2pi; {d_A})(1)", std::f64::consts::PI, 1e-9);
+}
+
+#[test]
+fn coordinate_and_parameter_differentials() {
+    let pi = std::f64::consts::PI;
+    // 曲線の上の P dx + Q dy（向きの付いた線積分）: ∮ −y dx + x dy = 2 × 面積
+    close("@intset((cos t, sin t),0<=t<=2pi; {d_x})(-y) + @intset((cos t, sin t),0<=t<=2pi; {d_y})(x)", 2.0 * pi, 1e-9);
+    // 媒介変数そのものの d は何も掛けない（極座標の r dr dθ）
+    close("@intset((r cos theta, r sin theta),0<=r<=1,0<=theta<=2pi; {d_r},{d_theta})(r)", pi, 1e-9);
+    close("@intset((cos t, sin t),0<=t<=2pi; {d_t})(1)", 2.0 * pi, 1e-12);
+    // 曲面の上の dx dy は法線の z 成分（平面 x + y + z = 1 の三角形を xy 平面に映した面積 1/2）
+    close("@intset((u,v,1-u-v),0<=u<=1,0<=v<=1-u; {d_x},{d_y})(1)", 0.5, 1e-12);
+    close("@intset((u,v,1-u-v),0<=u<=1,0<=v<=1-u; {d_y},{d_x})(1)", -0.5, 1e-12);
+}
+
+#[test]
+fn parametric_set_conditions() {
+    // t ∈ [0, 1] は 0 ≤ t ≤ 1、≠ は描き方が変わらない
+    same("⦃(t,t^(2))∣t∈[0,1]⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
+    same("⦃(cos(t),sin(t))∣0<=t<=2pi,t≠pi⦄", "⦃(cos(t),sin(t))∣0<=t<=2pi⦄", "");
+    // 端がほかの媒介変数の式（扇形の三角形 0 ≤ t ≤ s）も描ける
+    let (p, _) = mesh("⦃(s cos(t),s sin(t))∣0<=s<=1,0<=t<=s⦄", "", &[]);
+    assert!(!p.is_empty());
+    // 媒介変数で書いた集合どうしの ∪（折れ線の経路）は、それぞれ描いて重ねる
+    let (p1, _) = mesh("⦃(t,t^(2))∣-1<=t<=1⦄", "", &[]);
+    let (p2, _) = mesh("⦃(t,t^(2))∣-1<=t<=1⦄ ∪ ⦃(t,1)∣-1<=t<=1⦄", "", &[]);
+    assert!(p2.len() > p1.len());
+}
+
+#[test]
+fn integrals_over_unions_and_set_operations() {
+    let pi = std::f64::consts::PI;
+    // 点が同じ変数の組の集合どうしの ∩・∖・∪ は、条件の (x, y) ∈ A ∩ B
+    close("@intset((x,y),(x,y)∈⦃(x,y)∣x^(2)+y^(2)<=1⦄ ∩ ⦃(x,y)∣y>=0⦄; {d_A})(1)", pi / 2.0, 1e-6);
+    close("@intset((x,y),(x,y)∈⦃(x,y)∣x^(2)+y^(2)<=1⦄ ∖ ⦃(x,y)∣y>=0⦄; {d_A})(1)", pi / 2.0, 1e-6);
+    // 平面全体（端が ∞）
+    close("@intset((x,y),-∞<=x<=∞,-∞<=y<=∞; {d_A})(e^(-x^(2)-y^(2)))", pi, 1e-9);
+}
+
+#[test]
+fn kernel_and_image_formulas() {
+    let kind = |defs: &str, src: &str| run(src, defs, &[]).unwrap().kind().to_string();
+    // 張るベクトル・媒介変数表示・方程式を、小さい整数で出す。名前は書いた行列の名前
+    assert_eq!(kind("A= ⟦1,2;2,4⟧", "@ker A"), "ker A = span{(2, −1)}、(x, y) = t(2, −1)、x + 2y = 0（1 次元。直線）");
+    assert_eq!(kind("A= ⟦1,2;2,4⟧", "Im A"), "Im A = span{(1, 2)}、(x, y) = t(1, 2)、2x − y = 0（1 次元。直線）");
+    assert_eq!(kind("B= ⟦1,2,3;0,1,1⟧", "@ker B"), "ker B = span{(1, 1, −1)}、(x, y, z) = t(1, 1, −1)、x + z = 0, y + z = 0（1 次元。直線）");
+    assert_eq!(kind("B= ⟦1,2,3;0,1,1⟧", "Im B"), "Im B = ℝ²（2 次元。平面）");
+    assert_eq!(kind("D= ⟦1,1,1;1,1,1;1,1,1⟧", "@ker D"), "ker D = span{(1, −1, 0), (1, 0, −1)}、(x, y, z) = s(1, −1, 0) + t(1, 0, −1)、x + y + z = 0（2 次元。平面）");
+    assert_eq!(kind("E= ⟦1,0;0,1⟧", "@ker E"), "ker E = {0}（0 次元。原点）");
+    // 描けない次元でも、式は誤りの文に出す
+    assert!(error_of("@ker F", "F= ⟦1,2,3,4;0,1,1,1⟧").starts_with("ker F = span{(1, 1, −1, 0), (2, 1, 0, −1)}"));
+}
+
+#[test]
+fn non_square_matrix_definitions_draw_columns() {
+    // 行が 2・3 なら、正方でなくても列ベクトルを描く
+    let m = run("B= ⟦1,2,3;0,1,1⟧", "B= ⟦1,2,3;0,1,1⟧", &[]).unwrap();
+    assert!(!m.positions().is_empty() || m.kind().contains("列ベクトル"));
+    let m = run("H= ⟦1,2;0,1;1,1⟧", "H= ⟦1,2;0,1;1,1⟧", &[]).unwrap();
+    assert!(!m.positions().is_empty() || m.kind().contains("列ベクトル"));
+}
+
+#[test]
+fn im_is_image_only_for_real_matrices() {
+    // 行全体が Im(実数の行列（列が 2 つ以上）) なら像。ベクトル・複素数の成分・式の中は虚部（成分ごと）
+    assert!(run("Im A", "A= ⟦1,2;2,4⟧", &[]).unwrap().kind().starts_with("Im A = span{(1, 2)}"));
+    same("Im {vec_b}", "(1, 0, 3)", "{vec_b}=(1+i,2,3i)");
+    same("z = Im((x + i y)^(2))", "z = 2 x y", "");
+}
+
+#[test]
+fn eigenvalues_and_eigenspaces() {
+    let kind = |defs: &str, src: &str| run(src, defs, &[]).unwrap().kind().to_string();
+    // 固有値ごとの固有空間（重複度・対角化できないこと・実数でない固有値も）
+    assert_eq!(
+        kind("A= ⟦2,1;1,2⟧", "@eig A"),
+        "A の固有値 ／ λ = 1: E(1) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0 ／ λ = 3: E(3) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0"
+    );
+    assert!(kind("B= ⟦1,1;0,1⟧", "@eig B").contains("λ = 1（2 重）: E(1) = span{(1, 0)}") && kind("B= ⟦1,1;0,1⟧", "@eig B").contains("対角化できない"));
+    assert!(kind("C= ⟦0,-1;1,0⟧", "@eig C").contains("λ = ±i（実数でないので固有空間は描かない）"));
+    assert!(kind("D= ⟦2,0,0;0,2,0;0,0,3⟧", "@eig D").contains("λ = 2（2 重）: E(2) = span{(1, 0, 0), (0, 1, 0)}"));
+    assert!(error_of("@eig J", "J= ⟦1,2,3;4,5,6⟧").contains("正方行列"));
+    // 決まった固有値の固有空間 ker(A − λI)。単位行列は I か E
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(A-3I)"), "ker (A − 3I) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0（1 次元。直線）");
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(1E - A)"), "ker (1E − A) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）");
+    assert!(error_of("@ker(A - 3)", "A= ⟦2,1;1,2⟧").contains("単位行列は I か E"));
 }

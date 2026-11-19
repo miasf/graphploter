@@ -16,7 +16,8 @@
 //! - ベクトル（組）の計算: 和・差・スカラー倍・内積（`*`）・外積（`×`）・大きさ（`abs`）。勾配 `@grad f`・発散 `@div F`・
 //!   回転 `@rot F`（`@curl`）・ラプラシアン `@lap f`（座標は x, y, z）
 //! - 線積分・面積分・体積分: 点を媒介変数の式で書いた `@intset((cos(t), sin(t), 0), 0 ≤ t ≤ 2pi)(f)`（弧長 ds・面積 dS・体積 dV）と、
-//!   `@intset(…; {vec})(F)`（F · dr・F · dS）
+//!   `@intset(…; {vec})(F)`（F · dr・F · dS）。`; {d_s}`・`; {d_x}, {d_y}` は積分の記号の d の後の文字（範囲の次元と合うかを確かめ、
+//!   曲線の上の dx は x′(t) を掛ける）。変数の組の範囲の等式 `@intset((x, y, z), x = y = z, 0 ≤ x ≤ 1)(f)` は、解いて曲線・曲面にする
 //! - 領域の上の重積分 `@intset((x, y), 0 ≤ x ≤ 1, x^2 ≤ y ≤ x)(式)`（条件から累次積分の順番と範囲を見つける。
 //!   範囲の形にならない条件は、条件の外を 0 にした近似。変数ごとの範囲が無くても、1 次式の範囲 `−1 ≤ x + y ≤ 1, 0 ≤ x − y ≤ 1` なら
 //!   変数変換（ヤコビアン 1/|det|）で累次積分にする）
@@ -250,6 +251,15 @@ pub fn view_x() -> (f64, f64) {
     VIEW_X.with(|x| x.get())
 }
 
+/// 表示中の 3 つの座標の表示範囲（横・奥・縦の順に下端・上端。停留点を探す範囲に使う。`lib.rs` が入れる）
+pub fn set_view_box(b: [f64; 6]) {
+    VIEW_BOX.with(|x| x.set(b));
+}
+
+pub fn view_box() -> [f64; 6] {
+    VIEW_BOX.with(|x| x.get())
+}
+
 /// 数字の添字の付いた名前 `a1` が、定義した数列の項の名前か
 pub fn is_term_name(name: &str) -> bool {
     split_subscript(name).is_some_and(|(h, _)| current().seq(h).is_some()) && crate::equation::coord_index(name).is_none()
@@ -316,6 +326,7 @@ thread_local! {
     static KIND: RefCell<Option<String>> = const { RefCell::new(None) };
     /// 横の座標の表示範囲
     static VIEW_X: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((-10.0, 10.0)) };
+    static VIEW_BOX: std::cell::Cell<[f64; 6]> = const { std::cell::Cell::new([-10.0, 10.0, -10.0, 10.0, -10.0, 10.0]) };
     /// 常微分方程式の初期値の欄（状態の成分ごとの式。計画 M9。`lib.rs` が入れる）
     static ODE_INIT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 常微分方程式の状態の名前（`x`・`y'` など。初期値の欄の見出しに使う）
@@ -898,6 +909,8 @@ impl Expander<'_> {
                 };
                 Val::S(body.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone())))
             }
+            // テイラー多項式 `@taylor(f, x, a, n)`・`@taylor(f, (x, y), (a, b), n)`
+            Expr::Op { op, args } if op == "taylor" => Val::S(self.taylor(args)?),
             Expr::Op { op, args } if op == "compose" => {
                 let (f, g) = (self.val(&args[0])?, self.val(&args[1])?);
                 match (f, g) {
@@ -915,6 +928,9 @@ impl Expander<'_> {
                 Val::S(self.matrix_op(op, args)?)
             }
             Expr::Op { op, args } if op == "dim" || op == "rank" => Val::S(Expr::Num(self.dimension(op, args)? as f64)),
+            Expr::Op { op, .. } if op == "eig" => {
+                return Err("@eig(A)（固有値・固有空間）は、1 行にそれだけを書いてください（決まった固有値 λ の固有空間は @ker(A − λI)）".into())
+            }
             Expr::Op { op, .. } if matches!(op.as_str(), "ker" | "im") => {
                 return Err(format!("@{op}(A) は、1 行にそれだけを書いてください（式の中では @dim(@{op}(A)) の形で使えます）"))
             }
@@ -1810,14 +1826,25 @@ impl Expander<'_> {
         })
     }
 
-    /// 点を媒介変数の式で書いた集合の上の積分（線積分・面積分・体積分）。被積分関数の x, y, z に点の成分を入れ、
+    /// 点を媒介変数の式で書いた集合の上の積分（線積分・面積分・体積分）。被積分関数の座標 `coords`（ふつうは x, y, z）に点の成分を入れ、
     /// 弧長 $|\mathbf r'|$・面積要素 $|\mathbf r_u \times \mathbf r_v|$・体積要素 $|\det J|$（`vec` なら $\mathbf F \cdot \mathbf r'$・
     /// $\mathbf F \cdot (\mathbf r_u \times \mathbf r_v)$）を掛けて、媒介変数の領域の上の積分にする。
-    /// 媒介変数は、条件で範囲を書いた名前のうち点の式に出てくるもの（出てくる順。面の向き $\mathbf r_u \times \mathbf r_v$ もこの順）
-    fn parametric_integral(&mut self, point: &Expr, chains: &[Expr], vec_mode: bool, body: &Expr) -> Result<Expr, String> {
-        use crate::diff::{add, diff, mul, sub};
-        const XYZ: [&str; 3] = ["x", "y", "z"];
-        let comps: Vec<Expr> = match self.scalar(point)? {
+    /// 媒介変数 `params` を渡さなければ、条件に出てくる名前のうち点の式に出てくるもの（出てくる順。面の向き $\mathbf r_u \times \mathbf r_v$ もこの順）。
+    /// 条件の等式（`y = x^2`・`x = y = z`）は、媒介変数のどれかについて解いて点の式に入れる（[`Self::eliminate`]）。
+    /// `diffs` は積分の記号の d の後の文字（ds・dS・dV・dx …）。範囲の次元と合わなければ誤り（[`Self::measure_of`]）
+    #[allow(clippy::too_many_arguments)]
+    fn parametric_integral(
+        &mut self,
+        point: &Expr,
+        chains: &[Expr],
+        vec_mode: bool,
+        diffs: &[String],
+        params: Option<Vec<String>>,
+        coords: &[String],
+        body: &Expr,
+    ) -> Result<Expr, String> {
+        use crate::diff::{add, diff, mul, neg, sub};
+        let mut comps: Vec<Expr> = match self.scalar(point)? {
             Expr::Tuple(items) => items,
             e => vec![e],
         };
@@ -1825,75 +1852,267 @@ impl Expander<'_> {
         if dim > 3 {
             return Err("曲線・曲面の点は 3 成分までにしてください".into());
         }
-        // 条件で範囲を書いた名前
-        let mut bounded: Vec<String> = Vec::new();
-        for chain in chains {
-            if let Expr::Op { args: exprs, .. } = chain {
-                for e in exprs {
-                    if let Expr::Var(v) = e {
-                        bounded.push(v.clone());
+        let mut params = match params {
+            Some(p) => p,
+            None => {
+                // 条件に出てくる名前（パラメータ・定義の名前は除く）のうち、点の式に出てくるもの
+                let mut in_cond: Vec<String> = Vec::new();
+                for chain in chains {
+                    match chain {
+                        Expr::Op { args, .. } => args.iter().for_each(|e| e.collect_vars(&mut in_cond)),
+                        Expr::Cond(f) => f.collect_vars(&mut in_cond),
+                        e => e.collect_vars(&mut in_cond),
                     }
                 }
-            }
-        }
-        let mut params: Vec<String> = Vec::new();
-        for c in &comps {
-            let mut vs = Vec::new();
-            c.collect_vars(&mut vs);
-            for v in vs {
-                if bounded.contains(&v) && !params.contains(&v) {
-                    params.push(v);
+                let mut ps: Vec<String> = Vec::new();
+                for c in &comps {
+                    let mut vs = Vec::new();
+                    c.collect_vars(&mut vs);
+                    for v in vs {
+                        if in_cond.contains(&v) && !self.params.contains_key(&v) && !self.defs.map.contains_key(&v) && !ps.contains(&v) {
+                            ps.push(v);
+                        }
+                    }
                 }
+                ps
             }
+        };
+        // 等式の条件を解いて、点の式に入れる。残りの条件は媒介変数の範囲
+        let (eqs, mut chains) = split_equalities(chains);
+        if !eqs.is_empty() {
+            let (solved, rest) = self.eliminate(&params, &eqs)?;
+            let back = |v: &str| solved.iter().find(|(w, _)| w == v).map(|(_, e)| e.clone());
+            comps = comps.iter().map(|c| c.substitute(&back)).collect();
+            chains = chains.iter().map(|c| subst_chain(c, &back)).collect();
+            params = rest;
         }
         let k = params.len();
         if k == 0 {
-            return Err("曲線・曲面の媒介変数の範囲を、0 ≤ t ≤ 2π のように書いてください".into());
+            return Err(if eqs.is_empty() {
+                "曲線・曲面の媒介変数の範囲を、0 ≤ t ≤ 2π のように書いてください".into()
+            } else {
+                "等式で範囲が 1 点になります（積分は 0）。曲線なら、等式を 1 つ減らしてください".into()
+            });
         }
+        let measure = self.measure_of(k, dim, diffs, vec_mode, &params, coords)?;
         let jac: Vec<Vec<Expr>> = params.iter().map(|p| comps.iter().map(|c| diff(c, p)).collect::<Result<_, _>>()).collect::<Result<_, _>>()?;
-        // 被積分関数（関数の名前なら座標に当てはめる）の x, y, z に点の成分を入れる
+        // 被積分関数（関数の名前なら座標に当てはめる）の座標に点の成分を入れる
+        let coord_vars: Vec<Expr> = coords.iter().map(|c| Expr::Var(c.clone())).collect();
         let g = match self.val(body)? {
             Val::S(s) => s,
-            Val::Fn { arity, body } if arity <= 3 => {
-                apply_body(&body, &XYZ[..arity].iter().map(|c| Expr::Var((*c).into())).collect::<Vec<_>>())
-            }
+            Val::Fn { arity, body } if arity <= coords.len() => apply_body(&body, &coord_vars[..arity]),
             Val::Fn { .. } => return Err(fn_as_value_error(body)),
         };
-        let g = g.substitute(&|v: &str| XYZ[..dim].iter().position(|c| *c == v).map(|i| comps[i].clone()));
+        let g = g.substitute(&|v: &str| coords[..dim.min(coords.len())].iter().position(|c| c == v).map(|i| comps[i].clone()));
         let dot = |u: &[Expr], v: &[Expr]| u.iter().zip(v).fold(Expr::Num(0.0), |s, (a, b)| add(s, mul(a.clone(), b.clone())));
-        let integrand = if vec_mode {
+        if vec_mode {
             let Expr::Tuple(f) = &g else { return Err("F · dr・F · dS の F はベクトル場 (P, Q, R) にしてください".into()) };
             if f.len() != dim {
                 return Err(format!("ベクトル場の成分の数（{}）を、点の成分の数（{dim}）にそろえてください", f.len()));
             }
-            match k {
-                1 => dot(f, &jac[0]),
-                2 if dim == 3 => match cross(&jac[0], &jac[1])? {
-                    Expr::Tuple(n) => dot(f, &n),
-                    _ => unreachable!(),
-                },
-                _ => return Err("F · dr は曲線（媒介変数 1 つ）、F · dS は 3 次元の曲面（媒介変数 2 つ）で使えます".into()),
+        } else if matches!(g, Expr::Tuple(_)) {
+            return Err("ベクトル場を積分するなら F · dr・F · dS の形で書いてください".into());
+        }
+        let normal = || match cross(&jac[0], &jac[1]) {
+            Ok(Expr::Tuple(n)) => Ok(n),
+            Ok(_) => Err("内部エラー: 法線".to_string()),
+            Err(e) => Err(e),
+        };
+        let integrand = match measure {
+            Measure::Natural if vec_mode => {
+                let Expr::Tuple(f) = &g else { return Err("F · dr・F · dS の F はベクトル場 (P, Q, R) にしてください".into()) };
+                match k {
+                    1 => dot(f, &jac[0]),
+                    2 if dim == 3 => dot(f, &normal()?),
+                    _ => return Err("F · dr は曲線（媒介変数 1 つ）、F · dS は 3 次元の曲面（媒介変数 2 つ）で使えます".into()),
+                }
             }
-        } else {
-            if matches!(g, Expr::Tuple(_)) {
-                return Err("ベクトル場を積分するなら F · dr・F · dS の形で書いてください".into());
+            Measure::Natural => {
+                let m = match (k, dim) {
+                    (1, _) => norm(&jac[0]),
+                    (2, 3) => norm(&normal()?),
+                    (2, 2) => Expr::Call(crate::functions::Func::Abs, vec![sub(mul(jac[0][0].clone(), jac[1][1].clone()), mul(jac[0][1].clone(), jac[1][0].clone()))]),
+                    (3, 3) => Expr::Call(crate::functions::Func::Abs, vec![det3(&jac)]),
+                    _ => return Err(format!("媒介変数 {k} つで {dim} 成分の点の積分はできません（曲線は 1 つ、曲面は 2 つ、立体は 3 つ）")),
+                };
+                mul(g, m)
             }
-            let measure = match (k, dim) {
-                (1, _) => norm(&jac[0]),
-                (2, 3) => match cross(&jac[0], &jac[1])? {
-                    Expr::Tuple(n) => norm(&n),
-                    _ => unreachable!(),
-                },
-                (2, 2) => Expr::Call(crate::functions::Func::Abs, vec![sub(mul(jac[0][0].clone(), jac[1][1].clone()), mul(jac[0][1].clone(), jac[1][0].clone()))]),
-                (3, 3) => Expr::Call(crate::functions::Func::Abs, vec![det3(&jac)]),
-                _ => return Err(format!("媒介変数 {k} つで {dim} 成分の点の積分はできません（曲線は 1 つ、曲面は 2 つ、立体は 3 つ）")),
-            };
-            mul(g, measure)
+            Measure::Plain => g,
+            Measure::Coord(i) => mul(g, jac[0][i].clone()),
+            Measure::Form(i, sign) => {
+                let n = normal()?;
+                let c = n[i].clone();
+                mul(g, if sign { c } else { neg(c) })
+            }
         };
         let mut args = vec![Expr::Tuple(params.iter().map(|p| Expr::Var(p.clone())).collect())];
-        args.extend(chains.iter().cloned());
+        args.extend(chains);
         args.push(integrand);
         self.region_integral(&args)
+    }
+
+    /// 積分の記号の d の後の文字 `diffs` から、媒介変数 `params`（k 個）・点の成分 dim 個の範囲の上で掛けるもの（測度）を決める。
+    /// - 無し: 範囲の次元から（曲線は弧長、曲面は面積、立体は体積）
+    /// - ds: 曲線の弧長、dS・dA・dσ: 曲面・平面の領域の面積、dV: 立体の体積（範囲の次元と違えば誤り。ds の範囲が曲面など）
+    /// - 媒介変数そのもの（dt・du dv）: 何も掛けない
+    /// - 座標（`coords`）: 曲線の上の dx は $x'(t)$、曲面の上の dx dy は法線の z 成分（向きの付いた面積）。
+    ///   座標の数が範囲の次元と同じ（平面の領域の dx dy）なら、面積・体積
+    /// - `vec`（F · dr・F · dS）: dr は曲線、dS は曲面
+    fn measure_of(&self, k: usize, dim: usize, diffs: &[String], vec_mode: bool, params: &[String], coords: &[String]) -> Result<Measure, String> {
+        let shape = shape_name(k, dim);
+        let need = |want: usize, d: &str| -> Result<Measure, String> {
+            if want == k {
+                return Ok(Measure::Natural);
+            }
+            let hint = match k {
+                1 => "曲線なら ds ",
+                2 if dim == 2 => "平面の領域なら dA（dx dy）",
+                2 => "曲面なら dS ",
+                _ => "立体なら dV ",
+            };
+            Err(format!("d{d} は{}の上の積分に使う記号ですが、この範囲は{shape}です（{hint}と書いてください）", shape_name(want, dim.max(want))))
+        };
+        if vec_mode {
+            return match diffs {
+                [] => Ok(Measure::Natural),
+                [d] if d == "r" || d == "s" => need(1, d).map_err(|_| format!("F · dr は曲線の上の積分ですが、この範囲は{shape}です（曲面なら F · dS と書いてください）")),
+                [d] if d == "S" || d == "A" || d == "σ" || d == "sigma" => {
+                    if k == 2 && dim == 3 {
+                        Ok(Measure::Natural)
+                    } else {
+                        Err(format!("F · dS は 3 次元の曲面の上の積分ですが、この範囲は{shape}です（曲線なら F · dr と書いてください）"))
+                    }
+                }
+                _ => Err(format!("ベクトル場の積分は F · dr か F · dS の形で書いてください（d{} は使えません）", diffs.join(" d"))),
+            };
+        }
+        if diffs.is_empty() {
+            return Ok(Measure::Natural);
+        }
+        // 弧長 ds・面積 dS・dA・dσ・体積 dV（ds はいつも弧長。ほかは、範囲の変数の名前なら、その変数の d）
+        if let [d] = diffs {
+            let own = params.iter().any(|p| p == d);
+            match d.as_str() {
+                "s" => return need(1, d),
+                "S" | "A" | "σ" | "sigma" if !own => return need(2, if d == "sigma" { "σ" } else { d }),
+                "V" if !own => return need(3, d),
+                _ => {}
+            }
+        }
+        // 媒介変数そのもの（並びは問わない）
+        if diffs.len() == k && diffs.iter().all(|d| params.contains(d)) && (1..k).all(|i| !diffs[..i].contains(&diffs[i])) {
+            // 平面の領域 {(x, y) | …} の dx dy もここ（点が変数の組なら、何も掛けないのが面積）
+            return Ok(Measure::Plain);
+        }
+        // 座標の d（dx・dy・dz）
+        let idx: Option<Vec<usize>> = diffs.iter().map(|d| coords[..dim.min(coords.len())].iter().position(|c| c == d)).collect();
+        if let Some(idx) = idx {
+            if (1..idx.len()).any(|i| idx[..i].contains(&idx[i])) {
+                return Err(format!("積分の d{} が重なっています", diffs.join(" d")));
+            }
+            match (idx.len(), k, dim) {
+                // 範囲と同じ次元の座標を全部並べた dx dy・dx dy dz は、面積・体積
+                (n, _, _) if n == k && n == dim => return Ok(Measure::Natural),
+                (1, 1, _) => return Ok(Measure::Coord(idx[0])),
+                (2, 2, 3) => {
+                    // dy dz → 法線の x 成分、dz dx → y 成分、dx dy → z 成分（逆の順なら向きが逆）
+                    let missing = 3 - idx[0] - idx[1];
+                    let sign = (idx[0] + 1) % 3 == idx[1];
+                    return Ok(Measure::Form(missing, sign));
+                }
+                _ => {}
+            }
+            let ds = diffs.iter().map(|d| format!("d{d}")).collect::<Vec<_>>().join(" ");
+            let want = match k {
+                1 => "曲線なら ds か dx 1 つ".to_string(),
+                2 if dim == 2 => "平面の領域なら dA か dx dy".to_string(),
+                2 => "曲面なら dS か dx dy（向きの付いた面積）".to_string(),
+                _ => "立体なら dV か dx dy dz".to_string(),
+            };
+            return Err(format!("{ds} は、この範囲の積分に合いません（範囲は{shape}。{want} と書いてください）"));
+        }
+        let ds = diffs.iter().map(|d| format!("d{d}")).collect::<Vec<_>>().join(" ");
+        Err(format!(
+            "積分の {ds} の文字が、範囲の変数（{}）にも、ds・dS・dA・dV にもなっていません",
+            params.iter().chain(coords[..dim.min(coords.len())].iter()).cloned().collect::<Vec<_>>().join(", ")
+        ))
+    }
+
+    /// 等式の条件 `eqs`（左, 右）を、変数 `vars` のどれかについて解く（その変数の 1 次式になっている等式だけ）。
+    /// 解いた変数と式（残りの変数だけの式）の組と、解かずに残った変数（媒介変数）を返す。
+    /// 後ろの変数から解く（x = y = z なら y = x, z = x で、x が媒介変数）。係数が数の変数を先に選ぶ（0 で割らない）
+    fn eliminate(&mut self, vars: &[String], eqs: &[(Expr, Expr)]) -> Result<Solved, String> {
+        use crate::diff::{diff, div, neg, sub};
+        let mut solved: Vec<(String, Expr)> = Vec::new();
+        let mut pending: Vec<Expr> = Vec::new();
+        for (l, r) in eqs {
+            pending.push(sub(self.scalar(l)?, self.scalar(r)?));
+        }
+        while !pending.is_empty() {
+            let mut progress = false;
+            let mut k = 0;
+            while k < pending.len() {
+                let back = |v: &str| solved.iter().find(|(w, _)| w == v).map(|(_, e)| e.clone());
+                let g = pending[k].substitute(&back);
+                let free: Vec<&String> = vars.iter().filter(|v| g.uses_var(v) && !solved.iter().any(|(w, _)| w == *v)).collect();
+                if free.is_empty() {
+                    // 変数の無い等式（1 = 1）は落とす。成り立たない等式（0 = 1）なら範囲が空
+                    if self.numeric(&g).is_some_and(|c| c.abs() > 1e-12) {
+                        return Err("等式の条件が成り立たないので、範囲が空です".into());
+                    }
+                    pending.remove(k);
+                    progress = true;
+                    continue;
+                }
+                // 1 次式になっている変数（係数が数のものを先に）
+                let mut best: Option<(bool, &String, Expr)> = None;
+                for v in free.iter().rev() {
+                    let Ok(a) = diff(&g, v) else { continue };
+                    if a.uses_var(v) {
+                        continue;
+                    }
+                    let constant = match self.numeric(&a) {
+                        Some(c) if c.abs() <= 1e-12 => continue,
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if best.as_ref().is_none_or(|b| constant && !b.0) {
+                        best = Some((constant, v, a));
+                    }
+                }
+                let Some((_, v, a)) = best else {
+                    k += 1;
+                    continue;
+                };
+                let v = v.clone();
+                let zero = |w: &str| (w == v).then_some(Expr::Num(0.0));
+                let value = neg(div(g.substitute(&zero), a));
+                let only = |w: &str| (w == v).then(|| value.clone());
+                for (_, e) in &mut solved {
+                    *e = e.substitute(&only);
+                }
+                solved.push((v, value));
+                pending.remove(k);
+                progress = true;
+            }
+            if !progress {
+                return Err(
+                    "範囲の等式を、どの変数についても解けません（1 次式になる変数がありません）。\
+                     曲線・曲面は {(cos t, sin t) | 0 ≤ t ≤ 2π} のように、点を媒介変数の式で書いてください"
+                        .into(),
+                );
+            }
+        }
+        let rest = vars.iter().filter(|v| !solved.iter().any(|(w, _)| w == *v)).cloned().collect();
+        Ok((solved, rest))
+    }
+
+    /// 変数を含まない式の値（パラメータは今の値）。変数があれば None。誤りを記録しない
+    fn numeric(&self, e: &Expr) -> Option<f64> {
+        let p = crate::eval::Program::compile_with(e, &[], self.params).ok()?;
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        p.eval_batch(&[], &mut out);
+        Some(crate::eval::as_real(out[0])).filter(|v| v.is_finite())
     }
 
     /// 1 次式の範囲で書いた領域（平行四辺形・平行六面体。`−1 ≤ x + y ≤ 1, 0 ≤ x − y ≤ 1`）の上の積分を、変数変換で累次積分にする。
@@ -1997,13 +2216,19 @@ impl Expander<'_> {
     fn region_integral(&mut self, args: &[Expr]) -> Result<Expr, String> {
         use crate::functions::Func;
         let (Some(vars_e), Some(body)) = (args.first(), args.last()) else { return Err("内部エラー: 領域の積分の形".into()) };
-        // 点が変数の組でなければ（媒介変数の式）、線積分・面積分・体積分。`; vec` の印も、ここで取り出す
-        let vec_mode = args.iter().any(|a| matches!(a, Expr::Op { op, .. } if op == "mode:vec"));
-        if let Some(bad) = args.iter().find_map(|a| match a {
-            Expr::Op { op, .. } if op.starts_with("mode:") && op != "mode:vec" => Some(op.trim_start_matches("mode:").to_string()),
-            _ => None,
-        }) {
-            return Err(format!("; の後の {bad} は使えません（{{vec}} と書いてください）"));
+        // 点が変数の組でなければ（媒介変数の式）、線積分・面積分・体積分。`; {vec}`・`; {d_s}` の印も、ここで取り出す
+        let mut vec_mode = false;
+        let mut diffs: Vec<String> = Vec::new();
+        for a in &args[1..args.len() - 1] {
+            let Expr::Op { op, .. } = a else { continue };
+            let Some(m) = op.strip_prefix("mode:") else { continue };
+            if m == "vec" {
+                vec_mode = true;
+            } else if let Some(d) = m.strip_prefix("d_") {
+                diffs.push(d.to_string());
+            } else {
+                return Err(format!("; の後の {m} は使えません（{{vec}} か {{d_s}} のように書いてください）"));
+            }
         }
         let chains: Vec<Expr> = args[1..args.len() - 1].iter().filter(|a| !matches!(a, Expr::Op { op, .. } if op.starts_with("mode:"))).cloned().collect();
         let plain_vars = |e: &Expr| -> bool {
@@ -2015,8 +2240,26 @@ impl Expander<'_> {
             let n = if let Expr::Tuple(items) = e { items.len() } else { 1 };
             names.len() == n && (1..names.len()).all(|i| !names[..i].contains(&names[i]))
         };
+        const XYZ: [&str; 3] = ["x", "y", "z"];
         if vec_mode || !plain_vars(vars_e) {
-            return self.parametric_integral(vars_e, &chains, vec_mode, body);
+            let coords: Vec<String> = XYZ.iter().map(|c| c.to_string()).collect();
+            return self.parametric_integral(vars_e, &chains, vec_mode, &diffs, None, &coords, body);
+        }
+        // 変数の組 (x, y, z) の範囲: 等式の条件（y = x², x = y = z）があれば、解いて曲線・曲面の積分にする。
+        // 無ければ、積分の d の文字が範囲の次元と合うかだけ確かめて、今までの重積分
+        let names: Vec<String> = match vars_e {
+            Expr::Var(v) => vec![v.clone()],
+            Expr::Tuple(items) => items.iter().filter_map(|i| if let Expr::Var(v) = i { Some(v.clone()) } else { None }).collect(),
+            _ => Vec::new(),
+        };
+        if !split_equalities(&chains).0.is_empty() {
+            return self.parametric_integral(vars_e, &chains, false, &diffs, Some(names.clone()), &names, body);
+        }
+        if !diffs.is_empty() {
+            match self.measure_of(names.len(), names.len(), &diffs, false, &names, &names)? {
+                Measure::Natural | Measure::Plain => {}
+                _ => return Err("内部エラー: 領域の積分の測度".into()),
+            }
         }
         let args: Vec<Expr> = std::iter::once(vars_e.clone()).chain(chains).chain(std::iter::once(body.clone())).collect();
         let args = args.as_slice();
@@ -2443,6 +2686,160 @@ impl Expander<'_> {
     }
 
     /// 整数の値（整数から 10⁻⁹ より離れていればエラー）
+    /// テイラー多項式 $T_n(\mathbf x) = \sum_{|\alpha| \le n} \frac{\partial^\alpha f(\mathbf a)}{\alpha!} (\mathbf x - \mathbf a)^\alpha$。
+    /// 偏導関数は記号微分（[`crate::diff::diff`]）で作り、中心 $\mathbf a$ を入れる。係数が数（とパラメータ）だけなら数にし、
+    /// 説明に多項式を出す（`T₅(x) = x − x³/6 + x⁵/120`）
+    fn taylor(&mut self, args: &[Expr]) -> Result<Expr, String> {
+        let [f, vars, centers, order] = args else {
+            return Err("テイラー展開は Taylor(f, x, a, n)（多変数なら Taylor(f, (x, y), (a, b), n)）の形で書いてください".into());
+        };
+        let names: Vec<String> = match vars {
+            Expr::Var(v) => vec![v.clone()],
+            Expr::Tuple(items) => items
+                .iter()
+                .map(|v| match v {
+                    Expr::Var(v) => Ok(v.clone()),
+                    _ => Err("テイラー展開の 2 つ目には、変数の名前（x か (x, y)）を書いてください".to_string()),
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err("テイラー展開の 2 つ目には、変数の名前（x か (x, y)）を書いてください".into()),
+        };
+        let k = names.len();
+        if !(1..=3).contains(&k) || names.iter().enumerate().any(|(i, n)| names[..i].contains(n)) {
+            return Err("テイラー展開の変数は、違う名前を 1〜3 個にしてください".into());
+        }
+        let centers: Vec<Expr> = match (centers, k) {
+            (Expr::Tuple(items), _) if items.len() == k => items.iter().map(|c| self.scalar(c)).collect::<Result<_, _>>()?,
+            (Expr::Tuple(_), 1) => return Err("1 変数のテイラー展開の中心は、数 1 つにしてください".into()),
+            (c, 1) => vec![self.scalar(c)?],
+            _ => return Err(format!("テイラー展開の中心は、変数と同じ {k} 個の組 (a, b{}) にしてください", if k == 3 { ", c" } else { "" })),
+        };
+        if centers.iter().any(|c| names.iter().any(|v| c.uses_var(v))) {
+            return Err("テイラー展開の中心に、展開する変数は使えません".into());
+        }
+        let n = self.integer(order, "テイラー展開の次数")?;
+        let max = [20, 10, 6][k - 1];
+        if !(0..=max).contains(&n) {
+            return Err(format!("{k} 変数のテイラー展開の次数は 0〜{max} にしてください"));
+        }
+        let n = n as usize;
+        // f は式か、引数が変数の数と同じ関数（関数の名前だけでもよい）
+        let body = match self.val(f)? {
+            Val::S(s) => s,
+            Val::Fn { arity, body } if arity == k => apply_body(&body, &names.iter().map(|v| Expr::Var(v.clone())).collect::<Vec<_>>()),
+            Val::Fn { .. } => return Err(format!("テイラー展開する関数の引数の数を、変数の数（{k}）にそろえてください")),
+        };
+        if matches!(body, Expr::Tuple(_) | Expr::List(_)) || Mat::of(&body).is_some() {
+            return Err("テイラー展開できるのは、値が数になる式です（ベクトル・リストは成分ごとに書いてください）".into());
+        }
+        // 1 変数で中心が数なら、べき級数の計算で係数を直接求める（記号微分で 20 階まで微分すると式が大きくなりすぎる。[`crate::series`]）
+        if k == 1 {
+            if let Some(a) = self.constant_value(&centers[0]) {
+                let value = |e: &Expr| self.constant_value(e);
+                if let Some(coefs) = crate::series::taylor(&body, &names[0], a, n, &value) {
+                    let real = coefs.iter().all(|c| c.im.abs() <= 1e-12 * c.re.abs().max(1.0)) && a.im == 0.0;
+                    let mut terms = Vec::new();
+                    for (j, c) in coefs.iter().enumerate() {
+                        if c.norm() < 1e-14 {
+                            continue;
+                        }
+                        let coef = if c.im.abs() <= 1e-12 * c.re.abs().max(1.0) {
+                            Expr::Num(c.re)
+                        } else {
+                            crate::diff::add(Expr::Num(c.re), crate::diff::mul(Expr::Num(c.im), Expr::Const(crate::parser::Constant::I)))
+                        };
+                        let shift = crate::diff::sub(Expr::Var(names[0].clone()), centers[0].clone());
+                        terms.push(if j == 0 { coef } else { crate::diff::mul(coef, crate::diff::pow(shift, Expr::Num(j as f64))) });
+                    }
+                    if real {
+                        let shown: Vec<(Vec<usize>, num_complex::Complex64)> = coefs.iter().enumerate().map(|(j, c)| (vec![j], num_complex::Complex64::new(c.re, 0.0))).collect();
+                        add_note(&taylor_text(n, &names, &[a.re], &shown));
+                    }
+                    return Ok(balanced(terms, BinOp::Add));
+                }
+            }
+        }
+        // 多重指数 α を次数の順に。∂^α f は、α から 1 つ減らした指数の偏導関数をもう 1 回微分して作る
+        let mut indices: Vec<Vec<usize>> = vec![vec![0; k]];
+        let mut derivs: Vec<Expr> = vec![body];
+        let mut terms: Vec<Expr> = Vec::new();
+        let mut shown: Vec<(Vec<usize>, num_complex::Complex64)> = Vec::new();
+        let mut numeric = true;
+        let at = |e: &Expr| e.substitute(&|v: &str| names.iter().position(|n| n == v).map(|i| centers[i].clone()));
+        let mut start = 0;
+        for degree in 0..=n {
+            if degree > 0 {
+                let end = indices.len();
+                for p in start..end {
+                    // 最後に 0 でない成分以降だけを増やす（同じ指数を 2 回作らない）
+                    let last = indices[p].iter().rposition(|&a| a > 0).unwrap_or(0);
+                    for j in last..k {
+                        let mut a = indices[p].clone();
+                        a[j] += 1;
+                        let d = crate::diff::diff(&derivs[p], &names[j])?;
+                        if d.node_count() > 200_000 {
+                            return Err("テイラー展開の導関数が大きくなりすぎました（次数を下げてください）".into());
+                        }
+                        indices.push(a);
+                        derivs.push(d);
+                    }
+                }
+                start = end;
+            } else {
+                start = 0;
+            }
+            for p in start..indices.len() {
+                let alpha = &indices[p];
+                let fact: f64 = alpha.iter().map(|&a| (1..=a).map(|i| i as f64).product::<f64>()).product();
+                let coef = crate::diff::div(at(&derivs[p]), Expr::Num(fact));
+                // 数とパラメータだけの係数は、数にする（式が短くなり、説明にも出せる）
+                let coef = match self.constant_value(&coef) {
+                    Some(c) if c.im.abs() <= 1e-12 * c.re.abs().max(1.0) => {
+                        shown.push((alpha.clone(), num_complex::Complex64::new(c.re, 0.0)));
+                        Expr::Num(c.re)
+                    }
+                    _ => {
+                        numeric = false;
+                        coef
+                    }
+                };
+                if matches!(coef, Expr::Num(v) if v.abs() < 1e-14) {
+                    continue;
+                }
+                let mut term = coef;
+                for (i, &a) in alpha.iter().enumerate() {
+                    if a > 0 {
+                        let shift = crate::diff::sub(Expr::Var(names[i].clone()), centers[i].clone());
+                        term = crate::diff::mul(term, crate::diff::pow(shift, Expr::Num(a as f64)));
+                    }
+                }
+                terms.push(term);
+            }
+        }
+        // 中心が数なら、説明に多項式を出す
+        let center_values: Option<Vec<f64>> = centers.iter().map(|c| self.constant_value(c).filter(|c| c.im == 0.0).map(|c| c.re)).collect();
+        if let (true, Some(cv)) = (numeric, center_values) {
+            add_note(&taylor_text(n, &names, &cv, &shown));
+        }
+        Ok(balanced(terms, BinOp::Add))
+    }
+
+    /// 数とパラメータだけの式の値（変数を含めば None）。使ったパラメータを覚える
+    fn constant_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
+        let prog = crate::eval::Program::compile_with(e, &[], self.params).ok()?;
+        USED_PARAMS.with(|u| {
+            let mut u = u.borrow_mut();
+            for p in prog.used_params() {
+                if !u.contains(p) {
+                    u.push(p.clone());
+                }
+            }
+        });
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        prog.eval_batch(&[], &mut out);
+        (out[0].re.is_finite() && out[0].im.is_finite()).then_some(out[0])
+    }
+
     fn integer(&mut self, e: &Expr, what: &str) -> Result<i64, String> {
         let v = self.number(e, what)?;
         let r = v.round();
@@ -2871,6 +3268,65 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
     (xs, ws)
 }
 
+/// 等式を解いた結果: (解いた変数, その式) の並びと、残った変数（[`Expander::eliminate`]）
+type Solved = (Vec<(String, Expr)>, Vec<String>);
+
+/// 範囲の上の積分で、媒介変数の領域の上の中身に掛けるもの（[`Expander::measure_of`]）
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Measure {
+    /// 範囲の次元の大きさ（弧長・面積・体積。`vec` なら F · r′・F · (r_u × r_v)）
+    Natural,
+    /// 何も掛けない（媒介変数そのものの d）
+    Plain,
+    /// 曲線の上の dx: 点の i 番目の成分の微分
+    Coord(usize),
+    /// 曲面の上の dx dy: 法線 r_u × r_v の i 番目の成分（false なら向きが逆）
+    Form(usize, bool),
+}
+
+/// 媒介変数 k 個・点の成分 dim 個の範囲の呼び名
+fn shape_name(k: usize, dim: usize) -> &'static str {
+    match (k, dim) {
+        (0, _) => "点",
+        (1, 1) => "区間",
+        (1, _) => "曲線（媒介変数 1 つ）",
+        (2, 2) => "平面の領域",
+        (2, _) => "曲面（媒介変数 2 つ）",
+        _ => "立体（媒介変数 3 つ）",
+    }
+}
+
+/// 範囲の条件を、等式（左, 右）とそれ以外に分ける。`x = y = z` は x = y と y = z、`0 ≤ x = y` は 0 ≤ x と x = y
+fn split_equalities(chains: &[Expr]) -> (Vec<(Expr, Expr)>, Vec<Expr>) {
+    let mut eqs = Vec::new();
+    let mut rest = Vec::new();
+    for c in chains {
+        match c {
+            Expr::Op { op, args } if op.starts_with("rel:") && op.contains('=') => {
+                for (j, r) in op.trim_start_matches("rel:").chars().enumerate() {
+                    let (l, rr) = (args[j].clone(), args[j + 1].clone());
+                    if r == '=' {
+                        eqs.push((l, rr));
+                    } else {
+                        rest.push(Expr::Op { op: format!("rel:{r}"), args: vec![l, rr] });
+                    }
+                }
+            }
+            _ => rest.push(c.clone()),
+        }
+    }
+    (eqs, rest)
+}
+
+/// 範囲の条件の変数に式を入れる
+fn subst_chain(c: &Expr, s: &dyn Fn(&str) -> Option<Expr>) -> Expr {
+    match c {
+        Expr::Op { op, args } => Expr::Op { op: op.clone(), args: args.iter().map(|e| e.substitute(s)).collect() },
+        Expr::Cond(f) => Expr::Cond(Box::new(crate::logic::substitute(f, s))),
+        e => e.substitute(s),
+    }
+}
+
 /// 3 × 3 の行列式（列 cols[j][i]）
 fn det3(cols: &[Vec<Expr>]) -> Expr {
     use crate::diff::{add, mul, sub};
@@ -3021,4 +3477,107 @@ pub fn definition_line(l: &Expr) -> Option<(String, usize, bool)> {
             false,
         ),
     })
+}
+
+/// 係数を、小さい分母の分数で書けるなら分数で（1/6・−3/2）。書けなければ有効 6 桁
+fn coefficient_text(v: f64) -> (bool, String) {
+    let neg = v < 0.0;
+    let a = v.abs();
+    // 連分数で、値が浮動小数点の誤差の範囲で一致する分数を探す（e・π のような数は分数にしない）
+    let (mut h0, mut h1, mut k0, mut k1) = (0.0f64, 1.0f64, 1.0f64, 0.0f64);
+    let mut x = a;
+    let mut frac = None;
+    for _ in 0..30 {
+        let q = x.floor();
+        let (h2, k2) = (q * h1 + h0, q * k1 + k0);
+        // 分母は 10⁷ まで。分子が 1000 以下なら分母は 10¹⁸ まで（1/20! のような階乗の逆数も分数で出す）。
+        // 分子も分母も大きい分数（4551459/808579796）は、無理数をたまたま近似しただけなので使わない
+        if k2 > 1e18 || h2 > 1e7 || (k2 > 1e7 && h2 > 1000.0) {
+            break;
+        }
+        (h0, h1, k0, k1) = (h1, h2, k1, k2);
+        if (h1 / k1 - a).abs() <= 4e-16 * a.max(1e-300) {
+            frac = Some((h1, k1));
+            break;
+        }
+        let r = x - q;
+        if r < 1e-15 {
+            break;
+        }
+        x = 1.0 / r;
+    }
+    let text = match frac {
+        Some((h, k)) if k == 1.0 => format!("{h}"),
+        Some((h, k)) => format!("{h}/{k}"),
+        // 小さすぎる・大きすぎる数は、有効 6 桁の指数表記（2.50521×10⁻⁸）
+        None if a != 0.0 && (a < 1e-3 || a >= 1e7) => {
+            let e = a.log10().floor() as i32;
+            let m = format!("{:.5}", a / 10f64.powi(e));
+            let m = m.trim_end_matches('0').trim_end_matches('.');
+            let sup: String = e.to_string().chars().map(|c| if c == '-' { '⁻' } else { "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap() }).collect();
+            format!("{m}×10{sup}")
+        }
+        None => {
+            let s = format!("{a:.6}");
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        }
+    };
+    (neg, text)
+}
+
+/// 上付きの数字（² ³ …）
+fn superscript(n: usize) -> String {
+    if n == 1 {
+        return String::new();
+    }
+    n.to_string().chars().map(|c| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect()
+}
+
+/// 説明に出すテイラー多項式（`T₃(x) = x − x³/6`、`T₂(x, y) = 1 + (x − 1) + …`）
+fn taylor_text(n: usize, names: &[String], centers: &[f64], terms: &[(Vec<usize>, num_complex::Complex64)]) -> String {
+    let sub: String = n.to_string().chars().map(|c| "₀₁₂₃₄₅₆₇₈₉".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect();
+    let shift = |i: usize, wrap: bool| -> String {
+        let c = centers[i];
+        if c == 0.0 {
+            names[i].clone()
+        } else {
+            let (neg, t) = coefficient_text(c);
+            let s = format!("{} {} {t}", names[i], if neg { "+" } else { "−" });
+            if wrap { format!("({s})") } else { s }
+        }
+    };
+    let mut out = String::new();
+    for (alpha, c) in terms {
+        let v = c.re;
+        if v.abs() < 1e-14 {
+            continue;
+        }
+        let factors: Vec<usize> = (0..alpha.len()).filter(|&i| alpha[i] > 0).collect();
+        let mono: String = factors
+            .iter()
+            .map(|&i| {
+                format!("{}{}", shift(i, true), superscript(alpha[i]))
+            })
+            .collect();
+        let (neg, t) = coefficient_text(v);
+        let body = if mono.is_empty() {
+            t
+        } else if t == "1" {
+            mono
+        } else if let Some((p, q)) = t.split_once('/') {
+            if p == "1" { format!("{mono}/{q}") } else { format!("{p}{mono}/{q}") }
+        } else {
+            format!("{t}{mono}")
+        };
+        if out.is_empty() {
+            out = if neg { format!("−{body}") } else { body };
+        } else {
+            out.push_str(if neg { " − " } else { " + " });
+            out.push_str(&body);
+        }
+    }
+    if out.is_empty() {
+        out = "0".into();
+    }
+    format!("T{sub}({}) = {out}", names.join(", "))
 }
