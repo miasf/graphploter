@@ -866,12 +866,19 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
   `d\mathbf{r}` は曲線、`d\mathbf{S}` は 3 次元の曲面（合わなければ「ds は曲線の上の積分に使う記号ですが、この範囲は曲面です」のような誤り）。
   媒介変数そのものの $d$（`r\,dr\,d\theta`・`dt`）なら、何も掛けない（$\int f\,dt$ そのもの）。曲線の上の座標の $d$ は向きの付いた線積分で、
   `\oint_{C} -y\,dx + x\,dy` は $\int (-y\,x'(t) + x\,y'(t))\,dt$（`P\,dx + Q\,dy + R\,dz` と続けて書ける）。曲面の上の `R\,dx\,dy` は法線の
-  $z$ 成分を掛ける（向きの付いた面積）。式を全部書き並べてから計算するので、3 重の積分の
+  $z$ 成分を掛ける（向きの付いた面積）。`(P\,dx + Q\,dy)` と括弧で囲んでもよい。`\mathbf{F}\cdot\mathbf{T}\,ds`（単位接線）は $\mathbf F \cdot d\mathbf r$、
+  `\mathbf{F}\cdot\mathbf{n}\,dS`（単位法線。`\hat{\mathbf{n}}` も）は $\mathbf F \cdot d\mathbf S$、`\mathrm{d}\mathbf{r}` も読む。
+  積分記号の下には、条件だけ（`\iint_{x^2+y^2 \le 1} f\,dx\,dy`。点は d の文字か、積分記号の数で決める）・`\mathbb{R}^2`・
+  添字の付いた名前（`C_1`・`D_{12}`）・集合どうしの $\cap$・$\cup$・$\setminus$（点が同じ変数の組なら 1 つの領域、媒介変数で書いた曲線・曲面どうしの
+  $\cup$ はそれぞれの積分の和。三角形の経路 $\oint_{C_1 \cup C_2 \cup C_3}$ など）も書ける。式を全部書き並べてから計算するので、3 重の積分の
   式が大きくなりすぎるとエラーになる（球座標の球の体積は計算できるが、範囲が外側の変数の式（$\sqrt{1-x^2-y^2}$）の 3 重積分は大きすぎる）
 - 集合と論理: 内包的表記 `\left\{(x,y,z) \mid x^2+y^2<1,\ 0 \le z \le 2\right\}`（点の名前は自由。表示中の座標に順に読み替える）、
   条件の `-1 \le x, y \le 1`・`-1 \le x, y, z \le 1` は、並べた文字のどれもが $-1$ 以上 $1$ 以下（`-1 \le x \le 1, -1 \le y \le 1` と同じ。
   集合の中でも、積分の範囲でも、連立の不等式の行でも同じ。不等号の向きがそろっていて、両端に並べた文字や座標が無いときだけ。
-  `x \le y, z \le 1` は $x \le y$ と $z \le 1$ のまま）、
+  `x \le y, z \le 1` は $x \le y$ と $z \le 1$ のまま）。片側だけの `x, y, z \ge 0`・`0 \le x, y` も、並べた文字のどれもがその条件
+  （「$-1 \le x$ かつ $y \le 1$」は `-1 \le x \land y \le 1` と書く）。区間・実数全体の累乗 `[0,1]^2`・`\mathbb{R}^3` は直積（$\in$ の右・積分記号の下）、
+  集合の補集合 `\{\dots\}^{c}`。媒介変数で書いた集合の条件には `t \in [0, 1]`・`t \ne \pi`（描き方は変わらない）・ほかの媒介変数の式の端
+  `0 \le t \le s`（$t = s\,w$, $0 \le w \le 1$ と置き換えて描く）も書け、媒介変数で書いた集合どうしの $\cup$（折れ線の経路など）はそれぞれ描いて重ねる、
   論理 `\land`・`\lor`・`\neg`・`\Rightarrow`・`\Leftarrow`・`\Leftrightarrow`、排他的論理和（XOR）`\oplus`・`\veebar`・`\nleftrightarrow`、
   否定論理積（NAND）`\barwedge`・`\uparrow`、否定論理和（NOR）`\downarrow`・`\nor`、集合 `\cap`・`\cup`・`\setminus`・対称差 `\triangle`・`\ominus`・
   補集合 `A^{c}`・`A^{\complement}`・`\complement A`、`\in`・`\notin`・`\ni`、区間 `[0,1)`・`(0,1]`・`[0,\infty)` とその直積 `[0,1]\times[0,2]`、

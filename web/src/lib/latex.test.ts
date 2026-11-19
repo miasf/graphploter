@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
+import { fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -415,6 +415,54 @@ check(
   inlineRegions('\\int_C x\\,ds+\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}1\\,dA+\\int_0^1x\\,dx+\\int_{\\left\\lbrace\\left(t,t^2\\right)\\middle\\vert0\\le t\\le1\\right\\rbrace}1\\,ds').map((r) => latexToText(regionDisplayLatex(r) ?? '')),
   ['⦃(x,y,z)∣0<=x<=1,0<=y<=2,z=0⦄', '⦃(t,t^(2))∣0<=t<=1⦄'],
 )
+
+
+// ---- 精査で足した書き方 ----
+{
+  const S = (p: string, c: string) => `\\left\\{\\left(${p}\\right)\\mid ${c}\\right\\}`
+  const circ = S('\\cos t,\\sin t', '0\\le t\\le2\\pi')
+  const tri = `${S('t,0', '0\\le t\\le1')}\\cup${S('1-t,t', '0\\le t\\le1')}\\cup${S('0,1-t', '0\\le t\\le1')}`
+  const more: [string, string][] = [
+    // 片側の省略形 x, y, z ≥ 0・0 ≤ x, y
+    [S('x,y,z', 'x+y+z=1,x,y,z\\ge0'), '⦃(x,y,z)∣x+y+z=1,x>=0,y>=0,z>=0⦄'],
+    [S('x,y', '0\\le x,y,x+y\\le1'), '⦃(x,y)∣0<=x,0<=y,x+y<=1⦄'],
+    // 区間・実数全体の累乗は直積（リストの累乗はそのまま）
+    ['\\left(x,y\\right)\\in\\left[0,1\\right]^{2}', '(x,y)∈[0,1]×[0,1]'],
+    ['\\iiint_{\\left[0,1\\right]^3}1\\,dV', '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1; {d_V})(1)'],
+    ['\\iint_{\\mathbb{R}^2}e^{-x^2-y^2}\\,dA', '@intset((x,y),-∞<=x<=∞,-∞<=y<=∞; {d_A})(e^(-x^(2)-y^(2)))'],
+    ['\\left[1,2\\right]^2', '[1,2]^(2)'],
+    // 集合の補集合
+    [`${S('x,y', 'x^2+y^2<1')}^{c}`, '⦃(x,y)∣x^(2)+y^(2)<1⦄ᶜ'],
+    // \mathrm{d}\mathbf{r}・単位接線 T ds・単位法線 n dS
+    [`\\oint_{${circ}}\\left(-y,x\\right)\\cdot\\mathrm{d}\\mathbf{r}`, '@intset(( cos t, sin t),0<=t<=2 pi; {vec},{d_r})((-y,x))'],
+    [`\\int_{${circ}}\\left(-y,x\\right)\\cdot\\mathbf{T}\\,ds`, '@intset(( cos t, sin t),0<=t<=2 pi; {vec},{d_r})((-y,x))'],
+    [`\\iint_{${S('u,v,0', '0\\le u,v\\le1')}}\\left(0,0,1\\right)\\cdot\\hat{\\mathbf{n}}\\,dS`, '@intset((u,v,0),0<=u<=1,0<=v<=1; {vec},{d_S})((0,0,1))'],
+    // 括弧で囲んだ微分形式（括弧の外に d があれば、今までどおり）
+    [`\\oint_{${circ}}\\left(-y\\,dx+x\\,dy\\right)`, '( @intset(( cos t, sin t),0<=t<=2 pi; {d_x})(-y) + @intset(( cos t, sin t),0<=t<=2 pi; {d_y})(x) )'],
+    ['\\int_0^1\\left(x+1\\right)\\,dx', '@int(x,0,1)((x+1))'],
+    // 積分記号の下に条件だけ（点は d の文字か、積分記号の数）
+    ['\\iint_{x^2+y^2\\le1}1\\,dx\\,dy', '@intset((x,y),x^(2)+y^(2)<=1; {d_x},{d_y})(1)'],
+    ['\\iint_{x^2+y^2\\le1}1\\,dA', '@intset((x,y),x^(2)+y^(2)<=1; {d_A})(1)'],
+    ['\\iiint_{x^2+y^2+z^2\\le1}1\\,dV', '@intset((x,y,z),x^(2)+y^(2)+z^(2)<=1; {d_V})(1)'],
+    // 集合どうしの ∩（点が同じ変数の組）と、曲線どうしの ∪（範囲ごとの積分の和）
+    [`\\iint_{${S('x,y', 'x^2+y^2\\le1')}\\cap${S('x,y', 'y\\ge0')}}1\\,dA`, '@intset((x,y),(x,y)∈⦃(x,y)∣x^(2)+y^(2)<=1⦄ ∩ ⦃(x,y)∣y>=0⦄; {d_A})(1)'],
+    [`\\oint_{${tri}}1\\,ds`, '( @intset((t,0),0<=t<=1; {d_s})(1) + @intset((1-t,t),0<=t<=1; {d_s})(1) + @intset((0,1-t),0<=t<=1; {d_s})(1) )'],
+  ]
+  for (const [latex, want] of more) check(latex, latexToText(latex), want)
+  // 添字の付いた範囲の名前 C_1・D_{12}
+  check('添字の名前', regionsUsed('\\int_{C_1}x\\,ds+\\iint_{D_{12}}1\\,dA').map((r) => r.name), ['C_1', 'D_12'])
+  check('添字の名前の表示', [regionLabel('C_1'), regionLabel('\\Omega_2')], ['C₁', 'Ω₂'])
+  setRegions({ C_1: circ })
+  check('添字の名前の範囲', latexToText('\\int_{C_1}x^2\\,ds'), '@intset(( cos t, sin t),0<=t<=2 pi; {d_s})(x^(2))')
+  setRegions({})
+  // 範囲を表示: 条件だけの範囲・集合の演算
+  check('条件だけの範囲を表示', inlineRegions('\\iint_{x^2+y^2\\le1}x\\,dA').map((r) => latexToText(regionDisplayLatex(r) ?? '')), ['⦃(x,y,z)∣x^(2)+y^(2)<=1,z=0⦄'])
+  check('∩ の範囲を表示', latexToText(regionDisplayLatex(`${S('x,y', 'x^2+y^2\\le1')}\\cap${S('x,y', 'y\\ge0')}`) ?? ''), '⦃(x,y,z)∣x^(2)+y^(2)<=1,z=0⦄ ∩ ⦃(x,y,z)∣y>=0,z=0⦄')
+  check('∪ の経路を表示', latexToText(regionDisplayLatex(tri) ?? ''), '⦃(t,0)∣0<=t<=1⦄ ∪ ⦃(1-t,t)∣0<=t<=1⦄ ∪ ⦃(0,1-t)∣0<=t<=1⦄')
+  // 積分の図: x + y + z = 1 は z について解いて曲面にする
+  const plane = integralDisplay(`\\iint_{${S('x,y,z', 'x+y+z=1,x\\ge0,y\\ge0,z\\ge0')}}1\\,dS`, 1)
+  check('x + y + z = 1 の図', plane !== null && !('error' in plane), true)
+}
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')

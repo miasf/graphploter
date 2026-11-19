@@ -1285,3 +1285,27 @@ fn coordinate_and_parameter_differentials() {
     close("@intset((u,v,1-u-v),0<=u<=1,0<=v<=1-u; {d_x},{d_y})(1)", 0.5, 1e-12);
     close("@intset((u,v,1-u-v),0<=u<=1,0<=v<=1-u; {d_y},{d_x})(1)", -0.5, 1e-12);
 }
+
+#[test]
+fn parametric_set_conditions() {
+    // t ∈ [0, 1] は 0 ≤ t ≤ 1、≠ は描き方が変わらない
+    same("⦃(t,t^(2))∣t∈[0,1]⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
+    same("⦃(cos(t),sin(t))∣0<=t<=2pi,t≠pi⦄", "⦃(cos(t),sin(t))∣0<=t<=2pi⦄", "");
+    // 端がほかの媒介変数の式（扇形の三角形 0 ≤ t ≤ s）も描ける
+    let (p, _) = mesh("⦃(s cos(t),s sin(t))∣0<=s<=1,0<=t<=s⦄", "", &[]);
+    assert!(!p.is_empty());
+    // 媒介変数で書いた集合どうしの ∪（折れ線の経路）は、それぞれ描いて重ねる
+    let (p1, _) = mesh("⦃(t,t^(2))∣-1<=t<=1⦄", "", &[]);
+    let (p2, _) = mesh("⦃(t,t^(2))∣-1<=t<=1⦄ ∪ ⦃(t,1)∣-1<=t<=1⦄", "", &[]);
+    assert!(p2.len() > p1.len());
+}
+
+#[test]
+fn integrals_over_unions_and_set_operations() {
+    let pi = std::f64::consts::PI;
+    // 点が同じ変数の組の集合どうしの ∩・∖・∪ は、条件の (x, y) ∈ A ∩ B
+    close("@intset((x,y),(x,y)∈⦃(x,y)∣x^(2)+y^(2)<=1⦄ ∩ ⦃(x,y)∣y>=0⦄; {d_A})(1)", pi / 2.0, 1e-6);
+    close("@intset((x,y),(x,y)∈⦃(x,y)∣x^(2)+y^(2)<=1⦄ ∖ ⦃(x,y)∣y>=0⦄; {d_A})(1)", pi / 2.0, 1e-6);
+    // 平面全体（端が ∞）
+    close("@intset((x,y),-∞<=x<=∞,-∞<=y<=∞; {d_A})(e^(-x^(2)-y^(2)))", pi, 1e-9);
+}
