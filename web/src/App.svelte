@@ -40,8 +40,8 @@
     Space,
     RenderMode,
   } from './lib/types'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_THOROUGH } from './lib/types'
-  import { Viewer } from './lib/Viewer'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_THOROUGH } from './lib/types'
+  import { Viewer, type PickResult } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
   const PALETTE = ['#2d70b3', '#c74440', '#388c46', '#6042a6', '#fa7e19', '#1a9ea0']
@@ -136,6 +136,7 @@
 
   onMount(() => {
     viewer = new Viewer(viewerEl)
+    viewer.onPick = handlePick
     // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
     viewer.onGpuFallback = (id, reason) => {
       const it = items.find((x) => x.id === id)
@@ -179,6 +180,77 @@
     })()
     return () => viewer?.dispose()
   })
+
+  // ---- 点を押すと値が出る（学習用）----
+
+  /** 印を出している式の id（無ければ null） */
+  let pickedId: number | null = null
+  /** 押した順の番号（古い計算の結果を捨てる） */
+  let pickSeq = 0
+
+  const POI_NAMES = ['極大', '極小', '鞍点', '零点', '', '停留点']
+
+  function clearPick() {
+    pickedId = null
+    pickSeq++
+    viewer?.showPick(null)
+  }
+
+  /** 札に出す数（有効 6 桁。ごく小さい数は 0） */
+  function pickNum(v: number, span: number) {
+    if (Math.abs(v) < 1e-9 * Math.max(1, span)) return '0'
+    return Number(v.toPrecision(6)).toString().replace('-', '−')
+  }
+
+  /**
+   * グラフを押したとき: 押した所の式の点に印を付け、座標を札に出す。
+   * 陽関数の行（y = f(x)・z = f(x, y)）は、押した横・奥の座標で式の値を計算し直して、縦の座標を正確な値にする
+   * （画面の線・三角形は折れ線なので、そのままでは少しずれる）。注目する点（極値・零点など）は計算エンジンが求めた正確な点
+   */
+  function handlePick(r: PickResult | null) {
+    if (!r) {
+      clearPick()
+      return
+    }
+    const item = items.find((it) => it.id === r.id)
+    if (!item) {
+      clearPick()
+      return
+    }
+    const seq = ++pickSeq
+    pickedId = item.id
+    const names = axisNames
+    const shownAxes = flat ? [0, 1] : [0, 1, 2]
+    const spans = [domain.xmax - domain.xmin, domain.ymax - domain.ymin, domain.zmax - domain.zmin]
+    const pt: [number, number, number] = [...r.point]
+    const label = () => {
+      const kindName = (k: number) => (k === 4 ? `${prettyName(names[flat ? 1 : 2])} 切片` : (POI_NAMES[k] ?? ''))
+      const head = r.poi === undefined ? '' : `${(r.kinds ?? [r.poi]).map(kindName).join('・')}\n`
+      const coords = `(${shownAxes.map((k) => pickNum(pt[k], spans[k])).join(', ')})`
+      return head + coords
+    }
+    viewer?.showPick(pt, label(), item.color, item.id)
+    if (r.poi !== undefined) return
+    // 陽関数の行なら、縦の座標を式から計算し直す
+    const m = /^\s*([a-z])\s*=(.*)$/s.exec(item.latex)
+    if (!m || item.integralOf !== undefined || item.regionName !== undefined) return
+    const lhs = m[1]
+    const axis = names.indexOf(lhs)
+    const rhs = m[2]
+    if (axis < 0 || (flat && axis === 2) || new RegExp(`(^|[^a-zA-Z\\\\])${lhs}(?![a-zA-Z])`).test(rhs) || /,/.test(rhs.replace(/\\left\(.*?\\right\)/g, ''))) return
+    const others = shownAxes.filter((k) => k !== axis)
+    const at = `\\left.${rhs}\\right|_{${others.map((k) => `${names[k]}=${pt[k].toFixed(12)}`).join(',')}}`
+    const run = () => {
+      if (seq !== pickSeq) return
+      const v = evalValue(at, currentParams(), run, currentDefinitions(item))
+      if (!v || !('value' in v)) return
+      // 押した点から遠すぎる値（式の読み違い）は使わない
+      if (Math.abs(v.value - pt[axis]) > 0.08 * Math.max(spans[axis], 1e-9)) return
+      pt[axis] = v.value
+      viewer?.showPick(pt, label(), item.color, item.id)
+    }
+    run()
+  }
 
   // ---- 保存・共有 ----
 
@@ -953,7 +1025,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0),
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse ? 0 : PLOT_POI),
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
@@ -1360,6 +1432,8 @@
   }
 
   function setLatex(item: PlotItem, latex: string) {
+    // 押した点の印を出している式が書き換わったら、印を消す（値が古くなる）
+    if (pickedId === item.id) clearPick()
     item.latex = latex
     // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
     for (const r of regionsUsed(latex)) {

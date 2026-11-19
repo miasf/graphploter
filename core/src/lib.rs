@@ -531,6 +531,19 @@ const FLAG_THOROUGH: u32 = 2;
 /// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
 const FLAG_EDGES: u32 = 4;
 
+thread_local! {
+    /// 最後の [`plot`] で求めた注目する点（[`last_poi`]）
+    static LAST_POI: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 最後の [`plot`] で求めた、陽関数の注目する点（極値・零点・縦軸との交点・停留点）。
+/// [点の 3 つの座標, 種類, …]。種類は 0: 極大, 1: 極小, 2: 鞍点, 3: 零点, 4: 縦軸との交点, 5: そのほかの停留点。
+/// `plot` の `flags` のビット 4 を立てたときだけ求める（無ければ空）
+#[wasm_bindgen]
+pub fn last_poi() -> Vec<f64> {
+    LAST_POI.with(|p| p.borrow().clone())
+}
+
 /// 式を解析して、曲面（または曲線）を作る。
 ///
 /// - `domain`: 表示範囲 [横の最小, 横の最大, 奥の最小, 奥の最大, 縦の最小, 縦の最大]
@@ -656,12 +669,22 @@ pub fn plot(
     }
 
     let _defs = take_definitions(&consts);
+    LAST_POI.with(|p| p.borrow_mut().clear());
+    let _ = equation::take_last_explicit();
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
     expand::set_view_x(domain[0], domain[1]);
     expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
+    // 注目する点（陽関数の極値・零点など。点を押すと値が出る機能）: 画面側が頼んだとき（ビット 4。動かしている間は頼まない）
+    if flags & 16 != 0 && coord_src.trim().is_empty() {
+        if let (equation::Plot::Explicit { rotated: false, .. }, Some((axis, e, shown))) = (&plot, equation::take_last_explicit()) {
+            let d = [domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]];
+            let poi = critical::points_of_interest(axis, &e, &shown, &d, &consts, flat);
+            LAST_POI.with(|p| *p.borrow_mut() = poi);
+        }
+    }
     if !coord_src.trim().is_empty() && matches!(plot, equation::Plot::Field { .. }) {
         return Err(err("座標系を選んだ式では、ベクトル場は描けません（成分をどの向きで読むかが決まらないため）"));
     }

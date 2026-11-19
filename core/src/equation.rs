@@ -3002,8 +3002,19 @@ pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<Str
     }
 }
 
+thread_local! {
+    /// 最後に作った陽関数の (縦の軸, 式, 表示中の座標の名前)。点を押したときの「注目する点」（極値・零点）を求めるため（[`take_last_explicit`]）
+    static LAST_EXPLICIT: std::cell::RefCell<Option<(usize, Expr, [String; 3])>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 最後に作った陽関数の式を取り出す（`lib.rs` の [`crate::plot`] が、計算の前に空にしてから使う）
+pub fn take_last_explicit() -> Option<(usize, Expr, [String; 3])> {
+    LAST_EXPLICIT.with(|l| l.borrow_mut().take())
+}
+
 fn explicit(axis: usize, e: &Expr, shown: &[String; 3], consts: &Params) -> Result<Plot, String> {
     let (a, b) = others(axis);
+    LAST_EXPLICIT.with(|l| *l.borrow_mut() = Some((axis, e.clone(), shown.clone())));
     let prog = Program::compile_with(e, &[&shown[a], &shown[b]], consts)?;
     Ok(Plot::Explicit { axis, names: shown.clone(), prog, rotated: false })
 }
