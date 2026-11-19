@@ -90,9 +90,9 @@ const cases: [string, string][] = [
   // 不定積分・重積分
   ['y=\\int x^2\\,dx', 'y= @int(x)(x^(2))'],
   ['\\int_0^1\\int_0^x xy\\,dy\\,dx', '@int(x,0,1)(@int(y,0,x)(xy))'],
-  ['\\iint_{\\left\\{\\left(x,y\\right)\\mid0\\le x\\le1,0\\le y\\le x\\right\\}}xy\\,dA', '@intset((x,y),0<=x<=1,0<=y<=x)(xy)'],
-  ['\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}xy\\,dx\\,dy', '@intset((x,y),0<=x<=1,0<=y<=2)(xy)'],
-  ['\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x\\le1,0\\le y\\le1,0\\le z\\le1\\right\\}}1\\,dV', '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1)(1)'],
+  ['\\iint_{\\left\\{\\left(x,y\\right)\\mid0\\le x\\le1,0\\le y\\le x\\right\\}}xy\\,dA', '@intset((x,y),0<=x<=1,0<=y<=x; {d_A})(xy)'],
+  ['\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}xy\\,dx\\,dy', '@intset((x,y),0<=x<=1,0<=y<=2; {d_x},{d_y})(xy)'],
+  ['\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x\\le1,0\\le y\\le1,0\\le z\\le1\\right\\}}1\\,dV', '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1; {d_V})(1)'],
   // ベクトル場の演算子・外積・線積分・面積分
   ['z=\\nabla\\cdot\\left(x^2,y^2,0\\right)', 'z= @div (x^(2),y^(2),0)'],
   ['z=\\nabla\\times\\left(-y,x\\right)', 'z= @rot (-y,x)'],
@@ -101,8 +101,8 @@ const cases: [string, string][] = [
   ['z=\\Delta\\left(x^2y\\right)', 'z= @lap (x^(2)y)'],
   ['\\operatorname{div}F', '@div F'],
   ['\\left(1,2,3\\right)\\times\\left(4,5,6\\right)', '(1,2,3)×(4,5,6)'],
-  ['\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', '@intset(( cos t, sin t),0<=t<=2 pi; {vec})((-y,x))'],
-  ['\\int_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi)(x^(2))'],
+  ['\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', '@intset(( cos t, sin t),0<=t<=2 pi; {vec},{d_r})((-y,x))'],
+  ['\\int_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi; {d_s})(x^(2))'],
   // 集合と論理（M11）
   ['\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2<1,0\\le z\\le2\\right\\}', '⦃(x,y,z)∣x^(2)+y^(2)<1,0<=z<=2⦄'],
   ['x^2+y^2+z^2\\le4\\land\\neg\\left(z>1\\right)', 'x^(2)+y^(2)+z^(2)<=4∧¬(z>1)'],
@@ -241,10 +241,10 @@ setRegions({
   '\\Omega': '\\left[0,1\\right]\\times\\left[0,2\\right]',
   E: '',
 })
-check('∬_D', latexToText('\\iint_{D}xy\\,dA'), '@intset((x,y),0<=x<=1,0<=y<=x)(xy)')
-check('∬_D（括弧なし）', latexToText('\\iint_Dxy\\,dA'), '@intset((x,y),0<=x<=1,0<=y<=x)(xy)')
-check('∮_C F·dr', latexToText('\\oint_{C}\\left(-y,x\\right)\\cdot d\\mathbf{r}'), '@intset(( cos t, sin t),0<=t<=2 pi; {vec})((-y,x))')
-check('∫_Ω dx dy', latexToText('\\int_{\\Omega}xy\\,dx\\,dy'), '@intset((x,y),0<=x<=1,0<=y<=2)(xy)')
+check('∬_D', latexToText('\\iint_{D}xy\\,dA'), '@intset((x,y),0<=x<=1,0<=y<=x; {d_A})(xy)')
+check('∬_D（括弧なし）', latexToText('\\iint_Dxy\\,dA'), '@intset((x,y),0<=x<=1,0<=y<=x; {d_A})(xy)')
+check('∮_C F·dr', latexToText('\\oint_{C}\\left(-y,x\\right)\\cdot d\\mathbf{r}'), '@intset(( cos t, sin t),0<=t<=2 pi; {vec},{d_r})((-y,x))')
+check('∫_Ω dx dy', latexToText('\\int_{\\Omega}xy\\,dx\\,dy'), '@intset((x,y),0<=x<=1,0<=y<=2; {d_x},{d_y})(xy)')
 check('定積分はそのまま', latexToText('\\int_{a}^{b}t\\,dt'), '@int(t,a,b)(t)')
 for (const name of ['E', 'G']) {
   let message = ''
@@ -284,7 +284,7 @@ for (const [def, want] of shown) {
 
 // 条件の並びの省略形 a ≤ x, y, z ≤ b
 check('省略形（集合）', latexToText('\\left\\{\\left(x,y,z\\right)\\mid-1\\le x,y,z\\le1\\right\\}'), '⦃(x,y,z)∣-1<=x<=1,-1<=y<=1,-1<=z<=1⦄')
-check('省略形（積分）', latexToText('\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x,y,z\\le1,x+y\\le z\\right\\}}1\\,dV'), '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1,x+y<=z)(1)')
+check('省略形（積分）', latexToText('\\iiint_{\\left\\{\\left(x,y,z\\right)\\mid0\\le x,y,z\\le1,x+y\\le z\\right\\}}1\\,dV'), '@intset((x,y,z),0<=x<=1,0<=y<=1,0<=z<=1,x+y<=z; {d_V})(1)')
 check('省略形でない', latexToText('\\left\\{\\left(x,y\\right)\\mid0\\le x,y\\le1\\right\\}'), '⦃(x,y)∣0<=x,y<=1⦄')
 
 // 積分を描くための式（被積分関数を、積分する範囲の上に描く）
@@ -338,7 +338,7 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   const v = integralDisplay('\\oint_{H}\\vec{F}\\cdot d\\mathbf{r}', 0.5, 2)
   const ok = v !== null && !('error' in v) ? v : null
   check('進み具合の変数', ok?.sweep, 't')
-  check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.141593; {vec})({vec_F})')
+  check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.141593; {vec},{d_r})({vec_F})')
   check('添えるもの', ok?.extras?.map((e) => e.role), ['path', 'point', 'tangent', 'vector', 'component'])
   check('今の点', ok && latexToText(ok.extras![1].latex), '( cos (3.141593), sin (3.141593),(3.141593))')
   // 被積分関数が媒介変数そのもの（(t + 1, t²)）: 場の矢印は添えず、F の矢印には今の t を入れる
@@ -362,9 +362,39 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
 // 太字の 1 文字は、ベクトルの名前（\vec と同じ名前）
 check('太字 \\mathbf{F}', latexToText('\\mathbf{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'), latexToText('\\vec{F}\\left(x,y,z\\right)=\\left(-y,x,0\\right)'))
 check('太字 \\boldsymbol{F}', latexToText('\\boldsymbol{F}'), '{vec_F}')
-check('黒板太字 \\mathbb{F}', latexToText('\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le\\pi\\right\\}}\\mathbb{F}\\cdot d\\mathbb{r}'), '@intset(( cos t, sin t),0<=t<= pi; {vec})({vec_F})')
+check('黒板太字 \\mathbb{F}', latexToText('\\oint_{\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le\\pi\\right\\}}\\mathbb{F}\\cdot d\\mathbb{r}'), '@intset(( cos t, sin t),0<=t<= pi; {vec},{d_r})({vec_F})')
 check('黒板太字の集合はそのまま', latexToText('x\\in\\mathbb{Z}'), 'x∈ℤ')
 check('太字の名前（2 文字以上）はそのまま', latexToText('\\mathbf{Im}'), 'Im')
+setRegions({})
+
+// MathLive のキーボードで打った集合: { は \left\lbrace … \right\rbrace、集合の中の | は \,\middle\vert\,（\middle{\vert}・\middle|）
+const typed: [string, string][] = [
+  ['\\left\\lbrace\\left(x,x^2\\right)\\,\\middle{\\vert}\\,0\\le x\\le1\\right\\rbrace', '⦃(x,x^(2))∣0<=x<=1⦄'],
+  ['\\left\\lbrace\\left(t,\\sin t\\right)\\middle\\vert0\\le t\\le2\\pi\\right\\rbrace', '⦃(t, sin t)∣0<=t<=2 pi⦄'],
+  ['\\left\\lbrace\\left(x,y\\right)\\middle|x^2+y^2<1\\right\\rbrace', '⦃(x,y)∣x^(2)+y^(2)<1⦄'],
+  ['\\lbrace\\left(x,y,z\\right)\\mid x=y=z,0\\le x\\le1\\rbrace', '⦃(x,y,z)∣x=y=z,0<=x<=1⦄'],
+  ['x\\in\\left\\lbrace1,2,3\\right\\rbrace', 'x∈⦃1,2,3⦄'],
+  ['\\int_{\\left\\lbrace\\left(\\cos t,\\sin t\\right)\\,\\middle\\vert\\,0\\le t\\le2\\pi\\right\\rbrace}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi; {d_s})(x^(2))'],
+]
+for (const [latex, want] of typed) check(latex, latexToText(latex), want)
+// 範囲の欄に打った集合も同じ
+setRegions({ C: '\\left\\lbrace\\left(x,y,z\\right)\\,\\middle\\vert\\,x=y=z,0\\le x\\le1\\right\\rbrace' })
+check('範囲の欄の \\lbrace・\\middle\\vert', latexToText('\\int_C x\\,ds'), '@intset((x,y,z),x=y=z,0<=x<=1; {d_s})(x)')
+check('範囲の欄の \\lbrace を描く式', latexToText(regionDisplayLatex('\\left\\lbrace\\left(t,t^2\\right)\\middle\\vert0\\le t\\le1\\right\\rbrace') ?? ''), '⦃(t,t^(2))∣0<=t<=1⦄')
+
+// 積分の d の後の文字（計算エンジンが範囲の次元と合うかを確かめる）と、曲線の上の P dx + Q dy
+setRegions({ C: '\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}' })
+const marks: [string, string][] = [
+  ['\\oint_C-y\\,dx+x\\,dy', '( @intset(( cos t, sin t),0<=t<=2 pi; {d_x})(-y) + @intset(( cos t, sin t),0<=t<=2 pi; {d_y})(x) )'],
+  ['\\oint_C y^2\\,dx-x\\,dy+1', '( @intset(( cos t, sin t),0<=t<=2 pi; {d_x})(y^(2)) - @intset(( cos t, sin t),0<=t<=2 pi; {d_y})(x) ) +1'],
+  // 区間の直積の上の dx（続く + … dy は足さない）
+  ['\\int_{\\left[0,1\\right]}x\\,dx+1', '@intset(x,0<=x<=1; {d_x})(x) +1'],
+  ['\\iint_{\\left[0,1\\right]\\times\\left[0,2\\right]}xy\\,dA', '@intset((x,y),0<=x<=1,0<=y<=2; {d_A})(xy)'],
+  ['\\iint_{\\left\\{\\left(r\\cos\\theta,r\\sin\\theta\\right)\\mid0\\le r\\le1,0\\le\\theta\\le2\\pi\\right\\}}r\\,dr\\,d\\theta', '@intset((r cos theta ,r sin theta ),0<=r<=1,0<= theta <=2 pi; {d_r},{d_theta})(r)'],
+  ['\\int_{0}^{\\pi}\\sin\\theta\\,d\\theta', '@int(theta,0,pi)(sin theta)'],
+  ['\\iint_{\\left\\{\\left(u,v,uv\\right)\\mid0\\le u\\le1,0\\le v\\le1\\right\\}}1\\,d\\sigma', '@intset((u,v,uv),0<=u<=1,0<=v<=1; {d_sigma})(1)'],
+]
+for (const [latex, want] of marks) check(latex, latexToText(latex), want)
 setRegions({})
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)

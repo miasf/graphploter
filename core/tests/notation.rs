@@ -1227,3 +1227,61 @@ fn dim_forms() {
     assert_eq!(value_with("@dim(Im(A))", defs), 1.0);
     assert!(error_of("@dim(A)", defs).contains("dim ker A"), "{}", error_of("@dim(A)", defs));
 }
+
+// ---- 集合・積分の範囲の書き方の自由度: 媒介変数の名前・等式で書いた曲線と曲面・積分の d の文字 ----
+
+#[test]
+fn parametric_sets_with_any_parameter_name() {
+    // 点の式の媒介変数は t・u・v でなくてもよい（座標と同じ名前 x でも）
+    same("⦃(x,x^(2))∣0<=x<=1⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
+    same("⦃(s, sin(s))∣0<=s<=6⦄", "⦃(t, sin(t))∣0<=t<=6⦄", "");
+    same("⦃(x,y,x^(2)+y^(2))∣-1<=x<=1,-1<=y<=1⦄", "⦃(u,v,u^(2)+v^(2))∣-1<=u<=1,-1<=v<=1⦄", "");
+    // 範囲の無い t・u・v を、付け替えた名前と混ぜない
+    assert!(error_of("⦃(s, t, s)∣0<=s<=1⦄", "").contains("t の範囲"));
+}
+
+#[test]
+fn regions_written_with_equations() {
+    let sqrt3 = 3f64.sqrt();
+    // 曲線 y = x²（弧長）・x = y = z（直線）
+    let arc = (5f64.sqrt() / 2.0) + (2.0 + 5f64.sqrt()).ln() / 4.0;
+    close("@intset((x,y),y=x^2,0<=x<=1; {d_s})(1)", arc, 1e-9);
+    close("@intset((x,y),y=x^2,0<=x<=1)(1)", arc, 1e-9);
+    close("@intset((x,y,z),x=y=z,0<=x<=1; {d_s})(x+y+z)", 1.5 * sqrt3, 1e-12);
+    close("@intset((x,y), x = 1, 0<=y<=2; {d_s})(y)", 2.0, 1e-12);
+    // 曲面 z = x² + y²（円板の上）: 面積 π(5√5 − 1)/6
+    close("@intset((x,y,z),z=x^2+y^2,x^2+y^2<=1; {d_S})(1)", std::f64::consts::PI * (5.0 * 5f64.sqrt() - 1.0) / 6.0, 1e-5);
+    // 1 次式にならない等式は、媒介変数で書くように言う
+    assert!(graph_core::equation::eval_constant("@intset((x,y),x^2+y^2=1; {d_s})(1)").unwrap_err().contains("媒介変数"));
+}
+
+#[test]
+fn differentials_must_match_the_region() {
+    let err = |s: &str| graph_core::equation::eval_constant(s).unwrap_err();
+    // ds の範囲が曲面・平面の領域、dA の範囲が曲線、F · dS の範囲が曲線
+    assert!(err("@intset((u, v, u v),0<=u<=1, 0<=v<=1; {d_s})(1)").contains("曲面なら dS"));
+    assert!(err("@intset((x,y),x^2+y^2<=1; {d_s})(1)").contains("平面の領域なら dA"));
+    assert!(err("@intset((x,y,z),z=x^2+y^2,x^2+y^2<=1; {d_s})(1)").contains("ds は曲線"));
+    assert!(err("@intset((x,y),y=x^2,0<=x<=1; {d_A})(1)").contains("曲線なら ds"));
+    assert!(err("@intset((cos t, sin t),0<=t<=2pi; {vec},{d_S})((-y,x))").contains("F · dr"));
+    assert!(err("@intset((x,y),x^2+y^2<=1; {d_x})(1)").contains("dx dy"));
+    // 合っていれば今までどおり
+    close("@intset((x,y),x^2+y^2<=1; {d_A})(1)", std::f64::consts::PI, 1e-6);
+    close("@intset((x,y),x^2+y^2<=1; {d_x},{d_y})(1)", std::f64::consts::PI, 1e-6);
+    close("@intset((u, v, u v),0<=u<=1, 0<=v<=1; {d_S})(1)", value("@intset((u, v, u v),0<=u<=1, 0<=v<=1)(1)"), 1e-12);
+    close("@intset((cos t, sin t),0<=t<=2pi; {vec},{d_r})((-y,x))", 2.0 * std::f64::consts::PI, 1e-9);
+    close("@intset((r cos(theta), r sin(theta)),0<=r<=1,0<=theta<=2pi; {d_A})(1)", std::f64::consts::PI, 1e-9);
+}
+
+#[test]
+fn coordinate_and_parameter_differentials() {
+    let pi = std::f64::consts::PI;
+    // 曲線の上の P dx + Q dy（向きの付いた線積分）: ∮ −y dx + x dy = 2 × 面積
+    close("@intset((cos t, sin t),0<=t<=2pi; {d_x})(-y) + @intset((cos t, sin t),0<=t<=2pi; {d_y})(x)", 2.0 * pi, 1e-9);
+    // 媒介変数そのものの d は何も掛けない（極座標の r dr dθ）
+    close("@intset((r cos theta, r sin theta),0<=r<=1,0<=theta<=2pi; {d_r},{d_theta})(r)", pi, 1e-9);
+    close("@intset((cos t, sin t),0<=t<=2pi; {d_t})(1)", 2.0 * pi, 1e-12);
+    // 曲面の上の dx dy は法線の z 成分（平面 x + y + z = 1 の三角形を xy 平面に映した面積 1/2）
+    close("@intset((u,v,1-u-v),0<=u<=1,0<=v<=1-u; {d_x},{d_y})(1)", 0.5, 1e-12);
+    close("@intset((u,v,1-u-v),0<=u<=1,0<=v<=1-u; {d_y},{d_x})(1)", -0.5, 1e-12);
+}
