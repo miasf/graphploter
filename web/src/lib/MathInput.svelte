@@ -4,7 +4,7 @@
   import { onMount } from 'svelte'
   import { fenceBareDelimiters } from './latex'
   import { findShortcut, reverseShortcuts } from './autoNames'
-  import { colBlank, colsOf, formatMatrix, insertCol, insertRow, isBlank, MAX_SIZE, parseMatrix, removeCol, removeRow, resize, rowBlank, rowsOf, type Matrix } from './matrixEdit'
+  import { colBlank, colsOf, editWithMemory, formatMatrix, isBlank, MAX_SIZE, parseMatrix, rowBlank, rowsOf, type Matrix, type MatrixOp } from './matrixEdit'
   import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
   interface Props {
@@ -174,18 +174,24 @@
     const at = findMatrix()
     if (!at) return false
     const { m, row, col } = at
-    let next = m
     let [r, c] = [row, col]
-    if (op === 'row+') [next, r] = [insertRow(m, row + 1), row + 1]
-    else if (op === 'row^') next = insertRow(m, row)
-    else if (op === 'col+') [next, c] = [insertCol(m, col + 1), col + 1]
-    else if (op === 'row-') [next, r] = [removeRow(m, row), Math.max(0, row - 1)]
-    else if (op === 'col-') [next, c] = [removeCol(m, col), Math.max(0, col - 1)]
-    else next = resize(m, rows, cols)
-    if (next === m) return false
+    let e: MatrixOp
+    if (op === 'row+') [e, r] = [{ op: 'row+', at: row + 1 }, row + 1]
+    else if (op === 'row^') e = { op: 'row+', at: row }
+    else if (op === 'col+') [e, c] = [{ op: 'col+', at: col + 1 }, col + 1]
+    else if (op === 'row-') [e, r] = [{ op: 'row-', at: row }, Math.max(0, row - 1)]
+    else if (op === 'col-') [e, c] = [{ op: 'col-', at: col }, Math.max(0, col - 1)]
+    else e = { op: 'size', rows, cols }
+    // 小さくした分の成分を覚えておき、大きさを戻したら戻す（行列の位置ごと。この入力欄の中だけ）
+    const { next, ghost } = editWithMemory(m, ghosts.get(at.start) ?? null, e)
+    ghosts.set(at.start, ghost)
+    if (formatMatrix(next) === formatMatrix(m)) return false
     replaceMatrix(at, next, r, c)
     return true
   }
+
+  /** 行列ごと（式の中の行列の位置 → 覚え）の、小さくして外れた成分の覚え（matrixEdit.ts の editWithMemory） */
+  const ghosts = new Map<number, Matrix>()
 
   /** 行列の中でのキー: Enter = 下に行、Shift + Enter = 上に行、カンマ = 右に列、Tab = 次の成分、空の行・列で Backspace = その行・列を消す */
   function matrixKey(e: KeyboardEvent) {
@@ -211,8 +217,9 @@
       done()
       if (k >= rowsOf(m) * colsOf(m)) {
         // 最後の成分で Tab: 次の行を足して、その最初の成分へ
-        const next = insertRow(m, rowsOf(m))
-        if (next !== m) replaceMatrix(at, next, rowsOf(m), 0)
+        const { next, ghost } = editWithMemory(m, ghosts.get(at.start) ?? null, { op: 'row+', at: rowsOf(m) })
+        ghosts.set(at.start, ghost)
+        if (rowsOf(next) > rowsOf(m)) replaceMatrix(at, next, rowsOf(m), 0)
         return
       }
       placeInCell(at.start, at.end, depthAt(at.start + 1), m, Math.floor(k / colsOf(m)), k % colsOf(m))

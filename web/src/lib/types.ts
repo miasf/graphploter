@@ -260,11 +260,13 @@ export interface PlotItem extends PlotStyle {
    * 積分を描くための行のうち、添えて描くもの（ベクトル場の矢印・今の点・接線・法線・場の向きと成分）なら、その役。
    * 積分の図そのものの行は undefined
    */
-  integralRole?: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component'
+  integralRole?: 'path' | 'field' | 'point' | 'tangent' | 'normal' | 'vector' | 'component' | 'riemann'
   /** 積分を描くための行: 進み具合のスライダーで動かす積分の変数（無ければスライダーを出さない） */
   auxSweep?: string
   /** 積分の式（元の式）の、図の進み具合（0〜1。積分の範囲を下の端から途中までにする。無ければ 1）。保存しない */
   integralProgress?: number
+  /** 積分の式（元の式）の、定積分の近似の図（リーマン和・台形則・シンプソン則と分割数 n）。無ければ描かない。保存しない */
+  riemann?: { method: import('./latex').RiemannMethod; n: number }
   /** 積分を描くための行: 何を描いているかの説明（描けない形なら、その理由を auxError に入れる） */
   auxNote?: string
   auxError?: string
@@ -335,6 +337,15 @@ export interface IntegralViewInfo {
   valueError?: string
   /** 添えて描いているもの（色と説明） */
   legend: { color: string; label: string; error?: string }[]
+  /** 定積分の近似（1 変数の定積分だけ。描けない形なら error） */
+  riemann?: {
+    method: import('./latex').RiemannMethod | null
+    n: number
+    /** 近似の値・正確な積分の値 */
+    approx?: number
+    exact?: number
+    error?: string
+  }
 }
 
 /** 立体の切り口: 画面の軸 axis（0: 横, 1: 奥, 2: 縦）に垂直な平面で切り、片側だけを表示する */

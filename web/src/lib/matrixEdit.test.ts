@@ -1,5 +1,5 @@
 // matrixEdit.ts のテスト。実行: npm test
-import { BLANK, blankMatrix, colBlank, formatMatrix, insertCol, insertRow, parseMatrix, removeCol, removeRow, resize, resizeMatrix, rowBlank } from './matrixEdit.ts'
+import { BLANK, blankMatrix, colBlank, editWithMemory, formatMatrix, insertCol, insertRow, parseMatrix, removeCol, removeRow, resize, resizeMatrix, rowBlank, type Matrix } from './matrixEdit.ts'
 import { latexToText } from './latex.ts'
 
 let failures = 0
@@ -51,6 +51,33 @@ check('大きさを変えても中身が残る', resize(resize(base, 3, 3), 2, 2
 // 空欄は 0 として読める（大きさを変えている途中でもエラーにならない）
 check('空欄のある行列を読む', latexToText(resizeMatrix('\\begin{pmatrix}1 & 2\\\\ 3 & 4\\end{pmatrix}', 5, 3, 3)), '⟦1,2,0;3,4,0;0,0,0⟧')
 check('新しい行列', latexToText(blankMatrix(2, 2)), '⟦0,0;0,0⟧')
+
+// 小さくしてから大きくすると、元の成分が戻る（覚え）
+{
+  const m33: Matrix = { env: 'pmatrix', cells: [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9']] }
+  let g: Matrix | null = null
+  let cur = m33
+  const step = (e: Parameters<typeof editWithMemory>[2]) => {
+    const r = editWithMemory(cur, g, e)
+    cur = r.next
+    g = r.ghost
+    return cur.cells
+  }
+  check('3×3 → 2×2', step({ op: 'size', rows: 2, cols: 2 }), [['1', '2'], ['4', '5']])
+  check('2×2 → 3×3 で元に戻る', step({ op: 'size', rows: 3, cols: 3 }), m33.cells)
+  check('3×3 → 1×3', step({ op: 'size', rows: 1, cols: 3 }), [['1', '2', '3']])
+  // 小さくしている間に書き換えた成分は、書き換えたほうが残る
+  cur = { env: 'pmatrix', cells: [['1', 'a', '3']] }
+  check('最後に行を足すと戻る', step({ op: 'row+', at: 1 }), [['1', 'a', '3'], ['4', '5', '6']])
+  check('最後の行を消して足すと戻る', (step({ op: 'row-', at: 1 }), step({ op: 'row+', at: 1 })), [['1', 'a', '3'], ['4', '5', '6']])
+  check('最後の列を消して足すと戻る', (step({ op: 'col-', at: 2 }), step({ op: 'col+', at: 2 })), [['1', 'a', '3'], ['4', '5', '6']])
+  check('大きさを戻すと 3 行目も戻る', step({ op: 'size', rows: 3, cols: 3 }), [['1', 'a', '3'], ['4', '5', '6'], ['7', '8', '9']])
+  // 途中に行を足すと、覚えも一緒にずれる（増えた行は空欄）
+  check('途中に行を足す', step({ op: 'row+', at: 1 }), [['1', 'a', '3'], ['', '', ''], ['4', '5', '6'], ['7', '8', '9']])
+  // 途中の行を消すと、覚えからも消える
+  check('途中の行を消す', (step({ op: 'size', rows: 2, cols: 3 }), step({ op: 'row-', at: 0 })), [['', '', '']])
+  check('消した行は戻らない', step({ op: 'size', rows: 3, cols: 3 }), [['', '', ''], ['4', '5', '6'], ['7', '8', '9']])
+}
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('matrixEdit.ts: すべて成功')

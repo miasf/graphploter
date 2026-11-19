@@ -57,6 +57,8 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('f∘g', '\\circ', '関数の合成'),
         key('Σ∈', '\\sum_{n\\in#?}#?', '集合の上の総和 Σ_{n ∈ S}（S は {1, 4, 9}・1 ≤ n ≤ 10, …・d ∣ 12 など）'),
         key('f(x)=', 'f\\left(x\\right)=#?', '関数の定義'),
+        key('Tₙ', '\\operatorname{Taylor}\\left(#?,x,0,#?\\right)', 'テイラー多項式 Taylor(f, x, a, n)（中心 a・n 次。多変数は Taylor(f, (x, y), (a, b), n)。説明に多項式が出る。n をスライダーにすると次数を動かせる）'),
+        key('crit', '\\operatorname{crit}#?', '停留点 crit f（∇f = 0 の点を探し、ヘッセ行列で極大・極小・鞍点に分ける。1 行にそれだけ。説明に一覧、図に点）'),
       ],
     ],
   },
@@ -88,6 +90,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('Aᵀ', '#@^{T}', '転置'),
         key('A⁻¹', '#@^{-1}', '逆行列'),
         key('ker', '\\ker', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
+        key('Im', '\\operatorname{Im}', '像 Im A（列ベクトルが張る空間）'),
         key(vecLabel('v'), '\\vec{#@}', '直前の文字をベクトルの名前にする（v の後に押すと \\vec{v}。v とは別の名前）'),
       ],
     ],
@@ -179,9 +182,11 @@ export const MATRIX_ROWS: CalcKey[][] = [
     key('Aᵀ', '#@^{T}', '転置（直前の行列に付ける）'),
     key('A⁻¹', '#@^{-1}', '逆行列'),
     key('Aⁿ', '#@^{#?}', '行列のべき（20 までの整数）'),
-    key('A†', '#@^{\\dagger}', '共役転置'),
-    key('ker', '\\ker #?', '零空間 ker A（1 行にそれだけなら、点・直線・平面）'),
+    key('ker', '\\ker #?', '零空間 ker A（1 行にそれだけなら、点・直線・平面。説明に式も出る。固有値 λ の固有空間は ker(A − λI)、I・E は単位行列）'),
+    key('Im', '\\operatorname{Im}#?', '像 Im A（列ベクトルが張る空間。1 行にそれだけなら、点・直線・平面。説明に式も出る）'),
+    key('eig', '\\operatorname{eig}#?', '固有値と固有空間（1 行にそれだけ。説明に固有値ごとの固有空間の式、図に固有ベクトル）'),
   ],
+
   [
     {
       ...key(vecLabel('v'), '\\vec{#@}', '直前の文字をベクトルの名前にする（F の後に押すと \\vec{F}。F とは別の名前で、定義して積分などに使える。長押しで太字 \\mathbf{F}・黒板太字 \\mathbb{F}。この 3 つは同じ名前）'),
@@ -196,6 +201,7 @@ export const MATRIX_ROWS: CalcKey[][] = [
     key('⟨a,b⟩', '\\left\\langle#?,#?\\right\\rangle', '内積 ⟨a, b⟩'),
     key('‖a‖', '\\left\\Vert#0\\right\\Vert', 'ノルム（大きさ）'),
     key('Aᵢⱼ', '#@_{#?,#?}', '成分 A_{i,j}'),
+    key('A†', '#@^{\\dagger}', '共役転置'),
     key('dim', '\\dim #?', '次元 dim ker A など'),
   ],
 ]

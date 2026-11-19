@@ -714,6 +714,17 @@ export class Viewer {
 
   /** 格子線の太さの倍率（全部の曲面の材質で共有する。今の画素密度 ÷ ふつうのときの画素密度） */
   private pixelScale = { value: 1 }
+  /** 表示範囲の箱（曲面の材質で共有する。箱の壁の格子線を、面の濃さと一緒に薄くするのに使う。2D では z の壁は無い） */
+  private boxUniforms = { lo: { value: new THREE.Vector3(-1e30, -1e30, -1e30) }, hi: { value: new THREE.Vector3(1e30, 1e30, 1e30) } }
+
+  /** 曲面の材質の箱を、今の表示範囲にする */
+  private updateBoxUniforms() {
+    const d = this.domain
+    if (!d) return
+    const far = 1e30
+    this.boxUniforms.lo.value.set(d.xmin, d.ymin, this.flat ? -far : d.zmin)
+    this.boxUniforms.hi.value.set(d.xmax, d.ymax, this.flat ? far : d.zmax)
+  }
 
   /**
    * 画素密度を下げている間も、線が太って見えないようにする。
@@ -1019,6 +1030,36 @@ export class Viewer {
   }
 
   /**
+   * グラフの一覧に出す小さな絵（JPEG の data URL）。今の視点で 1 コマをすぐ描いて、横 w の大きさに縮める（縦横比は画面のまま）。
+   * 描けなければ null
+   */
+  thumbnail(w = 192): string | null {
+    try {
+      this.controls.update()
+      this.updateClipRange()
+      this.updateLabelSizes()
+      this.updateStencilSides()
+      this.renderer.render(this.scene, this.camera)
+      const src = this.renderer.domElement
+      if (!src.width || !src.height) return null
+      // 縦長の画面（スマホ）でも一覧で見やすいよう、横 : 縦 = 4 : 3 に中央を切り抜く
+      const h = Math.round((w * 3) / 4)
+      const k = Math.min(src.width / w, src.height / h)
+      const sw = w * k
+      const sh = h * k
+      const c = document.createElement('canvas')
+      c.width = w
+      c.height = h
+      const ctx = c.getContext('2d')
+      if (!ctx) return null
+      ctx.drawImage(src, (src.width - sw) / 2, (src.height - sh) / 2, sw, sh, 0, 0, w, h)
+      return c.toDataURL('image/jpeg', 0.7)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 文字の画面上の大きさを、CSS ピクセルで一定にする。
    * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
    */
@@ -1109,6 +1150,7 @@ export class Viewer {
       )
     }
     this.applyClipping()
+    this.updateBoxUniforms()
     for (const p of this.plots.values()) {
       if (p.kind === 'surface') p.grid.uHeatRange.value.set(d.zmin, d.zmax)
       else this.placeDots(p.dots)
@@ -1125,6 +1167,7 @@ export class Viewer {
   setFlat(on: boolean) {
     if (this.flat === on) return
     this.flat = on
+    this.updateBoxUniforms()
     this.controls.enableRotate = !on
     this.applyButtons()
     this.controls.touches.ONE = on ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE
@@ -1851,7 +1894,7 @@ export class Viewer {
       p.cap.geometry = geo
     } else {
       // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
-      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes))
+      p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes, true))
       p.cap.frustumCulled = false // 切り口は表示範囲の中（外接球を求めない。下の曲面と同じ）
       p.group.add(p.cap)
       this.setStyle(id, style)
@@ -2000,7 +2043,7 @@ export class Viewer {
 
   private setSurface(id: number, mesh: MeshData) {
     // 表と裏は1つの材質で描く（裏面はシェーダーで暗くする）
-    const grid = createGridUniforms(this.pixelScale)
+    const grid = createGridUniforms(this.pixelScale, this.boxUniforms)
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
     const surface = new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes))
@@ -2345,7 +2388,8 @@ export class Viewer {
         }
       }
       const q = p.stencil.quad.material as THREE.MeshStandardMaterial
-      q.opacity = Math.max(opacity, 0.15)
+      // 面の濃さ 0 なら、ふたも見えなくする（透明でも描いて、ステンシルは 0 に戻す）
+      q.opacity = opacity
       q.depthWrite = !transparent
     }
     for (const mesh of p.cap ? [mesh0, p.cap] : [mesh0]) {

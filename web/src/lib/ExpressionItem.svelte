@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { hasIntegral, inlineRegions, joinTuple, regionLabel, regionsUsed, splitTuple } from './latex'
+  import { RIEMANN_METHODS, hasIntegral, inlineRegions, joinTuple, regionLabel, regionsUsed, splitTuple, type RiemannMethod } from './latex'
   import { matrixDefinition } from './matrixEdit'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
@@ -38,6 +38,8 @@
     onIntegralProgress: (v: number) => void
     /** 進み具合の再生・停止 */
     onIntegralPlay: () => void
+    /** 定積分の近似（リーマン和など）の方法と分割数を変えた（方法が null なら近似を消す） */
+    onRiemann?: (method: RiemannMethod | null, n: number) => void
     onColor: (color: string) => void
     onGrid: (grid: GridStyle) => void
     onOpacity: (opacity: number) => void
@@ -77,6 +79,8 @@
     onToggleSettings: () => void
     onToggleVertical: () => void
     onRemove: () => void
+    /** 式を複製して、すぐ下に置く */
+    onDuplicate: () => void
     /** パラメータの値を変えたとき */
     onParam: (re: number, im: number) => void
     onSlider: (slider: SliderStyle) => void
@@ -138,6 +142,7 @@
     onIntegralShow,
     onIntegralProgress,
     onIntegralPlay,
+    onRiemann,
     onColor,
     onGrid,
     onOpacity,
@@ -165,6 +170,7 @@
     onToggleSettings,
     onToggleVertical,
     onRemove,
+    onDuplicate,
     onParam,
     onSlider,
     paramPlaying,
@@ -436,6 +442,42 @@
 
   /** 積分の値を短く出す（有効 6 桁） */
   const formatValue = (v: number) => (Math.abs(v) < 1e-12 ? '0' : Number(v.toPrecision(6)).toString().replace('-', '−'))
+  /** 誤差（小さい数は指数表記） */
+  const formatError = (v: number) => {
+    const a = Math.abs(v)
+    if (a === 0) return '0'
+    if (a >= 1e-3 && a < 1e5) return formatValue(v)
+    const [m, e] = v.toExponential(2).split('e')
+    return `${m.replace('-', '−')} × 10^${Number(e)}`.replace(/\^(-?\d+)/, (_, x) => [...String(x)].map((c) => '⁻⁰¹²³⁴⁵⁶⁷⁸⁹'['-0123456789'.indexOf(c)]).join(''))
+  }
+
+  // ---- 定積分の近似: n を 1 から増やしていく再生 ----
+  let riemannPlaying = $state(false)
+  let riemannTimer: ReturnType<typeof setInterval> | undefined
+  function toggleRiemannPlay() {
+    const r = integralView?.riemann
+    if (!r?.method) return
+    if (riemannPlaying) {
+      riemannPlaying = false
+      clearInterval(riemannTimer)
+      return
+    }
+    riemannPlaying = true
+    let n = r.n >= 64 ? 1 : r.n
+    onRiemann?.(r.method, n)
+    riemannTimer = setInterval(() => {
+      const m = integralView?.riemann?.method
+      // 増やし方は、小さい n はゆっくり、大きい n は速く（1, 2, 3, …, 10, 12, 14, …）
+      n = n < 10 ? n + 1 : n < 32 ? n + 2 : n + 4
+      if (!m || n > 64) {
+        riemannPlaying = false
+        clearInterval(riemannTimer)
+        return
+      }
+      onRiemann?.(m, n)
+    }, 450)
+  }
+  $effect(() => () => clearInterval(riemannTimer))
 </script>
 
 <li class="item" class:has-error={!!item.error} class:dragging class:in-folder={!!item.folder} data-item-id={item.id}>
@@ -607,6 +649,62 @@
             途中までの積分 = <b>{formatValue(integralView.value)}</b>
           {:else}
             途中までの積分を計算中…
+          {/if}
+        </div>
+      {/if}
+      {#if integralView && !integralView.error && integralView.riemann && onRiemann}
+        {@const r = integralView.riemann}
+        <!-- 定積分の近似（リーマン和・台形則・シンプソン則）: 図と、近似の値・正確な値・誤差 -->
+        <div class="riemann">
+          <div class="riemann-methods" role="group" aria-label="定積分の近似の方法">
+            <span class="riemann-title">近似</span>
+            <button class="riemann-chip" class:on={r.method === null} aria-pressed={r.method === null} onclick={() => onRiemann(null, r.n)}>なし</button>
+            {#each RIEMANN_METHODS as m (m.id)}
+              <button
+                class="riemann-chip"
+                class:on={r.method === m.id}
+                aria-pressed={r.method === m.id}
+                title="{m.label}{m.id === 'trap' || m.id === 'simpson' ? '' : 'のリーマン和'}（誤差は {m.order}）"
+                onclick={() => onRiemann(m.id, r.n)}>{m.label}</button
+              >
+            {/each}
+          </div>
+          {#if r.method}
+            <div class="integral-sweep">
+              <span class="sweep-name" title="区間を n 等分する">n</span>
+              <input
+                type="range"
+                min="1"
+                max="64"
+                step="1"
+                value={Math.min(64, r.n)}
+                aria-label="分割数 n"
+                oninput={(e) => onRiemann(r.method, e.currentTarget.valueAsNumber)}
+              />
+              <EditableValue chars={4} value={r.n} label="分割数 n" onChange={(v) => onRiemann(r.method, v)} />
+              <button
+                class="sweep-play"
+                class:on={riemannPlaying}
+                onclick={toggleRiemannPlay}
+                aria-label={riemannPlaying ? '止める' : 'n を増やしていく'}
+                title={riemannPlaying ? '止める' : 'n を 1 から 64 まで増やしていく'}>{riemannPlaying ? '❚❚' : '▶'}</button
+              >
+            </div>
+            <div class="integral-value riemann-values">
+              {#if r.error}
+                近似の値: 計算できません（{r.error}）
+              {:else if r.approx !== undefined && r.exact !== undefined}
+                <span>近似 = <b>{formatValue(r.approx)}</b></span>
+                <span>正確な値 = <b>{formatValue(r.exact)}</b></span>
+                <span>誤差 = <b>{Math.abs(r.approx - r.exact) <= 1e-12 * Math.max(1, Math.abs(r.exact)) ? '0（丸め誤差の範囲）' : formatError(r.approx - r.exact)}</b></span>
+                <span class="sweep-hint">
+                  {RIEMANN_METHODS.find((m) => m.id === r.method)?.label}{r.method === 'trap' || r.method === 'simpson' ? '則' : 'のリーマン和'}の誤差は
+                  {RIEMANN_METHODS.find((m) => m.id === r.method)?.order}（n を 2 倍にすると、{r.method === 'simpson' ? 'およそ 1/16' : r.method === 'mid' || r.method === 'trap' ? 'およそ 1/4' : 'およそ 1/2'} になる）。{r.method === 'simpson' ? 'n は偶数にそろえる。' : ''}
+                </span>
+              {:else}
+                近似の値を計算中…
+              {/if}
+            </div>
           {/if}
         </div>
       {/if}
@@ -1262,6 +1360,7 @@
       aria-expanded={choosingFolder}
       onclick={() => (choosingFolder = !choosingFolder)}>▤</button
     >
+    <button class="icon" title="複製（すぐ下に同じ式を足す）" aria-label="複製" onclick={onDuplicate}>⧉</button>
     <button class="icon" title="削除" aria-label="削除" onclick={onRemove}>×</button>
   </div>
 </li>
@@ -1526,6 +1625,45 @@
   .integral-value {
     font-size: 12px;
     color: var(--muted);
+  }
+  .riemann {
+    display: grid;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .riemann-methods {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+  }
+  .riemann-title {
+    font-size: 12px;
+    color: var(--muted);
+    margin-right: 2px;
+  }
+  .riemann-chip {
+    font: inherit;
+    font-size: 12px;
+    padding: 1px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .riemann-chip.on {
+    background: #2d70b3;
+    border-color: #2d70b3;
+    color: #fff;
+  }
+  .riemann-values {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 12px;
+  }
+  .riemann-values .sweep-hint {
+    flex-basis: 100%;
   }
   .integral-value .sweep-hint {
     display: block;

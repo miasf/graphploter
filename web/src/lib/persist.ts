@@ -1,7 +1,8 @@
 // 式と設定の保存・共有。
-// - ブラウザ（localStorage）に自動で保存し、次に開いたときに元に戻す
-// - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）
+// - ブラウザ（localStorage）のグラフの一覧（lib/library.ts）に自動で保存し、次に開いたときは最後に開いたグラフに戻す
+// - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）。開くと、一覧に新しいグラフとして入る
 
+import { importGraph, lastGraphId, loadGraph, migrate, newId, setCurrent } from './library'
 import type { ComplexMode, CoordSystem, CutStyle, Domain, Folder, GridStyle, HiddenStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
@@ -47,6 +48,8 @@ export interface SavedItem {
 /** 保存する状態全体 */
 export interface SavedState {
   version: 1
+  /** グラフの名前（古い保存データには無い。無ければ「無題のグラフ」） */
+  title?: string
   items: SavedItem[]
   domain: Domain
   resolution: number
@@ -81,7 +84,6 @@ export interface SavedState {
   rotOwn?: boolean
 }
 
-const STORAGE_KEY = 'graphploter:state'
 const HASH_PREFIX = '#s='
 
 /** バイト列 → URL に入れられる base64（+ / = を使わない形） */
@@ -107,7 +109,7 @@ async function decompress(bytes: Uint8Array): Promise<string> {
   return await new Response(stream).text()
 }
 
-function isState(x: unknown): x is SavedState {
+export function isState(x: unknown): x is SavedState {
   const s = x as SavedState
   const ok = !!s && typeof s === 'object' && s.version === 1 && Array.isArray(s.items) && validDomain(s.domain) && !!s.space && typeof s.space === 'object'
   if (!ok) return false
@@ -131,53 +133,44 @@ function validDomain(d: unknown): d is Domain {
   return ['x', 'y', 'z'].every((a) => num(a + 'min') && num(a + 'max') && (v[a + 'min'] as number) < (v[a + 'max'] as number))
 }
 
-/** ブラウザに保存する */
-export function saveLocal(state: SavedState) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // 保存できない環境（プライベートモードなど）では何もしない
-  }
-}
-
-/** ブラウザに保存した状態を消す */
-export function clearLocal() {
-  try {
-    localStorage.removeItem(STORAGE_KEY)
-  } catch {
-    // 何もしない
-  }
-}
-
 /** 共有リンク（今のページの URL の # の後ろに状態を入れたもの）を作る */
 export async function shareUrl(state: SavedState): Promise<string> {
   const data = toBase64Url(await compress(JSON.stringify(state)))
   return `${location.origin}${location.pathname}${HASH_PREFIX}${data}`
 }
 
+/** 最初に開くグラフ: id と状態（新しいグラフなら状態は null）。`shared` は共有リンクから開いたか */
+export interface Initial {
+  id: string
+  state: SavedState | null
+  shared: boolean
+}
+
 /**
- * 最初に読み込む状態。共有リンクで開いたならその状態、そうでなければブラウザに保存した状態。
- * どちらも無い（または壊れている）なら null
+ * 最初に読み込むグラフ。共有リンクで開いたなら、その状態を新しいグラフとして一覧に入れて開く。
+ * そうでなければ、最後に開いたグラフ。どれも無い（または壊れている）なら、新しいグラフ（状態は null）
  */
-export async function loadInitial(): Promise<SavedState | null> {
+export async function loadInitial(): Promise<Initial> {
+  migrate()
   if (location.hash.startsWith(HASH_PREFIX)) {
     try {
       const s = JSON.parse(await decompress(fromBase64Url(location.hash.slice(HASH_PREFIX.length))))
-      // 共有リンクの状態は一度読み込んだら URL から消す（以後はブラウザへの保存で続ける）
+      // 共有リンクの状態は一度読み込んだら URL から消す（以後は一覧のグラフとして保存を続ける）
       history.replaceState(null, '', location.pathname + location.search)
-      if (isState(s)) return s
+      if (isState(s)) {
+        const title = (s.title ?? '').trim() || '共有されたグラフ'
+        const id = importGraph({ ...s, title }) ?? newId()
+        setCurrent(id)
+        return { id, state: { ...s, title }, shared: true }
+      }
     } catch {
       // 壊れたリンクは無視する
     }
   }
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) {
-      const s = JSON.parse(raw)
-      if (isState(s)) return s
-    }
-  } catch {
-    // 何もしない
+  const id = lastGraphId()
+  if (id) {
+    const s = loadGraph(id)
+    if (isState(s)) return { id, state: s, shared: false }
   }
-  return null
+  return { id: newId(), state: null, shared: false }
 }

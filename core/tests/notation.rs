@@ -802,8 +802,9 @@ fn matrices_draw_the_same_mesh() {
 fn matrix_errors_and_sizes() {
     assert!(error_of("z = @det(⟦1,2,3;4,5,6⟧ ⟦1,2;3,4⟧) + x", "").contains("2×3 の行列と 2×2 の行列は掛けられません"));
     assert!(error_of("z = @det(⟦1,2,3;4,5,6⟧) + x", "").contains("正方行列"));
-    // 正方でない行列だけの行は描けない（2×2・3×3 は、列ベクトルを描く。M7）
-    assert!(error_of("⟦1,2,3;4,5,6⟧", "").contains("行列だけの行"));
+    // 行が 2・3 の行列だけの行は、正方でなくても列ベクトルを描く。行が 4 以上なら描けない
+    assert_eq!(error_of("⟦1,2,3;4,5,6⟧", ""), "");
+    assert!(error_of("⟦1,2;3,4;5,6;7,8⟧", "").contains("行列だけの行"));
     assert_eq!(error_of("⟦1,2;3,4⟧", ""), "");
     assert!(error_of("z = @tr(⟦1,2;2,4⟧^(-1)) + x", "").contains("逆行列はありません"));
     assert!(error_of("z = A_(3,1) + x", "A = ⟦1,2;3,4⟧").contains("成分はありません"));
@@ -852,7 +853,7 @@ fn linear_systems_are_reduced() {
 fn kernel_and_image() {
     // ker ⟦1, 1, 1⟧ は平面 x + y + z = 0（表示範囲の箱の中だけ）
     let m = run("@ker(⟦1, 1, 1⟧)", "", &[]).unwrap();
-    assert!(m.kind().contains("ker A（2 次元。平面）"), "{}", m.kind());
+    assert!(m.kind().contains("x + y + z = 0（2 次元。平面）"), "{}", m.kind());
     let p = points("@ker(⟦1, 1, 1⟧)", "");
     assert!(p.len() > 100);
     assert!(p.iter().all(|v| (v[0] + v[1] + v[2]).abs() < 1e-5 && v.iter().all(|c| c.abs() <= 3.0 + 1e-5)));
@@ -1308,4 +1309,53 @@ fn integrals_over_unions_and_set_operations() {
     close("@intset((x,y),(x,y)∈⦃(x,y)∣x^(2)+y^(2)<=1⦄ ∖ ⦃(x,y)∣y>=0⦄; {d_A})(1)", pi / 2.0, 1e-6);
     // 平面全体（端が ∞）
     close("@intset((x,y),-∞<=x<=∞,-∞<=y<=∞; {d_A})(e^(-x^(2)-y^(2)))", pi, 1e-9);
+}
+
+#[test]
+fn kernel_and_image_formulas() {
+    let kind = |defs: &str, src: &str| run(src, defs, &[]).unwrap().kind().to_string();
+    // 張るベクトル・媒介変数表示・方程式を、小さい整数で出す。名前は書いた行列の名前
+    assert_eq!(kind("A= ⟦1,2;2,4⟧", "@ker A"), "ker A = span{(2, −1)}、(x, y) = t(2, −1)、x + 2y = 0（1 次元。直線）");
+    assert_eq!(kind("A= ⟦1,2;2,4⟧", "Im A"), "Im A = span{(1, 2)}、(x, y) = t(1, 2)、2x − y = 0（1 次元。直線）");
+    assert_eq!(kind("B= ⟦1,2,3;0,1,1⟧", "@ker B"), "ker B = span{(1, 1, −1)}、(x, y, z) = t(1, 1, −1)、x + z = 0, y + z = 0（1 次元。直線）");
+    assert_eq!(kind("B= ⟦1,2,3;0,1,1⟧", "Im B"), "Im B = ℝ²（2 次元。平面）");
+    assert_eq!(kind("D= ⟦1,1,1;1,1,1;1,1,1⟧", "@ker D"), "ker D = span{(1, −1, 0), (1, 0, −1)}、(x, y, z) = s(1, −1, 0) + t(1, 0, −1)、x + y + z = 0（2 次元。平面）");
+    assert_eq!(kind("E= ⟦1,0;0,1⟧", "@ker E"), "ker E = {0}（0 次元。原点）");
+    // 描けない次元でも、式は誤りの文に出す
+    assert!(error_of("@ker F", "F= ⟦1,2,3,4;0,1,1,1⟧").starts_with("ker F = span{(1, 1, −1, 0), (2, 1, 0, −1)}"));
+}
+
+#[test]
+fn non_square_matrix_definitions_draw_columns() {
+    // 行が 2・3 なら、正方でなくても列ベクトルを描く
+    let m = run("B= ⟦1,2,3;0,1,1⟧", "B= ⟦1,2,3;0,1,1⟧", &[]).unwrap();
+    assert!(!m.positions().is_empty() || m.kind().contains("列ベクトル"));
+    let m = run("H= ⟦1,2;0,1;1,1⟧", "H= ⟦1,2;0,1;1,1⟧", &[]).unwrap();
+    assert!(!m.positions().is_empty() || m.kind().contains("列ベクトル"));
+}
+
+#[test]
+fn im_is_image_only_for_real_matrices() {
+    // 行全体が Im(実数の行列（列が 2 つ以上）) なら像。ベクトル・複素数の成分・式の中は虚部（成分ごと）
+    assert!(run("Im A", "A= ⟦1,2;2,4⟧", &[]).unwrap().kind().starts_with("Im A = span{(1, 2)}"));
+    same("Im {vec_b}", "(1, 0, 3)", "{vec_b}=(1+i,2,3i)");
+    same("z = Im((x + i y)^(2))", "z = 2 x y", "");
+}
+
+#[test]
+fn eigenvalues_and_eigenspaces() {
+    let kind = |defs: &str, src: &str| run(src, defs, &[]).unwrap().kind().to_string();
+    // 固有値ごとの固有空間（重複度・対角化できないこと・実数でない固有値も）
+    assert_eq!(
+        kind("A= ⟦2,1;1,2⟧", "@eig A"),
+        "A の固有値 ／ λ = 1: E(1) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0 ／ λ = 3: E(3) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0"
+    );
+    assert!(kind("B= ⟦1,1;0,1⟧", "@eig B").contains("λ = 1（2 重）: E(1) = span{(1, 0)}") && kind("B= ⟦1,1;0,1⟧", "@eig B").contains("対角化できない"));
+    assert!(kind("C= ⟦0,-1;1,0⟧", "@eig C").contains("λ = ±i（実数でないので固有空間は描かない）"));
+    assert!(kind("D= ⟦2,0,0;0,2,0;0,0,3⟧", "@eig D").contains("λ = 2（2 重）: E(2) = span{(1, 0, 0), (0, 1, 0)}"));
+    assert!(error_of("@eig J", "J= ⟦1,2,3;4,5,6⟧").contains("正方行列"));
+    // 決まった固有値の固有空間 ker(A − λI)。単位行列は I か E
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(A-3I)"), "ker (A − 3I) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0（1 次元。直線）");
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(1E - A)"), "ker (1E − A) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）");
+    assert!(error_of("@ker(A - 3)", "A= ⟦2,1;1,2⟧").contains("単位行列は I か E"));
 }
