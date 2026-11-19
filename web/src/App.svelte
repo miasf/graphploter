@@ -7,7 +7,11 @@
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
-  import { clearLocal, loadInitial, saveLocal, shareUrl, type SavedState } from './lib/persist'
+  import { loadInitial, shareUrl, type SavedState } from './lib/persist'
+  import {
+    UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
+  } from './lib/library'
+  import GraphsDialog from './lib/GraphsDialog.svelte'
   import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
   import { setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
@@ -149,8 +153,11 @@
       return () => viewer?.dispose()
     }
     ;(async () => {
-      // 共有リンクで開いた、またはブラウザに保存してあるなら、その状態に戻す
-      const saved = await loadInitial()
+      // 共有リンクで開いたならその状態、そうでなければ最後に開いたグラフに戻す（どちらも無ければ新しいグラフ）
+      blankState = snapshot()
+      const init = await loadInitial()
+      graphId = init.id
+      const saved = init.state
       if (saved) {
         // 読み込めない保存データ（別の版のものなど）で止まると、開き直しても同じ所で止まり続ける。最初の状態に戻して続ける
         const fresh = snapshot()
@@ -177,6 +184,113 @@
 
   /** 保存した状態を読み込み終わったか（それまでは自動保存しない） */
   let loaded = $state(false)
+
+  // ---- グラフの一覧（lib/library.ts。このブラウザに、グラフごとに保存する）----
+
+  /** 開いているグラフの id と名前 */
+  let graphId = $state('')
+  let graphTitle = $state(UNTITLED)
+  /** 何も書いていない最初の状態（「新しいグラフ」「最初の状態に戻す」に使う） */
+  let blankState: SavedState | null = null
+  /** 一覧の画面を開いているか・一覧の中身 */
+  let graphsOpen = $state(false)
+  let graphList = $state<GraphMeta[]>([])
+  /** 最後の保存に失敗したか（容量がいっぱいなど） */
+  let saveFailed = $state(false)
+  /** 最後に小さな絵を撮った時刻 */
+  let lastThumb = 0
+
+  $effect(() => {
+    document.title = graphTitle && graphTitle !== UNTITLED ? `${graphTitle} – graphploter` : 'graphploter'
+  })
+
+  /** 今のグラフの小さな絵を撮って一覧に付ける */
+  function takeThumb() {
+    if (!graphId || !viewer) return
+    const t = viewer.thumbnail()
+    if (t) setThumb(graphId, t)
+    lastThumb = Date.now()
+  }
+
+  function refreshGraphs() {
+    graphList = listGraphs()
+  }
+
+  function openGraphs() {
+    flushSave()
+    takeThumb()
+    refreshGraphs()
+    graphsOpen = true
+  }
+
+  /** 今のグラフが空（式が 1 つも無い）か */
+  function currentEmpty() {
+    return isEmptyState(snapshot())
+  }
+
+  /** 読み込み直して、次のグラフを開く（式・計算・再生の状態を確実に入れ替えるため、ページごと読み込み直す） */
+  function reloadInto(prepare: () => void) {
+    flushSave()
+    takeThumb()
+    // 何も書いていない今のグラフは、一覧に残さない
+    if (currentEmpty()) deleteGraph(graphId)
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
+    prepare()
+    location.reload()
+  }
+
+  function openGraph(id: string) {
+    if (id === graphId) {
+      graphsOpen = false
+      return
+    }
+    reloadInto(() => setCurrent(id))
+  }
+
+  function newGraph() {
+    if (currentEmpty()) {
+      graphsOpen = false
+      return
+    }
+    reloadInto(markNew)
+  }
+
+  function removeGraph(id: string) {
+    const title = graphList.find((m) => m.id === id)?.title ?? UNTITLED
+    if (!confirm(`「${title}」を削除します。元に戻せません。よろしいですか？`)) return
+    if (id !== graphId) {
+      deleteGraph(id)
+      refreshGraphs()
+      return
+    }
+    // 開いているグラフを消したら、次に新しいものを開く（無ければ新しいグラフ）
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
+    deleteGraph(id)
+    const next = lastGraphId()
+    if (next) setCurrent(next)
+    else markNew()
+    location.reload()
+  }
+
+  function copyGraph(id: string) {
+    flushSave()
+    const nid = duplicateGraph(id)
+    if (nid) reloadInto(() => setCurrent(nid))
+  }
+
+  function renameAny(id: string, title: string) {
+    if (id === graphId) {
+      graphTitle = title.trim() || UNTITLED
+      flushSave()
+    } else {
+      renameGraph(id, title)
+    }
+    refreshGraphs()
+  }
 
   /** 式 1 つの、保存する分の設定 */
   function savedItem(it: PlotItem) {
@@ -214,6 +328,7 @@
   function snapshot(): SavedState {
     return $state.snapshot({
       version: 1 as const,
+      title: graphTitle,
       items: listed().map(savedItem),
       groups,
       coordSystems: coordSystems.length > 0 ? coordSystems : undefined,
@@ -251,6 +366,7 @@
 
   function restore(s: SavedState) {
     nextId = 1
+    graphTitle = typeof s.title === 'string' && s.title.trim() ? s.title : UNTITLED
     regions = { ...(s.regions ?? {}) }
     setRegions(regions)
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
@@ -302,7 +418,14 @@
   function flushSave() {
     clearTimeout(saveTimer)
     saveTimer = undefined
-    if (unsaved) saveLocal(unsaved)
+    if (unsaved && graphId) {
+      // 開いただけの空のグラフは一覧に入れない（式を書いたら入る）
+      if (!isEmptyState(unsaved) || listGraphs().some((m) => m.id === graphId)) {
+        saveFailed = !saveGraph(graphId, unsaved)
+        // 小さな絵は、変わってから 10 秒ごとまで（描き直しの手間を減らす）
+        if (!saveFailed && Date.now() - lastThumb > 10000) takeThumb()
+      }
+    }
     unsaved = null
   }
   $effect(() => {
@@ -331,12 +454,12 @@
   }
 
   function resetAll() {
-    if (!confirm('式と設定をすべて最初の状態に戻します。よろしいですか？')) return
+    if (!confirm('このグラフの式と設定をすべて最初の状態に戻します（名前は残します）。よろしいですか？')) return
     // 読み込み直す前（ページを閉じるとき）に今の状態が保存し直されないようにする
     loaded = false
     unsaved = null
     clearTimeout(saveTimer)
-    clearLocal()
+    if (blankState) saveGraph(graphId, { ...blankState, title: graphTitle })
     location.reload()
   }
 
@@ -470,7 +593,7 @@
     { id: 'look', icon: '◎', label: '見え方', desc: '動かしている間の画質、遠近感、視点のリセット、背景' },
     { id: 'control', icon: '✥', label: 'マウス操作', desc: '操作モード A / B の切り替え' },
     { id: 'cut', icon: '✂', label: '切り口', desc: '立体を平面で切る' },
-    { id: 'save', icon: '⇪', label: '保存・共有', desc: '共有リンク、最初の状態に戻す' },
+    { id: 'save', icon: '⇪', label: '保存・共有', desc: 'グラフの一覧、共有リンク、最初の状態に戻す' },
     { id: 'help', icon: '?', label: '書き方のヒント', desc: '式の書き方と操作' },
   ]
   let settingsCat = $state<SettingsCat | null>(null)
@@ -2627,6 +2750,22 @@
   onkeydown={(e) => e.key === 'Escape' && settingsOpen && closeSettings()}
 />
 
+{#if graphsOpen}
+  <GraphsDialog
+    graphs={graphList}
+    currentId={graphId}
+    {saveFailed}
+    {shareMessage}
+    onClose={() => (graphsOpen = false)}
+    onOpen={openGraph}
+    onNew={newGraph}
+    onDelete={removeGraph}
+    onDuplicate={copyGraph}
+    onRename={renameAny}
+    onShare={copyShareLink}
+  />
+{/if}
+
 <div class="app" style:--panel-w={panelWidth === null ? null : `${panelWidth}px`}>
   <aside
     class="panel"
@@ -2648,7 +2787,26 @@
     >
       <span class="grip"></span>
       <h1>graphploter</h1>
-      <span class="subtitle">3D グラフ</span>
+      <!-- グラフの名前とグラフの一覧。シートのつまみのドラッグにならないよう、押した操作をここで止める -->
+      <input
+        class="graph-title"
+        value={graphTitle}
+        aria-label="グラフの名前"
+        title="グラフの名前（押して変える）"
+        onpointerdown={(e) => e.stopPropagation()}
+        onkeydown={(e) => {
+          e.stopPropagation()
+          if (e.key === 'Enter') e.currentTarget.blur()
+        }}
+        onchange={(e) => (graphTitle = e.currentTarget.value.trim() || UNTITLED)}
+      />
+      <button
+        class="graphs-btn"
+        onpointerdown={(e) => e.stopPropagation()}
+        onclick={openGraphs}
+        title="グラフの一覧（新しいグラフ・開く・共有）"
+        aria-label="グラフの一覧"
+      >☰ グラフ</button>
     </header>
 
     <div class="panel-body">
@@ -3190,8 +3348,12 @@
 
 
           {:else if settingsCat === 'save'}
-            <p class="note">式と設定はこのブラウザに自動で保存され、次に開いたときに元に戻ります。</p>
+            <p class="note">
+              式と設定は、グラフごとにこのブラウザに自動で保存されます。次にサイトを開くと、最後に開いたグラフが開きます。
+              共有リンクには、グラフの中身がまるごと入ります（サーバーには送りません）。リンクを開いた人の一覧には、新しいグラフとして入ります。
+            </p>
             <div class="buttons">
+              <button class="secondary" onclick={() => { closeSettings(); openGraphs() }}>グラフの一覧</button>
               <button class="secondary" onclick={copyShareLink}>共有リンクをコピー</button>
               <button class="secondary" onclick={resetAll}>最初の状態に戻す</button>
             </div>
@@ -3347,7 +3509,7 @@
   }
   .title {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
@@ -3360,9 +3522,37 @@
     margin: 0;
     font-size: 18px;
   }
-  .subtitle {
-    color: var(--muted);
+  .graph-title {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 3px 6px;
+    text-overflow: ellipsis;
+  }
+  .graph-title:hover,
+  .graph-title:focus {
+    border-color: var(--border);
+    outline: none;
+  }
+  .graphs-btn {
+    flex-shrink: 0;
+    font: inherit;
     font-size: 13px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .graphs-btn:hover {
+    background: var(--hover);
   }
   .list {
     list-style: none;

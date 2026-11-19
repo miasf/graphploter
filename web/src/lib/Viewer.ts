@@ -1030,6 +1030,36 @@ export class Viewer {
   }
 
   /**
+   * グラフの一覧に出す小さな絵（JPEG の data URL）。今の視点で 1 コマをすぐ描いて、横 w の大きさに縮める（縦横比は画面のまま）。
+   * 描けなければ null
+   */
+  thumbnail(w = 192): string | null {
+    try {
+      this.controls.update()
+      this.updateClipRange()
+      this.updateLabelSizes()
+      this.updateStencilSides()
+      this.renderer.render(this.scene, this.camera)
+      const src = this.renderer.domElement
+      if (!src.width || !src.height) return null
+      // 縦長の画面（スマホ）でも一覧で見やすいよう、横 : 縦 = 4 : 3 に中央を切り抜く
+      const h = Math.round((w * 3) / 4)
+      const k = Math.min(src.width / w, src.height / h)
+      const sw = w * k
+      const sh = h * k
+      const c = document.createElement('canvas')
+      c.width = w
+      c.height = h
+      const ctx = c.getContext('2d')
+      if (!ctx) return null
+      ctx.drawImage(src, (src.width - sw) / 2, (src.height - sh) / 2, sw, sh, 0, 0, w, h)
+      return c.toDataURL('image/jpeg', 0.7)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 文字の画面上の大きさを、CSS ピクセルで一定にする。
    * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
    */
