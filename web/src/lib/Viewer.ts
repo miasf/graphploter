@@ -1384,6 +1384,7 @@ export class Viewer {
     this.dirty = true
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
+    for (const h of this.holeMarks.values()) (h.material as THREE.ShaderMaterial).uniforms.uBg.value.set(this.theme.background)
     if (this.domain) this.buildFrame(this.domain)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
   }
@@ -1528,7 +1529,15 @@ export class Viewer {
     }
     const gridGeo = new THREE.BufferGeometry()
     gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
-    this.frame.add(new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: t.grid })))
+    const floorGrid = new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: t.grid }))
+    if (!this.flat) {
+      // 3D: 床の方眼は、図形よりいつも奥に見せる（最初に描き、深さを書かない）。下から見上げると、床（z = 0）は上の図形より手前にあるので、
+      // 深さのとおりに描くと方眼が図形の上に重なって、図形にひびが入ったように見えた（floor(x) + floor(y) + floor(z) = 0 の立方体）。
+      // 軸・枠は深さのとおりに描く（面を貫く軸の見え方を残す）
+      floorGrid.material.depthWrite = false
+      floorGrid.renderOrder = -10000
+    }
+    this.frame.add(floorGrid)
 
     // 座標軸（原点を通る。原点が範囲外なら範囲の端に寄せる）
     const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v))
@@ -1565,6 +1574,23 @@ export class Viewer {
       // 2D 表示では左の辺に並べる
       const x = this.flat ? d.xmin - pad * 1.3 : d.xmax + pad
       this.frame.add(label(fmt(y), 'tick', new THREE.Vector3(x, y, zFloor)))
+    }
+    if (!this.flat) {
+      // 3D: 床の方眼・軸・枠の線を、深さだけ少し奥へずらす。面とちょうど同じ所にある線（floor(x) + floor(y) + floor(z) = 0 の
+      // z = 0 の上面・平面 z = 0）は、深さが同じになって、線がぶつぶつに見える（ちらつく）。面の上に描く境目の線・≠ の点線は
+      // ずらさないので、面の上にそのまま見える
+      this.frame.traverse((o) => {
+        if (o instanceof THREE.LineSegments) {
+          const m = o.material as THREE.Material
+          m.onBeforeCompile = (shader) => {
+            shader.vertexShader = shader.vertexShader.replace(
+              '#include <project_vertex>',
+              '#include <project_vertex>\n  gl_Position.z += 3e-4 * gl_Position.w;',
+            )
+          }
+          m.customProgramCacheKey = () => 'frame-behind'
+        }
+      })
     }
     if (this.flat) {
       // 枠・方眼・軸は、z = 0 にある図形の下に描く（同じ高さで重なってちらつかないように）
@@ -1732,6 +1758,7 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
+    this.setHoles(id, mesh)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
     this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'), style.render === 'gpu')
@@ -2526,6 +2553,17 @@ export class Viewer {
     dots.userData.pos = pos
     dots.userData.scale = scale
     this.placeDots(dots)
+    // 視点が動いたら、画面の上の大きさの上限に合わせて置き直す（点が少ないときだけ。多い点の集まりは空間の大きさのまま）
+    if (pos.length / 3 <= 4096) {
+      dots.onBeforeRender = (_r, _s, camera) => {
+        const c = camera as THREE.PerspectiveCamera
+        const key = `${c.position.x},${c.position.y},${c.position.z},${c.fov},${this.viewH}`
+        if (dots.userData.camKey !== key) {
+          dots.userData.camKey = key
+          this.placeDots(dots)
+        }
+      }
+    }
     return dots
   }
 
@@ -2533,11 +2571,19 @@ export class Viewer {
   private placeDots(dots: THREE.InstancedMesh) {
     const d = this.domain
     const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin, this.flat ? 0 : d.zmax - d.zmin) : 10
-    const r = span * 0.008 * dots.userData.scale
+    const r = span * 0.006 * dots.userData.scale
     const pos = dots.userData.pos as number[]
     const m = new THREE.Matrix4()
+    // 空間の大きさ（表示範囲の 0.6 %）のまま描くが、画面の上で半径 4 画素（太さの倍率をかける）を超えないようにする。
+    // 拡大して近づくと、点が画面を覆うほど大きな球になっていた（線積分の「今の点」）
+    const cam = this.camera
+    const perPixel = (2 * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2)) / Math.max(1, this.viewH)
+    const cap = 4 * dots.userData.scale * perPixel
     for (let i = 0; i < dots.count; i++) {
-      m.makeScale(r, r, r).setPosition(pos[3 * i], pos[3 * i + 1], pos[3 * i + 2])
+      const x = pos[3 * i], y = pos[3 * i + 1], z = pos[3 * i + 2]
+      const dist = Math.hypot(x - cam.position.x, y - cam.position.y, z - cam.position.z)
+      const ri = Math.min(r, cap * dist)
+      m.makeScale(ri, ri, ri).setPosition(x, y, z)
       dots.setMatrixAt(i, m)
     }
     dots.instanceMatrix.needsUpdate = true
@@ -2598,6 +2644,56 @@ export class Viewer {
 
   /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
   private styles = new Map<number, PlotStyle>()
+  /** ≠ で除いた点の白丸（式ごと）。曲線を GPU の 2D の描き方で描いて線を隠すときも見えるよう、図形とは別に置く */
+  private holeMarks = new Map<number, THREE.Points>()
+
+  /** ≠ で除いた点に白丸を置く（中を背景の色で塗り、縁を図形の色にする。画面の上の大きさは一定） */
+  private setHoles(id: number, mesh: MeshData) {
+    const old = this.holeMarks.get(id)
+    if (old) {
+      this.scene.remove(old)
+      old.geometry.dispose()
+      ;(old.material as THREE.Material).dispose()
+      this.holeMarks.delete(id)
+    }
+    if (!mesh.holes || mesh.holes.length === 0) return
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(mesh.holes, 3))
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(this.styles.get(id)?.color ?? '#2b6cb0') },
+        uBg: { value: new THREE.Color(this.theme.background) },
+        uSize: { value: 11 * this.renderer.getPixelRatio() },
+      },
+      vertexShader: `
+        uniform float uSize;
+        void main() {
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          // 線・面と同じ深さで重なってちらつかないよう、少し手前に出す
+          gl_Position.z -= 2e-3 * gl_Position.w;
+          gl_PointSize = uSize;
+        }`,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform vec3 uBg;
+        void main() {
+          float r = length(gl_PointCoord - 0.5) * 2.0;
+          if (r > 1.0) discard;
+          float ring = smoothstep(0.5, 0.62, r);
+          gl_FragColor = vec4(mix(uBg, uColor, ring), 1.0 - smoothstep(0.88, 1.0, r));
+          // 色は線形の値で持っているので、画面の色空間（sRGB）に直す（線・面の材質と同じ色に見えるように）
+          #include <colorspace_fragment>
+        }`,
+      transparent: true,
+    })
+    const pts = new THREE.Points(geo, mat)
+    pts.frustumCulled = false
+    pts.renderOrder = 10
+    pts.raycast = () => {}
+    pts.visible = this.styles.get(id)?.visible ?? true
+    this.holeMarks.set(id, pts)
+    this.scene.add(pts)
+  }
 
   /** 色・表示/非表示・格子線などの見た目だけを変える（計算し直さない） */
   setStyle(id: number, style: PlotStyle) {
@@ -2612,6 +2708,11 @@ export class Viewer {
     this.styles.set(id, style)
     this.dirty = true
     const c = new THREE.Color(style.color)
+    const holes = this.holeMarks.get(id)
+    if (holes) {
+      holes.visible = style.visible
+      ;(holes.material as THREE.ShaderMaterial).uniforms.uColor.value.copy(c)
+    }
 
     if (p.kind === 'curve') {
       p.line.visible = style.visible
@@ -2693,6 +2794,7 @@ export class Viewer {
   }
 
   removePlot(id: number) {
+    this.setHoles(id, { holes: undefined } as MeshData)
     this.setPoi(id, undefined)
     this.curvePts.delete(id)
     if (this.pickFor === id) this.showPick(null)

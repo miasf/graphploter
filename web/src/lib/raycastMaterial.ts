@@ -82,31 +82,100 @@ export function applyShownRotation(ray: RaycastUniforms, axes: number[], t: Arra
 
 
 
-/** main の最初に差し込む: 光線を飛ばし、当たらなければ捨てる。当たれば、光の計算・格子線が使う値を差し替え、深さを書く */
-const RAY_MAIN = /* glsl */ `
-{
-  vec3 ro = cameraPosition;
-  vec3 rd = normalize(vRayWorld - cameraPosition);
+/**
+ * 光線が箱・カメラの手前の面・切り口の平面で切られた区間 [t0, t1]（空なら t0 ≥ t1）。
+ * カメラが箱の中にいるとき、光線はカメラの位置（t = 0）から始まる。1 画素の大きさ（uPixel · t）は t = 0 で 0 になるので、
+ * 面が密な式（tan(xyz) = 1 など）ではカメラのすぐ手前を際限なく細かく分け、繰り返しの上限まで使い切っていた（拡大して 1 コマ 0.5 秒）。
+ * メッシュと同じく、カメラの手前の面（near）より近い所は描かない
+ */
+const RAY_RANGE = /* glsl */ `
+vec2 gRayRange(vec3 ro, vec3 rd) {
   vec2 tr = gRayBox(ro, rd);
-  // カメラが箱の中にいるとき、光線はカメラの位置（t = 0）から始まる。1 画素の大きさ（uPixel · t）は t = 0 で 0 になるので、
-  // 面が密な式（tan(xyz) = 1 など）ではカメラのすぐ手前を際限なく細かく分け、繰り返しの上限まで使い切っていた（拡大して 1 コマ 0.5 秒）。
-  // メッシュと同じく、カメラの手前の面（near）より近い所は描かない
   tr.x = max(tr.x, uNear);
   if (uCutOn > 0.5) {
     float s0 = dot(uCut.xyz, ro) + uCut.w;
     float sd = dot(uCut.xyz, rd);
     if (sd == 0.0) {
-      if (s0 < 0.0) discard;
+      if (s0 < 0.0) return vec2(1.0, 0.0);
     } else {
       float tc = -s0 / sd;
       if (sd > 0.0) tr.x = max(tr.x, tc); else tr.y = min(tr.y, tc);
     }
   }
-  if (!(tr.x < tr.y)) discard;
-  // 光線は表示中の座標のまま。式の座標への 1 次式は gRayV・gRayI・gRayGrad の中で掛ける（勾配も表示中の座標についてのもの）
-  float tHit;
-  int res = gRay(ro, rd, tr.x, tr.y, tHit);
+  return tr;
+}
+`
+
+/** main の最初に差し込む: 光線を飛ばし、当たらなければ捨てる。当たれば、光の計算・格子線が使う値を差し替え、深さを書く */
+const RAY_MAIN = /* glsl */ `
+{
+  vec3 ro = cameraPosition;
+  vec3 rd = normalize(vRayWorld - cameraPosition);
+  // 隣の画素への光線の向きの差（輪郭の画素で、画素の中の別の位置へ光線を飛ばすのに使う）。捨てる前に求める
+  // （2 × 2 の画素の組のどれかを先に捨てると、微分が決まらない）
+  vec3 dRx = dFdx(rd);
+  vec3 dRy = dFdy(rd);
+  // 光線は表示中の座標のまま。式の座標への 1 次式は gRayV・gRayI・gRayGrad の中で掛ける（勾配も表示中の座標についてのもの）。
+  // 輪郭のアンチエイリアス: 真ん中の光線が当たった画素は、画素の中の 4 点（回した格子）へも光線を飛ばし、当たった割合を MSAA の標本に
+  // 割り振る（alphaToCoverage）。4 本とも、まず当たった深さの前後 2 画素分だけを探し（面の上なら区間演算 数回で済む）、無ければ
+  // （輪郭の外へはみ出した・別の面の縁にかかった）光線の全体を探す。別の面に当たれば覆われているとみなす（段差の継ぎ目を出さない）。
+  // 視点を動かしている間（uMaxIter が RAY_STILL の 256 より少ない）はしない（輪郭の画素で光線が最大 5 倍になり、動きが重くなる）。
+  // 光線の探索（gRay）を呼ぶ所は 1 か所にする（s = 0 が真ん中、s = 1〜8 が 4 本の手前の探索・その先の探索）。呼ぶ所ごとに式の中身が
+  // 複製されて、シェーダーのコンパイルが何秒も重くなるため（ジャイロイドで 7.5 → 11〜14 秒になった）
+  float tHit = 0.0;
+  int res = 0;
+  int nSub = 0;
+  bool aa = uProbe < 0.5 && uMaxIter >= 256;
+  bool found = false;
+  for (int s = 0; s < 9; s++) {
+    if (s > 0 && (res == 0 || !aa)) break;
+    int k = max(s - 1, 0) / 2;
+    bool second = s > 0 && s - 1 - 2 * k == 1;
+    if (second && found) continue;
+    vec2 o = k == 0 ? vec2(-0.125, -0.375) : k == 1 ? vec2(0.375, -0.125) : k == 2 ? vec2(0.125, 0.375) : vec2(-0.375, 0.125);
+    vec3 d = s == 0 ? rd : normalize(rd + dRx * o.x + dRy * o.y);
+    vec2 trk = gRayRange(ro, d);
+    if (s > 0 && !second) {
+      float w = 2.0 * uPixel * tHit;
+      trk = vec2(max(trk.x, tHit - w), min(trk.y, tHit + w));
+    }
+    float tk = 0.0;
+    int rk = 0;
+    if (trk.x < trk.y) rk = gRay(ro, d, trk.x, trk.y, tk);
+    if (s == 0) {
+      res = rk;
+      tHit = tk;
+    } else {
+      found = rk != 0;
+      if (found) nSub++;
+    }
+  }
+  float cover = res == 0 ? 0.0 : aa ? 0.2 * float(1 + nSub) : 1.0;
+  // 体積を持つ解（floor の和の立方体）の中に当たったか（当たった点の 0.05 画素奥で値がちょうど 0。半画素だと、角の近くで立方体の外に出てしまう）と、その深さ。外れた画素で、
+  // 2 × 2 の組の隣がこれなら、立方体どうしが辺でだけ接する継ぎ目の割れ目（幅 0）を光線が通り抜けただけなので、隣の深さで塗る
+  float solidF = 0.0;
+  if (res != 0) solidF = gRayV(ro + tHit * (1.0 + 0.05 * uPixel) * rd) == 0.0 ? 1.0 : 0.0;
+  float tSolid = solidF * tHit;
+  bool nearSolid = max(abs(dFdx(solidF)), abs(dFdy(solidF))) > 0.5;
+  float tNeighbor = max(abs(dFdx(tSolid)), abs(dFdy(tSolid)));
+  // 割れ目か（向かい合う 1 画素先の 2 点が、両方とも解の中）を確かめてから塗る。輪郭の外の背景の画素（片側だけが解）は塗らない
+  if (res == 0 && nearSolid && tNeighbor > 0.0) {
+    vec3 pc = ro + tNeighbor * rd;
+    vec3 ox = dRx * tNeighbor;
+    vec3 oy = dRy * tNeighbor;
+    // 向かい合う 2 点の組（左右・上下・斜め 2 本）のどれかが、両方とも解の中か（立方体の角が集まる所の割れ目は斜め）
+    vec4 pairIn = vec4(0.0);
+    for (int j = 0; j < 8; j++) {
+      int pr = j / 2;
+      float sg = j - 2 * pr == 0 ? 1.0 : -1.0;
+      vec3 off = pr == 0 ? ox : pr == 1 ? oy : pr == 2 ? ox + oy : ox - oy;
+      float z = gRayV(pc + sg * off) == 0.0 ? 1.0 : 0.0;
+      pairIn += z * (pr == 0 ? vec4(1.0, 0.0, 0.0, 0.0) : pr == 1 ? vec4(0.0, 1.0, 0.0, 0.0) : pr == 2 ? vec4(0.0, 0.0, 1.0, 0.0) : vec4(0.0, 0.0, 0.0, 1.0));
+    }
+    if (max(max(pairIn.x, pairIn.y), max(pairIn.z, pairIn.w)) > 1.5) { tHit = tNeighbor; res = 1; cover = 1.0; }
+  }
   if (res == 0) discard;
+  gRayCover = cover;
   vec3 hit = ro + tHit * rd;
   vec3 g = gRayGrad(hit);
   gRayBack = dot(g, rd) > 0.0;
@@ -116,9 +185,52 @@ const RAY_MAIN = /* glsl */ `
   vec3 dn = cross(dFdx(hit), dFdy(hit));
   if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) {
     gRayBack = false;
-    nw = dot(dn, rd) > 0.0 ? -dn : dn;
-    if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) nw = -rd;
+    // 体積を持つ解（勾配が 0 の面。floor の和の立方体）では、輪郭のアンチエイリアスをしない（覆う割合を 1 にする）。立方体どうしは辺でだけ
+    // 接するので、継ぎ目をかすめる画素の中の光線が、1/16 画素より薄い角のかけらを通り抜けて外れになり、継ぎ目に背景の色の点線が出た
+    gRayCover = 1.0;
+    // 値が飛ぶ面: 当たった点の前後 0.1 画素で値がいちばん大きく変わる軸を面の向きにする（隣の画素との当たった点の差 dn は、輪郭・段差で
+    // 向きがでたらめになり、黒い点々になっていた。当たった点は 1/16 画素まで詰めてある。1 画素だと縁の近くでほかの軸の段差も拾い、縁に暗い点線が出た）。
+    // あわせて、面の縁から 1.5 画素以内か（ほかの軸の向きに値が飛ぶ）を軸ごとに見る。縁は整数の座標にあるので、その軸の格子線がちょうど縁に乗り、
+    // 縁の両側の画素に分かれて白い点線になっていた（立方体の縦の継ぎ目）。縁の近くでは、その軸の格子線を引かない。
+    // 値を求める所（gRayV）は 1 か所のループにまとめる（j = 0 が当たった点、1〜6 が ±0.1 画素、7〜12 が ±1.5 画素）。配列は使わない
+    float e = 0.1 * uPixel * tHit;
+    float e2 = 1.5 * uPixel * tHit;
+    float h0 = 0.0;
+    vec3 jumpAcc = vec3(0.0);
+    vec3 nanAcc = vec3(0.0);
+    vec3 edgeAcc = vec3(0.0);
+    for (int j = 0; j < 13; j++) {
+      int m = max(j - 1, 0);
+      int axis = (m - 6 * (m / 6)) / 2;
+      float sgn = (m - 2 * (m / 2)) == 0 ? 1.0 : -1.0;
+      vec3 mask = axis == 0 ? vec3(1.0, 0.0, 0.0) : axis == 1 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+      float off = j == 0 ? 0.0 : j <= 6 ? e : e2;
+      float v = gRayV(hit + mask * (sgn * off));
+      if (j == 0) {
+        h0 = v;
+      } else if (j <= 6) {
+        bool ok = v == v;
+        jumpAcc += mask * (ok ? sgn * v : 0.0);
+        nanAcc += mask * (ok ? 0.0 : 1.0);
+      } else {
+        edgeAcc += mask * (v != h0 ? 1.0 : 0.0);
+      }
+    }
+    vec3 jump = vec3(nanAcc.x > 0.0 ? 0.0 : abs(jumpAcc.x), nanAcc.y > 0.0 ? 0.0 : abs(jumpAcc.y), nanAcc.z > 0.0 ? 0.0 : abs(jumpAcc.z));
+    float jm = max(jump.x, max(jump.y, jump.z));
+    if (jm > 0.0) {
+      vec3 ax = jump.x == jm ? vec3(1.0, 0.0, 0.0) : jump.y == jm ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+      nw = dot(ax, rd) > 0.0 ? -ax : ax;
+      gRayNearEdge = vec3(
+        ax.x > 0.5 ? 0.0 : float(edgeAcc.x > 0.0),
+        ax.y > 0.5 ? 0.0 : float(edgeAcc.y > 0.0),
+        ax.z > 0.5 ? 0.0 : float(edgeAcc.z > 0.0));
+    } else {
+      nw = dot(dn, rd) > 0.0 ? -dn : dn;
+      if (!(dot(nw, nw) > 0.0) || !(dot(nw, nw) < 1e38)) nw = -rd;
+    }
   }
+  gRayNW = normalize(nw);
   gRayN = normalize((viewMatrix * vec4(nw, 0.0)).xyz);
   // 当たった点での 1 画素の大きさ（面に沿った長さ）。格子線の太さの見積もりの上限に使う
   gRayFoot = uPixel * tHit / max(abs(dot(normalize(nw), rd)), 0.05);
@@ -137,6 +249,8 @@ const RAY_MAIN = /* glsl */ `
  */
 export function createRaycastMaterial(glsl: string, n: number, grid: GridUniforms, ray: RaycastUniforms): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({ side: THREE.BackSide, roughness: 0.55, metalness: 0.05 })
+  // 輪郭の画素の当たった割合（gRayCover）を、MSAA の標本の数に割り振る（並べ替えの要らないアンチエイリアス）
+  m.alphaToCoverage = true
   m.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, grid, ray)
     shader.vertexShader = shader.vertexShader
@@ -152,13 +266,20 @@ export function createRaycastMaterial(glsl: string, n: number, grid: GridUniform
       .replace('float w = fwidth(c);', 'float w = min(fwidth(c), gRayFoot / spacing);')
       .replace('if (w <= 1e-5 * max(abs(c), 1.0)) return 0.0;', 'if (w <= max(1e-5 * max(abs(c), 1.0), 0.02 * gRayFoot / spacing)) return 0.0;')
     if (!header.includes('0.02 * gRayFoot')) throw new Error('格子線の差し込みの場所が見つからない（surfaceMaterial.ts の gridLine）')
+    // 面の向きが座標の軸にほぼそろっている（|n_k| > 0.995）面では、その座標の格子線を引かない。その座標は面の上で変わらないので、
+    // 格子線の座標の上にある面（floor の和の立方体の面は全部 x・y・z が整数の面）が、当たった点の座標の 32 ビットの揺れで線の点々に
+    // なっていた。揺れの大きさは GPU で違い、隣の画素との差（fwidth）での判定では消えない環境があった
     const apply = FRAGMENT_APPLY.replace('!gl_FrontFacing', 'gRayBack')
+      .replace('gridLine(vGridPos.x, uGridSpacing.x)', '(abs(gRayNW.x) > 0.995 || gRayNearEdge.x > 0.5 ? 0.0 : gridLine(vGridPos.x, uGridSpacing.x))')
+      .replace('gridLine(vGridPos.y, uGridSpacing.y)', '(abs(gRayNW.y) > 0.995 || gRayNearEdge.y > 0.5 ? 0.0 : gridLine(vGridPos.y, uGridSpacing.y))')
+      .replace('gridLine(vGridPos.z, uGridSpacing.z)', '(abs(gRayNW.z) > 0.995 || gRayNearEdge.z > 0.5 ? 0.0 : gridLine(vGridPos.z, uGridSpacing.z))')
+    if (!apply.includes('gRayNW.z')) throw new Error('格子線の呼び出しの場所が見つからない（surfaceMaterial.ts の FRAGMENT_APPLY）')
     shader.fragmentShader = shader.fragmentShader
       // 光の計算が使う点の位置を、箱の面ではなく当たった点にする（同じ名前の変数にして、three.js の部品をそのまま使う）
       .replace('varying vec3 vViewPosition;', 'vec3 vViewPosition;')
-      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\n${header}\n${glsl}\n${RAY_GLSL}`)
+      .replace('#include <common>', `#include <common>\nuniform mat4 projectionMatrix;\nuniform float uNear;\nuniform float uProbe;\n#define G_N ${n}\nbool gRayAborted = false;\nfloat gRayFoot = 1e30;\nfloat gRayCover = 1.0;\nvec3 gRayNW = vec3(0.0);\nvec3 gRayNearEdge = vec3(0.0);\n${header}\n${glsl}\n${RAY_GLSL}\n${RAY_RANGE}`)
       .replace('#include <clipping_planes_fragment>', RAY_MAIN)
-      .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);`)
+      .replace('#include <color_fragment>', `#include <color_fragment>\n${apply}\nif (gRayAborted && uDebug > 0.5) diffuseColor.rgb = vec3(1.0, 0.0, 0.0);\ndiffuseColor.a *= gRayCover;`)
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = gRayN;\nnonPerturbedNormal = gRayN;')
       .replace('#include <dithering_fragment>', '#include <dithering_fragment>\nif (uProbe > 0.5) gl_FragColor = vec4(gRayAborted ? 1.0 : 0.0, 1.0, 0.0, 1.0);')
   }

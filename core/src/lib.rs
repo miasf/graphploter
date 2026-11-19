@@ -33,6 +33,7 @@ pub mod quad;
 pub mod series;
 pub mod solve;
 mod region;
+pub mod implicit;
 pub mod parser;
 pub mod special;
 pub mod system;
@@ -97,6 +98,8 @@ pub struct MeshResult {
     gpu_reason: String,
     /// 常微分方程式なら、状態の成分の名前（`x`・`y'`。初期値の欄の見出し）
     ode_states: Vec<String>,
+    /// ≠ で除いた点（曲線が h = 0 を横切る所。点ごとに 3 つ）。描画側で白丸を描く
+    holes: Vec<f32>,
 }
 
 /// 3D の陰関数を光線で描くための GLSL と、uniform の値
@@ -195,6 +198,10 @@ impl MeshResult {
     /// 実線の点ごとの値（Float32Array。ベクトル場の流線の大きさ。無ければ空）
     pub fn take_outline_values(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline_values)
+    }
+    /// ≠ で除いた点（Float32Array。点ごとに 3 つ。無ければ空）。描画側で白丸を描く
+    pub fn take_holes(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.holes)
     }
     /// ベクトル場か（矢印・流線を鮮やかな色の対応表で塗る）
     #[wasm_bindgen(getter)]
@@ -456,6 +463,7 @@ pub fn coord_grid(
         gpu3d: None,
         gpu_reason: String::new(),
         ode_states: Vec::new(),
+        holes: Vec::new(),
     })
 }
 
@@ -769,6 +777,20 @@ pub fn plot(
     let mut outline = built.outline;
     // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
     outline.0.append(&mut inner.edge_lines);
+    // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
+    let excluded = expand::take_excluded();
+    let mut holes = Vec::new();
+    // 2D の投影は縦の座標を押しつぶした後なので、≠ の式（縦の座標を使うかもしれない）では調べない
+    if !excluded.is_empty() && coord.is_none() && !(flat && !ctx.flat_slice) {
+        let (h, dashed, all) = mark_excluded(&inner, curve, &excluded);
+        holes = h;
+        outline.1.extend(dashed);
+        if all {
+            // 曲線全体が除かれた（y = x, z ≠ 0 の 2D の切り口 z = 0）: 何も描かない
+            inner = mesh::Mesh::default();
+            expand::add_note("≠ で全部除かれる");
+        }
+    }
     // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
     // 流線（点ごとの値つきの線）・座標系があるときは足さない
     if !flat && !curve && coord.is_none() && built.outline_values.is_empty() {
@@ -841,7 +863,10 @@ pub fn plot(
             equation::Plot::Param { name, value, .. } => Some((name.clone(), *value)),
             _ => None,
         },
-        local_available: !flat && !hidden_on && coord.is_none() && matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }),
+        local_available: !flat
+            && !hidden_on
+            && coord.is_none()
+            && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
         gpu2d: if coord.is_some() {
             None
         } else {
@@ -856,6 +881,7 @@ pub fn plot(
         coord,
         defs: (expand::used(), expand::def_line()),
         ode_states: expand::ode_states(),
+        holes,
     })
 }
 
@@ -1653,6 +1679,18 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             let local = mesh::LocalMesh { mesh: m, prog: lp.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
             b.local = Some((local, lp.used_params().to_vec()));
         }
+        // 不等式の領域の回す前の形（陰関数の上と同じ）: 回す前の不等式で、回転の中心から表示範囲の角までの距離 ρ の立方体に作る。
+        // 小さい領域は fit_to_shape で領域の周りだけの格子にするので、回転の再生・ドラッグ中も止まったときと同じ細かさで回る
+        // （前は再生のたびに格子 16 ほどで作り直して、境目がぎざぎざに崩れて見えた）
+        P::System { eqs, local: Some(lr), .. } if ctx.local && eqs.is_empty() => {
+            let ext = rotated_domain(space, dom);
+            let mut m = fit_to_shape(ext, ctx.implicit_resolution, |d| {
+                system::region_faces(&lr.cuts, &lr.faces, d, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine)
+            });
+            mesh::add_cluster_lod(&mut m);
+            let local = mesh::LocalMesh { mesh: m, prog: lr.max.clone(), dims: space.dims, axes: space.axes, slice: space.slice.clone() };
+            b.local = Some((local, lr.max.used_params().to_vec()));
+        }
         // 複素数の陰関数（値が複素数の F = 0）: Re F = Im F = 0 の線として、連立方程式の交わる線と同じ道で描く
         // 複素数の色分けをするなら、曲面（|F| = 1・Re F = 0・Im F = 0）を作って、頂点の F の値で色を付ける（陽関数の色分けと同じ色）
         P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
@@ -1747,9 +1785,27 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         }
         // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）。
         // 不等式があれば、線分を切る
-        P::System { eqs, cuts, .. } if eqs.len() == 2 => {
+        P::System { eqs, cuts, exact, .. } if eqs.len() == 2 => {
             b.curve = true;
             b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, ctx.implicit_resolution, ctx.implicit_refine);
+            // 縦の座標を使わない 2 本の等式で、符号の変わる所が無い（接するだけ: y = x², y = 0 は x = y = 0 の直線）なら、
+            // グレブナー基底で求めた平面の解（exact[1]）を縦にのばした直線にする
+            if b.inner.positions.is_empty() && !eqs.iter().any(|e| e.uses_var_index(2)) {
+                if let Some(pts) = &exact[1] {
+                    let mut pos = Vec::new();
+                    for p in pts.iter().filter(|p| (0..2).all(|a| p[a] >= dom.lo[a] && p[a] <= dom.hi[a])) {
+                        if !pos.is_empty() {
+                            pos.extend([f32::NAN; 3]);
+                        }
+                        let n = 64;
+                        for k in 0..=n {
+                            let z = dom.lo[2] + (dom.hi[2] - dom.lo[2]) * k as f64 / n as f64;
+                            pos.extend([p[0] as f32, p[1] as f32, z as f32]);
+                        }
+                    }
+                    b.inner.positions = pos;
+                }
+            }
             for g in cuts {
                 system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
             }
@@ -2054,6 +2110,101 @@ fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]
     s
 }
 
+/// ≠ で除いた所 h = 0（`hs` のどれか）を示す。曲線なら、線分が h = 0 を横切る点（はさみうち法で寄せる）を白丸の点にし、
+/// 面・領域なら、三角形ごとに h = 0 の線分を求めて点線にする。曲線が h = 0 の上を走っている（頂点の半分以上で h = 0）なら、
+/// 曲線全体が除かれる（3 つ目の値が true）。戻り値は（白丸の点, 点線の線分, 曲線全体が除かれるか）
+fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f32>, Vec<f32>, bool) {
+    let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let eval_at = |h: &eval::Program, q: &[[f64; 3]]| -> Vec<f64> {
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| q.iter().map(|p| p[c]).collect());
+        let mut out = vec![num_complex::Complex64::new(0.0, 0.0); q.len()];
+        h.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+        out.iter().map(|v| if v.im.abs() <= 1e-9 * v.re.abs().max(1.0) { v.re } else { f64::NAN }).collect()
+    };
+    let lerp = |a: [f64; 3], b: [f64; 3], t: f64| [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c]));
+    let (mut holes, mut dashed) = (Vec::new(), Vec::new());
+    for h in hs {
+        let v = eval_at(h, &pts);
+        if curve {
+            let zeros = v.iter().filter(|x| **x == 0.0).count();
+            if zeros * 2 > v.iter().filter(|x| x.is_finite()).count() {
+                return (Vec::new(), Vec::new(), true);
+            }
+            // 符号が変わる線分（はさみうち法で 30 回寄せる）と、ちょうど 0 の頂点
+            let mut found: Vec<[f64; 3]> = Vec::new();
+            let mut segs: Vec<([f64; 3], [f64; 3], f64, f64)> = Vec::new();
+            for k in 0..pts.len().saturating_sub(1) {
+                let (a, b) = (v[k], v[k + 1]);
+                if !(a.is_finite() && b.is_finite()) {
+                    continue;
+                }
+                if a == 0.0 {
+                    found.push(pts[k]);
+                } else if a * b < 0.0 {
+                    segs.push((pts[k], pts[k + 1], a, b));
+                }
+            }
+            if let Some(&last) = v.last() {
+                if last == 0.0 {
+                    found.push(pts[pts.len() - 1]);
+                }
+            }
+            for _ in 0..30 {
+                if segs.is_empty() {
+                    break;
+                }
+                let mids: Vec<[f64; 3]> = segs.iter().map(|&(a, b, fa, fb)| lerp(a, b, fa / (fa - fb))).collect();
+                let fm = eval_at(h, &mids);
+                for (s, (m, f)) in segs.iter_mut().zip(mids.iter().zip(fm)) {
+                    if !f.is_finite() || f == 0.0 {
+                        s.0 = *m;
+                        s.1 = *m;
+                        s.2 = 0.0;
+                        s.3 = 0.0;
+                    } else if f * s.2 < 0.0 {
+                        (s.1, s.3) = (*m, f);
+                    } else {
+                        (s.0, s.2) = (*m, f);
+                    }
+                }
+                segs.retain(|s| s.2 != 0.0 || s.0 != s.1);
+                // 寄り切った（端の値がとても小さい）線分は、点を決める
+                segs.retain(|&(a, b, fa, fb)| {
+                    let done = (0..3).all(|c| (a[c] - b[c]).abs() <= 1e-12 * (1.0 + a[c].abs()));
+                    if done {
+                        found.push(lerp(a, b, fa / (fa - fb)));
+                    }
+                    !done
+                });
+            }
+            for (a, b, fa, fb) in segs {
+                found.push(if fa == fb { a } else { lerp(a, b, fa / (fa - fb)) });
+            }
+            for p in found.into_iter().take(500) {
+                holes.extend(p.map(|x| x as f32));
+            }
+        } else {
+            for t in mesh.indices.chunks_exact(3) {
+                let ids = [t[0] as usize, t[1] as usize, t[2] as usize];
+                let f = ids.map(|i| v[i]);
+                if !f.iter().all(|x| x.is_finite()) {
+                    continue;
+                }
+                let mut cross = Vec::with_capacity(2);
+                for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                    if (f[i] < 0.0) != (f[j] < 0.0) {
+                        cross.push(lerp(pts[ids[i]], pts[ids[j]], f[i] / (f[i] - f[j])));
+                    }
+                }
+                if let [a, b] = cross[..] {
+                    dashed.extend([a[0] as f32, a[1] as f32, a[2] as f32, b[0] as f32, b[1] as f32, b[2] as f32, f32::NAN, f32::NAN, f32::NAN]);
+                }
+            }
+        }
+    }
+    (holes, dashed, false)
+}
+
 /// 表示範囲に比べて小さい図形を、図形の周りだけの格子で作り直す（表示範囲を広げると粗くなるのを防ぐ）。
 ///
 /// 格子のマスの数は表示範囲の 1 辺あたり `n` なので、表示範囲を 4 倍に広げると、半径 1 の球は 1 辺 4 マスほどで粗くなっていた。
@@ -2064,6 +2215,7 @@ fn fit_to_shape(dom: mesh::Domain, n: usize, make: impl Fn(mesh::Domain) -> mesh
     let n = n.max(2) as f64;
     let side = |d: &mesh::Domain| (0..3).map(|a| d.hi[a] - d.lo[a]).fold(0.0, f64::max);
     let (mut best, mut box_) = (make(dom), dom);
+    let first_lines = best.edge_lines.clone();
     // 1 回目は表示範囲の 2/3 以下になるとき。粗い格子の余白（1.5 マス）が大きいので、作り直した面でもう一度だけ詰める（8 割以下になるとき）
     for shrink in [2.0 / 3.0, 0.8] {
         let Some((lo, hi)) = bounds(&best.positions) else { break };
@@ -2088,6 +2240,9 @@ fn fit_to_shape(dom: mesh::Domain, n: usize, make: impl Fn(mesh::Domain) -> mesh
         }
         (best, box_) = (next, fit);
     }
+    // 面にならない特異点の線（mesh::singular::trace_singular_lines）は、表示範囲の格子で作った 1 回目のものを使う
+    // （ローマ曲面のひげは面の外へ伸びるので、面の周りだけの箱では途中で切れる。線はニュートン法で寄せるので格子の粗さによらない）
+    best.edge_lines = first_lines;
     best
 }
 
@@ -2268,6 +2423,7 @@ impl Shape {
             gpu3d: self.gpu3d.clone(),
             gpu_reason: String::new(),
             ode_states: Vec::new(),
+            holes: Vec::new(),
         }
     }
 }
@@ -2369,6 +2525,7 @@ impl CapSource {
             gpu3d: None,
             gpu_reason: String::new(),
             ode_states: Vec::new(),
+            holes: Vec::new(),
         })
     }
 }

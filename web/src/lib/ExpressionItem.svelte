@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { RIEMANN_METHODS, hasIntegral, inlineRegions, joinTuple, regionLabel, regionsUsed, splitTuple, type RiemannMethod } from './latex'
+  import { RIEMANN_METHODS, hasIntegral, inlineRegions, integralKinds, joinTuple, regionLabel, regionsUsed, splitTuple, type RiemannMethod } from './latex'
   import { matrixDefinition } from './matrixEdit'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
@@ -237,6 +237,8 @@
   const regionNames = $derived(regionsUsed(item.latex).map((r) => r.name))
   /** 積分記号の下に直接書いた範囲を描くための名前（App の inlineKey と同じ形） */
   const inlineNames = $derived(inlineRegions(item.latex).map((_, k) => `#${item.id}:${k}`))
+  /** 式の中の積分の分類（何の積分か。範囲の書き方・次元と被積分関数の形から決める。範囲の欄が変われば変わる） */
+  const kinds = $derived(hasIntegral(item.latex) ? integralKinds(item.latex, regions) : [])
   const showVertical = $derived(item.vertical && parts !== null && !editingLine)
 
   function setPart(k: number, value: string) {
@@ -581,6 +583,18 @@
         <div class="region-error">{regionLabel(name)} を描けません: {regionViews[name].error}</div>
       {/if}
     {/each}
+    <!-- 何の積分か（書いた範囲と被積分関数から判定した分類と、媒介変数で書いたときの式） -->
+    {#if kinds.length > 0}
+      <div class="integral-kinds" aria-label="積分の分類">
+        {#each kinds as k, j (j)}
+          <div class="integral-kind">
+            <span class="kind-name">{k.kind}</span>
+            <span class="kind-region">範囲: {k.region}</span>
+            <span class="kind-formula">{k.formula}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
     <!-- 積分を描く: 被積分関数を、積分する範囲の上に描く（面積・体積が積分の値になる図形） -->
     {#if hasIntegral(item.latex) || integralView}
       <div class="integral">
@@ -1695,6 +1709,31 @@
   .integral-note {
     color: var(--muted);
     font-size: 12px;
+  }
+  .integral-kinds {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+  }
+  .integral-kind {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 8px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .kind-name {
+    font-weight: 600;
+  }
+  .kind-region {
+    color: var(--muted);
+  }
+  .kind-formula {
+    flex-basis: 100%;
+    color: var(--muted);
+    overflow-wrap: anywhere;
   }
   .region {
     display: grid;

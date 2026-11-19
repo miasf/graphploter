@@ -345,7 +345,18 @@ pub enum Plot {
         exact: [Option<Vec<[f64; 3]>>; 2],
         /// GPU の画素ごとの描き方（2D）に渡す、回転・断面を入れる前の元の座標の式（[`GpuSystem`]）
         gpu: Option<Box<GpuSystem>>,
+        /// 不等式だけの領域で、回転が表示中の座標どうしだけなら、回す前の形（[`LocalRegion`]）。
+        /// 回転の再生・ドラッグ中は、これで作った面を回すだけで描く（陰関数の `local` と同じ）
+        local: Option<Box<LocalRegion>>,
     },
+}
+
+/// 回す前の座標の不等式の領域（[`Plot::System`] の `local`）。`cuts`・`faces` は回す前の座標の式、
+/// `max` は max G_j（領域が ≤ 0。切り口のふたに使う）
+pub struct LocalRegion {
+    pub cuts: Vec<Program>,
+    pub faces: Vec<Vec<(usize, Program)>>,
+    pub max: Program,
 }
 
 /// GPU の画素ごとの描き方に渡す連立方程式・不等式（[`GpuImplicit`] と同じ形。等式・不等式で変数の並びをそろえる）。
@@ -1103,7 +1114,7 @@ fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, s
 /// 論理式・集合（計画 M11）を描く。選言標準形にして、かたまりが 1 つなら今の連立方程式・不等式の道で描く。
 /// 領域（等式の無いかたまり）どうしの「または」は、1 本の不等式 $\min_k \max_j g_{kj} \le 0$ にまとめる
 /// （重なった面を切り取らなくてよい。和集合の角は、格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
-/// ≠ は「かつ」の中では描き方が変わらないので無視し、説明に注意を出す
+/// ≠ は「かつ」の中では形を変えないので、除いた所（h = 0）を白丸（曲線）・点線（面・領域）で示す
 fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
     use crate::parser::{Formula, SetE};
     let names = crate::expand::names();
@@ -1184,7 +1195,17 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
         let mut out = Vec::new();
         for l in c {
             if l.op == Op::Ne {
-                crate::expand::add_note("≠ は描き方が変わらないので無視");
+                // ≠ は面積・長さの無い所を除くだけなので、形は変えずに、除いた所を白丸・点線で示す（lib.rs の mark_excluded）
+                let h = Expr::Bin(BinOp::Sub, Box::new(crate::expand::expand(&l.l, params)?), Box::new(crate::expand::expand(&l.r, params)?));
+                let h = match space.rotation_matrix() {
+                    Some(m) => rotate_coords(&h, &m, space),
+                    None => h,
+                };
+                let refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
+                match Program::compile_with(&h, &refs, &space.with_hidden(params)) {
+                    Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(p),
+                    _ => crate::expand::add_note("≠ は描き方が変わらないので無視"),
+                }
                 continue;
             }
             out.push(Lit { l: crate::expand::expand(&l.l, params)?, op: l.op, r: crate::expand::expand(&l.r, params)? });
@@ -1421,6 +1442,8 @@ fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space:
             }
         }
     }
+    // 略記 −1 ≤ x, y, z ≤ 1（x・y・z がどれも −1 以上 1 以下）・x, y ≥ 0・0 ≤ x, y, z を、変数ごとの行に分ける
+    chains = crate::parser::expand_shared_bounds(chains);
     // ベクトル = ベクトルは、成分ごとの等式の連立（(x, y, z) = (1, 2, 3) は x = 1, y = 2, z = 3）。計画 M6
     chains = split_vector_relations(chains)?;
     // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
@@ -2251,20 +2274,21 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
     let consts = space.with_hidden(params);
     let rot = space.rotation_matrix();
-    // 左辺 − 右辺（回転していれば、座標を回した後の座標の式に置き換えてから引く）
-    let diff = |a: &Expr, b: &Expr| -> Result<Program, String> {
-        let (a, b) = match &rot {
+    // 左辺 − 右辺（回転していれば、座標を回した後の座標の式に置き換えてから引く。`rot` が None なら回す前の式）
+    let diff_with = |a: &Expr, b: &Expr, rot: &Option<Vec<Vec<f64>>>| -> Result<Program, String> {
+        let (a, b) = match rot {
             Some(m) => (rotate_coords(a, m, space), rotate_coords(b, m, space)),
             None => (a.clone(), b.clone()),
         };
         Program::compile_with(&Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b)), &shown_refs, &consts)
     };
+    let diff = |a: &Expr, b: &Expr| diff_with(a, b, &rot);
     let (mut eqs, mut cuts, mut strict) = (Vec::new(), Vec::new(), Vec::new());
     let mut faces = Vec::new();
     let mut eq_rows = Vec::new();
     // 境目の面 G = 0 を、表示中の座標の 1 つについて解く（解が 1 つになる座標を先に。同じなら z を先に）
-    let solve_face = |a: &Expr, b: &Expr| -> Vec<(usize, Program)> {
-        let (a, b) = match &rot {
+    let solve_face_with = |a: &Expr, b: &Expr, rot: &Option<Vec<Vec<f64>>>| -> Vec<(usize, Program)> {
+        let (a, b) = match rot {
             Some(m) => (rotate_coords(a, m, space), rotate_coords(b, m, space)),
             None => (a.clone(), b.clone()),
         };
@@ -2288,6 +2312,7 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
         }
         best
     };
+    let solve_face = |a: &Expr, b: &Expr| solve_face_with(a, b, &rot);
     for (l, rel, r) in &rels {
         match rel {
             Rel::Eq => {
@@ -2334,7 +2359,38 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     } else {
         None
     };
-    Ok(Plot::System { base, eqs, cuts, strict, faces, exact: [exact3, exact2], gpu })
+    // 回す前の形: 不等式だけで、回転が表示中の座標どうしだけ（使う座標が全部表示中）で、範囲で重ねる名前を使わないとき。
+    // 回転していないときも作る（初めて回すときから、回すだけで描けるように）
+    let local = if eqs.is_empty() && !space.flat_slice {
+        let mut used = Vec::new();
+        for (l, _, r) in &rels {
+            l.collect_vars(&mut used);
+            r.collect_vars(&mut used);
+        }
+        let ranged = space.ranged().iter().any(|(n, _, _)| used.contains(n));
+        if !ranged && space.rotation_keeps_shown(&used) {
+            let none = None;
+            let mut lc = Vec::new();
+            let mut lf = Vec::new();
+            let mut sides = Vec::new();
+            for (l, rel, r) in &rels {
+                let (a, b) = if matches!(rel, Rel::Ge | Rel::Gt) { (r, l) } else { (l, r) };
+                lc.push(diff_with(a, b, &none)?);
+                lf.push(solve_face_with(a, b, &none));
+                sides.push(Expr::Bin(BinOp::Sub, Box::new(a.clone()), Box::new(b.clone())));
+            }
+            let max = sides.into_iter().reduce(|a, b| Expr::Call(crate::functions::Func::Max, vec![a, b]));
+            match max.map(|m| Program::compile_with(&m, &shown_refs, &consts)) {
+                Some(Ok(max)) => Some(Box::new(LocalRegion { cuts: lc, faces: lf, max })),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(Plot::System { base, eqs, cuts, strict, faces, exact: [exact3, exact2], gpu, local })
 }
 
 /// 連立方程式・不等式の、GPU の描き方の式（[`GpuSystem`]）。どれかの式がコンパイルできなければ None（今までどおり、式に畳み込んだ形で描く）
@@ -3113,9 +3169,11 @@ mod tests {
 
     #[test]
     fn system_errors() {
-        for src in ["(x = y)", "x <", "x = y,", ", x = y", "a = 1, b = 2", "x, y = 1", "sin(x ≤ 1)"] {
+        for src in ["(x = y)", "x <", "x = y,", ", x = y", "a = 1, b = 2", "sin(x ≤ 1)"] {
             assert!(kind(src).starts_with("error"), "{src}: {}", kind(src));
         }
+        // 範囲を共有する略記: x, y = 1 は x = 1 かつ y = 1（parser::expand_shared_bounds）
+        assert_eq!(kind("x, y = 1"), "連立方程式の曲線");
         assert_eq!(kind("(x = y)"), "error: =・≤ などは、括弧の外に書いてください（4文字目）");
         assert!(kind("x = y,").contains("`,` の前後に式を書いてください"));
         assert!(kind("a = 1, b = 2").contains("パラメータの定義は、1 行に 1 つだけ"));

@@ -1,5 +1,5 @@
 // latex.ts のテスト。実行: npm test
-import { conditionHolds, paramConditions, riemannDisplay, fenceBareDelimiters, inlineRegions, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
+import { conditionHolds, paramConditions, riemannDisplay, fenceBareDelimiters, inlineRegions, integralKinds, joinTuple, latexToText, regionDisplayLatex, regionLabel, regionsUsed, setRegions, splitTuple, integralDisplay } from './latex.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -13,6 +13,9 @@ function check(name: string, got: unknown, want: unknown) {
 const cases: [string, string][] = [
   // 数学の記法（計画 docs/plan-math-notation.md の M1・M4）
   ['\\sum_{n=1}^{10}n^2', '@sum(n,1,10) n^(2)'],
+  // 添字を並べた多重の和: \sum_{x,y,z=0}^{n} は x・y・z それぞれ 0〜n
+  ['\\sum_{x,y,z=0}^{2}xyz', '@sum(x,0,2) @sum(y,0,2) @sum(z,0,2) xyz'],
+  ['\\prod_{m,n=1}^{3}\\left(m+n\\right)', '@prod(m,1,3) @prod(n,1,3) (m+n)'],
   ['\\sum_{k=1}^{N}\\frac{\\sin\\left(kx\\right)}{k}+1', '@sum(k,1,N) ((sin (kx))/(k))+1'],
   ['\\prod\\limits_{k=1}^{5}\\left(x-k\\right)', '@prod(k,1,5) (x-k)'],
   ['y=\\pm\\sqrt{x}', 'y=± sqrt(x)'],
@@ -341,7 +344,7 @@ const integrals: [string, string | null][] = [
 for (const [latex, want] of integrals) check(`積分を描く式 ${latex}`, drawn(latex), want)
 // 面積分: 曲面を、法線の向きに被積分関数の分だけ厚くする
 check('積分を描く式（面積分）', drawn('\\iint_{S}z^2\\,dS')?.startsWith('⦃( sin u cos v, sin u sin v, cos u)+t(( cos u)^(2))((( @diff(u) ( sin u cos v, sin u sin v, cos u))×( @diff(v) '), true)
-check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\cdot d\\mathbf{S}')?.startsWith('⦃( sin u cos v, sin u sin v, cos u)+t(((( sin u cos v),( sin u sin v),( cos u)))*((('), true)
+check('積分を描く式（ベクトル場の面積分）', drawn('\\iint_{S}\\left(x,y,z\\right)\\cdot d\\mathbf{S}')?.startsWith('⦃( sin u cos v, sin u sin v, cos u)+t(((( sin u cos v),( sin u sin v),( cos u)))*((('), true)
 // 進み具合: 最初の媒介変数の範囲を途中までにし、途中までの積分の式と、今の点・矢印を添える
 {
   const v = integralDisplay('\\oint_{H}\\vec{F}\\cdot d\\mathbf{r}', 0.5, 2)
@@ -360,6 +363,8 @@ check('積分を描く式（流束）', drawn('\\iint_{S}\\left(x,y,z\\right)\\c
   const inl = integralDisplay('\\oint_{\\left\\{\\left(2\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', 0.3)
   const oki = inl !== null && !('error' in inl) ? inl : null
   check('直書きの経路', oki && latexToText(oki.extras!.find((e) => e.role === 'path')!.latex), '⦃(2 cos t, sin t)∣0<=t<=2 pi⦄')
+  // 3D 表示の 1 変数の定積分: 軸の上に立てた高さ f（z）の幕（線積分と同じ向き）
+  check('1 変数の 3D', (() => { const v = integralDisplay('\\int_{0}^{2}t^2\\,dt', 1, 1, false); return v && !('error' in v) ? latexToText(v.latex) : null })(), '⦃(t,y,z)∣0<=t<=2,y=0, min (0,t^(2))<=z<= max (0,t^(2))⦄')
   check('1 変数の区間', (() => { const v = integralDisplay('\\int_{0}^{2}t^2\\,dt'); return v && !('error' in v) ? latexToText(v.extras![0].latex) : null })(), '⦃(x,y,z)∣0<=x<=2,y=0,z=0⦄')
   // ∇ · 𝐅 の体積分（媒介変数 3 つ）: 立体を描く
   setRegions({ W: '\\left\\{\\left(r\\cos v,r\\sin v,h\\right)\\mid0\\le r\\le2,0\\le v\\le2\\pi,0\\le h\\le1\\right\\}' })
@@ -502,6 +507,47 @@ check(
   check('2 重積分は近似しない', err('\\iint_{x^2+y^2\\le1}1\\,dA'), true)
   check('端に座標がある', err('\\int_0^xt\\,dt'), true)
   check('不定積分', err('\\int x\\,dx'), true)
+}
+
+// 積分の分類（何の積分か）: 積分記号は自由に書き、範囲の次元と被積分関数の形から決める
+{
+  const regions = {
+    C: '\\left\\{\\left(x,y\\right)\\mid x^2+y^2=1\\right\\}',
+    P: '\\left\\{\\left(\\cos t,\\sin t,t\\right)\\mid 0\\le t\\le 2\\pi\\right\\}',
+    S: '\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2+z^2=1\\right\\}',
+    T: '\\left\\{\\left(\\sin u\\cos v,\\sin u\\sin v,\\cos u\\right)\\mid 0\\le u\\le\\pi,0\\le v\\le 2\\pi\\right\\}',
+    D: '\\left\\{\\left(r\\cos\\theta,r\\sin\\theta\\right)\\mid 0\\le r\\le1,0\\le\\theta\\le2\\pi\\right\\}',
+    V: '\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2+z^2\\le1\\right\\}',
+  }
+  const kind = (l: string) => integralKinds(l, regions).map((k) => k.kind)
+  check('定積分', kind('\\int_{0}^{1}x\\,dx'), ['定積分'])
+  check('累次積分', kind('\\int_{0}^{1}\\int_{0}^{x}xy\\,dy\\,dx'), ['累次積分（2 重）'])
+  check('スカラー場の線積分（等式の曲線）', kind('\\int_{C}x^2\\,ds'), ['スカラー場の線積分（弧長についての線積分）'])
+  check('ベクトル場の線積分（∮）', kind('\\oint_{C}\\left(-y,x\\right)\\cdot d\\mathbf{r}'), ['ベクトル場の線積分'])
+  check('座標についての線積分', kind('\\int_{C}-y\\,dx+x\\,dy'), ['座標についての線積分（P dx + Q dy の形）'])
+  check('空間の曲線', integralKinds('\\int_{P}z\\,ds', regions)[0]?.region, '媒介変数表示の空間の曲線（媒介変数 t）')
+  check('スカラー場の面積分（等式の曲面）', integralKinds('\\iint_{S}1\\,dS', regions)[0]?.region, '等式で書いた曲面（集合の書き方。媒介変数を使わない）')
+  check('ベクトル場の面積分', kind('\\oiint_{T}\\left(x,y,z\\right)\\cdot d\\mathbf{S}'), ['ベクトル場の面積分'])
+  check('極座標の 2 重積分', kind('\\iint_{D}1\\,dA'), ['2 重積分（平面の領域の上の積分）'])
+  check('媒介変数についての積分', kind('\\iint_{D}r\\,dr\\,d\\theta'), ['媒介変数についての積分'])
+  check('発散の体積分', kind('\\iiint_{V}\\nabla\\cdot\\left(x,y,z\\right)\\,dV'), ['3 重積分（体積分）: 発散 ∇ · F の体積分'])
+  // ∬ で書いても、範囲が曲線なら線積分（記号ではなく範囲で決める）
+  check('記号に依らない', kind('\\iint_{C}1\\,ds'), ['スカラー場の線積分（弧長についての線積分）'])
+  check('2 つの積分', kind('\\int_{C}1\\,ds+\\iiint_{V}1\\,dV').length, 2)
+  check('範囲が空', kind('\\iint_{Q}1\\,dA'), ['範囲を書くと決まります'])
+}
+
+// 等式で書いた曲線・曲面（媒介変数なし）の上の積分の図: 幕・殻を、集合の条件のまま描く
+{
+  setRegions({ C: '\\left\\{\\left(x,y\\right)\\mid x^2+y^2=1\\right\\}', S: '\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2+z^2=1\\right\\}' })
+  const drawn = (l: string) => {
+    const d = integralDisplay(l)
+    return d === null || 'error' in d ? d : latexToText(d.latex)
+  }
+  check('等式の曲線の上の幕', drawn('\\int_{C}x^2\\,ds'), '⦃(x,y,z)∣x^(2)+y^(2)=1, min (0,x^(2))<=z<= max (0,x^(2))⦄')
+  check('等式の曲面の殻', String(drawn('\\iint_{S}1\\,dS')).startsWith('⦃(x,y,z)∣min (0,1)<=(((x^(2)+y^(2)+z^(2))-(1))/(abs(( @diff(x)'), true)
+  check('P dx + Q dy の幕', String(drawn('\\int_{C}-y\\,dx+x\\,dy')).includes('(-y)(- @diff(y)'), true)
+  setRegions({})
 }
 
 // スライダーの値の条件（不等式だけの行）

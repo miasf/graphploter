@@ -238,7 +238,7 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         integral: 0.3,
       },
       {
-        label: '流束 ∬ F · dS とガウスの定理 ∭ ∇ · F dV（球）',
+        label: 'ベクトル場の面積分 ∬ F · dS とガウスの発散定理 ∭ ∇ · F dV（球面）',
         items: [
           { latex: '\\vec{G}\\left(x,y,z\\right)=\\left(x,y,z\\right)', options: { color: '#6042a6', opacity: 0.8 } },
           {
@@ -257,6 +257,13 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           },
         ],
         integral: 0.4,
+      },
+      {
+        label: '等式で書いた曲線・曲面の上の積分 ∮ F · dr・∯ f dS（媒介変数なし）',
+        items: [
+          { latex: '\\oint_{\\left\\{\\left(x,y\\right)\\mid x^2+y^2=4\\right\\}}\\left(-y,x\\right)\\cdot d\\mathbf{r}', options: { color: '#388c46' } },
+          { latex: '\\iint_{\\left\\{\\left(x,y,z\\right)\\mid x^2+y^2+z^2=4,z\\ge0\\right\\}}z\\,dS', options: { color: '#fa7e19' } },
+        ],
       },
       {
         label: '集合 {(x, y, z) | x² + y² ≤ 4, 0 ≤ z ≤ x}',
