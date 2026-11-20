@@ -137,6 +137,34 @@ body {
   overflow: hidden;
 }
 
+/* 狭い画面ではキー同士の余白を少し詰め、文字や記号に使える幅を残す。 */
+@media (max-width: 560px) {
+  #math-keyboard {
+    --keyboard-padding-horizontal: 6px;
+    --keycap-gap: 4px;
+    --keycap-font-size: clamp(16px, 4.6vw, 20px);
+  }
+
+  #math-keyboard .MLK__plate {
+    padding-inline: 0;
+  }
+
+  #math-keyboard .MLK__toolbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  #math-keyboard .MLK__toolbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  #math-keyboard .MLK__toolbar > div > div {
+    flex: 0 0 auto;
+    padding-inline: 7px;
+  }
+}
+
 #math-keyboard .MLK__row > .small,
 #math-keyboard .MLK__row > .action {
   font-size: clamp(12px, 3.3cqw, 16px);

@@ -622,12 +622,22 @@
     half: Math.max(64, Math.round(windowHeight * 0.45)),
     full: Math.max(64, windowHeight - 48),
   })
-  const sheetHeight = $derived(dragHeight ?? snapHeights[sheetState])
 
   // シートが重なっている分だけ、グラフの表示を上にずらす（全体まで引き出したときは半分の位置で止める）
   const narrow = window.matchMedia('(max-width: 560px), (max-width: 720px) and (min-height: 501px)')
   let isNarrow = $state(narrow.matches)
   narrow.addEventListener('change', () => (isNarrow = narrow.matches))
+  /**
+   * キーボードが覆う分だけパネルを短くする。閉じるときは bottom の移動量と
+   * 高さの増加量が同じになるため、パネル上端が跳ねない。
+   */
+  const visibleSnapHeights = $derived({
+    peek: snapHeights.peek,
+    half: isNarrow ? Math.max(64, snapHeights.half - keyboardHeight) : snapHeights.half,
+    full: isNarrow ? Math.max(64, snapHeights.full - keyboardHeight) : snapHeights.full,
+  })
+  /** 画面に実際に見えている高さ。ドラッグ中も同じ単位で扱う。 */
+  const sheetHeight = $derived(dragHeight ?? visibleSnapHeights[sheetState])
   /** 設定を開いているか */
   let settingsOpen = $state(false)
   // スマホで設定を開いている間は、設定が下半分を覆うので、グラフはその上に収める
@@ -657,7 +667,7 @@
     if (dt > 0) drag.v = (e.clientY - drag.lastY) / dt // 指の速さ（下向きが正、px/ms）
     drag.lastY = e.clientY
     drag.lastT = e.timeStamp
-    dragHeight = Math.min(snapHeights.full, Math.max(snapHeights.peek, drag.startH - dy))
+    dragHeight = Math.min(visibleSnapHeights.full, Math.max(visibleSnapHeights.peek, drag.startH - dy))
   }
 
   function sheetUp() {
@@ -669,13 +679,15 @@
       const order: SheetState[] = ['peek', 'half', 'full']
       if (drag.v < -0.5) {
         // 上向きにはじいた → 1段上へ
-        sheetState = order.find((st) => snapHeights[st] > h + 1) ?? 'full'
+        sheetState = order.find((st) => visibleSnapHeights[st] > h + 1) ?? 'full'
       } else if (drag.v > 0.5) {
         // 下向きにはじいた → 1段下へ
-        sheetState = [...order].reverse().find((st) => snapHeights[st] < h - 1) ?? 'peek'
+        sheetState = [...order].reverse().find((st) => visibleSnapHeights[st] < h - 1) ?? 'peek'
       } else {
         // 一番近い段へ
-        sheetState = order.reduce((a, b) => (Math.abs(snapHeights[b] - h) < Math.abs(snapHeights[a] - h) ? b : a))
+        sheetState = order.reduce((a, b) =>
+          Math.abs(visibleSnapHeights[b] - h) < Math.abs(visibleSnapHeights[a] - h) ? b : a,
+        )
       }
     }
     drag = null
@@ -4344,14 +4356,9 @@
       border-right: none;
       border-radius: 14px 14px 0 0;
       box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
-      transition: height 0.25s ease;
-      overflow: hidden;
-    }
-    .keyboard-open .panel {
-      /* 式を置く上端は、編集中の行を表示する高さが足りる限り、そのままにする */
-      --editor-space: calc(100dvh - var(--keyboard-h) - 48px);
-      height: clamp(min(148px, var(--editor-space)), calc(var(--sheet-h) - var(--keyboard-h)), var(--editor-space));
+      /* キーボードを閉じる瞬間に bottom と height が別々にアニメーションして跳ねないようにする。 */
       transition: none;
+      overflow: hidden;
     }
     .panel-body {
       padding-bottom: 0; /* シートごとキーボードの上に乗せている */

@@ -245,23 +245,32 @@ const CALC_LAYOUT = {
   }),
 }
 
-/** 行列のタブ: 行列・ベクトルの雛形と、det・tr などの演算（calcKeys.ts の MATRIX_ROWS） */
+/**
+ * 行列のタブ。横幅の狭い端末でもキーを読めるよう、雛形・演算・ベクトルを
+ * 1 ページずつに分け、各行を最大 5 キーにする。
+ */
+const MATRIX_TITLES = ['雛形', '演算', 'ベクトル']
 const MATRIX_LAYOUT = {
   label: '行列',
-  tooltip: '行列・ベクトル（雛形・det・tr・転置・逆行列・ベクトルの名前）',
-  rows: [
-    ...MATRIX_ROWS.map((r) => r.map((k) => ({ ...k }) as Partial<VirtualKeyboardKeycap>)),
-    [
+  tooltip: '行列・ベクトル（◀ ▶ で雛形・演算・ベクトルを切り替える）',
+  layers: MATRIX_ROWS.map((page, k) => {
+    const n = MATRIX_ROWS.length
+    const id = (j: number) => `matrix-${(j + n) % n}`
+    const keys = page.map((key) => ({ ...key }) as Partial<VirtualKeyboardKeycap>)
+    const split = Math.ceil(keys.length / 2)
+    const rows: Partial<VirtualKeyboardKeycap>[][] = [keys.slice(0, split), keys.slice(split)]
+    while (rows.length < 3) rows.push([])
+    rows.push([
+      { label: '◀', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k - 1)], tooltip: '前のページ' },
+      { label: `${MATRIX_TITLES[k]} ${k + 1}/${n}`, class: 'action small', width: 2, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
+      { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
       { label: '[left]', width: 1 },
       { label: '[right]', width: 1 },
-      '[hide-keyboard]',
-      { label: '[return]', width: 1 },
-      '[separator-5]',
-      { latex: ',', tooltip: 'カンマ（行列の中では、右に列を足す）' },
-      { latex: '=', tooltip: '等号' },
+      { label: '[hide-keyboard]' },
       { label: '[backspace]', width: 1 },
-    ] as (string | Partial<VirtualKeyboardKeycap>)[],
-  ],
+    ])
+    return { id: id(k), rows }
+  }),
 }
 
 /** abc タブのキー（keyboardSymbols.ts の書き方 → MathLive のキー） */
@@ -341,7 +350,7 @@ const ABC_LAYOUT = (() => {
 // タブを押した瞬間に行き先を「そのタブで最後に開いていたページ」に書き換える
 
 /** ページのあるタブの層の id（abc-3、special-0 など） */
-const PAGED_LAYER = /^(abc|special|calc)-/
+const PAGED_LAYER = /^(abc|special|calc|matrix)-/
 /** タブ → 最後に開いていたページの層の id */
 const lastPage = new Map<string, string>()
 
