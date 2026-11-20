@@ -732,30 +732,37 @@ function numericLayout() {
     return { left: row.slice(0, separator), right: row.slice(separator + 1) }
   })
   const [coordinates, punctuation, powers, controls] = numberRows
-  const to = (label: string, layer: string): KeyboardRow => [
-    { label, class: 'action', width: 5, command: ['switchKeyboardLayer', layer] },
-  ]
+  const pageKey = (label: string, layer: string): Partial<VirtualKeyboardKeycap> => ({
+    label, class: 'action small', width: 2, command: ['switchKeyboardLayer', layer],
+  })
   return {
     ...base,
     layers: [
       {
         id: 'numeric-basic',
         rows: [
-          [...coordinates.left.slice(0, 4), ...coordinates.right],
+          [...coordinates.left.slice(0, 3), coordinates.left[4], ...coordinates.right],
           [...punctuation.left.slice(0, 4), ...punctuation.right],
           [...powers.left.slice(0, 3), powers.left[4], ...powers.right],
           [...controls.left, ...controls.right],
-          to('記号へ ▶', 'numeric-symbols'),
+          [
+            ...symbols.left.slice(0, 4), powers.left[3], symbols.right[1],
+            pageKey('記号へ ▶', 'numeric-symbols'),
+          ],
         ],
       },
       {
         id: 'numeric-symbols',
         rows: [
           symbols.left,
-          [...symbols.right, ...coordinates.left.slice(4)],
+          [...symbols.right, coordinates.left[3], ...coordinates.left.slice(5)],
           [...punctuation.left.slice(4), powers.left[3], ...powers.left.slice(5), ...controls.right.slice(-1)],
           [...controls.left, punctuation.left[0], punctuation.left[1], punctuation.left[2], powers.left[4]],
-          to('◀ 数字へ', 'numeric-basic'),
+          [
+            fn('sin', '正弦'), fn('cos', '余弦'), fn('tan', '正接'),
+            fn('log', '常用対数（底 10）'), fn('ln', '自然対数（底 e）'), fn('exp', '指数関数 eˣ'),
+            pageKey('◀ 数字へ', 'numeric-basic'),
+          ],
         ],
       },
     ],
