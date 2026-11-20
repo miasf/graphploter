@@ -9,6 +9,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
+import { SurfaceTransparency } from './SurfaceTransparency'
 import { gpu2dMaterial, gpu2dMesh, setGpu2dUniforms, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
 import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
@@ -250,6 +251,7 @@ export class Viewer {
     // 描画の土台
     // ステンシルバッファは、媒介変数表示の立体の切り口のふたに使う
     this.renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true })
+    this.transparency = new SurfaceTransparency(this.renderer)
     this.renderer.setPixelRatio(this.basePixelRatio)
     this.renderer.localClippingEnabled = true // 表示範囲の外を切り落とすため
     container.appendChild(this.renderer.domElement)
@@ -924,6 +926,7 @@ export class Viewer {
     this.clearRotationTrails()
     this.resizeObserver.disconnect()
     this.controls.dispose()
+    this.transparency.dispose()
     this.renderer.dispose()
     this.container.replaceChildren()
   }
@@ -1142,7 +1145,7 @@ export class Viewer {
     this.notMotionLastTick = this.notMotion
     this.notMotion = false
     if (this.frameLog) this.renderMeasured(renderedBefore ? dt : null)
-    else this.renderer.render(this.scene, this.camera)
+    else this.renderScene()
     this.placePickLabel()
   }
   private renderedLastTick = false
@@ -1150,6 +1153,12 @@ export class Viewer {
   private notMotion = false
   /** 前の回に描いたコマが、形の差し替え・視点の跳びを含んでいたか */
   private notMotionLastTick = false
+  private readonly transparency: SurfaceTransparency
+
+  private renderScene() {
+    if (this.flat) this.renderer.render(this.scene, this.camera)
+    else this.transparency.render(this.scene, this.camera, this.camera.position.distanceTo(this.controls.target), this.sceneSize())
+  }
 
   // ---- ベンチマーク（?bench=1）用。ふつうに開いたときは使わない ----
 
@@ -1222,7 +1231,7 @@ export class Viewer {
     const q = ext && this.pendingQueries.length < 8 ? gl.createQuery() : null
     if (q) gl.beginQuery(ext!.TIME_ELAPSED_EXT, q)
     const t0 = performance.now()
-    this.renderer.render(this.scene, this.camera)
+    this.renderScene()
     const cpu = performance.now() - t0
     if (q) {
       gl.endQuery(ext!.TIME_ELAPSED_EXT)
@@ -1278,7 +1287,7 @@ export class Viewer {
     this.updateClipRange()
     this.updateLabelSizes()
     this.updateStencilSides()
-    this.renderer.render(this.scene, this.camera)
+    this.renderScene()
     // 描いた直後（同じ処理の中）なら、preserveDrawingBuffer なしでも絵を読める
     const c = document.createElement('canvas')
     c.width = w
@@ -1302,7 +1311,7 @@ export class Viewer {
       this.updateClipRange()
       this.updateLabelSizes()
       this.updateStencilSides()
-      this.renderer.render(this.scene, this.camera)
+      this.renderScene()
       const src = this.renderer.domElement
       if (!src.width || !src.height) return null
       // 縦長の画面（スマホ）でも一覧で見やすいよう、横 : 縦 = 4 : 3 に中央を切り抜く
@@ -1960,11 +1969,13 @@ export class Viewer {
     this.applyRayBudget(ray)
     // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
     const mat = createRaycastMaterial(glsl, Math.floor(info.affine.length / 4), p.grid, ray)
+    this.transparency.register(mat, true)
     // 不透明・半透明は、コンパイルの前に面の材質に合わせる（three.js は別のシェーダーにするので、後で変えると
     // 画面のスレッドを止めてコンパイルし直す。光線のシェーダーは重く、Windows の Chrome で 2 秒ほど固まった）
     const src = (p.group.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial
     mat.transparent = src.transparent
     mat.depthWrite = src.depthWrite
+    mat.alphaToCoverage = !src.transparent
     const m = raycastMesh(mat, ray, d)
     const layer = { mesh: m, mat, ray, glsl, key, ready: false, axes: info.axes, params: info.params }
     this.gpu3d.set(id, layer)
@@ -2059,7 +2070,7 @@ export class Viewer {
       layer.ray.uProbe.value = 0
       delete layer.mesh.userData.pixelH
       // 左下を確かめのために塗ったので、画面に出る前に、ふつうの絵で描き直す
-      this.renderer.render(this.scene, this.camera)
+      this.renderScene()
       this.dirty = true
     }
     let drawn = 0
@@ -2148,6 +2159,7 @@ export class Viewer {
     if (m.transparent !== src.transparent) {
       // 不透明・半透明が変わると three.js は別のシェーダーにするので、裏でコンパイルし直し、その間はメッシュの面を見せる
       m.transparent = src.transparent
+      m.alphaToCoverage = !src.transparent
       m.needsUpdate = true
       layer.ready = false
       this.scene.remove(layer.mesh)
@@ -2295,6 +2307,7 @@ export class Viewer {
     } else {
       // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
       p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes, true))
+      this.transparency.register(p.cap.material as THREE.MeshStandardMaterial)
       p.cap.frustumCulled = false // 切り口は表示範囲の中（外接球を求めない。下の曲面と同じ）
       p.group.add(p.cap)
       this.setStyle(id, style)
@@ -2333,6 +2346,8 @@ export class Viewer {
         })
       const inc = new THREE.Mesh(p.geo, pass(THREE.IncrementWrapStencilOp))
       const dec = new THREE.Mesh(p.geo, pass(THREE.DecrementStencilOp))
+      this.transparency.register(inc.material)
+      this.transparency.register(dec.material)
       const quadMat = new THREE.MeshStandardMaterial({
         side: THREE.DoubleSide,
         roughness: 0.7,
@@ -2346,6 +2361,7 @@ export class Viewer {
         clippingPlanes: this.boxPlanes,
       })
       const quad = new THREE.Mesh(new THREE.BufferGeometry(), quadMat)
+      this.transparency.register(quadMat)
       // 次の立体のために、ステンシルを 0 に戻しておく（ふたが描かれなかった画素も含めて）
       quad.onAfterRender = (r) => r.clearStencil()
       const base = -3000 + 3 * p.order
@@ -2447,6 +2463,7 @@ export class Viewer {
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
     const surface = new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes))
+    this.transparency.register(surface.material)
     // 曲面はいつも表示範囲の箱の中にあるので、視錐台の判定はしない。判定すると、three.js が新しい形ごとに外接球を
     // 点を 1 つずつ読んで求める（再生中は返事のたびに。数十万点の形で数十 ms）。カーソルの下の点を探すときは、
     // three.js が必要になったときに求める
