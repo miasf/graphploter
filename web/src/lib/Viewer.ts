@@ -135,6 +135,17 @@ type PlotObject =
       dots: THREE.InstancedMesh
     }
 
+type TrailFrame = { lines: Float32Array; dots: Float32Array }
+type RotationTrail = {
+  lines: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>
+  dots: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  frames: TrailFrame[]
+  angles: number[]
+  at: number
+  lastPoint?: number[]
+}
+const TRAIL_FRAMES = 80 // 約 1 回転分（再生は毎秒 30°）
+
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
 /** 拡大で中心の点にここまで（図形の大きさに対する割合）近づいたら、そこからは一定の速さで前に進む（通り抜けられる） */
 const NEAR_FRACTION = 0.08
@@ -163,6 +174,7 @@ export class Viewer {
   private controls: OrbitControls
   private frame = new THREE.Group() // 軸・目盛り・枠
   private plots = new Map<number, PlotObject>() // 式ごとの曲面・曲線
+  private rotationTrails = new Map<number, RotationTrail>()
   /**
    * 2D 表示で、画素ごとに描く曲線・領域（計画 12 章の G4）。式の番号 → 平面と材質と、その GLSL・表示範囲。
    * あるときは、plots の線・面を隠して（カーソルの下の点にはそれを使う）、こちらを描く
@@ -909,6 +921,7 @@ export class Viewer {
 
   dispose() {
     this.stopped = true
+    this.clearRotationTrails()
     this.resizeObserver.disconnect()
     this.controls.dispose()
     this.renderer.dispose()
@@ -1611,6 +1624,110 @@ export class Viewer {
     this.notePickData(id, mesh)
   }
 
+  /** 回転中の形を、表示座標で軽い線・点の形にして記録する。 */
+  recordRotationTrail(id: number, angles: number[]) {
+    const plot = this.plots.get(id)
+    const style = this.styles.get(id)
+    if (!plot || !style?.visible) return
+    const now = performance.now()
+    let trail = this.rotationTrails.get(id)
+    if (trail) {
+      const previousAngles = trail.angles
+      const delta = Math.max(0, ...angles.map((a, i) => {
+        const d = Math.abs((a - (previousAngles[i] ?? 0)) % 360)
+        return Math.min(d, 360 - d)
+      }))
+      if (delta < 0.01 || (now - trail.at < 160 && delta < 8)) return
+    }
+
+    const lines: number[] = []
+    let dots: number[] = []
+    if (plot.kind === 'curve') {
+      const pts = this.curvePts.get(id)
+      if (!pts) return
+      const step = Math.max(1, Math.ceil(pts.length / (3 * 256)))
+      let previous = -1
+      for (let i = 0; i < pts.length; i += 3) {
+        if (!Number.isFinite(pts[i]) || !Number.isFinite(pts[i + 1]) || !Number.isFinite(pts[i + 2])) {
+          previous = -1
+        } else if (previous < 0 || i - previous >= 3 * step || !Number.isFinite(pts[i + 3])) {
+          if (previous >= 0 && lines.length < 6 * 384 &&
+              (pts[previous] !== pts[i] || pts[previous + 1] !== pts[i + 1] || pts[previous + 2] !== pts[i + 2])) {
+            lines.push(pts[previous], pts[previous + 1], pts[previous + 2], pts[i], pts[i + 1], pts[i + 2])
+          }
+          previous = i
+        }
+      }
+      const points = plot.dots.userData.pos as number[]
+      const stride = Math.max(1, Math.ceil(points.length / (3 * 128))) * 3
+      for (let i = 0; i < points.length; i += stride) dots.push(points[i], points[i + 1], points[i + 2])
+    } else {
+      const mesh = plot.group.children[0] as THREE.Mesh
+      const geo = (plot.geo.userData.lod as THREE.BufferGeometry | undefined) ?? plot.geo
+      const pos = geo.getAttribute('position')
+      const index = geo.getIndex()
+      if (!pos || !index) return
+      const stride = Math.max(1, Math.ceil(index.count / (3 * 128))) * 3
+      const point = new THREE.Vector3()
+      mesh.updateWorldMatrix(true, false)
+      for (let i = 0; i + 2 < index.count; i += stride) {
+        for (const j of [0, 1, 1, 2, 2, 0]) {
+          point.fromBufferAttribute(pos, index.getX(i + j)).applyMatrix4(mesh.matrixWorld)
+          lines.push(point.x, point.y, point.z)
+        }
+      }
+    }
+    const lonePoint = lines.length === 0 && dots.length === 3 ? dots : undefined
+    if (lonePoint && trail?.lastPoint) {
+      lines.push(...trail.lastPoint, ...lonePoint)
+      dots = []
+    }
+    if (!lines.length && !dots.length) return
+    if (!trail) {
+      const appearance = { color: style.color, transparent: true, opacity: 0.26, depthWrite: false, clippingPlanes: this.clipPlanes }
+      const strokes = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial(appearance))
+      const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ ...appearance, size: 3, sizeAttenuation: false }))
+      strokes.raycast = points.raycast = () => {}
+      this.scene.add(strokes, points)
+      trail = { lines: strokes, dots: points, frames: [], angles, at: now }
+      this.rotationTrails.set(id, trail)
+    }
+    trail.angles = [...angles]
+    trail.at = now
+    trail.lastPoint = lonePoint
+    trail.frames.push({ lines: new Float32Array(lines), dots: new Float32Array(dots) })
+    if (trail.frames.length > TRAIL_FRAMES) trail.frames.shift()
+    for (const kind of ['lines', 'dots'] as const) {
+      const positions = new Float32Array(trail.frames.reduce((n, frame) => n + frame[kind].length, 0))
+      let offset = 0
+      for (const frame of trail.frames) {
+        positions.set(frame[kind], offset)
+        offset += frame[kind].length
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+      trail[kind].geometry.dispose()
+      trail[kind].geometry = geometry
+    }
+    this.dirty = true
+  }
+
+  clearRotationTrail(id: number) {
+    const trail = this.rotationTrails.get(id)
+    if (!trail) return
+    for (const object of [trail.lines, trail.dots]) {
+      this.scene.remove(object)
+      object.geometry.dispose()
+      object.material.dispose()
+    }
+    this.rotationTrails.delete(id)
+    this.dirty = true
+  }
+
+  clearRotationTrails() {
+    for (const id of this.rotationTrails.keys()) this.clearRotationTrail(id)
+  }
+
   /**
    * 座標系を使う式の、移行のスライダーの値 s（0〜1）を変える。位置を (1 − s) q + s T(q) に書き換えて、形だけを差し替える
    * （式は計算し直さない）。座標系を使わない式では、値を覚えるだけ
@@ -2130,6 +2247,7 @@ export class Viewer {
     }
     for (const id of this.plots.keys()) this.updateStencil(id)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.Material).clippingPlanes = this.clipPlanes
+    for (const trail of this.rotationTrails.values()) trail.lines.material.clippingPlanes = trail.dots.material.clippingPlanes = this.clipPlanes
     this.dirty = true
   }
 
@@ -2695,6 +2813,13 @@ export class Viewer {
     this.styles.set(id, style)
     this.dirty = true
     const c = new THREE.Color(style.color)
+    const trail = this.rotationTrails.get(id)
+    if (trail) {
+      trail.lines.visible = trail.dots.visible = style.visible
+      if (!style.visible) trail.lastPoint = undefined
+      trail.lines.material.color.copy(c)
+      trail.dots.material.color.copy(c)
+    }
     const holes = this.holeMarks.get(id)
     if (holes) {
       holes.visible = style.visible
@@ -2781,6 +2906,7 @@ export class Viewer {
   }
 
   removePlot(id: number) {
+    this.clearRotationTrail(id)
     this.setHoles(id, { holes: undefined } as MeshData)
     this.setPoi(id, undefined)
     this.curvePts.delete(id)

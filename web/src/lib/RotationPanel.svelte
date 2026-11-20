@@ -20,8 +20,11 @@
     onPlay: (k: number) => void
     /** 再生を止める（リセットしたとき） */
     onStop: (ks: number[]) => void
+    trailEnabled: boolean
+    onTrail: (enabled: boolean) => void
+    onClearTrail: () => void
   }
-  let { dims, axes, rotation, center, onRotate, playing, onPlay, onStop }: Props = $props()
+  let { dims, axes, rotation, center, onRotate, playing, onPlay, onStop, trailEnabled, onTrail, onClearTrail }: Props = $props()
 
   /** 最初から見せる回転の数。これより多い分は折りたたむ */
   const SHOW = 6
@@ -70,44 +73,55 @@
 </script>
 
 {#snippet plane(p: { i: number; j: number; k: number })}
-  <span class="name">{prettyName(coordName(p.i))}{prettyName(coordName(p.j))}</span>
-  <input
-    type="range"
-    min="-180"
-    max="180"
-    step="1"
-    value={rotation[p.k]}
-    aria-label="{coordName(p.i)}{coordName(p.j)} 平面の回転角"
-    oninput={(e) => setAngle(p.k, e.currentTarget.valueAsNumber)}
-  />
-  <span class="value">
-    <EditableValue
+  <div class="plane">
+    <span class="name">{prettyName(coordName(p.i))}{prettyName(coordName(p.j))}</span>
+    <input
+      type="range"
+      min="-180"
+      max="180"
+      step="1"
       value={rotation[p.k]}
-      suffix="°"
-      chars={6}
-      format={(v) => String(Number(v.toFixed(1)))}
-      label="{coordName(p.i)}{coordName(p.j)} 平面の回転角（度）"
-      onChange={(v) => setAngle(p.k, v)}
+      aria-label="{coordName(p.i)}{coordName(p.j)} 平面の回転角"
+      oninput={(e) => setAngle(p.k, e.currentTarget.valueAsNumber)}
     />
-  </span>
-  <button
-    class="play"
-    class:on={playing.includes(p.k)}
-    onclick={() => onPlay(p.k)}
-    aria-label="{coordName(p.i)}{coordName(p.j)} の回転を{playing.includes(p.k) ? '止める' : '再生する'}"
-    title={playing.includes(p.k) ? '止める' : '回し続ける'}>{playing.includes(p.k) ? '❚❚' : '▶'}</button
-  >
-  <button
-    class="play"
-    disabled={rotation[p.k] === 0 && !playing.includes(p.k)}
-    onclick={() => resetAngle(p.k)}
-    aria-label="{coordName(p.i)}{coordName(p.j)} の回転を 0° に戻す"
-    title="0° に戻す（再生も止める）">⟲</button
-  >
+    <span class="value">
+      <EditableValue
+        value={rotation[p.k]}
+        suffix="°"
+        chars={6}
+        format={(v) => String(Number(v.toFixed(1)))}
+        label="{coordName(p.i)}{coordName(p.j)} 平面の回転角（度）"
+        onChange={(v) => setAngle(p.k, v)}
+      />
+    </span>
+    <button
+      class="play"
+      class:on={playing.includes(p.k)}
+      onclick={() => onPlay(p.k)}
+      aria-label="{coordName(p.i)}{coordName(p.j)} の回転を{playing.includes(p.k) ? '止める' : '再生する'}"
+      title={playing.includes(p.k) ? '止める' : '回し続ける'}>{playing.includes(p.k) ? '❚❚' : '▶'}</button
+    >
+    <button
+      class="play"
+      disabled={rotation[p.k] === 0 && !playing.includes(p.k)}
+      onclick={() => resetAngle(p.k)}
+      aria-label="{coordName(p.i)}{coordName(p.j)} の回転を 0° に戻す"
+      title="0° に戻す（再生も止める）">⟲</button
+    >
+  </div>
 {/snippet}
 
 <div class="rotation">
   <p class="status">{planes.length} 通りの回転{nonzero > 0 ? `（${nonzero} 個を回転中）` : ''}</p>
+  <div class="trail-controls">
+    <label>
+      <input type="checkbox" checked={trailEnabled} onchange={(e) => onTrail(e.currentTarget.checked)} />
+      回転の軌跡を表示
+    </label>
+    {#if trailEnabled}
+      <button class="reset" onclick={onClearTrail}>軌跡を消す</button>
+    {/if}
+  </div>
 
   <div class="center">
     <span class="label">中心</span>
@@ -148,6 +162,17 @@
 </div>
 
 <style>
+  .trail-controls,
+  .trail-controls label {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .trail-controls {
+    margin: 6px 0 10px;
+    font-size: 13px;
+  }
   .status {
     margin: 0 0 4px;
     font-size: 12px;
@@ -169,6 +194,8 @@
     display: flex;
     align-items: center;
     gap: 3px;
+    min-width: 0;
+    max-width: 100%;
   }
   .center .c :global(.num) {
     width: 4.5em;
@@ -188,33 +215,43 @@
     /* 回転の並べ方を、この枠の幅で決める（下の @container） */
     container-type: inline-size;
   }
-  .planes {
+  .plane {
     display: grid;
-    grid-template-columns: 2.6em 1fr auto 1.8em 1.8em;
+    grid-template-columns: 2.6em minmax(0, 1fr) auto 24px 24px;
     align-items: center;
-    gap: 4px 8px;
+    column-gap: 8px;
   }
-  /* 狭いとき（式の ⚙ の「回転」）: 1 行に 5 つ並べるとスライダーが 30px ほどに潰れていた。
-     上の行に名前・角度・再生・戻す、下の行にスライダーを横いっぱいに出す（dense で、名前の行の空きに角度などを詰める） */
+  .plane + .plane {
+    margin-top: 4px;
+  }
   @container (max-width: 300px) {
-    .planes {
-      grid-template-columns: 2.6em 1fr 1.8em 1.8em;
-      grid-auto-flow: row dense;
-      row-gap: 2px;
+    .plane {
+      grid-template-columns: auto minmax(0, 1fr) 24px 24px;
+      gap: 2px 4px;
     }
-    .planes input {
+    .plane input {
       grid-column: 1 / -1;
-      margin-bottom: 6px;
+      grid-row: 2;
+    }
+    .plane + .plane {
+      margin-top: 6px;
     }
   }
-  .planes input {
+  .plane input {
     width: 100%;
     min-width: 0;
+    margin: 0;
   }
   .value {
     font: 12px var(--mono);
     color: var(--muted);
     text-align: right;
+  }
+  .value :global(.ev) {
+    max-width: 100%;
+  }
+  .value :global(.field) {
+    min-width: 0;
   }
   .play {
     width: 24px;
