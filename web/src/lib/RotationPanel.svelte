@@ -20,8 +20,11 @@
     onPlay: (k: number) => void
     /** 再生を止める（リセットしたとき） */
     onStop: (ks: number[]) => void
+    trailEnabled: boolean
+    onTrail: (enabled: boolean) => void
+    onClearTrail: () => void
   }
-  let { dims, axes, rotation, center, onRotate, playing, onPlay, onStop }: Props = $props()
+  let { dims, axes, rotation, center, onRotate, playing, onPlay, onStop, trailEnabled, onTrail, onClearTrail }: Props = $props()
 
   /** 最初から見せる回転の数。これより多い分は折りたたむ */
   const SHOW = 6
@@ -108,6 +111,15 @@
 
 <div class="rotation">
   <p class="status">{planes.length} 通りの回転{nonzero > 0 ? `（${nonzero} 個を回転中）` : ''}</p>
+  <div class="trail-controls">
+    <label>
+      <input type="checkbox" checked={trailEnabled} onchange={(e) => onTrail(e.currentTarget.checked)} />
+      回転の軌跡を表示
+    </label>
+    {#if trailEnabled}
+      <button class="reset" onclick={onClearTrail}>軌跡を消す</button>
+    {/if}
+  </div>
 
   <div class="center">
     <span class="label">中心</span>
@@ -148,6 +160,17 @@
 </div>
 
 <style>
+  .trail-controls,
+  .trail-controls label {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .trail-controls {
+    margin: 6px 0 10px;
+    font-size: 13px;
+  }
   .status {
     margin: 0 0 4px;
     font-size: 12px;

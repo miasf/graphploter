@@ -112,6 +112,9 @@
     rotPlaying: number[]
     onRotate: (rotation: number[], center: number[]) => void
     onPlayRot: (k: number) => void
+    trailEnabled: boolean
+    onTrail: (enabled: boolean) => void
+    onClearTrail: () => void
     /** 回転の再生を止める（リセットしたとき） */
     onStopRot: (ks: number[]) => void
     /** グループを変える（'new' ならこの式だけの新しいグループ） */
@@ -192,6 +195,9 @@
     rotPlaying,
     onRotate,
     onPlayRot,
+    trailEnabled,
+    onTrail,
+    onClearTrail,
     onStopRot,
     onGroup,
     coordSystems,
@@ -1321,7 +1327,7 @@
                 : `「${groupName}」の回転で描いています。同じグループを選んだ式は一緒に回ります（同期）。`}
             <button class="link" onclick={onOpenRotation}>まとめて設定</button>
           </p>
-          <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} onStop={onStopRot} />
+          <RotationPanel {dims} axes={viewAxes} {rotation} {center} {onRotate} playing={rotPlaying} onPlay={onPlayRot} onStop={onStopRot} {trailEnabled} {onTrail} {onClearTrail} />
         {:else if tab === 'coord'}
           <div class="group-row">
             <span class="label">座標系</span>

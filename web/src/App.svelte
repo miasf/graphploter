@@ -1039,6 +1039,8 @@
       return
     }
 
+    const rotationGroup = groupIdOf(item)
+    const pose = rotationIn(rotationGroup)
     const res = await requestPlot(
       item.id,
       source,
@@ -1047,7 +1049,7 @@
       used.ires,
       ranges,
       currentParams(),
-      { ...space, slice: sliceFor(item), ranges: spaceRanges, ...rotationOf(item) },
+      { ...space, slice: sliceFor(item), ranges: spaceRanges, ...pose },
       currentStacks(),
       cutRequest(),
       item.complexMode ?? 'off',
@@ -1159,6 +1161,9 @@
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
     else viewer.dropPixelLayers(item.id) // 回した後の式で描いている光線は、向きだけが変わったらメッシュに戻す（回す前の式なら、setPlotTransform で回す）
     viewer.setPlotTransform(item.id, res.mesh.transform)
+    if (!isAux(item) && trailGroups.includes(rotationGroup) && groupIdOf(item) === rotationGroup) {
+      viewer.recordRotationTrail(item.id, pose.rotation)
+    }
     viewer.setCap(item.id, res.cap, item)
     recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
@@ -1410,6 +1415,7 @@
     lastScale.delete(item.id)
     fineNext.delete(item.id)
     delete playing[-item.id]
+    if (trailGroups.includes(-item.id)) trailGroups = trailGroups.filter((id) => id !== -item.id)
     items.splice(items.indexOf(item), 1)
     if (item.param) paramsChanged([item.param.name])
     if (item.def) defsChanged([item.def])
@@ -1585,6 +1591,7 @@
   function setLatex(item: PlotItem, latex: string) {
     // 押した点の印を出している式が書き換わったら、印を消す（値が古くなる）
     if (pickedId === item.id) clearPick()
+    viewer?.clearRotationTrail(item.id)
     item.latex = latex
     // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
     for (const r of regionsUsed(latex)) {
@@ -2128,6 +2135,7 @@
   })
 
   function setLayout(next: Space) {
+    if (next.dims !== space.dims || next.axes.some((axis, i) => axis !== space.axes[i])) viewer?.clearRotationTrails()
     // 次元が変わったら、グループの回転も同じ座標の組の角度を引き継いで作り直す
     if (next.dims !== space.dims) {
       resizeRotations(space.dims, next.dims)
@@ -2236,6 +2244,8 @@
       item.rotGroup = to
     }
     if (from < 0) delete playing[from] // この式だけの回転の再生は、ほかの回転に移ったら止める
+    if (from < 0) trailGroups = trailGroups.filter((id) => id !== from)
+    viewer?.clearRotationTrail(item.id)
     schedule(item, 0)
   }
 
@@ -2251,6 +2261,7 @@
     }
     groups = groups.filter((g) => g.id !== gid)
     delete playing[gid]
+    trailGroups = trailGroups.filter((id) => id !== gid)
     if (rotTab === gid) rotTab = GLOBAL_GROUP
     animationChanged()
   }
@@ -2606,6 +2617,25 @@
 
   /** 再生中の回転（グループの番号 → 回転角の番号） */
   let playing = $state<Record<number, number[]>>({})
+  let trailGroups = $state<number[]>([])
+
+  function clearTrail(gid: number) {
+    for (const item of items) if (groupIdOf(item) === gid) viewer?.clearRotationTrail(item.id)
+  }
+
+  function setTrail(gid: number, enabled: boolean) {
+    if (enabled) {
+      if (trailGroups.includes(gid)) return
+      trailGroups = [...trailGroups, gid]
+      const angles = rotationIn(gid).rotation
+      for (const item of items) {
+        if (!isAux(item) && groupIdOf(item) === gid) viewer?.recordRotationTrail(item.id, angles)
+      }
+    } else {
+      trailGroups = trailGroups.filter((id) => id !== gid)
+      clearTrail(gid)
+    }
+  }
   /** 再生の速さ（度 / 秒） */
   const PLAY_SPEED = 30
   let lastFrame = 0
@@ -2955,6 +2985,7 @@
 
   function setFlat(on: boolean) {
     flat = on
+    viewer?.clearRotationTrails()
     viewer?.setFlat(on)
     viewer?.setCut(cutRequest())
     // 2D は真上からほぼ平行に見る。3D に戻したら元の遠近感にする
@@ -3177,6 +3208,9 @@
             onRotate={(r, c) => setRotation(groupIdOf(item), r, c)}
             onPlayRot={(k) => togglePlay(groupIdOf(item), k)}
             onStopRot={(ks) => stopPlay(groupIdOf(item), ks)}
+            trailEnabled={trailGroups.includes(groupIdOf(item))}
+            onTrail={(enabled) => setTrail(groupIdOf(item), enabled)}
+            onClearTrail={() => clearTrail(groupIdOf(item))}
             onGroup={(g) => setItemGroup(item, g)}
             {coordSystems}
             onCoord={(c) => setItemCoord(item, c)}
@@ -3349,6 +3383,9 @@
               playing={playing[rotTab] ?? []}
               onPlay={(k) => togglePlay(rotTab, k)}
               onStop={(ks) => stopPlay(rotTab, ks)}
+              trailEnabled={trailGroups.includes(rotTab)}
+              onTrail={(enabled) => setTrail(rotTab, enabled)}
+              onClearTrail={() => clearTrail(rotTab)}
             />
           {:else if settingsCat === 'coords'}
             <div class="group-tabs" role="tablist" aria-label="座標系">
