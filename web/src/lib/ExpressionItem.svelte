@@ -1487,10 +1487,12 @@
     background: var(--gutter);
     font-size: 13px;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
   .tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
     border-bottom: 1px solid var(--border);
     margin: -2px 0 2px;
