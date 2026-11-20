@@ -7,6 +7,7 @@ export interface CalcKey {
   insert: string
   tooltip: string
   class?: string
+  width?: 2
   /** 長押しで出る別のキー（入れる LaTeX） */
   variants?: string[]
 }
@@ -17,12 +18,21 @@ export const vecLabel = (c: string) =>
 
 /** 雛形のキー（label はキーの表示、insert は入れる LaTeX（#? は空欄、#0 は選んでいた部分）、ja は長押しで出る名前） */
 function key(label: string, insert: string, ja: string, small = false): CalcKey {
-  return { label, insert, tooltip: ja, ...(small || [...label].length > 2 ? { class: 'small' } : {}) }
+  // 全角の文字は、欧文の文字のおよそ 2 文字分として幅を決める。
+  const length = [...label.replace(/<[^>]*>/g, '').replace(/[\u3000-\u9fff]/g, 'aa')].length
+  const withSubscripts = label.replace(/_([A-Za-z])/g, '<sub>$1</sub>')
+  return {
+    label: withSubscripts === label ? label : `<span>${withSubscripts}</span>`,
+    insert,
+    tooltip: ja,
+    ...(small || length > 2 ? { class: 'small' } : {}),
+    ...(small || length >= 4 ? { width: 2 } : {}),
+  }
 }
 
 /**
  * 「∑∫∈」のタブ: 数学の記法（微積・ベクトル・集合と論理）の雛形。スマホで探さずに入れられるように、abc の奥ではなくここにまとめる。
- * 1 段 8 個まで（幅 360px のスマホでも押しやすい大きさ）。ページは下の段の ◀ ▶ でめくる
+ * 長いラベルにはキー 2 個分の幅を使う。ページは下の段の ◀ ▶ でめくる
  */
 export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
   {
@@ -78,7 +88,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
           variants: ['\\oint_{C}#?\\cdot d\\mathbf{r}'],
         },
         key('∮_C F·dr', '\\oint_{C}#?\\cdot d\\mathbf{r}', '閉じた曲線の上のベクトル場の線積分 ∮_C F · dr（計算は ∫ と同じ。平面ならグリーンの定理で ∬_D (Q_x − P_y) dA と等しい）'),
-        key('∫P dx+Q dy', '\\int_{C}#?\\,dx+#?\\,dy', '座標についての線積分 ∫_C P dx + Q dy = ∫_a^b (P x′(t) + Q y′(t)) dt（(P, Q) · dr と同じ。向きに依る）'),
+        key('∫dx+dy', '\\int_{C}#?\\,dx+#?\\,dy', '座標についての線積分 ∫_C P dx + Q dy = ∫_a^b (P x′(t) + Q y′(t)) dt（(P, Q) · dr と同じ。向きに依る）'),
       ],
       [
         key('∬_D f dA', '\\iint_{D}#?\\,dA', '2 重積分 ∬_D f dA（平面の領域 D の上の積分。D を媒介変数で書くと変数変換 |det J| du dv になる）'),
@@ -243,7 +253,7 @@ export const MATRIX_ROWS: CalcKey[][] = [
     key('[⋮⋮]', pm(2, 2, 'bmatrix'), '2×2 の行列（角括弧）'),
     key('|⋮⋮|', pm(2, 2, 'vmatrix'), '2×2 の行列式（1 行にそれだけなら、列ベクトルが張る平行四辺形）'),
     key('|⋮⋮⋮|', pm(3, 3, 'vmatrix'), '3×3 の行列式（平行六面体）'),
-    key('A=', 'A=' + pm(2, 2), '行列の定義 A = …（ほかの式で A と書ける）'),
+    key('A=', 'A=' + pm(2, 2), '行列の定義 A = …（ほかの式で A と書ける）', true),
   ],
   [
     key('det', '\\det #?', '行列式 det A（その行だけなら値が出る）'),
@@ -269,7 +279,7 @@ export const MATRIX_ROWS: CalcKey[][] = [
     key('a·b', '\\cdot', '内積・行列の積'),
     key('a×b', '\\times', '外積'),
     key('⟨a,b⟩', '\\left\\langle#?,#?\\right\\rangle', '内積 ⟨a, b⟩'),
-    key('‖a‖', '\\left\\Vert#0\\right\\Vert', 'ノルム（大きさ）'),
+    key('‖a‖', '\\left\\Vert#0\\right\\Vert', 'ノルム（大きさ）', true),
     key('Aᵢⱼ', '#@_{#?,#?}', '成分 A_{i,j}'),
     key('A†', '#@^{\\dagger}', '共役転置'),
     key('dim', '\\dim #?', '次元 dim ker A など'),

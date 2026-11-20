@@ -13,7 +13,7 @@
   } from './lib/library'
   import GraphsDialog from './lib/GraphsDialog.svelte'
   import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
-  import { setKeyboardDims } from './lib/mathSetup'
+  import { keyboardOcclusion, setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
   import CoordPanel from './lib/CoordPanel.svelte'
@@ -608,21 +608,24 @@
   let sheetState = $state<SheetState>('half')
   let dragHeight = $state<number | null>(null) // ドラッグ中の高さ
   let windowHeight = $state(window.innerHeight)
-  // 画面上の数式キーボードの高さ（出ていなければ 0）。シートはキーボードの上に乗せる
+  // キーボードの高さは入力欄の見える範囲だけに使い、グラフの視点には反映しない
   let keyboardHeight = $state(0)
-  const kb = window.mathVirtualKeyboard
-  kb.addEventListener('geometrychange', () => {
-    keyboardHeight = kb.visible ? kb.boundingRect.height : 0
+  onMount(() => {
+    const kb = window.mathVirtualKeyboard
+    const measure = () => (keyboardHeight = keyboardOcclusion())
+    kb.addEventListener('geometrychange', measure)
+    measure()
+    return () => kb.removeEventListener('geometrychange', measure)
   })
   const snapHeights = $derived({
     peek: 64,
-    half: Math.round((windowHeight - keyboardHeight) * 0.45),
-    full: Math.max(64, windowHeight - keyboardHeight - 48),
+    half: Math.max(64, Math.round(windowHeight * 0.45)),
+    full: Math.max(64, windowHeight - 48),
   })
   const sheetHeight = $derived(dragHeight ?? snapHeights[sheetState])
 
   // シートが重なっている分だけ、グラフの表示を上にずらす（全体まで引き出したときは半分の位置で止める）
-  const narrow = window.matchMedia('(max-width: 720px)')
+  const narrow = window.matchMedia('(max-width: 560px), (max-width: 720px) and (min-height: 501px)')
   let isNarrow = $state(narrow.matches)
   narrow.addEventListener('change', () => (isNarrow = narrow.matches))
   /** 設定を開いているか */
@@ -630,8 +633,8 @@
   // スマホで設定を開いている間は、設定が下半分を覆うので、グラフはその上に収める
   const bottomInset = $derived(
     isNarrow
-      ? (settingsOpen ? snapHeights.half : Math.min(sheetHeight, snapHeights.half)) + keyboardHeight
-      : keyboardHeight,
+      ? settingsOpen ? snapHeights.half : Math.min(sheetHeight, snapHeights.half)
+      : 0,
   )
   $effect(() => {
     viewer?.setBottomInset(bottomInset)
@@ -3039,12 +3042,16 @@
   />
 {/if}
 
-<div class="app" style:--panel-w={panelWidth === null ? null : `${panelWidth}px`}>
+<div
+  class="app"
+  class:keyboard-open={keyboardHeight > 0}
+  style:--keyboard-h="{keyboardHeight}px"
+  style:--panel-w={panelWidth === null ? null : `${panelWidth}px`}
+>
   <aside
     class="panel"
     class:dragging={dragHeight !== null}
     style:--sheet-h="{sheetHeight}px"
-    style:--keyboard-h="{keyboardHeight}px"
   >
     <!-- スマホではここがシートのつまみになる -->
     <header
@@ -3250,9 +3257,7 @@
   <!-- 設定: ボタンで項目の一覧を出し、選んだ項目だけを表示する（下までスクロールしなくてよいように） -->
   <div
     class="settings-anchor"
-    style:--inset="{bottomInset}px"
     style:--half="{snapHeights.half}px"
-    style:--keyboard-h="{keyboardHeight}px"
   >
     <div class="tool-row">
       <button class="settings-toggle" onclick={() => viewer?.resetCamera()} title="視点を最初の位置に戻す"
@@ -3981,7 +3986,7 @@
     top: 44px;
     right: -56px;
     width: min(380px, calc(100vw - 24px));
-    max-height: calc(100dvh - 68px - var(--inset));
+    max-height: calc(100dvh - 68px - var(--keyboard-h));
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border);
@@ -4304,8 +4309,8 @@
     box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
   }
 
-  /* スマホなど幅が狭いときは、グラフを全画面にして、式の一覧を下から引き出すシートにする */
-  @media (max-width: 720px) {
+  /* 幅が狭いときは下に式の一覧を置く。横向きで高さが限られるときは、式とグラフを横に並べる。 */
+  @media (max-width: 560px), (max-width: 720px) and (min-height: 501px) {
     /* スマホ: 設定はグラフを隠さないよう、下から出るシートにする（式の一覧の上に重ねる） */
     .settings-card {
       position: fixed;
@@ -4314,7 +4319,7 @@
       right: 0;
       bottom: var(--keyboard-h);
       width: auto;
-      height: var(--half);
+      height: min(var(--half), calc(100dvh - var(--keyboard-h) - 48px));
       max-height: none;
       border-radius: 14px 14px 0 0;
       box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
@@ -4339,12 +4344,16 @@
       border-right: none;
       border-radius: 14px 14px 0 0;
       box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
-      transition:
-        height 0.25s ease,
-        bottom 0.25s ease;
+      transition: height 0.25s ease;
       overflow: hidden;
     }
-.panel-body {
+    .keyboard-open .panel {
+      /* 式を置く上端は、編集中の行を表示する高さが足りる限り、そのままにする */
+      --editor-space: calc(100dvh - var(--keyboard-h) - 48px);
+      height: clamp(min(148px, var(--editor-space)), calc(var(--sheet-h) - var(--keyboard-h)), var(--editor-space));
+      transition: none;
+    }
+    .panel-body {
       padding-bottom: 0; /* シートごとキーボードの上に乗せている */
     }
     .panel.dragging {
