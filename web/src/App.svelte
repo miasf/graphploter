@@ -1161,10 +1161,10 @@
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
     else viewer.dropPixelLayers(item.id) // 回した後の式で描いている光線は、向きだけが変わったらメッシュに戻す（回す前の式なら、setPlotTransform で回す）
     viewer.setPlotTransform(item.id, res.mesh.transform)
-    if (!isAux(item) && trailGroups.includes(rotationGroup) && groupIdOf(item) === rotationGroup) {
-      viewer.recordRotationTrail(item.id, pose.rotation)
-    }
     viewer.setCap(item.id, res.cap, item)
+    if (!isAux(item) && trailGroups.includes(rotationGroup) && groupIdOf(item) === rotationGroup) {
+      viewer.recordRotationTrail(item.id, pose.rotation, pose.center)
+    }
     recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
     const plain = space.axes.every((a, k) => a === k) && space.rotation.every((a) => a === 0)
@@ -2627,9 +2627,9 @@
     if (enabled) {
       if (trailGroups.includes(gid)) return
       trailGroups = [...trailGroups, gid]
-      const angles = rotationIn(gid).rotation
+      const { rotation, center } = rotationIn(gid)
       for (const item of items) {
-        if (!isAux(item) && groupIdOf(item) === gid) viewer?.recordRotationTrail(item.id, angles)
+        if (!isAux(item) && groupIdOf(item) === gid) viewer?.recordRotationTrail(item.id, rotation, center)
       }
     } else {
       trailGroups = trailGroups.filter((id) => id !== gid)
