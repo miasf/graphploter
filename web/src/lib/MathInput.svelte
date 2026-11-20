@@ -1,11 +1,11 @@
 <script lang="ts">
   // 数式の入力欄（MathLive の <math-field>）。値は LaTeX でやりとりする。
   import type { MathfieldElement } from 'mathlive'
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { fenceBareDelimiters } from './latex'
   import { findShortcut, reverseShortcuts } from './autoNames'
   import { colBlank, colsOf, editWithMemory, formatMatrix, isBlank, MAX_SIZE, parseMatrix, rowBlank, rowsOf, type Matrix, type MatrixOp } from './matrixEdit'
-  import { keyboardOcclusion, keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
+  import { keyboardOcclusion, keyboardOnBlur, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
   interface Props {
     /** 入力欄の中身（LaTeX） */
@@ -94,7 +94,6 @@
   let picker = $state(false)
   let hover = $state<[number, number] | null>(null)
   /** 画面の数式キーボードの高さ（指で操作する画面で、帯をそのすぐ上に出す） */
-  let keyboardHeight = $state(0)
 
   const depthAt = (k: number) => el.getElementInfo(k)?.depth ?? 0
 
@@ -141,32 +140,47 @@
   function updateMatrix() {
     const at = focused ? findMatrix() : null
     matrix = at ? { rows: rowsOf(at.m), cols: colsOf(at.m), row: at.row, col: at.col } : null
+    if (matrix && touch && window.mathVirtualKeyboard.visible) keyboardMoved()
     if (!matrix) picker = false
   }
 
   function keyboardMoved() {
     if (!focused) return
-    keyboardHeight = keyboardOcclusion()
     cancelAnimationFrame(revealFrame)
-    if (keyboardHeight > 0) revealFrame = requestAnimationFrame(revealInput)
+    if (window.mathVirtualKeyboard.visible) revealFrame = requestAnimationFrame(revealInput)
   }
 
   /** 隠れた入力欄を、式の一覧か設定の中だけでスクロールして見せる。 */
   function revealInput() {
-    if (!focused) return
+    if (!focused || picker) return
     const scroller = el.closest<HTMLElement>('.panel-body, .card-body')
     if (!scroller) return
     const field = el.getBoundingClientRect()
     const bounds = scroller.getBoundingClientRect()
     const keyboard = window.mathVirtualKeyboard.boundingRect
-    const matrixBar = el.parentElement?.querySelector('.matrix-bar.floating')?.getBoundingClientRect()
     const overlapsKeyboard = field.right > keyboard.left && field.left < keyboard.right
-    const bottom = Math.min(bounds.bottom, overlapsKeyboard ? matrixBar?.top ?? window.innerHeight - keyboardHeight : Infinity)
+    const bottom = Math.min(bounds.bottom, overlapsKeyboard ? window.innerHeight - keyboardOcclusion() : Infinity)
     const top = bounds.top + 4
     const visibleBottom = bottom - 4
     if (visibleBottom <= top) return
-    if (field.top < top || field.height > visibleBottom - top) scroller.scrollTop += field.top - top
+    if (field.height > visibleBottom - top) {
+      const caret = el.shadowRoot?.querySelector('.ML__caret, .ML__selected')?.getBoundingClientRect()
+      if (caret && caret.top - 12 < top) scroller.scrollTop += caret.top - 12 - top
+      else if (caret && caret.bottom + 12 > visibleBottom) scroller.scrollTop += caret.bottom + 12 - visibleBottom
+      else if (!caret && field.top < top) scroller.scrollTop += field.top - top
+    } else if (field.top < top) scroller.scrollTop += field.top - top
     else if (field.bottom > visibleBottom) scroller.scrollTop += field.bottom - visibleBottom
+  }
+
+  async function toggleMatrixPicker() {
+    picker = !picker
+    if (!picker || !touch) return
+    await tick()
+    const firstCell = el.parentElement?.querySelector('.size-grid .cell')
+    const scroller = el.closest<HTMLElement>('.panel-body, .card-body')
+    if (!firstCell || !scroller) return
+    const bottom = Math.min(scroller.getBoundingClientRect().bottom, window.innerHeight - keyboardOcclusion())
+    scroller.scrollTop += Math.max(0, firstCell.getBoundingClientRect().bottom - bottom + 4)
   }
 
   /** 行列を `next` に入れ替えて、カーソルを (row, col) の成分に置く（空欄ならその空欄を選ぶ。打つと置き換わる） */
@@ -769,19 +783,23 @@
   onbeforeinput={handleBeforeInput}
   oninput={handleInput}
   onfocus={() => {
+    if (focused) return
     focused = true
-    keyboardOnFocus()
     updateMatrix()
     keyboardMoved()
     onFocusChange?.(true)
   }}
   onblur={() => {
-    keepScroll()
-    focused = false
-    matrix = null
-    picker = false
-    keyboardOnBlur()
-    onFocusChange?.(false)
+    // MathLive はキーボードを切り替えるとき、内部で同じ入力欄にフォーカスし直す。
+    queueMicrotask(() => {
+      if (!el || document.activeElement === el) return
+      keepScroll()
+      focused = false
+      matrix = null
+      picker = false
+      keyboardOnBlur()
+      onFocusChange?.(false)
+    })
   }}
 ></math-field>
   {#if matrix}
@@ -789,8 +807,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="matrix-bar"
-      class:floating={touch}
-      style:bottom={touch ? `${keyboardHeight}px` : undefined}
+      class:touch-matrix={touch}
       onpointerdown={keepFocus}
       onmousedown={keepFocus}
     >
@@ -798,7 +815,7 @@
       <button type="button" title="カーソルの行を消す" disabled={matrix.rows <= 1} onclick={() => editMatrix('row-')}>行 −</button>
       <button type="button" title="カーソルの列の右に列を足す（,）" disabled={matrix.cols >= MAX_SIZE} onclick={() => editMatrix('col+')}>列 ＋</button>
       <button type="button" title="カーソルの列を消す" disabled={matrix.cols <= 1} onclick={() => editMatrix('col-')}>列 −</button>
-      <button type="button" class="size" title="大きさを選ぶ" aria-expanded={picker} onclick={() => (picker = !picker)}>
+      <button type="button" class="size" title="大きさを選ぶ" aria-expanded={picker} onclick={toggleMatrixPicker}>
         {matrix.rows} × {matrix.cols}
       </button>
       {#if picker}
@@ -869,16 +886,22 @@
     user-select: none;
   }
   .with-touch-toggle {
-    padding-inline-end: 44px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+  .with-touch-toggle math-field {
+    grid-area: 1 / 1;
   }
   .with-touch-toggle .tap-cover {
-    inset-inline-end: 44px;
+    grid-area: 1 / 1 / 2 / 2;
+  }
+  .with-touch-toggle .matrix-bar {
+    grid-column: 1 / -1;
   }
   .touch-keyboard-toggle {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-end: 0;
-    width: 44px;
+    grid-area: 1 / 2;
+    align-self: start;
+    min-height: 44px;
     display: grid;
     place-items: center;
     padding: 0;
@@ -897,17 +920,6 @@
     margin-top: 4px;
     font-size: 12px;
   }
-  /* 指で操作する画面: 数式キーボードのすぐ上に出す（キーボードに隠れない） */
-  .matrix-bar.floating {
-    position: fixed;
-    left: 0;
-    right: 0;
-    z-index: 200;
-    margin: 0;
-    padding: 6px 8px;
-    background: var(--panel, var(--bg));
-    border-top: 1px solid var(--border-strong);
-  }
   .matrix-bar button {
     padding: 3px 8px;
     border: 1px solid var(--border-strong);
@@ -917,9 +929,8 @@
     font: inherit;
     cursor: pointer;
   }
-  .matrix-bar.floating button {
-    padding: 7px 10px;
-    font-size: 14px;
+  .matrix-bar.touch-matrix button {
+    padding: 7px 8px;
   }
   .matrix-bar button:disabled {
     opacity: 0.35;
@@ -944,12 +955,10 @@
     background: var(--bg);
     box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
   }
-  .matrix-bar.floating .size-grid {
-    top: auto;
-    bottom: 100%;
-    right: 8px;
+  .matrix-bar.touch-matrix .size-grid {
+    position: static;
     grid-template-columns: repeat(6, 30px);
-    margin: 0 0 4px;
+    margin: 4px 0 0 auto;
   }
   .matrix-bar .size-grid .cell {
     width: 22px;
@@ -957,7 +966,7 @@
     padding: 0;
     border-radius: 3px;
   }
-  .matrix-bar.floating .size-grid .cell {
+  .matrix-bar.touch-matrix .size-grid .cell {
     width: 30px;
     height: 30px;
   }

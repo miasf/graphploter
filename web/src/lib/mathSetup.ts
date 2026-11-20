@@ -605,6 +605,7 @@ function variablesLayout(dims: number) {
 
 /** キーボードの「変数」のタブに並べている座標の数（次元） */
 let keyboardDims = 0
+const compactNumeric = window.matchMedia('(max-width: 560px)')
 
 /** 次元が変わったとき: 「変数」のタブの座標のキーを、その次元のものにする */
 export function setKeyboardDims(dims: number) {
@@ -620,6 +621,9 @@ export function setupKeyboard() {
   setupKeyTips()
   setupPageMemory()
   setKeyboardDims(3)
+  compactNumeric.addEventListener('change', () => {
+    window.mathVirtualKeyboard.layouts = keyboardLayouts(keyboardDims)
+  })
 }
 
 /** 数式キーボードが画面の下端から覆っている高さ（端末の安全領域を含む）。 */
@@ -630,99 +634,137 @@ export function keyboardOcclusion(): number {
   return Math.ceil(window.innerHeight - host.bottom + kb.boundingRect.height)
 }
 
+type KeyboardRow = (string | Partial<VirtualKeyboardKeycap>)[]
+
+function numericLayout() {
+  const rows: KeyboardRow[] = [
+    // よく使う記号（abc タブの文字のページにもある）
+    [
+      ...COMMON_SYMBOLS.slice(0, 7).map((k) => k as Partial<VirtualKeyboardKeycap>),
+      '[separator-5]',
+      ...COMMON_SYMBOLS.slice(7).map((k) => k as Partial<VirtualKeyboardKeycap>),
+      { latex: 'r', tooltip: '極座標の半径 r（θ と一緒に使うと自動で極座標。r = θ でらせん）' },
+    ],
+    [
+      { latex: 'x', tooltip: '座標 x' },
+      { latex: 'y', tooltip: '座標 y' },
+      { latex: 'z', tooltip: '座標 z' },
+      { latex: 'w', tooltip: '4次元目の座標 w（5次元目からは w₂, w₃, …。「変数」のタブにある）' },
+      { latex: 't', tooltip: '媒介変数 t（曲線）' },
+      { latex: 'u', tooltip: '媒介変数 u（曲面）' },
+      { latex: 'v', tooltip: '媒介変数 v（曲面）' },
+      '[separator-5]',
+      '7',
+      '8',
+      '9',
+      { latex: '\\frac{#@}{#?}', label: '÷', tooltip: '割り算（分数）' },
+    ],
+    [
+      { latex: '(', tooltip: '左かっこ（長押しで { } [ ] ⟨ ⟩）', variants: [
+        { latex: '\\left\\{#0\\right\\}', label: '{ }' },
+        { latex: '\\left[#0\\right]', label: '[ ]' },
+        { latex: '\\left\\langle#0\\right\\rangle', label: '⟨ ⟩' },
+        { latex: '\\left\\{#0\\mid#?\\right\\}', label: '{ | }' },
+      ] },
+      { latex: ')', tooltip: '右かっこ（長押しで } ]）', variants: [{ latex: '\\}', label: '}' }, { latex: ']', label: ']' }] },
+      { latex: ',', tooltip: 'カンマ（引数・成分の区切り）' },
+      { latex: '\\pi', tooltip: '円周率 π' },
+      { latex: '\\imaginaryI', label: 'i', tooltip: '虚数単位 i' },
+      { latex: 'e', tooltip: 'ネイピア数 e' },
+      {
+        latex: '#@_{#?}',
+        label: 'x₂',
+        tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前にする（矢印 \\vec・太字 \\mathbf・黒板太字 \\mathbb。どれも同じ名前）',
+        variants: [
+          { latex: '\\vec{#@}', label: VEC_LABEL('v') },
+          { latex: '\\mathbf{#@}' },
+          { latex: '\\mathbb{#@}' },
+        ],
+      },
+      '[separator-5]',
+      '4',
+      '5',
+      '6',
+      { latex: '\\cdot', label: '×', tooltip: '掛け算（長押しで外積 ×）', variants: ['\\times'] },
+    ],
+    [
+      { latex: '#@^{2}', label: 'x²', tooltip: '2乗' },
+      { latex: '#@^{#?}', label: 'xⁿ', tooltip: 'べき乗（長押しで階乗 !）', variants: ['!'] },
+      { latex: '\\sqrt{#0}', label: '√', tooltip: '平方根' },
+      { latex: '\\left|#0\\right|', label: '|x|', tooltip: '絶対値' },
+      { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
+      {
+        latex: 'f',
+        tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場の名前 F（矢印・太字・黒板太字。どれも同じ名前で、f とは別））',
+        variants: [
+          'f\\left(x\\right)',
+          'h',
+          '\\vec{F}',
+          '\\mathbf{F}',
+          '\\mathbb{F}',
+        ],
+      },
+      { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)・ベクトル場の名前 G）', variants: ['g\\left(x\\right)', '\\vec{G}'] },
+      '[separator-5]',
+      '1',
+      '2',
+      '3',
+      { latex: '-', tooltip: '引き算・マイナス' },
+    ],
+    // 一文字消すボタン（⌫）は、ふつうのキーボードと同じく右下に置く（⏎ は左下の矢印の隣）
+    [
+      { label: '[left]', width: 1 },
+      { label: '[right]', width: 1 },
+      '[hide-keyboard]',
+      { label: '[return]', width: 1 },
+      '[separator-5]',
+      '0',
+      { latex: '.', tooltip: '小数点' },
+      { latex: '+', tooltip: '足し算' },
+      { label: '[backspace]', width: 1 },
+    ],
+  ]
+  const base = { label: '123', tooltip: '数字と記号' }
+  if (!compactNumeric.matches) return { ...base, rows }
+
+  const [symbols, ...numberRows] = rows.map((row) => {
+    const separator = row.indexOf('[separator-5]')
+    return { left: row.slice(0, separator), right: row.slice(separator + 1) }
+  })
+  const [coordinates, punctuation, powers, controls] = numberRows
+  const to = (label: string, layer: string): KeyboardRow => [
+    { label, class: 'action', width: 5, command: ['switchKeyboardLayer', layer] },
+  ]
+  return {
+    ...base,
+    layers: [
+      {
+        id: 'numeric-basic',
+        rows: [
+          [...coordinates.left.slice(0, 4), ...coordinates.right],
+          [...punctuation.left.slice(0, 4), ...punctuation.right],
+          [...powers.left.slice(0, 3), powers.left[4], ...powers.right],
+          [...controls.left, ...controls.right],
+          to('記号へ ▶', 'numeric-symbols'),
+        ],
+      },
+      {
+        id: 'numeric-symbols',
+        rows: [
+          symbols.left,
+          [...symbols.right, ...coordinates.left.slice(4)],
+          [...punctuation.left.slice(4), powers.left[3], ...powers.left.slice(5), ...controls.right.slice(-1)],
+          [...controls.left, punctuation.left[0], punctuation.left[1], punctuation.left[2], powers.left[4]],
+          to('◀ 数字へ', 'numeric-basic'),
+        ],
+      },
+    ],
+  }
+}
+
 function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layouts {
   return [
-    {
-      label: '123',
-      tooltip: '数字と記号',
-      rows: [
-        // よく使う記号（abc タブの文字のページにもある）
-        [
-          ...COMMON_SYMBOLS.slice(0, 7).map((k) => k as Partial<VirtualKeyboardKeycap>),
-          '[separator-5]',
-          ...COMMON_SYMBOLS.slice(7).map((k) => k as Partial<VirtualKeyboardKeycap>),
-          { latex: 'r', tooltip: '極座標の半径 r（θ と一緒に使うと自動で極座標。r = θ でらせん）' },
-        ],
-        [
-          { latex: 'x', tooltip: '座標 x' },
-          { latex: 'y', tooltip: '座標 y' },
-          { latex: 'z', tooltip: '座標 z' },
-          { latex: 'w', tooltip: '4次元目の座標 w（5次元目からは w₂, w₃, …。「変数」のタブにある）' },
-          { latex: 't', tooltip: '媒介変数 t（曲線）' },
-          { latex: 'u', tooltip: '媒介変数 u（曲面）' },
-          { latex: 'v', tooltip: '媒介変数 v（曲面）' },
-          '[separator-5]',
-          '7',
-          '8',
-          '9',
-          { latex: '\\frac{#@}{#?}', label: '÷', tooltip: '割り算（分数）' },
-        ],
-        [
-          { latex: '(', tooltip: '左かっこ（長押しで { } [ ] ⟨ ⟩）', variants: [
-            { latex: '\\left\\{#0\\right\\}', label: '{ }' },
-            { latex: '\\left[#0\\right]', label: '[ ]' },
-            { latex: '\\left\\langle#0\\right\\rangle', label: '⟨ ⟩' },
-            { latex: '\\left\\{#0\\mid#?\\right\\}', label: '{ | }' },
-          ] },
-          { latex: ')', tooltip: '右かっこ（長押しで } ]）', variants: [{ latex: '\\}', label: '}' }, { latex: ']', label: ']' }] },
-          { latex: ',', tooltip: 'カンマ（引数・成分の区切り）' },
-          { latex: '\\pi', tooltip: '円周率 π' },
-          { latex: '\\imaginaryI', label: 'i', tooltip: '虚数単位 i' },
-          { latex: 'e', tooltip: 'ネイピア数 e' },
-          {
-            latex: '#@_{#?}',
-            label: 'x₂',
-            tooltip: '添字（w₂ など。文字の後ろに数字を打っても添字になる）。長押しで、直前の文字をベクトルの名前にする（矢印 \\vec・太字 \\mathbf・黒板太字 \\mathbb。どれも同じ名前）',
-            variants: [
-              { latex: '\\vec{#@}', label: VEC_LABEL('v') },
-              { latex: '\\mathbf{#@}' },
-              { latex: '\\mathbb{#@}' },
-            ],
-          },
-          '[separator-5]',
-          '4',
-          '5',
-          '6',
-          { latex: '\\cdot', label: '×', tooltip: '掛け算（長押しで外積 ×）', variants: ['\\times'] },
-        ],
-        [
-          { latex: '#@^{2}', label: 'x²', tooltip: '2乗' },
-          { latex: '#@^{#?}', label: 'xⁿ', tooltip: 'べき乗（長押しで階乗 !）', variants: ['!'] },
-          { latex: '\\sqrt{#0}', label: '√', tooltip: '平方根' },
-          { latex: '\\left|#0\\right|', label: '|x|', tooltip: '絶対値' },
-          { latex: '=', tooltip: '等号（陰関数・パラメータの定義）。長押しで < > ≤ ≥ ≠ ∈', variants: ['<', '>', '\\le', '\\ge', '\\ne', '\\in'] },
-          {
-            latex: 'f',
-            tooltip: '関数の名前 f（f(x) = … で定義する。長押しで f(x)・h・ベクトル場の名前 F（矢印・太字・黒板太字。どれも同じ名前で、f とは別））',
-            variants: [
-              'f\\left(x\\right)',
-              'h',
-              '\\vec{F}',
-              '\\mathbf{F}',
-              '\\mathbb{F}',
-            ],
-          },
-          { latex: 'g', tooltip: '関数の名前 g（長押しで g(x)・ベクトル場の名前 G）', variants: ['g\\left(x\\right)', '\\vec{G}'] },
-          '[separator-5]',
-          '1',
-          '2',
-          '3',
-          { latex: '-', tooltip: '引き算・マイナス' },
-        ],
-        // 一文字消すボタン（⌫）は、ふつうのキーボードと同じく右下に置く（⏎ は左下の矢印の隣）
-        [
-          { label: '[left]', width: 1 },
-          { label: '[right]', width: 1 },
-          '[hide-keyboard]',
-          { label: '[return]', width: 1 },
-          '[separator-5]',
-          '0',
-          { latex: '.', tooltip: '小数点' },
-          { latex: '+', tooltip: '足し算' },
-          { label: '[backspace]', width: 1 },
-        ],
-      ],
-    },
+    numericLayout(),
     variablesLayout(dims),
     {
       label: 'f(x)',
@@ -765,52 +807,15 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
   ]
 }
 
-// ---- PC でも画面上の数式キーボードを出す ----
-// MathLive の自動（auto）では、キーボードが出るのはスマホなど指で操作する画面だけ。
-// PC では手動（manual）にして、入力欄に入ったときにこちらで出す。
-// キーボードの「隠す」ボタンで閉じたら、その設定を覚えて、次からは自動で出さない
-// （入力欄のキーボードのボタンで開き直すと、また自動で出す）。
+// スマホは自動、PC は画面上のキーボードが必要なときにボタンで開く。
 
 /** 指で操作する画面か（MathLive に任せる） */
 const touch = window.matchMedia('(pointer: coarse)').matches
-const PC_KEYBOARD_KEY = 'graphploter:pcKeyboard'
-
-function loadAutoShow(): boolean {
-  try {
-    return localStorage.getItem(PC_KEYBOARD_KEY) !== 'off'
-  } catch {
-    return true
-  }
-}
-
-let autoShow = loadAutoShow()
-let watching = false
-
 const mathFieldFocused = () => document.activeElement?.tagName === 'MATH-FIELD'
 
 /** 入力欄に設定するキーボードの出し方 */
 export function keyboardPolicy(): 'auto' | 'manual' {
   return touch ? 'auto' : 'manual'
-}
-
-/** 入力欄に入ったとき（PC では、閉じられていなければキーボードを出す） */
-export function keyboardOnFocus() {
-  if (touch) return
-  const kb = window.mathVirtualKeyboard
-  if (!watching) {
-    watching = true
-    // 入力欄に入ったまま開閉された = 利用者がボタンで開閉した。その状態を覚える
-    kb.addEventListener('virtual-keyboard-toggle', () => {
-      if (!mathFieldFocused()) return // 入力欄から出たので閉じた
-      autoShow = kb.visible
-      try {
-        localStorage.setItem(PC_KEYBOARD_KEY, autoShow ? 'on' : 'off')
-      } catch {
-        // 保存できない環境では、このページを開いている間だけ覚える
-      }
-    })
-  }
-  if (autoShow && !kb.visible) kb.show()
 }
 
 /** 入力欄から出たとき（PC では、ほかの入力欄に移ったのでなければキーボードを閉じる） */
