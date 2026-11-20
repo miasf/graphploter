@@ -5,7 +5,7 @@
   import { fenceBareDelimiters } from './latex'
   import { findShortcut, reverseShortcuts } from './autoNames'
   import { colBlank, colsOf, editWithMemory, formatMatrix, isBlank, MAX_SIZE, parseMatrix, rowBlank, rowsOf, type Matrix, type MatrixOp } from './matrixEdit'
-  import { keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
+  import { keyboardOcclusion, keyboardOnBlur, keyboardOnFocus, keyboardPolicy, SCRIPT_SIZE_SHEET, SHORTCUTS } from './mathSetup'
 
   interface Props {
     /** 入力欄の中身（LaTeX） */
@@ -40,6 +40,7 @@
   let focused = $state(false)
 
   let el: MathfieldElement
+  let revealFrame = 0
   /** 最後にこの欄から外へ知らせた値。これと違う値が来たときだけ「外から変わった」とみなす */
   let lastEmitted: string | null = null
 
@@ -60,6 +61,10 @@
     el.addEventListener('pointerup', fieldUp, { capture: true })
     el.addEventListener('pointercancel', fieldCancel, { capture: true })
     el.addEventListener('wheel', fieldWheel, { passive: false })
+    return () => {
+      window.mathVirtualKeyboard?.removeEventListener('geometrychange', keyboardMoved)
+      cancelAnimationFrame(revealFrame)
+    }
   })
 
   // ---- 行列の大きさを、その場で変える（計画 M6）----
@@ -139,7 +144,28 @@
   }
 
   function keyboardMoved() {
-    keyboardHeight = window.mathVirtualKeyboard?.boundingRect.height ?? 0
+    if (!focused) return
+    keyboardHeight = keyboardOcclusion()
+    cancelAnimationFrame(revealFrame)
+    if (keyboardHeight > 0) revealFrame = requestAnimationFrame(revealInput)
+  }
+
+  /** 隠れた入力欄を、式の一覧か設定の中だけでスクロールして見せる。 */
+  function revealInput() {
+    if (!focused) return
+    const scroller = el.closest<HTMLElement>('.panel-body, .card-body')
+    if (!scroller) return
+    const field = el.getBoundingClientRect()
+    const bounds = scroller.getBoundingClientRect()
+    const keyboard = window.mathVirtualKeyboard.boundingRect
+    const matrixBar = el.parentElement?.querySelector('.matrix-bar.floating')?.getBoundingClientRect()
+    const overlapsKeyboard = field.right > keyboard.left && field.left < keyboard.right
+    const bottom = Math.min(bounds.bottom, overlapsKeyboard ? matrixBar?.top ?? window.innerHeight - keyboardHeight : Infinity)
+    const top = bounds.top + 4
+    const visibleBottom = bottom - 4
+    if (visibleBottom <= top) return
+    if (field.top < top || field.height > visibleBottom - top) scroller.scrollTop += field.top - top
+    else if (field.bottom > visibleBottom) scroller.scrollTop += field.bottom - visibleBottom
   }
 
   /** 行列を `next` に入れ替えて、カーソルを (row, col) の成分に置く（空欄ならその空欄を選ぶ。打つと置き換わる） */
@@ -713,12 +739,8 @@
   onfocus={() => {
     focused = true
     keyboardOnFocus()
-    keyboardMoved()
     updateMatrix()
-    // 画面上のキーボードが出て一覧の見える部分が狭くなるので、出終わってから入力欄が見える所まで送る
-    setTimeout(() => {
-      if (focused) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    }, 350)
+    keyboardMoved()
     onFocusChange?.(true)
   }}
   onblur={() => {

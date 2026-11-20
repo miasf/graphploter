@@ -47,7 +47,14 @@ function fn(name: string, ja: string, opts: { operator?: boolean; args?: number 
   const n = opts.args ?? 1
   const args = Array.from({ length: n }, () => '#?').join(',')
   const tooltip = `${ja}\n${name}(${Array.from({ length: n }, () => '□').join(', ')})`
-  return { label: name, latex: head, insert: `${head}\\left(${args}\\right)`, class: 'small', tooltip }
+  return {
+    label: name,
+    latex: head,
+    insert: `${head}\\left(${args}\\right)`,
+    class: 'small',
+    ...(name.length >= 5 ? { width: 2 as const } : {}),
+    tooltip,
+  }
 }
 
 /**
@@ -210,6 +217,7 @@ const SPECIAL_LAYOUT = {
       { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
       { label: '[left]', width: 1 },
       { label: '[right]', width: 1 },
+      { label: '[hide-keyboard]' },
       { label: '[backspace]', width: 1 },
     ])
     return { id: id(k), rows }
@@ -230,6 +238,7 @@ const CALC_LAYOUT = {
       { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
       { label: '[left]', width: 1 },
       { label: '[right]', width: 1 },
+      { label: '[hide-keyboard]' },
       { label: '[backspace]', width: 1 },
     ])
     return { id: id(k), rows }
@@ -258,7 +267,14 @@ const MATRIX_LAYOUT = {
 /** abc タブのキー（keyboardSymbols.ts の書き方 → MathLive のキー） */
 function symbolKey(k: SymbolKey): Partial<VirtualKeyboardKeycap> {
   if (typeof k === 'string') return { latex: k, tooltip: k }
-  return { ...k, ...(k.label && [...k.label].length > 2 ? { class: 'small' } : {}) }
+  const length = k.label ? [...k.label].length : 0
+  const longArrow = /^\\[Ll]ong/.test(k.latex) || k.latex === '\\biconditional'
+  const wideArrow = k.latex === '\\iff' || k.latex === '\\Longleftrightarrow'
+  return {
+    ...k,
+    ...(length > 2 || longArrow ? { class: 'small' } : {}),
+    ...(length >= 4 || k.label === '∇×' || wideArrow ? { width: 2 as const } : {}),
+  }
 }
 
 /**
@@ -274,6 +290,7 @@ const ABC_LAYOUT = (() => {
     { label: '▶', class: 'action', width: 1, command: ['switchKeyboardLayer', id(k + 1)], tooltip: '次のページ' },
     { label: '[left]', width: 1 },
     { label: '[right]', width: 1 },
+    { label: '[hide-keyboard]' },
     { label: '[backspace]', width: 1 },
   ]
   const pages = SYMBOL_PAGES.map((page, k) => {
@@ -309,6 +326,7 @@ const ABC_LAYOUT = (() => {
     { label: '[return]', width: 2 },
     { label: '[left]', width: 1 },
     { label: '[right]', width: 1 },
+    { label: '[hide-keyboard]' },
     { label: '[backspace]', width: 1 },
   ])
   return {
@@ -588,9 +606,19 @@ export function setKeyboardDims(dims: number) {
 
 /** 画面上の数式キーボード（スマホでは入力欄を押すと自動で出る） */
 export function setupKeyboard() {
+  // body に付けると MathLive が body 自体に下余白を足す。固定した別の領域に描く。
+  window.mathVirtualKeyboard.container = document.getElementById('math-keyboard')!
   setupKeyTips()
   setupPageMemory()
   setKeyboardDims(3)
+}
+
+/** 数式キーボードが画面の下端から覆っている高さ（端末の安全領域を含む）。 */
+export function keyboardOcclusion(): number {
+  const kb = window.mathVirtualKeyboard
+  if (!kb.visible || !kb.container) return 0
+  const host = kb.container.getBoundingClientRect()
+  return Math.ceil(window.innerHeight - host.bottom + kb.boundingRect.height)
 }
 
 function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layouts {
@@ -716,6 +744,7 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           fn('arg', '偏角', { operator: true }),
           { label: '[left]', width: 1 },
           { label: '[right]', width: 1 },
+          '[hide-keyboard]',
           '[backspace]',
         ],
       ],

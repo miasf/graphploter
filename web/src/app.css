@@ -45,6 +45,123 @@ body {
   font: 15px/1.5 var(--sans);
 }
 
+/* 数式キーボードはグラフの上に重ね、キーの外ではポインター操作を通す。 */
+#math-keyboard {
+  position: fixed;
+  inset: 0 max(0px, (100% - 864px) / 2) env(safe-area-inset-bottom, 0px);
+  z-index: 105;
+  pointer-events: none;
+  --keyboard-padding-top: 0px;
+  --keyboard-padding-horizontal: clamp(5px, 1.2vw, 14px);
+  --keyboard-background: var(--gutter);
+  --keyboard-accent-color: var(--accent);
+  --keyboard-toolbar-text: var(--muted);
+  --keyboard-toolbar-text-active: var(--on-accent);
+  --keyboard-toolbar-background-hover: var(--hover);
+  --keyboard-toolbar-background-selected: var(--accent);
+  --keyboard-toolbar-font-size: clamp(12px, 3.8cqw, 15px);
+  --keycap-height: clamp(38px, 6.5dvh, 48px);
+  --keycap-max-width: 76px;
+  --keycap-gap: clamp(3px, 0.8cqw, 7px);
+  --keycap-font-size: clamp(16px, 4.8cqw, 21px);
+  --keycap-text: var(--text);
+  --keycap-background: var(--panel);
+  --keycap-background-hover: var(--hover);
+  --keycap-border: var(--border);
+  --keycap-border-bottom: var(--border-strong);
+  --keycap-secondary-text: var(--text);
+  --keycap-secondary-background: color-mix(in srgb, var(--gutter) 60%, var(--border-strong));
+  --keycap-secondary-background-hover: var(--panel);
+  --keycap-secondary-border: var(--border);
+  --keycap-secondary-border-bottom: var(--border-strong);
+  --keycap-glyph-size: clamp(14px, 4.4cqw, 18px);
+  --keycap-glyph-size-lg: clamp(16px, 4.8cqw, 20px);
+  --variant-panel-background: var(--panel);
+  --variant-keycap-font-size: 19px;
+  --variant-keycap-length: 50px;
+}
+
+#math-keyboard .ML__keyboard {
+  overflow: visible;
+}
+
+#math-keyboard .MLK__backdrop {
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 0 0 1px var(--border-strong), 0 -5px 22px rgb(0 0 0 / 0.16);
+}
+
+#math-keyboard .MLK__plate {
+  padding-block: 5px 2px;
+  font-family: var(--sans);
+}
+
+#math-keyboard .MLK__toolbar {
+  align-items: center;
+  gap: 4px;
+}
+
+#math-keyboard .MLK__toolbar > div {
+  gap: 2px;
+}
+
+#math-keyboard .MLK__toolbar > div > div {
+  min-width: 0;
+  min-height: 34px;
+  margin: 0 0 5px;
+  padding: 0 clamp(4px, 1cqw, 10px);
+  border: 0;
+  font-size: var(--keyboard-toolbar-font-size);
+  font-weight: 600;
+}
+
+#math-keyboard .MLK__toolbar svg {
+  width: 16px;
+  height: 16px;
+}
+
+#math-keyboard .MLK__toolbar > .left > div {
+  border-radius: 7px;
+}
+
+#math-keyboard .MLK__toolbar > div > div:not(.selected):hover {
+  color: var(--text);
+}
+
+#math-keyboard .MLK__row > div:not(.separator) {
+  min-width: 0;
+  flex-direction: row;
+  justify-content: center;
+  padding: 0 2px;
+  border-radius: 7px;
+  line-height: 1.15;
+  overflow: hidden;
+}
+
+#math-keyboard .MLK__row > .small,
+#math-keyboard .MLK__row > .action {
+  font-size: clamp(12px, 3.3cqw, 16px);
+}
+
+#math-keyboard .MLK__row > .action.small {
+  font-size: clamp(11px, 3.4cqw, 14px);
+}
+
+#math-keyboard .MLK__row > div > svg {
+  margin: 0;
+}
+
+#math-keyboard .MLK__row sub {
+  font-size: 0.75em;
+  line-height: 0;
+}
+
+@media (max-height: 500px) {
+  #math-keyboard {
+    --keycap-height: clamp(26px, 8.5dvh, 38px);
+    --keycap-gap: 3px;
+  }
+}
+
 /* ---- 数式キーボードのキーの名前（mathSetup.ts の吹き出し） ---- */
 /* MathLive 自身の吹き出しはキーの外が切り取られることがあるので使わず、こちらで出す */
 .ML__keyboard .MLK__row > [data-tooltip]::after {
