@@ -201,7 +201,6 @@ export class Viewer {
   /** 遠近感の強さ = tan(視野角 / 2)。小さいほど平行投影に近い */
   private perspective = Math.tan(THREE.MathUtils.degToRad(22.5))
   /** 画面の下側が何 px 隠れているか（スマホで式の一覧のシートが重なる分） */
-  private bottomInset = 0
   private resizeObserver: ResizeObserver
   /**
    * 描く所の大きさ（CSS の画素。resize で覚える）。毎コマの処理で container.clientWidth・clientHeight を読むと、
@@ -235,7 +234,7 @@ export class Viewer {
   private lastCamPos = new THREE.Vector3()
   private lastCamQuat = new THREE.Quaternion()
 
-  constructor(private container: HTMLElement) {
+  constructor(private container: HTMLElement, private hasResizableSheet = () => false) {
     // 描画の土台
     // ステンシルバッファは、媒介変数表示の立体の切り口のふたに使う
     this.renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true })
@@ -1059,29 +1058,17 @@ export class Viewer {
       if (p.kind === 'curve') (p.line.material as LineMaterial).resolution.set(w, h)
       else for (const l of p.outlines) (l.material as LineMaterial).resolution.set(w, h)
     }
-    this.applyViewOffset()
+    this.updateProjection()
   }
 
-  /**
-   * 画面の下側 px 分が隠れていることを伝える。グラフが見えている部分の中央に来るよう、
-   * 描画の中心を上にずらす。
-   */
-  setBottomInset(px: number) {
-    this.bottomInset = Math.max(0, px)
-    this.applyViewOffset()
+  private verticalHalfAngleTan() {
+    // スマホの 2D では式一覧を伸縮しても、横方向の表示範囲を保つ。
+    return this.flat && this.hasResizableSheet() ? this.perspective / this.camera.aspect : this.perspective
   }
 
-  private applyViewOffset() {
-    const w = this.container.clientWidth
-    const h = this.container.clientHeight
-    if (w === 0 || h === 0) return
-    if (this.bottomInset > 0) {
-      this.camera.setViewOffset(w, h, 0, this.bottomInset / 2, w, h)
-    } else {
-      this.camera.clearViewOffset()
-    }
+  private updateProjection() {
+    this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(this.verticalHalfAngleTan()))
     this.camera.updateProjectionMatrix()
-    this.dirty = true
   }
 
   private loop = () => {
@@ -1368,8 +1355,7 @@ export class Viewer {
     offset.setLength(halfHeight / tanNew)
     this.camera.position.copy(target).add(offset)
     this.perspective = tanNew
-    this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(tanNew))
-    this.camera.updateProjectionMatrix()
+    this.updateProjection()
   }
 
   /** 軸の名前を変える */
@@ -1431,6 +1417,7 @@ export class Viewer {
   setFlat(on: boolean) {
     if (this.flat === on) return
     this.flat = on
+    this.updateProjection()
     this.updateBoxUniforms()
     this.controls.enableRotate = !on
     this.applyButtons()
@@ -1464,7 +1451,7 @@ export class Viewer {
       const c = new THREE.Vector3((d.xmin + d.xmax) / 2, (d.ymin + d.ymax) / 2, 0)
       const half = Math.max((d.ymax - d.ymin) / 2, (d.xmax - d.xmin) / 2 / this.camera.aspect) * 1.12
       this.controls.target.copy(c)
-      this.camera.position.copy(c).add(new THREE.Vector3(0, 0, half / this.perspective))
+      this.camera.position.copy(c).add(new THREE.Vector3(0, 0, half / this.verticalHalfAngleTan()))
       this.camera.lookAt(c)
       this.updateClipRange()
       return
