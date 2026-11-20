@@ -1753,31 +1753,29 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
     }
     let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
     let [chain] = chains.as_slice() else { return Ok(None) };
-    let Some((name, _, _, power)) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
-    if chain.rels != [Rel::Eq] || crate::expand::seq_def(&name).is_none() {
+    let Some(head) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
+    let name = &head.name;
+    if chain.rels != [Rel::Eq] || crate::expand::seq_def(name).is_none() {
         return Ok(None);
     }
-    if power > 1.0 {
+    if head.uses_principal_root() {
         crate::expand::add_note("各項には根の主値を使用");
     }
     let (lo, hi) = crate::expand::view_x();
-    let first = if crate::expand::is_recurrence(&name) {
-        match crate::expand::first_term(&name, params) {
-            Some(k) => k,
-            None => return Err(format!("変数 '{name}1' はここでは使えません（初項 {name}_1 を定義してください）")),
-        }
+    let first = if crate::expand::is_recurrence(name) {
+        crate::expand::first_term(name, params).unwrap_or(1)
     } else {
         0
     };
     let from = (lo.ceil() as i64).max(first);
-    let to = (hi.floor() as i64).min(from + 1999);
-    crate::expand::mark_def_line(&name, Some("数列の点".into()));
+    let to = hi.floor() as i64;
+    crate::expand::mark_def_line(name, Some("数列の点".into()));
     if to < from {
         return Ok(Some(Plot::Multi(Vec::new())));
     }
-    let Some(terms) = crate::expand::sequence_terms(&name, from, to, params)? else {
+    let Some(terms) = crate::expand::sequence_terms(&head, from, to, params)? else {
         // 項が座標を含む（関数の列）: 点は描かない
-        crate::expand::mark_def_line(&name, None);
+        crate::expand::mark_def_line(name, None);
         return Ok(Some(Plot::Multi(Vec::new())));
     };
     let complex = terms.iter().any(|(_, v)| v.im.abs() > 1e-12 * v.re.abs().max(1.0) && v.im.is_finite());
@@ -1787,7 +1785,7 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
         .map(|(k, v)| if complex { [v.re, v.im, 0.0] } else { [*k as f64, v.re, 0.0] })
         .collect();
     if complex {
-        crate::expand::mark_def_line(&name, Some("数列の軌道（複素平面）".into()));
+        crate::expand::mark_def_line(name, Some("数列の軌道（複素平面）".into()));
     }
     Ok(Some(Plot::Points { points, line: complex }))
 }

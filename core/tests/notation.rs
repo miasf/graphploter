@@ -1090,6 +1090,42 @@ fn powered_sequence_terms() {
 }
 
 #[test]
+fn recurrence_operations_and_initial_values() {
+    let given = [("a1", 2.0)];
+    assert_eq!(seq_value("a_3", "a_(n+1) = a_(n)^2 + a_1", &given).unwrap(), 38.0);
+    assert!((seq_value("a_2", "a_(n+1) = log(a_(n)) + a_1", &given).unwrap() - (2.0_f64.log10() + 2.0)).abs() < 1e-12);
+    let given = [("a1", 0.5)];
+    assert_eq!(seq_value("a_2", "log(a_(n+1)) = a_(n) + a_1", &given).unwrap(), 10.0);
+    assert!((seq_value("a_2", "ln(a_(n+1)^2) = a_(n) + a_1", &given).unwrap() - 0.5_f64.exp()).abs() < 1e-12);
+    // 多くの項をたどっても、呼び出しの深さには依存しない。
+    assert_eq!(seq_value("a_1500", "a_(n+1) = a_(n) + a_1", &[("a1", 2.0)]).unwrap(), 3000.0);
+    let overflow = seq_value("a_100", "a_(n+1) = a_(n)^2 + a_(n)", &[("a1", 2.0)]).unwrap_err();
+    assert_eq!(overflow, "実数の値になりません");
+}
+
+#[test]
+fn recurrence_index_rules_and_dependencies() {
+    let even = "a_(2n) = a_(n) + a_1";
+    let odd = "a_(2n+1) = a_(n)^2 + a_1";
+    let both = format!("{even}\n{odd}");
+    let given = [("a1", 2.0)];
+    assert_eq!(seq_value("a_6", &both, &given).unwrap(), 8.0);
+    assert_eq!(seq_value("a_(a_2)", &both, &given).unwrap(), 6.0);
+    assert_eq!(seq_value("b_125", "b_(2(2n+1)+3) = n", &[]).unwrap(), 30.0);
+    assert_eq!(seq_value("a_4", even, &given).unwrap(), 6.0);
+    assert_eq!(seq_value("a_2", "a_(n) = a_(2n) + 1", &[("a8", 3.0)]).unwrap(), 5.0);
+    assert_eq!(seq_value("a_7", "a_(n+1) = a_(floor(n/2)) + a_1", &[("a0", 1.0), ("a1", 2.0)]).unwrap(), 6.0);
+    let missing = seq_value("a_6", even, &given).unwrap_err();
+    assert!(missing.contains("初項 a_3"), "{missing}");
+    assert!(seq_value("a_(3/2)", &both, &given).unwrap_err().contains("整数"));
+    let plot = run(even, even, &given).unwrap();
+    assert!(plot.positions().chunks_exact(3).any(|p| p == [2.0, 4.0, 0.0]));
+    let runaway = seq_value("a_4", "a_(n) = a_(n+1) + a_(n-1)", &given).unwrap_err();
+    assert!(runaway.contains("必要な項が多すぎ"), "{runaway}");
+    assert!(seq_value("a_4", "a_(n) = a_(n)", &given).unwrap_err().contains("循環"));
+}
+
+#[test]
 fn sequence_terms_with_coordinates() {
     // z = a_(3)（a_(n) = x^n）と z = x^3 が同じメッシュ
     same("z = a_(3)", "z = x^3", "a_(n) = x^n");

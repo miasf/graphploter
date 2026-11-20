@@ -20,6 +20,9 @@ check('-0 は 0', formatNumber(-0.0001, 0.1), '0')
 
 check('べき付きの数列定義', sequenceDefinitionName('a_(n+1)^(2)=a_(n)+1'), 'a')
 check('名前付きの数列定義', sequenceDefinitionName('{alpha}_(n-2)^3=1'), 'alpha')
+check('対数と偶奇の添字', sequenceDefinitionName('log (a_(2(n+1)+1)^(2))=a_(n)+a_1'), 'a')
+check('固定の添字は数列定義ではない', sequenceDefinitionName('a_(3)^2=1'), null)
+check('項を足した左辺は数列定義ではない', sequenceDefinitionName('a_(n)+b_(n)=1'), null)
 check('数列の比較は定義ではない', sequenceDefinitionName('a_(n)^2>=1'), null)
 const hasSequence = (name: string) => name === 'a'
 check('初項の添字を補う', sequenceInitialLatex('a1=1.7', hasSequence), 'a_{1}=1.7')

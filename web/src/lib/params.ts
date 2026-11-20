@@ -88,8 +88,35 @@ export function latexName(name: string): string {
 
 /** 計算エンジン用の式から、数列の定義の名前を取り出す。左辺の項にはべきが付くこともある。 */
 export function sequenceDefinitionName(source: string): string | null {
-  const head = /^\s*(?:([A-Za-z])|\{(\w+)\})_\(\s*(?:[A-Za-z]\w*|\{\w+\})\s*(?:[+-]\s*\d+(?:\.0*)?\s*)?\)\s*(?:\^\s*(?:\(\s*\d+(?:\.0*)?\s*\)|\d+(?:\.0*)?)\s*)?=/.exec(source)
-  return head ? head[1] ?? head[2] : null
+  const relation = /[=<>]/.exec(source)
+  if (relation?.[0] !== '=') return null
+  let lhs = source.slice(0, relation.index).trim()
+  const closingParen = (text: string, open: number): number => {
+    let depth = 0
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === '(') depth++
+      if (text[i] === ')' && --depth === 0) return i
+    }
+    return -1
+  }
+  while (lhs) {
+    lhs = lhs.replace(/\s*\^\s*(?:\(\s*\d+(?:\.0*)?\s*\)|\d+(?:\.0*)?)$/, '').trimEnd()
+    const log = /^(?:ln|log)\s+/.exec(lhs)
+    if (log) {
+      lhs = lhs.slice(log[0].length)
+      continue
+    }
+    const group = /^(?:(?:ln|log)\s*)?\(/.exec(lhs)
+    if (group && closingParen(lhs, group[0].length - 1) === lhs.length - 1) {
+      lhs = lhs.slice(group[0].length, -1).trim()
+      continue
+    }
+    const head = /^([A-Za-z]|\{\w+\})_\(/.exec(lhs)
+    if (!head || closingParen(lhs, head[0].length - 1) !== lhs.length - 1) return null
+    const index = lhs.slice(head[0].length, -1)
+    return /[A-Za-z]/.test(index) ? head[1].replace(/^\{|\}$/g, '') : null
+  }
+  return null
 }
 
 /** 添字なしで入力された初項を、同じ名前の数列がある場合に限り a_{1} の形にそろえる。 */

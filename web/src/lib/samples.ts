@@ -352,6 +352,17 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '数列',
     samples: [
       {
+        label: '偶数項と奇数項を別々に定義する（a₁ を動かす）',
+        flat: true,
+        view: { dims: 3, half: 12 },
+        items: [
+          { latex: 'a_0=0', param: 'a0' },
+          { latex: 'a_1=1', param: 'a1' },
+          { latex: 'a_{2n}=a_n+a_1', options: { color: '#2d70b3', lineWidth: 6 } },
+          { latex: 'a_{2n+1}=a_n^2+a_1', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
         label: '収束する数列 aₙ₊₁ = aₙ/2 + 1（a₁ を動かす）',
         view: { dims: 3, half: 12 },
         items: [
