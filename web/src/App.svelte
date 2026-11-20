@@ -135,7 +135,7 @@
   }
 
   onMount(() => {
-    viewer = new Viewer(viewerEl)
+    viewer = new Viewer(viewerEl, () => narrow.matches)
     viewer.onPick = handlePick
     // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
     viewer.onGpuFallback = (id, reason) => {
@@ -604,9 +604,7 @@
     widthDrag = null
   }
 
-  type SheetState = 'peek' | 'half' | 'full'
-  let sheetState = $state<SheetState>('half')
-  let dragHeight = $state<number | null>(null) // ドラッグ中の高さ
+  let preferredSheetExtent = $state<number | null>(null)
   let windowHeight = $state(window.innerHeight)
   // キーボードの高さは入力欄の見える範囲だけに使い、グラフの視点には反映しない
   let keyboardHeight = $state(0)
@@ -617,83 +615,57 @@
     measure()
     return () => kb.removeEventListener('geometrychange', measure)
   })
-  const snapHeights = $derived({
-    peek: 64,
-    half: Math.max(64, Math.round(windowHeight * 0.45)),
-    full: Math.max(64, windowHeight - 48),
-  })
+  const defaultSheetExtent = $derived(Math.max(64, Math.round(windowHeight * 0.36)))
+  const maxSheetExtent = $derived(Math.max(64, windowHeight - 120))
+  const minSheetExtent = $derived(Math.min(maxSheetExtent, keyboardHeight > 0 ? keyboardHeight + 176 : 64))
+  const sheetExtent = $derived(clampSheetExtent(preferredSheetExtent ?? defaultSheetExtent))
+  const sheetHeight = $derived(Math.max(0, sheetExtent - keyboardHeight))
+  const settingsHeight = $derived(Math.max(0, Math.min(windowHeight * 0.45, maxSheetExtent - keyboardHeight)))
 
-  // シートが重なっている分だけ、グラフの表示を上にずらす（全体まで引き出したときは半分の位置で止める）
   const narrow = window.matchMedia('(max-width: 560px), (max-width: 720px) and (min-height: 501px)')
-  let isNarrow = $state(narrow.matches)
-  narrow.addEventListener('change', () => (isNarrow = narrow.matches))
-  /**
-   * キーボードが覆う分だけパネルを短くする。閉じるときは bottom の移動量と
-   * 高さの増加量が同じになるため、パネル上端が跳ねない。
-   */
-  const visibleSnapHeights = $derived({
-    peek: snapHeights.peek,
-    half: isNarrow ? Math.max(64, snapHeights.half - keyboardHeight) : snapHeights.half,
-    full: isNarrow ? Math.max(64, snapHeights.full - keyboardHeight) : snapHeights.full,
-  })
-  /** 画面に実際に見えている高さ。ドラッグ中も同じ単位で扱う。 */
-  const sheetHeight = $derived(dragHeight ?? visibleSnapHeights[sheetState])
   /** 設定を開いているか */
   let settingsOpen = $state(false)
-  // スマホで設定を開いている間は、設定が下半分を覆うので、グラフはその上に収める
-  const bottomInset = $derived(
-    isNarrow
-      ? settingsOpen ? snapHeights.half : Math.min(sheetHeight, snapHeights.half)
-      : 0,
-  )
-  $effect(() => {
-    viewer?.setBottomInset(bottomInset)
-  })
+  const graphBottom = $derived(settingsOpen ? Math.max(sheetExtent, settingsHeight + keyboardHeight) : sheetExtent)
 
-  let drag: { startY: number; startH: number; lastY: number; lastT: number; v: number; moved: boolean } | null =
-    null
+  function clampSheetExtent(extent: number) {
+    return Math.max(minSheetExtent, Math.min(maxSheetExtent, extent))
+  }
+
+  function toggleSheet() {
+    preferredSheetExtent = (preferredSheetExtent ?? defaultSheetExtent) <= 64 ? defaultSheetExtent : 64
+  }
+
+  let drag: { pointerId: number; startY: number; startExtent: number; moved: boolean } | null = null
 
   function sheetDown(e: PointerEvent) {
+    if (!narrow.matches || e.button !== 0 || drag) return
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     // つまみを触っても編集中の数式からフォーカスを外さず、キーボードを開いたまま動かす。
     e.preventDefault()
-    drag = { startY: e.clientY, startH: sheetHeight, lastY: e.clientY, lastT: e.timeStamp, v: 0, moved: false }
+    drag = { pointerId: e.pointerId, startY: e.clientY, startExtent: sheetExtent, moved: false }
   }
 
   function sheetMove(e: PointerEvent) {
-    if (!drag) return
+    if (drag?.pointerId !== e.pointerId) return
     const dy = e.clientY - drag.startY
     if (Math.abs(dy) > 4) drag.moved = true
     if (!drag.moved) return
-    const dt = e.timeStamp - drag.lastT
-    if (dt > 0) drag.v = (e.clientY - drag.lastY) / dt // 指の速さ（下向きが正、px/ms）
-    drag.lastY = e.clientY
-    drag.lastT = e.timeStamp
-    dragHeight = Math.min(visibleSnapHeights.full, Math.max(visibleSnapHeights.peek, drag.startH - dy))
+    preferredSheetExtent = clampSheetExtent(drag.startExtent - dy)
   }
 
-  function sheetUp() {
-    if (!drag) return
-    if (!drag.moved) {
-      sheetState = sheetState === 'peek' ? 'half' : 'peek' // タップ
-    } else {
-      const h = dragHeight ?? sheetHeight
-      const order: SheetState[] = ['peek', 'half', 'full']
-      if (drag.v < -0.5) {
-        // 上向きにはじいた → 1段上へ
-        sheetState = order.find((st) => visibleSnapHeights[st] > h + 1) ?? 'full'
-      } else if (drag.v > 0.5) {
-        // 下向きにはじいた → 1段下へ
-        sheetState = [...order].reverse().find((st) => visibleSnapHeights[st] < h - 1) ?? 'peek'
-      } else {
-        // 一番近い段へ
-        sheetState = order.reduce((a, b) =>
-          Math.abs(visibleSnapHeights[b] - h) < Math.abs(visibleSnapHeights[a] - h) ? b : a,
-        )
-      }
-    }
+  function sheetUp(e: PointerEvent) {
+    if (drag?.pointerId !== e.pointerId) return
+    if (!drag.moved && e.type === 'pointerup') toggleSheet()
     drag = null
-    dragHeight = null
+  }
+
+  function sheetKey(e: KeyboardEvent) {
+    if (!narrow.matches || e.target !== e.currentTarget) return
+    if (e.key === 'Enter' || e.key === ' ') toggleSheet()
+    else if (e.key === 'ArrowUp') preferredSheetExtent = clampSheetExtent(sheetExtent + 32)
+    else if (e.key === 'ArrowDown') preferredSheetExtent = clampSheetExtent(sheetExtent - 32)
+    else return
+    e.preventDefault()
   }
 
   // ---- 設定（ボタンで項目の一覧を出し、選んだ項目だけを表示する）----
@@ -3058,13 +3030,12 @@
 
 <div
   class="app"
-  class:keyboard-open={keyboardHeight > 0}
   style:--keyboard-h="{keyboardHeight}px"
+  style:--graph-bottom="{graphBottom}px"
   style:--panel-w={panelWidth === null ? null : `${panelWidth}px`}
 >
   <aside
     class="panel"
-    class:dragging={dragHeight !== null}
     style:--sheet-h="{sheetHeight}px"
   >
     <!-- スマホではここがシートのつまみになる -->
@@ -3077,7 +3048,7 @@
       onpointermove={sheetMove}
       onpointerup={sheetUp}
       onpointercancel={sheetUp}
-      onkeydown={(e) => e.key === 'Enter' && (sheetState = sheetState === 'peek' ? 'half' : 'peek')}
+      onkeydown={sheetKey}
     >
       <span class="grip"></span>
       <h1>graphploter</h1>
@@ -3271,7 +3242,7 @@
   <!-- 設定: ボタンで項目の一覧を出し、選んだ項目だけを表示する（下までスクロールしなくてよいように） -->
   <div
     class="settings-anchor"
-    style:--half="{snapHeights.half}px"
+    style:--settings-h="{settingsHeight}px"
   >
     <div class="tool-row">
       <button class="settings-toggle" onclick={() => viewer?.resetCamera()} title="視点を最初の位置に戻す"
@@ -4333,7 +4304,7 @@
       right: 0;
       bottom: var(--keyboard-h);
       width: auto;
-      height: min(var(--half), calc(100dvh - var(--keyboard-h) - 48px));
+      height: var(--settings-h);
       max-height: none;
       border-radius: 14px 14px 0 0;
       box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
@@ -4346,7 +4317,7 @@
     }
     .viewer {
       position: fixed;
-      inset: 0;
+      inset: 0 0 var(--graph-bottom) 0;
     }
     .panel {
       position: fixed;
@@ -4364,9 +4335,6 @@
     }
     .panel-body {
       padding-bottom: 0; /* シートごとキーボードの上に乗せている */
-    }
-    .panel.dragging {
-      transition: none;
     }
     .title {
       position: relative;
