@@ -655,6 +655,8 @@
 
   function sheetDown(e: PointerEvent) {
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    // つまみを触っても編集中の数式からフォーカスを外さず、キーボードを開いたまま動かす。
+    e.preventDefault()
     drag = { startY: e.clientY, startH: sheetHeight, lastY: e.clientY, lastT: e.timeStamp, v: 0, moved: false }
   }
 
