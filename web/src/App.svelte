@@ -605,6 +605,7 @@
   }
 
   let preferredSheetExtent = $state<number | null>(null)
+  let expandedSheetExtent: number | null = null
   let windowHeight = $state(window.innerHeight)
   // キーボードの高さは入力欄の見える範囲だけに使い、グラフの視点には反映しない
   let keyboardHeight = $state(0)
@@ -632,7 +633,13 @@
   }
 
   function toggleSheet() {
-    preferredSheetExtent = (preferredSheetExtent ?? defaultSheetExtent) <= 64 ? defaultSheetExtent : 64
+    if (keyboardHeight > 0) window.mathVirtualKeyboard.hide()
+    if ((preferredSheetExtent ?? defaultSheetExtent) <= 64) {
+      preferredSheetExtent = expandedSheetExtent
+    } else {
+      expandedSheetExtent = preferredSheetExtent
+      preferredSheetExtent = 64
+    }
   }
 
   let drag: { pointerId: number; startY: number; startExtent: number; moved: boolean } | null = null

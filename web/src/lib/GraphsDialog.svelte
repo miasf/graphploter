@@ -1,6 +1,7 @@
 <script lang="ts">
   // グラフの一覧の画面（Desmos の「マイグラフ」）: 新しいグラフ・開く・名前の変更・複製・削除・共有リンク
   import { formatDate, type GraphMeta } from './library'
+  import { onMount } from 'svelte'
 
   interface Props {
     graphs: GraphMeta[]
@@ -25,6 +26,23 @@
     query.trim() === '' ? graphs : graphs.filter((g) => g.title.toLowerCase().includes(query.trim().toLowerCase())),
   )
   const now = Date.now()
+  let dialog: HTMLDialogElement
+
+  onMount(() => {
+    const previous = document.activeElement
+    const modal = dialog
+    modal.showModal()
+    return () => {
+      modal.close()
+      if (previous instanceof HTMLElement) previous.focus({ preventScroll: true })
+    }
+  })
+
+  function backdropClick(e: MouseEvent) {
+    if (e.target !== dialog) return
+    const bounds = dialog.getBoundingClientRect()
+    if (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom) onClose()
+  }
 
   function focusSelect(node: HTMLInputElement) {
     node.focus()
@@ -32,10 +50,14 @@
   }
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && !editing && onClose()} />
-
-<div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onClose()}>
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="グラフの一覧">
+<dialog
+  bind:this={dialog}
+  class="dialog"
+  aria-label="グラフの一覧"
+  oncancel={(e) => { e.preventDefault(); onClose() }}
+  onkeydown={(e) => { if (e.key === 'Escape') e.stopPropagation() }}
+  onclick={backdropClick}
+>
     <div class="head">
       <span class="head-title">グラフ</span>
       <button class="close" onclick={onClose} aria-label="閉じる">×</button>
@@ -77,6 +99,7 @@
                   onkeydown={(e) => {
                     if (e.key === 'Enter') e.currentTarget.blur()
                     if (e.key === 'Escape') {
+                      e.preventDefault()
                       e.stopPropagation()
                       editing = null
                     }
@@ -102,23 +125,15 @@
       {#if shown.length === 0}<p class="empty">「{query}」を含む名前のグラフはありません。</p>{/if}
     {/if}
     <p class="note">グラフはこのブラウザだけに保存されます（別の端末・別のブラウザでは見えません）。ほかの人や別の端末へは、共有リンクで渡してください。</p>
-  </div>
-</div>
+</dialog>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 200;
+  .dialog::backdrop {
     background: rgb(0 0 0 / 0.35);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
   }
   .dialog {
-    width: min(760px, 100%);
-    max-height: min(86vh, 100%);
+    width: min(760px, calc(100% - 32px));
+    max-height: min(86dvh, calc(100% - 32px));
     overflow-y: auto;
     background: var(--panel);
     color: var(--text);
@@ -304,11 +319,9 @@
     color: var(--text);
   }
   @media (max-width: 480px) {
-    .backdrop {
-      padding: 0;
-      align-items: stretch;
-    }
     .dialog {
+      width: 100%;
+      height: 100%;
       max-height: 100%;
       border-radius: 0;
     }
