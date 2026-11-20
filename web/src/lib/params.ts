@@ -86,6 +86,20 @@ export function latexName(name: string): string {
   return name.replace(/^([a-zA-Z])(\d+)$/, '$1_{$2}')
 }
 
+/** 計算エンジン用の式から、数列の定義の名前を取り出す。左辺の項にはべきが付くこともある。 */
+export function sequenceDefinitionName(source: string): string | null {
+  const head = /^\s*(?:([A-Za-z])|\{(\w+)\})_\(\s*(?:[A-Za-z]\w*|\{\w+\})\s*(?:[+-]\s*\d+(?:\.0*)?\s*)?\)\s*(?:\^\s*(?:\(\s*\d+(?:\.0*)?\s*\)|\d+(?:\.0*)?)\s*)?=/.exec(source)
+  return head ? head[1] ?? head[2] : null
+}
+
+/** 添字なしで入力された初項を、同じ名前の数列がある場合に限り a_{1} の形にそろえる。 */
+export function sequenceInitialLatex(latex: string, hasSequence: (name: string) => boolean): string {
+  return latex.replace(/^(\s*)([A-Za-z])(\d+)(?=\s*=)/, (original, space: string, name: string, index: string) => {
+    const param = name + index
+    return !isReserved(param) && hasSequence(name) ? space + latexName(param) : original
+  })
+}
+
 /** 範囲 range をおよそ n 個に区切る「きりの良い」刻み（1, 2, 5 × 10^k） */
 export function niceStep(range: number, n: number): number {
   const raw = range / n

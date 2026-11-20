@@ -12,7 +12,7 @@
     UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
   } from './lib/library'
   import GraphsDialog from './lib/GraphsDialog.svelte'
-  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
+  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
   import { keyboardOcclusion, setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -822,16 +822,12 @@
   /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
   const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
 
-  /** 計算エンジン用の式の、数列の定義 `a_(n) = …`・`a_(n+1) = …`（計画 M10） */
-  const SEQ_DEF_HEAD = /^\s*([A-Za-z])_\(\s*[A-Za-z]\w*\s*([+-]\s*\d+\s*)?\)\s*=/
-
   /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
   function defNameOf(it: PlotItem): string | null {
     if (it.def) return it.def
     try {
       const text = latexToText(it.latex)
-      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD) ?? text.match(SEQ_DEF_HEAD)
-      return m ? m[1] : null
+      return (text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD))?.[1] ?? sequenceDefinitionName(text)
     } catch {
       return null
     }
@@ -965,7 +961,7 @@
 
   /** 「a のスライダーを追加」（次元の設定の欄から）: 一覧の一番上に a = 1 の行を足す */
   function addSliderTop(name: string) {
-    items.unshift(newItem(`${name}=1`))
+    items.unshift(newItem(`${latexName(name)}=1`))
     schedule(items[0], 0)
   }
 
@@ -1013,8 +1009,17 @@
     let ranges: ParamRanges
     let spaceRanges: Space['ranges']
     let coord: ReturnType<typeof coordRequest>
+    const inputLatex = item.latex
+    const initialLatex = sequenceInitialLatex(inputLatex, (name) => items.some((other) => {
+      if (other === item) return false
+      try {
+        return sequenceDefinitionName(latexToText(other.latex)) === name
+      } catch {
+        return false
+      }
+    }))
     try {
-      source = latexToText(item.latex)
+      source = latexToText(initialLatex)
       ranges = Object.fromEntries(
         Object.entries(item.ranges).map(([k, [a, b]]) => [k, [latexToText(a), latexToText(b)] as [string, string]]),
       )
@@ -1076,8 +1081,7 @@
       item.info = undefined
       dropParam(item)
       // 誤りのある定義の行も定義の行のまま（左辺の形で決める）。定義が消えた・変わったら、使う式を計算し直す
-      const head = source.match(DEF_HEAD)
-      noteDefinition(item, head ? head[1] : null, source)
+      noteDefinition(item, source.match(DEF_HEAD)?.[1] ?? sequenceDefinitionName(source), source)
       return
     }
 
@@ -1112,6 +1116,7 @@
       for (const it of items.slice(k + 1)) if (it.param?.name === name) schedule(it, 0)
       const prev = item.param
       item.param = res.param
+      if (initialLatex !== inputLatex && item.latex === inputLatex) item.latex = initialLatex
       if (res.param.im !== 0) item.slider.complex = true
       // 値がスライダーの範囲の外なら、範囲を広げる（範囲の中なら、そのまま）
       const { re, im } = res.param
