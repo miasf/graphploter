@@ -38,6 +38,7 @@
   // スマホなど指で操作する画面か
   const touch = window.matchMedia('(pointer: coarse)').matches
   let focused = $state(false)
+  const touchToggle = $derived(touch && keyboardToggle && !small)
 
   let el: MathfieldElement
   let revealFrame = 0
@@ -487,6 +488,37 @@
     tapped = false
   }
 
+  // MathLive のボタンは指が触れた時点で開閉する。タッチ端末では縦スクロールを通し、タップでだけ開閉する。
+  let toggleStart: { id: number; x: number; y: number } | null = null
+  let toggleMoved = false
+
+  function toggleDown(e: PointerEvent) {
+    if (!e.isPrimary || e.button !== 0) return
+    e.preventDefault() // 操作中の式からフォーカスを外さない
+    toggleStart = { id: e.pointerId, x: e.clientX, y: e.clientY }
+    toggleMoved = false
+  }
+
+  function toggleMove(e: PointerEvent) {
+    if (toggleStart?.id !== e.pointerId) return
+    if (Math.hypot(e.clientX - toggleStart.x, e.clientY - toggleStart.y) >= 10) toggleMoved = true
+  }
+
+  function toggleCancel(e: PointerEvent) {
+    if (toggleStart?.id !== e.pointerId) return
+    toggleStart = null
+    toggleMoved = true
+  }
+
+  function toggleKeyboard(e: MouseEvent) {
+    if (e.detail !== 0 && toggleMoved) return
+    const keyboard = window.mathVirtualKeyboard
+    const wasVisible = keyboard.visible
+    el.focus()
+    if (wasVisible) keyboard.hide()
+    else keyboard.show({ animate: true })
+  }
+
   // 外から値が変わったときだけ書き換える。
   // 速く入力していると、知らせた値が戻ってくる前に次の文字が入っていることがあるので、
   // 「今の欄の中身」ではなく「最後に知らせた値」と比べる（比べ方を間違えると入力した文字が消える）
@@ -727,11 +759,11 @@
   const keepFocus = (e: Event) => e.preventDefault()
 </script>
 
-<div class="wrap">
+<div class="wrap" class:with-touch-toggle={touchToggle}>
 <math-field
   bind:this={el}
   class:small
-  class:no-toggle={!keyboardToggle || small}
+  class:no-toggle={!keyboardToggle || small || touchToggle}
   aria-label={label}
   {placeholder}
   onbeforeinput={handleBeforeInput}
@@ -805,6 +837,23 @@
       onclick={coverClick}
     ></div>
   {/if}
+  {#if touchToggle}
+    <button
+      type="button"
+      class="touch-keyboard-toggle"
+      aria-label="数式キーボードの開閉"
+      onpointerdown={toggleDown}
+      onpointermove={toggleMove}
+      onpointerup={toggleMove}
+      onpointercancel={toggleCancel}
+      onclick={toggleKeyboard}
+    >
+      <svg aria-hidden="true" width="22" height="16" viewBox="0 0 22 16" fill="none" stroke="currentColor" stroke-width="1.4">
+        <rect x="1" y="2" width="20" height="12" rx="2" />
+        <path d="M4 6h2m2 0h2m2 0h2m2 0h2M4 10h2m2 0h6m2 0h2" />
+      </svg>
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -818,6 +867,26 @@
     touch-action: pan-y; /* 縦のスクロールはそのまま通す */
     -webkit-touch-callout: none; /* 長押しのメニューを出さない */
     user-select: none;
+  }
+  .with-touch-toggle {
+    padding-inline-end: 44px;
+  }
+  .with-touch-toggle .tap-cover {
+    inset-inline-end: 44px;
+  }
+  .touch-keyboard-toggle {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    width: 44px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    touch-action: pan-y;
+    cursor: pointer;
   }
   .matrix-bar {
     position: relative;
