@@ -1753,9 +1753,12 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
     }
     let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
     let [chain] = chains.as_slice() else { return Ok(None) };
-    let Some((name, _, _)) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
+    let Some((name, _, _, power)) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
     if chain.rels != [Rel::Eq] || crate::expand::seq_def(&name).is_none() {
         return Ok(None);
+    }
+    if power > 1.0 {
+        crate::expand::add_note("各項には根の主値を使用");
     }
     let (lo, hi) = crate::expand::view_x();
     let first = if crate::expand::is_recurrence(&name) {

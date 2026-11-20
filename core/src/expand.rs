@@ -161,7 +161,7 @@ impl Defs {
             if chain.rels != [Rel::Eq] {
                 continue;
             }
-            let Some((name, var, shift)) = sequence_head(&chain.exprs[0]) else { continue };
+            let Some((name, var, shift, power)) = sequence_head(&chain.exprs[0]) else { continue };
             if seqs.contains_key(&name) {
                 continue;
             }
@@ -169,6 +169,12 @@ impl Defs {
             let body = chain.exprs[1].substitute(&|v| {
                 (v == var && shift != 0).then(|| Expr::Bin(BinOp::Sub, Box::new(Expr::Var(var.clone())), Box::new(Expr::Num(shift as f64))))
             });
+            // a_(n + k)^p = f(n) の各項は、右辺の p 乗根の主値で定める。
+            let body = match power {
+                2.0 => Expr::Call(crate::functions::Func::Sqrt, vec![body]),
+                1.0 => body,
+                p => Expr::Bin(BinOp::Pow, Box::new(body), Box::new(Expr::Num(1.0 / p))),
+            };
             seqs.insert(name, Seq { var, body });
         }
         Defs { map, seqs }
@@ -192,8 +198,15 @@ impl Defs {
     }
 }
 
-/// 数列の定義の左辺 `a_(n)`・`a_(n + k)`・`a_(n − k)` なら (名前, 添字の変数, k)
-pub fn sequence_head(e: &Expr) -> Option<(String, String, i64)> {
+/// 数列の定義の左辺 `a_(n + k)^p` なら (名前, 添字の変数, k, p)。指数を省略すると p = 1。
+pub fn sequence_head(e: &Expr) -> Option<(String, String, i64, f64)> {
+    let (e, power) = match e {
+        Expr::Bin(BinOp::Pow, base, exp) => match &**exp {
+            Expr::Num(p) if *p > 0.0 && p.fract() == 0.0 => (&**base, *p),
+            _ => return None,
+        },
+        _ => (e, 1.0),
+    };
     let Expr::Index { name, index } = e else { return None };
     let int = |e: &Expr| match e {
         Expr::Num(v) if v.fract() == 0.0 && v.abs() < 1e4 => Some(*v as i64),
@@ -211,7 +224,7 @@ pub fn sequence_head(e: &Expr) -> Option<(String, String, i64)> {
         },
         _ => return None,
     };
-    (crate::equation::coord_index(&var).is_none()).then(|| (name.clone(), var, k))
+    (crate::equation::coord_index(&var).is_none()).then(|| (name.clone(), var, k, power))
 }
 
 /// 数列の項 a_from, …, a_to の値（複素数）。項が数にならない（座標を含む）なら None。初項が足りないなどはエラー
@@ -3249,7 +3262,7 @@ impl Expander<'_> {
             }
             (Val::Fn { arity, body }, Val::S(c)) => {
                 if op == BinOp::Pow {
-                    if matches!(&c, Expr::Neg(x) if matches!(**x, Expr::Num(n) if n == 1.0)) {
+                    if c.is_minus_one() {
                         return Err("逆関数 f⁻¹ は、y = f⁻¹(x) の形（片側がそれだけ）でだけ使えます".into());
                     }
                     return Err("関数のべき乗 f² は使えません（f(x)^2 と書いてください）".into());
@@ -3730,7 +3743,6 @@ pub fn rewrite_inverse(l: Expr, r: Expr) -> (Expr, Expr) {
         let Expr::Bin(BinOp::Mul, a, arg) = e else { return None };
         let Expr::Bin(BinOp::Pow, f, k) = &**a else { return None };
         let Expr::Var(name) = &**f else { return None };
-        let minus_one = matches!(&**k, Expr::Neg(x) if matches!(**x, Expr::Num(n) if n == 1.0)) || matches!(**k, Expr::Num(n) if n == -1.0);
         let one_arg = match defs.get(name) {
             Some(Def::Function { args, .. }) => args.len() == 1,
             Some(Def::Value(_)) => {
@@ -3740,7 +3752,7 @@ pub fn rewrite_inverse(l: Expr, r: Expr) -> (Expr, Expr) {
             }
             Some(Def::Set(_)) | None => false,
         };
-        (minus_one && one_arg).then(|| (name.clone(), (**arg).clone()))
+        (k.is_minus_one() && one_arg).then(|| (name.clone(), (**arg).clone()))
     };
     if let Some((f, arg)) = inv(&l) {
         return (Expr::Apply { name: f, primes: 0, args: vec![r] }, arg);

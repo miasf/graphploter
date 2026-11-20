@@ -391,6 +391,15 @@ const typed: [string, string][] = [
   ['\\int_{\\left\\lbrace\\left(\\cos t,\\sin t\\right)\\,\\middle\\vert\\,0\\le t\\le2\\pi\\right\\rbrace}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi; {d_s})(x^(2))'],
 ]
 for (const [latex, want] of typed) check(latex, latexToText(latex), want)
+check('添字と上付きの入力順', latexToText('a^{2}_{n+1}=a_n+1'), latexToText('a_{n+1}^{2}=a_n+1'))
+check('数列の項のべき乗', latexToText('a_{n+1}^{2}=a_n+1'), 'a_(n+1)^(2)=a_(n)+1')
+for (const [latex, want] of [
+  ['sin^2{x}', 'sin^(2)(x)'],
+  ['\\sin^{2}\\left\\lbrace x\\right\\rbrace', 'sin^(2)(x)'],
+  ['\\operatorname{erf}^{-3}\\lbrace x+1\\rbrace', 'erf^(-3)(x+1)'],
+  ['f^{p+1}{x,y}', 'f^(p+1)(x,y)'],
+  ['f^{p+1}\\{x,g^2\\{y,z\\}\\}', 'f^(p+1)(x,g^(2)(y,z))'],
+]) check(latex, squash(latexToText(latex)), want)
 // 範囲の欄に打った集合も同じ
 setRegions({ C: '\\left\\lbrace\\left(x,y,z\\right)\\,\\middle\\vert\\,x=y=z,0\\le x\\le1\\right\\rbrace' })
 check('範囲の欄の \\lbrace・\\middle\\vert', latexToText('\\int_C x\\,ds'), '@intset((x,y,z),x=y=z,0<=x<=1; {d_s})(x)')

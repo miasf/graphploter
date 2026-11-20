@@ -131,6 +131,16 @@ fn inverse_function() {
 }
 
 #[test]
+fn powers_of_function_calls() {
+    same("z = sin^(2)(x) + cos^(3)(y)", "z = sin(x)^2 + cos(y)^3", "");
+    same("z = erf^(-2)(x+2)", "z = erf(x+2)^(-2)", "");
+    same("z = max^(2)(x,y)", "z = max(x,y)^2", "");
+    same("z = f^(x+1)(y)^2", "z = ((y+2)^(x+1))^2", "f(t) = t+2");
+    same("z = g^(3)(x,y)", "z = (x+y)^3", "g(s,t) = s+t");
+    same("z = x^2(y)", "z = x^2*y", "");
+}
+
+#[test]
 fn errors_name_the_function() {
     assert!(error_of("z = f(x)", "f(x) = f(x) + 1").contains("f の定義が f 自身"), "{}", error_of("z = f(x)", "f(x) = f(x) + 1"));
     assert!(error_of("z = h(x)", "h(x, y) = x y").contains("h の引数は 2 個"));
@@ -1065,6 +1075,18 @@ fn sequences() {
     assert!(e.contains("変数 'a1' はここでは使えません"), "{e}");
     // 添字が数字の名前は今までどおり（パラメータ a1・座標 w₂）
     assert_eq!(seq_value("a_1 + 1", "", &[("a1", 2.0)]).unwrap(), 3.0);
+}
+
+#[test]
+fn powered_sequence_terms() {
+    let recurrence = "a_(n+1)^(2) = a_(n)+1";
+    let init = [("a1", 3.0)];
+    assert_eq!(seq_value("a_(2)", recurrence, &init).unwrap(), 2.0);
+    let m = run(recurrence, recurrence, &init).unwrap();
+    assert!(m.positions().chunks_exact(3).any(|p| p == [2.0, 2.0, 0.0]));
+    assert!(m.kind().contains("根の主値"));
+    let third = seq_value("b_(3)", "b_(n+2)^3 = b_(n) + n", &[("b1", 7.0), ("b2", 0.0)]).unwrap();
+    assert!((third - 2.0).abs() < 1e-14);
 }
 
 #[test]
