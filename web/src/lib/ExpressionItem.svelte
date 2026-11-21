@@ -8,6 +8,7 @@
   import MathInput from './MathInput.svelte'
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
+  import SequenceTable from './SequenceTable.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
   import { prettyCoordName } from './coords'
   import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
@@ -15,6 +16,7 @@
 
   interface Props {
     item: PlotItem
+    onToggleSequenceTable: () => void
     index: number
     /** 表示範囲（格子線の間隔の選択肢を決めるのに使う） */
     domain: Domain
@@ -135,6 +137,7 @@
   }
   let {
     item,
+    onToggleSequenceTable,
     index,
     domain,
     axisNames,
@@ -215,6 +218,7 @@
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
   const missing = $derived(missingParam(item.error))
+  const hasSequenceTable = $derived(item.visible && !item.error && !item.param && !!item.def && /（数列の(?:点|軌道)/.test(item.kind ?? ''))
   /**
    * 積分の範囲の欄・積分の図にだけ出ている、未定義の文字（式そのものは、積分の図を出すと非表示になって計算し直さないことがある）。
    * 式のエラーで出しているときは出さない
@@ -844,11 +848,17 @@
       <!-- 計算時間（〇〇 ms）は桁数が変わっても幅が変わらないようにする。
            そうしないと、1桁 ⇔ 2桁で改行の位置が変わり、下の行が上下にカクカク動く -->
       {@const m = /^(.*?)(\d+) ms(.*)$/s.exec(item.info)}
-      {#if m}
-        <p class="info">{m[1]}<span class="ms">{m[2]} ms</span>{m[3]}</p>
-      {:else}
-        <p class="info">{item.info}</p>
-      {/if}
+      <p class="info">
+        {#if m}{m[1]}<span class="ms">{m[2]} ms</span>{m[3]}{:else}{item.info}{/if}
+        {#if hasSequenceTable}
+          <button type="button" class="sequence-table-toggle" aria-expanded={!!item.showSequenceTable}
+            aria-label={item.showSequenceTable ? '項の表を閉じる' : '項の表を開く'} onclick={onToggleSequenceTable}>項の表</button>
+        {/if}
+      </p>
+    {/if}
+
+    {#if hasSequenceTable && item.showSequenceTable}
+      <SequenceTable values={item.sequenceTable} />
     {/if}
 
     {#if choosingFolder}
@@ -1390,6 +1400,19 @@
 </li>
 
 <style>
+  .sequence-table-toggle {
+    min-height: 28px;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: transparent;
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .sequence-table-toggle:hover { background: var(--hover); }
+
   .item {
     display: grid;
     grid-template-columns: 44px 1fr auto;

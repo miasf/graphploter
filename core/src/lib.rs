@@ -538,10 +538,12 @@ const FLAG_LOCAL: u32 = 8;
 const FLAG_THOROUGH: u32 = 2;
 /// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
 const FLAG_EDGES: u32 = 4;
+const FLAG_SEQUENCE_TABLE: u32 = 32;
 
 thread_local! {
     /// 最後の [`plot`] で求めた注目する点（[`last_poi`]）
     static LAST_POI: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAST_SEQUENCE_TABLE: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// 最後の [`plot`] で求めた、陽関数の注目する点（極値・零点・縦軸との交点・停留点）。
@@ -550,6 +552,12 @@ thread_local! {
 #[wasm_bindgen]
 pub fn last_poi() -> Vec<f64> {
     LAST_POI.with(|p| p.borrow().clone())
+}
+
+/// 最後の描画で要求した数列表を、項ごとの [添字, 実部, 虚部, 規則へ渡した添字] として返す。
+#[wasm_bindgen]
+pub fn take_sequence_table() -> Vec<f64> {
+    LAST_SEQUENCE_TABLE.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 
 /// 式を解析して、曲面（または曲線）を作る。
@@ -678,6 +686,7 @@ pub fn plot(
 
     let _defs = take_definitions(&consts);
     LAST_POI.with(|p| p.borrow_mut().clear());
+    LAST_SEQUENCE_TABLE.with(|p| p.borrow_mut().clear());
     let _ = equation::take_last_explicit();
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
@@ -685,6 +694,11 @@ pub fn plot(
     expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
+    if flags & FLAG_SEQUENCE_TABLE != 0 {
+        if let equation::Plot::Points { sequence: Some(sequence), .. } = &plot {
+            LAST_SEQUENCE_TABLE.with(|p| *p.borrow_mut() = sequence.table(&consts));
+        }
+    }
     // 注目する点（陽関数の極値・零点など。点を押すと値が出る機能）: 画面側が頼んだとき（ビット 4。動かしている間は頼まない）
     if flags & 16 != 0 && coord_src.trim().is_empty() {
         if let (equation::Plot::Explicit { rotated: false, .. }, Some((axis, e, shown))) = (&plot, equation::take_last_explicit()) {
@@ -1072,7 +1086,7 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
         }
         equation::Plot::Arrows { vectors } => Some(arrows_built(field::vectors(vectors, ctx.flat), "ベクトル".into())),
         equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
-        equation::Plot::Points { points, line } => {
+        equation::Plot::Points { points, line, .. } => {
             let pts: Vec<[f64; 3]> = points.iter().map(|p| if ctx.flat { [p[0], p[1], 0.0] } else { *p }).collect();
             let inner = if *line {
                 mesh::Mesh { positions: pts.iter().flat_map(|p| p.map(|v| v as f32)).collect(), ..Default::default() }

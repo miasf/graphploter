@@ -40,7 +40,7 @@
     Space,
     RenderMode,
   } from './lib/types'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_THOROUGH } from './lib/types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './lib/types'
   import { Viewer, type PickResult } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
@@ -779,6 +779,7 @@
     // 非表示の式は計算しない（表示したときに計算する）。パラメータの行は、ほかの式が使うので計算する
     if (!item.visible && !item.param) {
       item.stale = true
+      item.sequenceTable = undefined
       // 計算はしないが、式の書き方の誤りだけは今の式で調べ直す（範囲の欄を直したのに、前の誤りが残って見えないように）。
       // 計算の誤りは分からないので、表示したときに計算し直すまで出さない
       try {
@@ -1046,6 +1047,7 @@
 
     const rotationGroup = groupIdOf(item)
     const pose = rotationIn(rotationGroup)
+    const sequenceTableFlag = item.showSequenceTable ? PLOT_SEQUENCE_TABLE : 0
     const res = await requestPlot(
       item.id,
       source,
@@ -1062,7 +1064,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse || !pickValues ? 0 : PLOT_POI),
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse || !pickValues ? 0 : PLOT_POI) | sequenceTableFlag,
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
@@ -1076,6 +1078,7 @@
 
     if (!res.ok) {
       viewer.removePlot(item.id)
+      item.sequenceTable = undefined
       // 「（8文字目）」のような位置は、変換後の式での位置なので入力欄とは合わない。表示しない
       item.error = res.error.replace(/（\d+文字目）/g, '')
       item.info = undefined
@@ -1086,6 +1089,8 @@
     }
 
     item.error = undefined
+    if (!res.defName || !/（数列の(?:点|軌道)/.test(res.kind)) item.showSequenceTable = false
+    if (item.showSequenceTable && item.latex === inputLatex) item.sequenceTable = res.sequenceTable
     item.usedParams = res.usedParams
     item.usedDefs = res.usedDefs
     item.odeStates = res.odeStates && res.odeStates.length > 0 ? res.odeStates : undefined
@@ -1178,7 +1183,7 @@
       : /^複素平面の点/.test(res.kind)
       ? '点'
       : res.mesh.curve
-      ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
+      ? `${(res.mesh.positions.length / (res.kind.includes('（数列の点') ? 9 : 3)).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
     // 回転だけを変えた（形はそのまま）なら、三角形の数は前の表示のまま
     if (res.mesh.transformOnly) {
@@ -1598,6 +1603,7 @@
     if (pickedId === item.id) clearPick()
     viewer?.clearRotationTrail(item.id)
     item.latex = latex
+    item.sequenceTable = undefined
     // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
     for (const r of regionsUsed(latex)) {
       if (!(r.name in regions)) regions[r.name] = r.template
@@ -3145,6 +3151,11 @@
             {@const i = row.index}
           <ExpressionItem
             {item}
+            onToggleSequenceTable={() => {
+              item.showSequenceTable = !item.showSequenceTable
+              if (item.showSequenceTable) schedule(item, 0)
+              else item.sequenceTable = undefined
+            }}
             index={i}
             {domain}
             {axisNames}

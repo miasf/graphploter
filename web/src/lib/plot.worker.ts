@@ -16,6 +16,7 @@ import init, {
   coord_grid,
   definitions,
   last_poi,
+  take_sequence_table,
   last_used_params,
   plot,
   take_field_values,
@@ -26,7 +27,7 @@ import init, {
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -392,6 +393,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     }
     let r: MeshResult | null = null
     let poi: Float64Array | undefined
+    let sequenceTable: Float64Array | undefined
     /** メッシュの配列を取り出す結果（回す前の形のメッシュを返すときは、r とは別） */
     let geom: MeshResult | null = null
     let localTransform: Float64Array | null = null
@@ -457,6 +459,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       r = callPlot()
       // 注目する点（陽関数の極値・零点。頼んだときだけ。plot のすぐ後に読む）
       poi = last_poi()
+      if (req.flags & PLOT_SEQUENCE_TABLE) sequenceTable = take_sequence_table()
       lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null, ode: r.ode_states.split(',').filter((s) => s !== '') })
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
@@ -607,7 +610,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     geom?.free()
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
-    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, odeStates: defs.ode, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
+    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, odeStates: defs.ode, sequenceTable, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     field_mode_reset()
     forget(itemId)
@@ -623,6 +626,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
+        ...(res.sequenceTable ? [res.sequenceTable.buffer as ArrayBuffer] : []),
         ...(res.mesh.volume ? [res.mesh.volume.values.buffer] : []),
         ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
         ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),

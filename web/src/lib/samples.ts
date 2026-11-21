@@ -363,11 +363,20 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         ],
       },
       {
-        label: '収束する数列 aₙ₊₁ = aₙ/2 + 1（a₁ を動かす）',
+        label: 'a₁ を変えると、どちら側から 2 に近づく？',
         view: { dims: 3, half: 12 },
         items: [
           { latex: 'a_1=8', param: 'a1', options: { slider: { min: -10, max: 10, complex: false, stack: false } } },
           { latex: 'a_{n+1}=\\frac{a_n}{2}+1', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: '1/n と 1/n² の部分和はどう違う？',
+        flat: true,
+        view: { dims: 3, half: 30 },
+        items: [
+          { latex: 's_n=\\sum_{k=1}^n\\frac{1}{k}', options: { color: '#2d70b3', lineWidth: 5 } },
+          { latex: 'p_n=\\sum_{k=1}^n\\frac{1}{k^2}', options: { color: '#c74440', lineWidth: 5 } },
         ],
       },
       {

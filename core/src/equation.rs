@@ -316,7 +316,7 @@ pub enum Plot {
     /// 原点からのベクトルの矢印（行列の列ベクトル・ベクトルの定義。計画 M7・M8）
     Arrows { vectors: Vec<[f64; 3]> },
     /// 点（数列の点 (n, aₙ)。`line` なら順に線で結ぶ: 複素数の数列の軌道）。表示中の座標の空間の点
-    Points { points: Vec<[f64; 3]>, line: bool },
+    Points { points: Vec<[f64; 3]>, line: bool, sequence: Option<SequencePoints> },
     /// 常微分方程式（計画 M9）。状態 $\mathbf y$ の右辺 `rhs`（変数は状態の名前と独立変数）、初期値の組（組み合わせの数だけ解く）
     Ode(Box<Ode>),
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
@@ -752,7 +752,7 @@ fn critical_line(source: &str, params: &Params, space: &Space) -> Result<Option<
         parts.push(format!("{}: {} f = {}（{}）", at(c), crate::critical::class_name(c.class), crate::critical::num_text(c.value), c.reason));
     }
     crate::expand::set_kind(parts.join(" ／ "));
-    Ok(Some(Plot::Points { points, line: false }))
+    Ok(Some(Plot::Points { points, line: false, sequence: None }))
 }
 
 /// 行列を描く行（計画 M7 の 3.4）。そうでなければ None（今までの道へ）
@@ -1762,11 +1762,7 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
         crate::expand::add_note("各項には根の主値を使用");
     }
     let (lo, hi) = crate::expand::view_x();
-    let first = if crate::expand::is_recurrence(name) {
-        crate::expand::first_term(name, params).unwrap_or(1)
-    } else {
-        0
-    };
+    let first = crate::expand::sequence_start(&head, params);
     let from = (lo.ceil() as i64).max(first);
     let to = hi.floor() as i64;
     crate::expand::mark_def_line(name, Some("数列の点".into()));
@@ -1787,7 +1783,22 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
     if complex {
         crate::expand::mark_def_line(name, Some("数列の軌道（複素平面）".into()));
     }
-    Ok(Some(Plot::Points { points, line: complex }))
+    Ok(Some(Plot::Points { points, line: complex, sequence: Some(SequencePoints { head, terms }) }))
+}
+
+/// 数列の値を描画座標に変換する前の添字と値。
+pub struct SequencePoints {
+    head: crate::expand::SequenceHead,
+    terms: Vec<(i64, C)>,
+}
+
+impl SequencePoints {
+    pub(crate) fn table(&self, params: &Params) -> Vec<f64> {
+        self.terms.iter().flat_map(|(k, v)| {
+            let argument = self.head.argument_at(*k, params).map_or(f64::NAN, |n| n as f64);
+            [*k as f64, v.re, v.im, argument]
+        }).collect()
+    }
 }
 
 /// 常微分方程式（[`Plot::Ode`]）

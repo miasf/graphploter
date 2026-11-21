@@ -4,6 +4,10 @@ use graph_core::{definitions, ode_init, plot, MeshResult};
 
 /// 3 次元・既定に近い範囲で描く。`defs` は式の一覧のほかの行（`\n` 区切り）、`params` は (名前, 値) の並び
 fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, String> {
+    run_flags(src, defs, params, 0)
+}
+
+fn run_flags(src: &str, defs: &str, params: &[(&str, f64)], flags: u32) -> Result<MeshResult, String> {
     definitions(defs);
     let names: Vec<&str> = params.iter().map(|p| p.0).collect();
     let values: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
@@ -32,7 +36,7 @@ fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, Stri
         false,
         1,
         false,
-        0,
+        flags,
     )
     .map_err(|_| format!("{src} が描けない"))
 }
@@ -1101,6 +1105,33 @@ fn recurrence_operations_and_initial_values() {
     assert_eq!(seq_value("a_1500", "a_(n+1) = a_(n) + a_1", &[("a1", 2.0)]).unwrap(), 3000.0);
     let overflow = seq_value("a_100", "a_(n+1) = a_(n)^2 + a_(n)", &[("a1", 2.0)]).unwrap_err();
     assert_eq!(overflow, "実数の値になりません");
+}
+
+#[test]
+fn recurrence_cases_skip_unused_terms() {
+    let rule = "a_(n) = @cases(1, n=0; a_(n-1)+2)";
+    assert_eq!(seq_value("a_5", rule, &[]).unwrap(), 11.0);
+    assert_eq!(seq_value("a_0", "a_(n) = @cases(2, n=0; a_(n))", &[]).unwrap(), 2.0);
+    let plot = run(rule, rule, &[]).unwrap();
+    assert!(plot.positions().chunks_exact(3).any(|p| p == [0.0, 1.0, 0.0]));
+}
+
+#[test]
+fn sequence_table_uses_the_same_values_as_the_plot() {
+    let rule = "a_(2n) = a_(n) + a_1";
+    let params = [("a1", 3.0)];
+    let plotted = run(rule, rule, &params).unwrap();
+    assert!(graph_core::take_sequence_table().is_empty());
+    let inspected = run_flags(rule, rule, &params, 32).unwrap();
+    assert!(plotted.positions().iter().map(|x| x.to_bits()).eq(inspected.positions().iter().map(|x| x.to_bits())));
+    let rows = graph_core::take_sequence_table();
+    assert_eq!(&rows[..3], &[1.0, 3.0, 0.0]);
+    assert!(rows[3].is_nan());
+    assert_eq!(&rows[4..], &[2.0, 6.0, 0.0, 1.0]);
+
+    let complex = "b_(n) = n + 2i";
+    run_flags(complex, complex, &[], 32).unwrap();
+    assert_eq!(&graph_core::take_sequence_table()[4..8], &[1.0, 1.0, 2.0, 1.0]);
 }
 
 #[test]

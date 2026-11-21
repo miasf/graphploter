@@ -69,6 +69,7 @@ struct SequenceRule {
     index: SequenceIndex,
     body: Expr,
     recursive: bool,
+    has_cases: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,13 @@ pub(crate) struct SequenceHead {
 }
 
 impl SequenceHead {
+    pub(crate) fn argument_at(&self, k: i64, params: &Params) -> Option<i64> {
+        if params.contains_key(&format!("{}{k}", self.name)) {
+            return None;
+        }
+        self.index.parameter(k)
+    }
+
     pub(crate) fn uses_principal_root(&self) -> bool {
         self.inverses.iter().any(|inverse| matches!(inverse, SequenceInverse::Root(p) if *p > 1.0))
     }
@@ -214,8 +222,8 @@ impl Defs {
                     SequenceInverse::TenToPower => power(Expr::Num(10.0), body),
                 };
             }
-            let recursive = refers_to_sequence(&body, &head.name);
-            seqs.entry(head.name).or_insert_with(Seq::default).rules.push(SequenceRule { index: head.index, body, recursive });
+            let (recursive, has_cases) = sequence_body_features(&body, &head.name);
+            seqs.entry(head.name).or_insert_with(Seq::default).rules.push(SequenceRule { index: head.index, body, recursive, has_cases });
         }
         Defs { map, seqs }
     }
@@ -304,8 +312,9 @@ pub(crate) fn sequence_head(mut e: &Expr) -> Option<SequenceHead> {
     }
 }
 
-fn refers_to_sequence(body: &Expr, name: &str) -> bool {
+fn sequence_body_features(body: &Expr, name: &str) -> (bool, bool) {
     let found = std::cell::Cell::new(false);
+    let has_cases = std::cell::Cell::new(false);
     let _ = body.rewrite(&|e| {
         let same = match e {
             Expr::Index { name: n, .. } => n == name,
@@ -315,9 +324,12 @@ fn refers_to_sequence(body: &Expr, name: &str) -> bool {
         if same {
             found.set(true);
         }
+        if matches!(e, Expr::Op { op, .. } if op == "cases") {
+            has_cases.set(true);
+        }
         None
     });
-    found.get()
+    (found.get(), has_cases.get())
 }
 
 fn initial_index(name: &str, param: &str) -> Option<i64> {
@@ -331,8 +343,14 @@ pub fn first_term(name: &str, params: &Params) -> Option<i64> {
     params.keys().filter_map(|param| initial_index(name, param)).min()
 }
 
-pub fn is_recurrence(name: &str) -> bool {
-    current().seq(name).is_some_and(|s| s.rules.iter().any(|rule| rule.recursive))
+pub(crate) fn sequence_start(head: &SequenceHead, params: &Params) -> i64 {
+    let defs = current();
+    if let Some(seq) = defs.seq(&head.name) {
+        if !seq.rules.iter().any(|rule| rule.has_cases) && seq.rules.iter().any(|rule| rule.recursive) {
+            return first_term(&head.name, params).unwrap_or(1);
+        }
+    }
+    0
 }
 
 /// この行の規則で決まる項を描く。別の添字を指定する行には点を残す。
@@ -369,10 +387,8 @@ pub(crate) fn sequence_terms(head: &SequenceHead, from: i64, to: i64, params: &P
             }
             Err(e) => return Err(e),
         };
-        let Ok(p) = crate::eval::Program::compile_with(&e, &[], params) else { return Ok(None) };
-        let mut v = [num_complex::Complex64::new(0.0, 0.0)];
-        p.eval_batch(&[], &mut v);
-        out.push((k, v[0]));
+        let Some(value) = x.numeric_value(&e) else { return Ok(None) };
+        out.push((k, value));
         has_calculated_term |= !initial;
     }
     if let Some(error) = first_missing {
@@ -1226,7 +1242,11 @@ impl<'a> Expander<'a> {
             return Err(if *k >= 0 { missing(*k) } else { format!("{name} の添字 {k} に対応する定義がありません") });
         };
         if rule.recursive {
-            if let Some(first) = first_term(name, self.params) {
+            if rule.has_cases {
+                if *k < 0 {
+                    return Err(missing(0));
+                }
+            } else if let Some(first) = first_term(name, self.params) {
                 if *k < 0 || (*k < first && (root.0 != *name || root.1 >= first)) {
                     return Err(missing((*k).max(0)));
                 }
@@ -1323,9 +1343,9 @@ impl<'a> Expander<'a> {
     fn cases(&mut self, cases: &[Expr]) -> Result<Expr, String> {
         use crate::functions::Func;
         let mut out = Vec::new();
+        let mut choose_branch = self.term_evaluation.is_some();
         for (k, case) in cases.iter().enumerate() {
             let Expr::Op { args, .. } = case else { return Err("内部エラー: 場合分けの形".into()) };
-            let value = self.scalar(&args[0])?;
             let mut margins = Vec::new();
             let mut strict: u64 = 0;
             for chain in &args[1..] {
@@ -1354,10 +1374,30 @@ impl<'a> Expander<'a> {
             if margins.is_empty() && k + 1 != cases.len() {
                 return Err("条件の無い場合（それ以外）は、最後に書いてください".into());
             }
+            if choose_branch {
+                // 添字の代入後に条件が決まる数列では、必要な分岐の項だけを求める。
+                let mut matches = true;
+                for (j, margin) in margins.iter().enumerate() {
+                    let Some(v) = self.numeric_value(margin) else {
+                        choose_branch = false;
+                        break;
+                    };
+                    matches &= if strict >> j & 1 == 1 { v.re > 0.0 } else { v.re >= 0.0 };
+                }
+                if choose_branch {
+                    if matches {
+                        return self.scalar(&args[0]);
+                    }
+                    continue;
+                }
+            }
             out.push(Expr::Num(margins.len() as f64));
             out.push(Expr::Num(strict as f64));
             out.extend(margins);
-            out.push(value);
+            out.push(self.scalar(&args[0])?);
+        }
+        if choose_branch {
+            return Ok(Expr::Num(f64::NAN));
         }
         Ok(Expr::Call(Func::Piece, out))
     }
@@ -3160,6 +3200,15 @@ impl<'a> Expander<'a> {
     }
 
     fn numeric_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
+        // 数列で既に数にした項や初期値を、表と描画のために再コンパイルしない。
+        if let Expr::Num(n) = e {
+            return Some(num_complex::Complex64::new(*n, 0.0));
+        }
+        if let Expr::Var(name) = e {
+            let value = self.params.get(name)?;
+            note_param(name);
+            return Some(*value);
+        }
         let prog = crate::eval::Program::compile_with(e, &[], self.params).ok()?;
         USED_PARAMS.with(|u| {
             let mut u = u.borrow_mut();
