@@ -151,6 +151,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('a·b', '\\cdot', '内積（スカラーなら掛け算）'),
         key('a×b', '\\times', '外積（スカラーなら掛け算）'),
         key('|a|', '\\left|#0\\right|', 'ベクトルの大きさ（スカラーなら絶対値）'),
+        key('∠(u,v)', '\\angle\\left(#?,#?\\right)', '2 つのベクトルのなす角'),
       ],
       [
         key('∇f', '\\nabla #?', '勾配 grad'),
@@ -197,6 +198,12 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('(mod n)', '\\pmod{#?}', '合同の法'),
         key('gcd', '\\gcd\\left(#?,#?\\right)', '最大公約数'),
         key('C(n,k)', '\\binom{#?}{#?}', '二項係数'),
+      ],
+      [
+        key('cobweb', '\\operatorname{cobweb}\\left(#?,#?\\right)', '漸化式の階段図 cobweb(a₀, N)（開始項・反復回数）'),
+        key('orbit₂', '\\operatorname{orbit}\\left(#?,#?,#?\\right)', '2D の軌道 orbit(a₀, b₀, N)（2 個の開始項・反復回数）'),
+        key('orbit₃', '\\operatorname{orbit}\\left(#?,#?,#?,#?\\right)', '3D の軌道 orbit(a₀, b₀, c₀, N)（3 個の開始項・反復回数）'),
+        key('f|ₓ', '\\left.#?\\right|_{x=#?}', '点での値（x に指定した値を代入する）'),
       ],
     ],
   },

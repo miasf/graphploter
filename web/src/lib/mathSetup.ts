@@ -791,6 +791,8 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           fn('max', '大きいほう', { operator: true, args: 2 }),
           fn('nCr', '組み合わせの数', { operator: true, args: 2 }),
           fn('nPr', '順列の数', { operator: true, args: 2 }),
+          fn('gcd', '最大公約数', { operator: true, args: 2 }),
+          fn('lcm', '最小公倍数', { operator: true, args: 2 }),
         ],
         [
           fn('Re', '実部', { operator: true }),

@@ -32,4 +32,20 @@ for (const page of [...CALC_PAGES, { title: '行列', rows: MATRIX_ROWS }]) {
   }
 }
 if (failures > 0) throw new Error(`${failures} 件失敗`)
+
+const equationKeys = CALC_PAGES.find((page) => page.title === '方程式')?.rows.flat() ?? []
+for (const [label, args, expected] of [
+  ['cobweb', ['a_0', '12'], '@cobweb (a_0,12)'],
+  ['orbit₂', ['a_0', 'b_0', 'N'], '@orbit (a_0,b_0,N)'],
+  ['orbit₃', ['a_0', 'b_0', 'c_0', 'N'], '@orbit (a_0,b_0,c_0,N)'],
+] as const) {
+  const template = equationKeys.find((key) => key.label === label)
+  if (!template || template.insert.match(/#\?/g)?.length !== args.length) {
+    throw new Error(`方程式の ${label} に ${args.length} 個の入力欄が必要です`)
+  }
+  let index = 0
+  const actual = latexToText(template.insert.replace(/#\?/g, () => args[index++]))
+  if (actual !== expected) throw new Error(`${label}: ${actual} ≠ ${expected}`)
+}
+
 console.log('calcKeys.ts: すべて成功')
