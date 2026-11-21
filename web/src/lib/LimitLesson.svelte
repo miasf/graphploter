@@ -1,11 +1,12 @@
 <script lang="ts">
   import type { LimitResult } from './types'
+  import PositiveStepper from './PositiveStepper.svelte'
 
   let { result, variable }: { result: LimitResult; variable: string } = $props()
   let open = $state(false)
-  let epsilon = $state<number | undefined>(0.1)
-  let delta = $state<number | undefined>(0.5)
-  let threshold = $state<number | undefined>(10)
+  let epsilon = $state(0.1)
+  let delta = $state(0.5)
+  let threshold = $state(10)
   let candidate = $state<number | undefined>()
   let canvas = $state<HTMLCanvasElement>()
   let width = $state(0)
@@ -19,30 +20,23 @@
   })
   const last = $derived(points.at(-1)?.[0] ?? 1)
   const limit = $derived(candidate ?? (result.value !== undefined && Number.isFinite(result.value) ? result.value : (result.defined ?? 0)))
-  const valid = $derived(
-    epsilon !== undefined && Number.isFinite(epsilon) && epsilon > 0 && Number.isFinite(limit)
-      && (result.sequence ? threshold !== undefined && Number.isInteger(threshold) && threshold >= 1
-        : delta !== undefined && Number.isFinite(delta) && delta > 0),
-  )
   const selects = (x: number) => {
-    if (result.sequence) return x >= threshold!
+    if (result.sequence) return x >= threshold
     const d = x - result.target
-    return Math.abs(d) < delta! && d !== 0 && (result.side === 0 || Math.sign(d) === result.side)
+    return Math.abs(d) < delta && d !== 0 && (result.side === 0 || Math.sign(d) === result.side)
   }
   const stats = $derived.by(() => {
     let checked = 0
     let skipped = 0
     let outside = 0
     let example: [number, number] | undefined
-    if (valid) {
-      for (const p of points) {
-        if (!selects(p[0])) continue
-        if (!Number.isFinite(p[1])) { skipped++; continue }
-        checked++
-        if (Math.abs(p[1] - limit) >= epsilon!) {
-          outside++
-          example ??= p
-        }
+    for (const p of points) {
+      if (!selects(p[0])) continue
+      if (!Number.isFinite(p[1])) { skipped++; continue }
+      checked++
+      if (Math.abs(p[1] - limit) >= epsilon) {
+        outside++
+        example ??= p
       }
     }
     return { checked, skipped, outside, example }
@@ -59,8 +53,8 @@
   })
 
   $effect(() => {
-    if (open && canvas && width > 0 && valid) {
-      draw(canvas, width, epsilon!, result.sequence ? threshold! : delta!)
+    if (open && canvas && width > 0) {
+      draw(canvas, width, epsilon, result.sequence ? threshold : delta)
     }
   })
 
@@ -137,31 +131,27 @@
       {/if}
     </p>
     <div class="controls">
-      <label>ε <input type="number" inputmode="decimal" step="any" bind:value={epsilon} /></label>
+      <PositiveStepper label="ε" bind:value={epsilon} />
       {#if result.sequence}
-        <label>N <input type="number" inputmode="numeric" min="1" step="1" bind:value={threshold} /></label>
+        <PositiveStepper label="N" bind:value={threshold} integer />
       {:else}
-        <label>δ <input type="number" inputmode="decimal" step="any" bind:value={delta} /></label>
+        <PositiveStepper label="δ" bind:value={delta} />
       {/if}
       <label>L <input type="number" inputmode="decimal" step="any" value={limit} oninput={(event) => {
         const v = event.currentTarget.valueAsNumber
         candidate = Number.isFinite(v) ? v : undefined
       }} /></label>
     </div>
-    {#if valid}
-      <canvas bind:this={canvas} aria-label={result.sequence ? '数列の項と ε の帯' : '関数の標本と ε、δ の範囲'}></canvas>
-      <p aria-live="polite">
-        {#if stats.checked === 0}
-          この条件を調べられる標本がありません。
-        {:else}
-          {stats.checked} 点を確認。許容範囲の外は {stats.outside} 点。
-          {#if stats.example}<br />例　{variable} = {fmt(stats.example[0])}、値 ≈ {fmt(stats.example[1])}{/if}
-        {/if}
-        {#if stats.skipped > 0}<br />値を取得できない標本 {stats.skipped} 点。{/if}
-      </p>
-    {:else}
-      <p>{result.sequence ? '正の ε と 1 以上の整数 N' : '正の ε と δ'}を入力してください。</p>
-    {/if}
+    <canvas bind:this={canvas} aria-label={result.sequence ? '数列の項と ε の帯' : '関数の標本と ε、δ の範囲'}></canvas>
+    <p aria-live="polite">
+      {#if stats.checked === 0}
+        この条件を調べられる標本がありません。
+      {:else}
+        {stats.checked} 点を確認。許容範囲の外は {stats.outside} 点。
+        {#if stats.example}<br />例　{variable} = {fmt(stats.example[0])}、値 ≈ {fmt(stats.example[1])}{/if}
+      {/if}
+      {#if stats.skipped > 0}<br />値を取得できない標本 {stats.skipped} 点。{/if}
+    </p>
     <p class="hint">緑は帯の内側、赤は条件を満たさない点です。証明では条件内のすべての{result.sequence ? '項' : '点'}について示します。</p>
   {/if}
 </details>
