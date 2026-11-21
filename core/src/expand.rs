@@ -346,11 +346,41 @@ pub fn first_term(name: &str, params: &Params) -> Option<i64> {
 pub(crate) fn sequence_start(head: &SequenceHead, params: &Params) -> i64 {
     let defs = current();
     if let Some(seq) = defs.seq(&head.name) {
-        if !seq.rules.iter().any(|rule| rule.has_cases) && seq.rules.iter().any(|rule| rule.recursive) {
-            return first_term(&head.name, params).unwrap_or(1);
+        if seq.rules.iter().any(|rule| rule.recursive) {
+            return first_term(&head.name, params).unwrap_or_else(|| i64::from(!seq.rules.iter().any(|rule| rule.has_cases)));
         }
     }
     0
+}
+
+/// 開始項から、階段図に必要な連続した実数の項を求める。
+pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Result<Vec<f64>, String> {
+    const MAX_STEPS: i64 = 512;
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "階段図の最初の引数は a_1 や a_(N) のように数列の項を書いてください";
+    let (name, first) = match start {
+        Expr::Var(v) => {
+            let (name, digits) = split_subscript(v).ok_or(start_error)?;
+            (name, digits.parse::<i64>().map_err(|_| "開始項の添字が大きすぎます")?)
+        }
+        Expr::Index { name, index } => (name.as_str(), expander.integer(index, "開始項の添字")?),
+        _ => return Err(start_error.into()),
+    };
+    if defs.seq(name).is_none() {
+        return Err(format!("数列 {name} の定義を追加してください"));
+    }
+    let steps = expander.integer(steps, "階段図の反復回数")?;
+    if !(1..=MAX_STEPS).contains(&steps) {
+        return Err(format!("階段図の反復回数は 1〜{MAX_STEPS} にしてください"));
+    }
+    let last = first.checked_add(steps).ok_or("最後の項の添字が大きすぎます")?;
+    (first..=last).map(|k| {
+        let expr = expander.term_value(name, k)?;
+        let value = expander.constant_value(&expr).map(crate::eval::as_real);
+        value.filter(|v| (*v as f32).is_finite())
+            .ok_or_else(|| format!("階段図には有限の実数の項が必要です（{name}_{k}）"))
+    }).collect()
 }
 
 /// この行の規則で決まる項を描く。別の添字を指定する行には点を残す。

@@ -613,6 +613,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if let Some(p) = perp_line(source, params, space)? {
         return Ok(p);
     }
+    if source.trim_start().starts_with("@cobweb") {
+        return cobweb_line(source, params);
+    }
     // 数列の定義の行（計画 M10）
     if let Some(p) = sequence_line(source, params)? {
         return Ok(p);
@@ -1799,6 +1802,27 @@ impl SequencePoints {
             [*k as f64, v.re, v.im, argument]
         }).collect()
     }
+}
+
+fn cobweb_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { op, args } = expr else { return Err("階段図は単独の式の行に書いてください".into()) };
+    let [start, steps] = args.as_slice() else { return Err("階段図は cobweb(a_1, 12) のように開始項と反復回数を書いてください".into()) };
+    if op != "cobweb" {
+        return Err("階段図は cobweb(a_1, 12) の形で書いてください".into());
+    }
+    let terms = crate::expand::cobweb_terms(start, steps, params)?;
+    let mut points = Vec::with_capacity(2 * terms.len() - 1);
+    points.push([terms[0], terms[0], 0.0]);
+    for pair in terms.windows(2) {
+        if pair[0] != pair[1] {
+            points.push([pair[0], pair[1], 0.0]);
+            points.push([pair[1], pair[1], 0.0]);
+        }
+    }
+    let line = points.len() > 1;
+    crate::expand::set_kind(format!("数列の階段図（{} 回の反復）", terms.len() - 1));
+    Ok(Plot::Points { points, line, sequence: None })
 }
 
 /// 常微分方程式（[`Plot::Ode`]）

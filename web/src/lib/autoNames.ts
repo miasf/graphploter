@@ -24,7 +24,7 @@ export const OPERATOR_FUNCTIONS = [
   'legendreP', 'hermiteH', 'laguerreL', 'chebyshevT', 'chebyshevU', 'gegenbauerC', 'jacobiP',
   'hyp0F1', 'hyp1F1', 'hyp2F1', 'hypU',
   'ellipticK', 'ellipticE', 'ellipticF', 'ellipticPi', 'jacobiSN', 'jacobiCN', 'jacobiDN',
-  'det', 'rank',
+  'det', 'rank', 'cobweb',
 ]
 
 /** 関数名の自動変換の表（名前 → 入れる LaTeX） */

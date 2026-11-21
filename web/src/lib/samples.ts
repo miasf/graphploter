@@ -16,6 +16,8 @@ export interface Sample {
   /** 必要な次元（足りなければ自動で増やす） */
   dims?: number
   items: SampleItem[]
+  /** 初項や係数をすぐ操作できるよう、追加したフォルダを開いておく。 */
+  openFolder?: boolean
   /** 式を追加するだけでなく、次元・回転・表示範囲も設定する例（今ある式は非表示にする） */
   view?: SampleView
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
@@ -351,6 +353,29 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
   {
     title: '数列',
     samples: [
+      {
+        label: '階段図で固定点を調べる（q を −1 にすると？）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 4 },
+        items: [
+          { latex: 'j_1=2', param: 'j1' },
+          { latex: 'q=-0.5', param: 'q', options: { slider: { min: -1.2, max: 1.2, step: 0.05, complex: false, stack: false } } },
+          { latex: 'h(x)=1+q(x-1)', options: { color: '#2d70b3' } },
+          { latex: 'y=x', options: { color: '#888888' } },
+          { latex: 'j_{n+1}=h(j_n)', options: { visible: false } },
+          { latex: '\\operatorname{cobweb}\\left(j_1,12\\right)', options: { color: '#c74440', lineWidth: 4 } },
+        ],
+      },
+      {
+        label: 'コラッツ数列（初項を変えて 1 に着くまでを比べる）',
+        flat: true,
+        view: { dims: 3, half: 24 },
+        items: [
+          { latex: 'c_1=6', param: 'c1', options: { slider: { min: 1, max: 20, step: 1, complex: false, stack: false } } },
+          { latex: 'c_{n+1}=\\begin{cases}c_n/2&\\operatorname{mod}\\left(c_n,2\\right)=0\\\\3c_n+1&\\text{otherwise}\\end{cases}', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
       {
         label: '偶数項と奇数項を別々に定義する（a₁ を動かす）',
         flat: true,

@@ -780,12 +780,16 @@
     if (!item.visible && !item.param) {
       item.stale = true
       item.sequenceTable = undefined
+      const previous = sequenceDefinitionName(lastDefSource.get(item.id) ?? '')
       // 計算はしないが、式の書き方の誤りだけは今の式で調べ直す（範囲の欄を直したのに、前の誤りが残って見えないように）。
       // 計算の誤りは分からないので、表示したときに計算し直すまで出さない
       try {
-        latexToText(item.latex)
+        const source = latexToText(item.latex)
+        const sequence = sequenceDefinitionName(source)
+        if (sequence || previous) noteDefinition(item, sequence, source)
         item.error = undefined
       } catch (e) {
+        if (previous) noteDefinition(item, null, '')
         item.error = e instanceof Error ? e.message : String(e)
       }
       return
@@ -2883,7 +2887,7 @@
     const defined = new Set(items.map((it) => it.param?.name ?? latexParamName(it.latex)))
     const adding = sample.items.filter((si) => !(si.param && defined.has(si.param))) // 同じ名前のパラメータがすでにあれば足さない
     // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
-    const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4).id : undefined
+    const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4 && !sample.openFolder).id : undefined
     // 座標系で描く例: 用意した座標系（式・範囲が初期値のまま）があれば使い回し、無ければ作る
     let coordSys: number | undefined
     if (sample.coord) {

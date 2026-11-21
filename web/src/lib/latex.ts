@@ -761,6 +761,10 @@ class Converter {
           this.out += ' @crit '
           return
         }
+        if (name === 'operatorname' && s === 'cobweb') {
+          this.out += ' @cobweb '
+          return
+        }
         // 行列の演算子の名前
         if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
           this.out += ` @${s} `

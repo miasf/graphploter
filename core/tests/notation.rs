@@ -1135,6 +1135,23 @@ fn sequence_table_uses_the_same_values_as_the_plot() {
 }
 
 #[test]
+fn sequence_cobweb_uses_consecutive_terms() {
+    let rule = "a_(n+1)=1+r(a_(n)-1)";
+    let params = [("a1", 2.0), ("r", -0.5), ("N", 2.0)];
+    let m = run("@cobweb(a_1,N)", rule, &params).unwrap();
+    assert!(m.kind().contains("階段図（2 回の反復）"));
+    assert_eq!(m.positions(), vec![2.0, 2.0, 0.0, 2.0, 0.5, 0.0, 0.5, 0.5, 0.0, 0.5, 1.25, 0.0, 1.25, 1.25, 0.0]);
+    for param in ["a1", "r", "N"] {
+        assert!(m.used_params().split(',').any(|p| p == param));
+    }
+    let fixed = run("@cobweb(a_(0),512)", "a_(n)=1", &[]).unwrap();
+    assert_eq!(&fixed.positions()[..3], &[1.0, 1.0, 0.0]);
+    assert!(error_of("@cobweb(a_1,513)", rule).contains("1〜512"));
+    assert!(error_of("@cobweb(a_1,2)", "a_(n)=i").contains("有限の実数"));
+    assert!(error_of("@cobweb(a_1,2)", "").contains("数列 a の定義"));
+}
+
+#[test]
 fn recurrence_index_rules_and_dependencies() {
     let even = "a_(2n) = a_(n) + a_1";
     let odd = "a_(2n+1) = a_(n)^2 + a_1";
