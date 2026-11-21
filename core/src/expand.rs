@@ -40,6 +40,19 @@ use linalg::{cross, norm, Mat};
 pub const MAX_NODES: usize = 1_500_000;
 /// Σ・Π の項の数の上限
 const MAX_TERMS: usize = 2_000;
+const LIMIT_INDEX_SAMPLE: &str = "数列の添字を標本ごとに評価します";
+const LIMIT_INTEGRAL_SAMPLE: &str = "積分を標本ごとに評価します";
+
+fn uses_internal_var(expr: &Expr, except: Option<&str>) -> bool {
+    let mut vars = Vec::new();
+    expr.collect_vars(&mut vars);
+    vars.iter().any(|v| v.starts_with('#') && Some(v.as_str()) != except)
+}
+
+fn arithmetic_sample_error(error: &str) -> bool {
+    ["左極限と右極限が一致しません", "振動のため", "極限の収束を数値計算で確認できません", "積分が収束しない"]
+        .iter().any(|prefix| error.starts_with(prefix))
+}
 /// `[a, …, c]` の要素の数の上限（リストの組み合わせの上限と同じ）
 const MAX_LIST: usize = 256;
 /// `±` の符号を表す変数（展開の後、[`crate::equation::compile_with`] が +1 と −1 の 2 つの図形にする。利用者は書けない名前）
@@ -1036,6 +1049,10 @@ struct Expander<'a> {
     memo: HashMap<TermKey, Expr>,
     /// 項の展開中に、先に求める必要がある項を記録する。
     term_evaluation: Option<TermEvaluation>,
+    /// 極限の中身を先に式へ展開できるか調べている間だけ true。
+    probing_limit: bool,
+    limit_sample_depth: usize,
+    limit_samples_left: usize,
 }
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
@@ -1055,8 +1072,11 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
     Ok(out)
 }
 
-pub(crate) fn limit_line(var: &str, args: &[Expr], body: &Expr, params: &Params) -> Result<(crate::eval::Program, crate::limit::Report), String> {
-    Expander::new(&current(), params).limit_program(var, args, body, true)
+pub(crate) fn limit_line(
+    op: &str, var: &str, args: &[Expr], body: &Expr, params: &Params,
+) -> Result<(crate::limit::Graph, crate::limit::Report), String> {
+    let (graph, report) = Expander::new(&current(), params).limit_expression(op, var, args, body, true)?;
+    Ok((graph.expect("極限だけの行にはグラフがある"), report))
 }
 
 /// 式の途中（一番外でない所）に組があるか（ベクトルの計算。展開の段で成分の式にする）
@@ -1102,7 +1122,10 @@ fn fn_as_value_error(e: &Expr) -> String {
 
 impl<'a> Expander<'a> {
     fn new(defs: &'a Defs, params: &'a Params) -> Self {
-        Self { defs, params, int_depth: 0, stack: Vec::new(), memo: HashMap::new(), term_evaluation: None }
+        Self {
+            defs, params, int_depth: 0, stack: Vec::new(), memo: HashMap::new(), term_evaluation: None,
+            probing_limit: false, limit_sample_depth: 0, limit_samples_left: 12_000,
+        }
     }
 
     fn enter(&mut self, name: &str) -> Result<(), String> {
@@ -1179,7 +1202,23 @@ impl<'a> Expander<'a> {
                 },
             },
             Expr::Apply { name, primes, args } => {
-                let Some(f) = self.def_value(name)? else {
+                if self.limit_sample_depth > 0 && *primes == 0 {
+                    if let Some(value) = self.apply_at_limit_sample(name, args)? {
+                        return Ok(value);
+                    }
+                }
+                let depth = self.stack.len();
+                let f = match self.def_value(name) {
+                    Err(e) if *primes == 0 && e.contains("'#") => {
+                        self.stack.truncate(depth);
+                        if let Some(value) = self.apply_at_limit_sample(name, args)? {
+                            return Ok(value);
+                        }
+                        return Err(e);
+                    }
+                    value => value?,
+                };
+                let Some(f) = f else {
                     return Err(format!("{name} は定義されていません"));
                 };
                 let args = args.iter().map(|a| self.scalar(a)).collect::<Result<Vec<_>, _>>()?;
@@ -1299,7 +1338,10 @@ impl<'a> Expander<'a> {
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
-            Expr::Binder { op, var, args, body } if op == "lim" => Val::S(self.limit(var, args, body)?),
+            Expr::Binder { op, var, args, body } if matches!(op.as_str(), "lim" | "seqlim") => {
+                let (_, report) = self.limit_expression(op, var, args, body, false)?;
+                Val::S(Expr::Num(report.value()?))
+            }
             Expr::Binder { op, var, args, body } if matches!(op.as_str(), "max" | "min" | "sup" | "inf") => {
                 Val::S(self.extremum(matches!(op.as_str(), "max" | "sup"), var, args, body)?)
             }
@@ -1472,6 +1514,9 @@ impl<'a> Expander<'a> {
 
     /// 数列の添字は整数に評価できる式。必要な項と初項だけを参照する。
     fn term(&mut self, name: &str, index: &Expr) -> Result<Expr, String> {
+        if self.probing_limit && uses_internal_var(index, None) {
+            return Err(LIMIT_INDEX_SAMPLE.into());
+        }
         let k = self.integer(index, &format!("{name} の添字"))?;
         self.term_value(name, k)
     }
@@ -1909,36 +1954,25 @@ impl<'a> Expander<'a> {
     }
 
     /// 1 変数の実数の極限。近づく先と中身には、スライダーや定義を使える。
-    fn limit(&mut self, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
-        let (_, report) = self.limit_program(var, args, body, false)?;
-        report.value().map(Expr::Num)
-    }
-
-    fn limit_program(
+    fn limit_expression(
         &mut self,
+        op: &str,
         var: &str,
         args: &[Expr],
         body: &Expr,
         graph: bool,
-    ) -> Result<(crate::eval::Program, crate::limit::Report), String> {
-        use crate::eval::Program;
+    ) -> Result<(Option<crate::limit::Graph>, crate::limit::Report), String> {
+        use crate::{eval::Program, limit::{self, Graph}};
         let (target, side) = match args {
             [target] => (target, 0),
             [target, Expr::Num(1.0)] => (target, 1),
             [target, side] if side.is_minus_one() => (target, -1),
             _ => return Err("極限の近づく先と向きを確かめてください（x → a、x → a⁺、x → a⁻）".into()),
         };
-        let constant_error = |error: String| {
-            if error.starts_with("変数 '#") {
-                "極限の近づく先と中身には、外側で束縛されている変数を使えません".to_string()
-            } else {
-                error
-            }
-        };
         let target_expr = self.scalar(target)?;
         let infinity = matches!(&target_expr, Expr::Num(v) if v.is_infinite())
             || matches!(&target_expr, Expr::Neg(e) if matches!(&**e, Expr::Num(v) if v.is_infinite()));
-        let target = Program::compile_with(&target_expr, &[], self.params).map_err(constant_error)?;
+        let target = Program::compile_with(&target_expr, &[], self.params)?;
         target.used_params().iter().for_each(|p| note_param(p));
         let mut value = [num_complex::Complex64::default()];
         target.eval_batch(&[], &mut value);
@@ -1946,18 +1980,112 @@ impl<'a> Expander<'a> {
         if value[0].im != 0.0 || (!point.is_finite() && !(infinity && point.is_infinite() && side == 0)) {
             return Err("極限の近づく先には、実数または向きの付かない ±∞ を書いてください".into());
         }
+        if op == "seqlim" && point != f64::INFINITY {
+            return Err("自然数の添字の極限は n → ∞ の形で書いてください".into());
+        }
 
         // 中身の変数は、同じ名前の定義・パラメータを隠す。入れ子の外側の変数とも区別する。
         let mut local = "#limit".to_string();
         while body.uses_var(&local) {
             local.push('#');
         }
-        let body = self.scalar(&body.substitute(&|name| (name == var).then(|| Expr::Var(local.clone()))))?;
-        let prog = Program::compile_with(&body, &[&local], self.params).map_err(constant_error)?;
-        prog.used_params().iter().for_each(|p| note_param(p));
-        let removable = crate::limit::removable_quotient(&body, &local, point, self.params);
-        let report = crate::limit::analyze(&prog, var, point, side, removable, graph);
-        Ok((prog, report))
+        let body = body.substitute(&|name| (name == var).then(|| Expr::Var(local.clone())));
+        let sequence = point == f64::INFINITY && (op == "seqlim" || var == "n");
+        let start = match &body {
+            Expr::Index { name, index } if matches!(&**index, Expr::Var(v) if v == &local)
+                && self.defs.seq(name).is_some_and(|seq| seq.rules.iter().any(|r| r.recursive)) =>
+            {
+                first_term(name, self.params).unwrap_or(1).max(1) as f64
+            }
+            _ => 1.0,
+        };
+        let stack_len = self.stack.len();
+        let int_depth = self.int_depth;
+        let previous_probe = std::mem::replace(&mut self.probing_limit, true);
+        let symbolic = self.scalar(&body).and_then(|expanded| {
+            let prog = Program::compile_with(&expanded, &[&local], self.params)?;
+            Ok((expanded, prog))
+        });
+        self.probing_limit = previous_probe;
+        self.stack.truncate(stack_len);
+        self.int_depth = int_depth;
+        if let Ok((expanded, prog)) = symbolic {
+            prog.used_params().iter().for_each(|p| note_param(p));
+            let mut sample = |xs: &[f64]| Ok(limit::program_samples(&prog, xs));
+            if sequence {
+                return limit::sequence(&mut sample, var, graph, start);
+            }
+            let removable = limit::removable_quotient(&expanded, &local, point, self.params);
+            let report = limit::analyze(&mut sample, var, point, side, removable, graph)?;
+            return Ok((graph.then_some(Graph::Function(prog)), report));
+        }
+        let error = symbolic.err().unwrap();
+        let indexed = error == LIMIT_INDEX_SAMPLE;
+        if !indexed && error != LIMIT_INTEGRAL_SAMPLE && !error.contains(&local)
+            && !(error.contains("'#") && body.uses_var(&local))
+        {
+            return Err(error);
+        }
+        let mut sample = |xs: &[f64]| self.limit_samples(&body, &local, xs);
+        if sequence || (indexed && point == f64::INFINITY) {
+            return limit::sequence(&mut sample, var, graph, start);
+        }
+        let report = limit::analyze(&mut sample, var, point, side, None, graph)?;
+        let curve = if graph {
+            let (lo, hi) = view_x();
+            let xs: Vec<_> = (0..=128).map(|i| lo + (hi - lo) * f64::from(i) / 128.0).collect();
+            let pairs = sample(&xs)?.into_iter().zip(xs).map(|(y, x)| [x, y]).collect();
+            Some(Graph::Sampled(pairs))
+        } else {
+            None
+        };
+        Ok((curve, report))
+    }
+
+    fn limit_samples(&mut self, body: &Expr, var: &str, xs: &[f64]) -> Result<Vec<f64>, String> {
+        self.limit_samples_left = self.limit_samples_left.checked_sub(xs.len())
+            .ok_or("極限の標本の計算量が上限に達しました")?;
+        let previous_probe = std::mem::take(&mut self.probing_limit);
+        self.limit_sample_depth += 1;
+        let stack_len = self.stack.len();
+        let int_depth = self.int_depth;
+        let values = xs.iter().map(|&x| {
+            if !x.is_finite() { return Ok(f64::NAN); }
+            let at_x = |name: &str| (name == var).then_some(Expr::Num(x));
+            let result = self.scalar(&body.substitute(&at_x));
+            self.stack.truncate(stack_len);
+            self.int_depth = int_depth;
+            let value = match result {
+                Ok(value) => value.substitute(&at_x),
+                Err(e) if arithmetic_sample_error(&e) => return Ok(f64::NAN),
+                Err(e) => return Err(e),
+            };
+            let p = crate::eval::Program::compile_with(&value, &[], self.params)?;
+            p.used_params().iter().for_each(|p| note_param(p));
+            let mut out = [num_complex::Complex64::default()];
+            p.eval_batch(&[], &mut out);
+            Ok(crate::limit::real_sample(out[0]))
+        }).collect();
+        self.limit_sample_depth -= 1;
+        self.probing_limit = previous_probe;
+        values
+    }
+
+    fn apply_at_limit_sample(&mut self, name: &str, actual: &[Expr]) -> Result<Option<Val>, String> {
+        let Some(Def::Function { args, body }) = self.defs.get(name).cloned() else { return Ok(None) };
+        if args.len() != actual.len() { return Ok(None); }
+        let mut values = Vec::with_capacity(actual.len());
+        for arg in actual {
+            let arg = self.scalar(arg)?;
+            let Some(v) = self.constant_value(&arg).filter(|v| v.im == 0.0) else { return Ok(None) };
+            values.push(Expr::Num(v.re));
+        }
+        self.enter(name)?;
+        let stack_len = self.stack.len() - 1;
+        let expr = body.substitute(&|v| args.iter().position(|a| a == v).map(|i| values[i].clone()));
+        let result = self.val(&expr);
+        self.stack.truncate(stack_len);
+        result.map(Some)
     }
 
     /// 定積分 $\int_a^b g(t)\,dt$ を、区間を 2 つに分けたガウス・ルジャンドルの重み付きの和にする（2 重目は 8 点 × 2）。
@@ -1969,10 +2097,20 @@ impl<'a> Expander<'a> {
             return self.indefinite(var, body);
         }
         let [lo, hi] = args else { return Err("積分の範囲を書いてください（∫_0^1 の形）".into()) };
+        if self.probing_limit
+            && (uses_internal_var(lo, None) || uses_internal_var(hi, None) || uses_internal_var(body, Some(var)))
+        {
+            return Err(LIMIT_INTEGRAL_SAMPLE.into());
+        }
         if self.int_depth >= 3 {
             return Err("積分の入れ子は 3 重までにしてください".into());
         }
         let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
+        if self.limit_sample_depth > 0 {
+            if let Some(value) = self.wide_integral_primitive(var, &lo, &hi, body) {
+                return Ok(Expr::Num(value));
+            }
+        }
         // 値が定数になる積分は、適応型の積分で 1 つの数にする（決まった点の和より、ずっと正確）
         if let Some(v) = self.closed_integral(var, &lo, &hi, body)? {
             return Ok(Expr::Num(v));
@@ -2058,6 +2196,29 @@ impl<'a> Expander<'a> {
         Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
     }
 
+    fn wide_integral_primitive(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Option<f64> {
+        let a = self.constant_value(lo)?;
+        let b = self.constant_value(hi)?;
+        if a.im != 0.0 || b.im != 0.0 || (b.re - a.re).abs() < 32.0 {
+            return None;
+        }
+        let mut local = "#integral".to_string();
+        while body.uses_var(&local) { local.push('#'); }
+        let depth = self.stack.len();
+        let integral_depth = self.int_depth;
+        self.int_depth += 1;
+        let expanded = self.scalar(&body.substitute(&|v| (v == var).then(|| Expr::Var(local.clone()))));
+        self.stack.truncate(depth);
+        self.int_depth = integral_depth;
+        let primitive = crate::integrate::regular_antiderivative(&expanded.ok()?, &local)?;
+        let prog = crate::eval::Program::compile_with(&primitive, &[&local], self.params).ok()?;
+        prog.used_params().iter().for_each(|p| note_param(p));
+        let mut out = [num_complex::Complex64::default(); 2];
+        prog.eval_batch(&[&[a.re, b.re]], &mut out);
+        let value = out[1] - out[0];
+        (value.im == 0.0 && value.re.is_finite()).then_some(value.re)
+    }
+
     /// 値が定数になる積分（端と中身が、積分の変数とパラメータだけの式）を、適応型の積分（`quad.rs`）で数にする。
     /// すぐ内側に続く積分 ∫∫∫（内側の端は外側の積分の変数の式でよい）も、まとめて入れ子のまま計算する
     /// （内側を決まった点の和にすると、内側の誤差がそのまま残る）。定数にならない・計算が多すぎるときは None
@@ -2114,9 +2275,13 @@ impl<'a> Expander<'a> {
                 }
             }
         });
-        let budget = crate::quad::Budget::new(CLOSED_BUDGET);
-        let v = nested_integral(&bounds, &f, 0, [0.0; 3], &budget);
+        let limit_sample = self.limit_sample_depth > 0;
+        let budget = crate::quad::Budget::new(if limit_sample { 24_000 } else { CLOSED_BUDGET });
+        let v = nested_integral(&bounds, &f, 0, [0.0; 3], &budget, limit_sample);
         let infinite = bounds.iter().any(|(a, b)| matches!(a, Bound::Inf(_)) || matches!(b, Bound::Inf(_)));
+        if limit_sample && (budget.exhausted() || budget.rough.get() || !v.is_finite()) {
+            return Some((f64::NAN, true, infinite));
+        }
         if budget.exhausted() {
             return None;
         }
@@ -4003,7 +4168,7 @@ enum Bound {
     Inf(f64),
 }
 
-fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize, p: [f64; 3], budget: &crate::quad::Budget) -> f64 {
+fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize, p: [f64; 3], budget: &crate::quad::Budget, wide: bool) -> f64 {
     use num_complex::Complex64 as C;
     let n = bounds.len();
     let at = |b: &Bound| {
@@ -4020,6 +4185,7 @@ fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize
     let (a, b) = (at(&bounds[i].0), at(&bounds[i].1));
     // 外側ほど目標を厳しくする（内側の積分の誤差は、外側の値の誤差として足される）
     let tol = crate::quad::Tol { rel: if n == 1 { 1e-10 } else if i == 0 { 1e-9 } else { 1e-11 }, panels: [[20_000, 0, 0], [400, 200, 0], [200, 100, 100]][n - 1][i], ends: true };
+    let integrate = if wide { crate::quad::integrate_wide } else { crate::quad::integrate };
     if i + 1 == n {
         let mut g = |ts: &[f64], out: &mut [f64]| {
             let cols: Vec<Vec<f64>> = (0..n).map(|k| if k == i { ts.to_vec() } else { vec![p[k]; ts.len()] }).collect();
@@ -4030,16 +4196,16 @@ fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize
                 *o = crate::eval::as_real(*v);
             }
         };
-        crate::quad::integrate(&mut g, a, b, tol, budget)
+        integrate(&mut g, a, b, tol, budget)
     } else {
         let mut g = |ts: &[f64], out: &mut [f64]| {
             for (o, &t) in out.iter_mut().zip(ts) {
                 let mut q = p;
                 q[i] = t;
-                *o = nested_integral(bounds, f, i + 1, q, budget);
+                *o = nested_integral(bounds, f, i + 1, q, budget, wide);
             }
         };
-        crate::quad::integrate(&mut g, a, b, tol, budget)
+        integrate(&mut g, a, b, tol, budget)
     }
 }
 

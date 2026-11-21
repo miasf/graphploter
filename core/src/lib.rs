@@ -224,6 +224,14 @@ impl MeshResult {
         self.limit.as_ref().map_or_else(String::new, |m| m.report.variable.clone())
     }
 
+    pub fn limit_sequence(&self) -> bool {
+        self.limit.as_ref().is_some_and(|m| m.report.sequence)
+    }
+
+    pub fn take_limit_samples(&mut self) -> Vec<f64> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.report.lesson).into_iter().flatten().collect())
+    }
+
     /// [近づく先, 向き, 左の状態と値, 右の状態と値, 点での値, 指定した向きの極限値]
     pub fn limit_values(&self) -> Vec<f64> {
         let Some(LimitMesh { report: r, .. }) = &self.limit else { return Vec::new() };
@@ -1146,8 +1154,16 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
             Some(Built { inner: field::vectors(vectors, ctx.flat, span), kind: plot.kind_label(), ..Default::default() })
         }
         equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
-        equation::Plot::Limit { prog, report } => Some(Built {
-            inner: mesh::limit_curve(prog, report, ctx.dom, ctx.size * 1e-4),
+        equation::Plot::Limit { graph, report } => Some(Built {
+            inner: match graph {
+                limit::Graph::Function(prog) => mesh::limit_curve(prog, report, ctx.dom, ctx.size * 1e-4),
+                limit::Graph::Sampled(points) => mesh::sampled_limit_curve(points, report),
+                limit::Graph::Sequence(points) => {
+                    let visible: Vec<_> = points.iter().filter(|p| p[1].is_finite() && (ctx.dom.lo[0]..=ctx.dom.hi[0]).contains(&p[0]))
+                        .map(|p| [p[0], p[1], 0.0]).collect();
+                    system::points_mesh(&visible)
+                }
+            },
             kind: plot.kind_label(),
             curve: true,
             ..Default::default()

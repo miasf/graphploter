@@ -628,6 +628,8 @@ export interface LimitResult {
   right: LimitBehavior
   defined?: number
   value?: number
+  sequence: boolean
+  samples: Float64Array
 }
 
 /**

@@ -15,6 +15,8 @@ const cases: [string, string][] = [
   ['\\lim\\limits_{x\\rightarrow(-1)^{+}}x', '@lim(x,(-1),1) x'],
   ['\\lim_{\\alpha\\to a^{-}}f(\\alpha)', '@lim({alpha},a,-1) f( {alpha} )'],
   ['\\lim_{t\\longrightarrow-\\infty}e^{t}', '@lim(t,-∞) e^(t)'],
+  ['\\lim_{k\\to\\infty,\\,k\\in\\mathbb{N}}a_k', '@seqlim(k,∞) a_(k)'],
+  ['\\lim_{x\\to0}f\\prime(x+a)', "@lim(x,0) f'(x+a)"],
   // 数学の記法（計画 docs/plan-math-notation.md の M1・M4）
   ['\\sum_{n=1}^{10}n^2', '@sum(n,1,10) n^(2)'],
   // 添字を並べた多重の和: \sum_{x,y,z=0}^{n} は x・y・z それぞれ 0〜n

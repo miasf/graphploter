@@ -337,6 +337,43 @@ pub fn integrate(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol
     }
 }
 
+/// 極限の標本では、長い区間の端や、原点へ近づく端の寄与を拾えるように分割する。
+pub(crate) fn integrate_wide(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol, budget: &Budget) -> f64 {
+    if !a.is_finite() || !b.is_finite() {
+        return integrate(f, a, b, tol, budget);
+    }
+    if a > b {
+        return -integrate_wide(f, b, a, tol, budget);
+    }
+    if b - a > 32.0 && a < 0.0 && b > 0.0 {
+        return integrate_wide(f, a, 0.0, tol, budget) + integrate_wide(f, 0.0, b, tol, budget);
+    }
+    let mut cuts = vec![a, b];
+    if (a > 0.0 && a < b / 32.0) || (b < 0.0 && -b < -a / 32.0) {
+        let (mut near, far) = if a > 0.0 { (a, b) } else { (b, a) };
+        while near != far {
+            near = if a > 0.0 { (2.0 * near).min(far) } else { (2.0 * near).max(far) };
+            cuts.push(near);
+        }
+    }
+    if b - a > 32.0 {
+        let mut distance = 1.0;
+        let half = 0.5 * (b - a);
+        while distance < half && distance.is_finite() {
+            cuts.extend([a + distance, b - distance]);
+            distance *= 2.0;
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup_by(|x, y| *x == *y);
+    let mut sum = 0.0;
+    for w in cuts.windows(2) {
+        sum += integrate(f, w[0], w[1], tol, budget);
+        if budget.exhausted() || !sum.is_finite() { return f64::NAN; }
+    }
+    sum
+}
+
 /// base から dir の向きの無限の区間: t = base + dir · L s / (1 − s)、dt = L ds / (1 − s)²（s ∈ [0, 1)。L = max(1, |base|)）
 fn half_line(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: Tol, budget: &Budget) -> f64 {
     // 縮尺 L: 端が原点から遠い（∫_4097^∞）と、L = 1 では被積分関数が s = 1 のすぐ近くに鋭い山を作る

@@ -380,7 +380,7 @@ fn limit_values_and_binding() {
     close("@lim(x,0,-1) sign(x)", -1.0, 1e-9);
     close("@lim(x,0,1) sqrt(x)", 0.0, 1e-9);
     close("@lim(t,0) (@lim(t,0) cos(t) + t)", 1.0, 1e-9);
-    assert!(error_of("@lim(t,0) (@lim(u,0) (t+u))", "").contains("外側で束縛"));
+    close("@lim(t,0) (@lim(u,0) (t+u))", 0.0, 1e-9);
 
     let m = run("@lim(a,b) f(a)", "a = 99\nf(t) = t + b", &[("a", 99.0), ("b", 2.0)]).unwrap();
     assert_eq!(m.limit_variable(), "a");
@@ -390,6 +390,57 @@ fn limit_values_and_binding() {
     assert_eq!(m.used_params(), "b");
     assert!(!m.positions().is_empty());
     same("z = @lim(t,0) sin(t)/t + x", "z = 1 + x", "");
+}
+
+#[test]
+fn limits_compose_with_integrals_derivatives_and_definitions() {
+    close("@lim(x,0) (@int(t,0,x) cos(t))/x", 1.0, 1e-8);
+    close("@lim(x,∞) @int(t,0,x) exp(-t)", 1.0, 1e-8);
+    close("@lim(x,∞) @int(t,0,x) exp(-t^2)", std::f64::consts::PI.sqrt() / 2.0, 1e-8);
+    close("@lim(x,∞) @int(t,1,x) exp(-(t-x)^2)", std::f64::consts::PI.sqrt() / 2.0, 1e-8);
+    close("@lim(x,∞) (@int(t,0,x) sin(t))/x", 0.0, 1e-8);
+    let improper = run("@lim(x,0,1) @int(t,x,1) 1/t", "", &[]).unwrap();
+    assert_eq!(improper.limit_values()[7], f64::INFINITY);
+    close("@lim(x,1) @diff(x) (x^3)", 3.0, 1e-8);
+    close("@lim(h,0) (@lim(x,h) x^2)", 0.0, 1e-8);
+    let mut m = run("@lim(x,0) f'(x+a)", "f(x) = x^3", &[("a", 2.0)]).unwrap();
+    assert!((m.limit_values()[7] - 12.0).abs() < 1e-8);
+    assert_eq!(m.used_params(), "a");
+    let samples = m.take_limit_samples();
+    assert!(samples.len() >= 100 && samples.chunks_exact(2).all(|p| p[0] != 0.0));
+    let integral = run("@lim(x,∞) f(x)", "f(x) = @int(t,0,x) exp(-t)", &[]).unwrap();
+    assert!((integral.limit_values()[7] - 1.0).abs() < 1e-8);
+    let nested = run("@lim(x,0) g(x+a)", "g(t) = @lim(u,t) sin(u)", &[("a", 0.3)]).unwrap();
+    assert!((nested.limit_values()[7] - 0.3_f64.sin()).abs() < 1e-8);
+}
+
+#[test]
+fn sequence_limits_use_integers_and_distinguish_persistent_oscillation() {
+    close("@lim(n,∞) (-1)^n/n", 0.0, 1e-8);
+    close("@lim(n,∞) 1/(n+1)", 0.0, 1e-8);
+    close("@lim(n,∞) (1+1/n)^n", std::f64::consts::E, 1e-8);
+    close("@sum(k,1,512) 1/2^k", 1.0, 1e-10);
+    close("@lim(n,∞) @sum(k,1,n) 1/2^k", 1.0, 1e-8);
+    let mut m = run("@lim(k,∞) (1+b_(k+1))", "b_(n) = 1/n^2", &[]).unwrap();
+    assert!(m.limit_sequence());
+    assert!((m.limit_values()[7] - 1.0).abs() < 1e-7);
+    let samples = m.take_limit_samples();
+    assert!(samples.chunks_exact(2).all(|p| p[0].fract() == 0.0));
+    assert!(samples.chunks_exact(2).any(|p| p[0] == 4_096.0));
+    let recur = run("@lim(n,∞) a_(n)", "a_(n+1) = (a_(n)+2)/2", &[("a1", 0.0)]).unwrap();
+    assert!((recur.limit_values()[7] - 2.0).abs() < 1e-8);
+    assert!(recur.used_params().contains("a1"));
+    let later = run("@lim(n,∞) a_(n)", "a_(n+1) = (a_(n)+2)/2", &[("a20", 0.0)]).unwrap();
+    assert!((later.limit_values()[7] - 2.0).abs() < 1e-8);
+    let alias = run("@lim(k,∞) f(k)", "f(k) = a_(k)\na_(n) = 1/n", &[]).unwrap();
+    assert!(alias.limit_sequence());
+    assert!(alias.limit_values()[7].abs() < 1e-8);
+    let oscillation = run("@seqlim(k,∞) (-1)^k", "", &[]).unwrap();
+    assert_eq!(oscillation.limit_values()[4], 3.0);
+    let divergent = run("@lim(n,∞) n", "", &[]).unwrap();
+    assert_eq!(divergent.limit_values()[7], f64::INFINITY);
+    let overflow = run("@lim(n,∞) 2^n", "", &[]).unwrap();
+    assert_eq!(overflow.limit_values()[7], f64::INFINITY);
 }
 
 #[test]

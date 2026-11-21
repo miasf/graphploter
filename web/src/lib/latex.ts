@@ -780,8 +780,9 @@ class Converter {
       }
       case 'lim': {
         const { sub, sup, k } = limitsAt(this.toks, this.i - 1)
-        const parts = splitTop(sub ?? [], (t) => t === '\\to' || t === '\\rightarrow' || t === '\\longrightarrow' || t === '→')
-        if (sup !== null || parts.length !== 2) throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
+        const [head, domain, ...extra] = splitTop(sub ?? [], (t) => t === ',' || t === ';')
+        const parts = splitTop(head, (t) => t === '\\to' || t === '\\rightarrow' || t === '\\longrightarrow' || t === '→')
+        if (sup !== null || extra.length > 0 || parts.length !== 2) throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
         const variable = new Converter(parts[0]).run()
         const approach = new Converter(parts[1]).run()
         const side = /\^\(\s*([+\-−])\s*\)$/.exec(approach)
@@ -789,9 +790,12 @@ class Converter {
         if (!/^(?:[A-Za-z][0-9]*|theta|phi|rho|sigma|tau|mu|nu|\{[A-Za-z]\w*\})$/.test(variable) || !target) {
           throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
         }
+        if (domain && new Converter(domain).run().replace(/\s/g, '') !== variable + '∈ℕ') {
+          throw new LatexError('数列の極限は n → ∞, n ∈ ℕ の形で書いてください')
+        }
         this.i = k
         const direction = side ? (side[1] === '+' ? ',1' : ',-1') : ''
-        this.out += ` @lim(${variable},${target}${direction}) `
+        this.out += ` @${domain ? 'seqlim' : 'lim'}(${variable},${target}${direction}) `
         return
       }
       case 'sum':

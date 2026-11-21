@@ -6,6 +6,7 @@
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
+  import LimitLesson from './LimitLesson.svelte'
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import SequenceTable from './SequenceTable.svelte'
@@ -579,8 +580,9 @@
       {@const finite = Number.isFinite(result.target)}
       {#snippet limitSide(behavior: LimitBehavior, side: number)}
         <dt>
-          {finite ? (side > 0 ? '右極限' : '左極限') : '極限'}
-          <span class="limit-formula">lim<sub>{variable} → {target}{finite ? (side > 0 ? '⁺' : '⁻') : ''}</sub> f({variable})</span>
+          {finite ? (side > 0 ? '右極限' : '左極限') : result.sequence ? '数列の極限' : '極限'}
+          <span class="limit-formula">lim<sub>{variable} → {target}{finite ? (side > 0 ? '⁺' : '⁻') : ''}</sub>
+            {#if result.sequence}a<sub>{variable}</sub>{:else}f({variable}){/if}</span>
         </dt>
         <dd>
           {#if behavior.kind === 'finite'}
@@ -613,6 +615,9 @@
         {/if}
         <p class="hint">数値判定</p>
       </div>
+      {#if result.samples.length > 0}
+        <LimitLesson {result} {variable} />
+      {/if}
     {/if}
     <!-- 積分の範囲（∬_D の D）。式には名前だけを書き、範囲はここに書く。同じ名前は、どの式でも同じ範囲 -->
     {#each regionNames as name (name)}

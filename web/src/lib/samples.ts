@@ -353,6 +353,18 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     ],
   },
   {
+    title: '極限',
+    samples: [
+      { label: 'ε–δ　2x の極限', flat: true, items: [{ latex: '\\lim_{x\\to1}2x' }] },
+      { label: 'ε–N　1/n の極限', flat: true, items: [{ latex: 'a_n=\\frac{1}{n}' }, { latex: '\\lim_{n\\to\\infty}a_n' }] },
+      { label: 'ε–N　交互に振動する数列', flat: true, items: [{ latex: '\\lim_{n\\to\\infty}(-1)^n' }] },
+      { label: '積分の上端を無限遠に動かす', flat: true, items: [{ latex: '\\lim_{x\\to\\infty}\\int_0^x e^{-t}\\,dt' }] },
+      { label: 'ずらした導関数の極限', flat: true, items: [
+        { latex: 'a=2', param: 'a' }, { latex: 'f(x)=x^3' }, { latex: '\\lim_{x\\to0}f\\prime(x+a)' },
+      ] },
+    ],
+  },
+  {
     title: '数列',
     samples: [
       {

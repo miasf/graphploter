@@ -662,8 +662,8 @@ impl Code {
                         let mut ok = true;
                         for j in 0..len {
                             let (x, y) = (a[j], b[j]);
-                            dst[j] = if y.fract() == 0.0 && y.abs() <= 1024.0 {
-                                x.powi(y as i32)
+                            dst[j] = if y.fract() == 0.0 {
+                                real_integer_pow(x, y)
                             } else {
                                 ok &= x >= 0.0;
                                 x.powf(y)
@@ -1178,6 +1178,9 @@ fn pow(a: C, b: C) -> C {
         if b.re.fract() == 0.0 && b.re.abs() <= 1024.0 {
             return a.powi(b.re as i32);
         }
+        if a.im == 0.0 && b.re.fract() == 0.0 {
+            return C::new(real_integer_pow(a.re, b.re), 0.0);
+        }
         if a.im == 0.0 && a.re >= 0.0 {
             return C::new(a.re.powf(b.re), 0.0);
         }
@@ -1197,6 +1200,15 @@ fn pow(a: C, b: C) -> C {
         return C::new(f64::NAN, f64::NAN);
     }
     r
+}
+
+/// 大きい整数の指数でも、負の実数の底は偏角を経由せず偶奇で符号を決める。
+fn real_integer_pow(base: f64, exponent: f64) -> f64 {
+    if exponent.abs() <= 1024.0 {
+        return base.powi(exponent as i32);
+    }
+    let magnitude = base.abs().powf(exponent);
+    if base.is_sign_negative() && exponent % 2.0 != 0.0 { -magnitude } else { magnitude }
 }
 
 /// 複素数の結果を実数として扱う。虚部が無視できないほど大きければ「定義されない」(NaN)。

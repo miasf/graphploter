@@ -39,6 +39,15 @@ pub struct Report {
     pub(crate) left: Behavior,
     pub(crate) right: Behavior,
     pub(crate) defined: Option<f64>,
+    pub(crate) sequence: bool,
+    pub(crate) lesson: Vec<[f64; 2]>,
+}
+
+#[derive(Clone)]
+pub enum Graph {
+    Function(Program),
+    Sampled(Vec<[f64; 2]>),
+    Sequence(Vec<[f64; 2]>),
 }
 
 impl Report {
@@ -155,14 +164,14 @@ fn finite_estimate(a: &[f64], b: &[f64]) -> Option<f64> {
     stable
 }
 
-fn growing(samples: &[f64]) -> Option<f64> {
+fn growing(samples: &[f64], growth: f64) -> Option<f64> {
     // オーバーフローの前までに、同じ符号で大きさが増え続けているか確かめる。
     let end = samples.iter().rposition(|x| x.is_finite())? + 1;
     let start = samples[..end].iter().rposition(|x| !x.is_finite()).map_or(0, |i| i + 1);
     let run = &samples[start..end];
     let tail = run.get(run.len().checked_sub(WINDOW)?..)?;
     let last = tail[WINDOW - 1];
-    let geometric = last.abs() >= 1e6 * run[0].abs().max(1.0)
+    let geometric = last.abs() >= growth * run[0].abs().max(1.0)
         && samples[end..].iter().all(|x| *x == last.signum() * f64::INFINITY)
         && tail.windows(2).all(|w| w[0].signum() == last.signum() && w[1].abs() > 1.25 * w[0].abs());
     // 対数の発散では、距離を倍にするごとの増分が一定になる。
@@ -198,7 +207,26 @@ fn oscillates(samples: &[f64]) -> bool {
     directions.clone().zip(directions.skip(1)).filter(|(a, b)| a != b).count() >= 3
 }
 
-fn from_side(prog: &Program, point: f64, dir: f64) -> Behavior {
+/// 1/n の整数べきで近づく列を外挿する。各列の添字は倍々なので、補正の係数は 2^k になる。
+fn sequence_extrapolate(a: &[f64], b: &[f64]) -> Option<f64> {
+    let extrapolate_tail = |ys: &[f64]| {
+        let mut values = ys[ys.len() - 6..].to_vec();
+        for order in 1..=3 {
+            let factor = f64::from((1 << order) - 1);
+            values = values.windows(2).map(|w| w[1] + (w[1] - w[0]) / factor).collect();
+        }
+        values
+    };
+    let (a, b) = (extrapolate_tail(a), extrapolate_tail(b));
+    let estimate = *a.last()?;
+    a.iter().chain(&b).all(|&v| close(v, estimate)).then_some(estimate)
+}
+
+fn from_side(
+    sample: &mut impl FnMut(&[f64]) -> Result<Vec<f64>, String>,
+    point: f64,
+    dir: f64,
+) -> Result<Behavior, String> {
     let mut samples = [[0.0; STEPS]; 2];
     for (values, scale) in samples.iter_mut().zip([1.0, std::f64::consts::SQRT_2]) {
         let inputs = std::array::from_fn::<_, STEPS, _>(|k| {
@@ -209,40 +237,134 @@ fn from_side(prog: &Program, point: f64, dir: f64) -> Behavior {
                 point + dir * (point.abs().max(1.0) * (0.25 * scale / step))
             }
         });
-        let mut out = [Complex64::default(); STEPS];
-        prog.eval_batch(&[&inputs], &mut out);
-        for ((v, x), y) in values.iter_mut().zip(inputs).zip(out) {
-            // 実数の指数関数でも、桁あふれで複素数側の計算になると虚部が NaN になる。
-            // その標本は有限の極限に使わず、桁あふれ前の増加を確認するときだけ使う。
-            let real_or_overflow = y.im == 0.0 || (y.re.is_infinite() && y.im.is_nan());
-            *v = if x != point && x.is_finite() && real_or_overflow { y.re } else { f64::NAN };
+        for ((v, x), y) in values.iter_mut().zip(inputs).zip(sample(&inputs)?) {
+            *v = if x != point && x.is_finite() { y } else { f64::NAN };
         }
     }
     let [a, b] = &samples;
     let value = finite_estimate(a, b).or_else(|| {
-        let inf = growing(a)?;
-        (growing(b)? == inf).then_some(inf)
+        let inf = growing(a, 1e6)?;
+        (growing(b, 1e6)? == inf).then_some(inf)
     });
-    if let Some(value) = value {
+    Ok(if let Some(value) = value {
         Behavior::Value(value)
     } else if oscillates(a) && oscillates(b) {
         Behavior::Oscillates
     } else {
         Behavior::Unknown
-    }
+    })
 }
 
-pub(crate) fn analyze(prog: &Program, variable: &str, target: f64, side: i8, removable: Option<f64>, graph: bool) -> Report {
+pub(crate) fn real_sample(y: Complex64) -> f64 {
+    // 実数の指数関数でも、桁あふれで複素数側の計算になると虚部が NaN になる。
+    if y.im == 0.0 || (y.re.is_infinite() && y.im.is_nan()) { y.re } else { f64::NAN }
+}
+
+pub(crate) fn program_samples(prog: &Program, xs: &[f64]) -> Vec<f64> {
+    let mut values = vec![Complex64::default(); xs.len()];
+    prog.eval_batch(&[xs], &mut values);
+    values.into_iter().map(real_sample).collect()
+}
+
+pub(crate) fn analyze(
+    sample: &mut impl FnMut(&[f64]) -> Result<Vec<f64>, String>,
+    variable: &str,
+    target: f64,
+    side: i8,
+    removable: Option<f64>,
+    graph: bool,
+) -> Result<Report, String> {
     let finite = target.is_finite();
-    let sample = |dir| removable.map_or_else(|| from_side(prog, target, dir), Behavior::Value);
-    let left = if (finite && (graph || side <= 0)) || target == f64::NEG_INFINITY { sample(-1.0) } else { Behavior::Unknown };
-    let right = if (finite && (graph || side >= 0)) || target == f64::INFINITY { sample(1.0) } else { Behavior::Unknown };
+    let mut approach = |dir| removable.map_or_else(|| from_side(sample, target, dir), |v| Ok(Behavior::Value(v)));
+    let left = if (finite && (graph || side <= 0)) || target == f64::NEG_INFINITY { approach(-1.0)? } else { Behavior::Unknown };
+    let right = if (finite && (graph || side >= 0)) || target == f64::INFINITY { approach(1.0)? } else { Behavior::Unknown };
     let defined = if graph && finite {
-        let mut out = [Complex64::default()];
-        prog.eval_batch(&[&[target]], &mut out);
-        (out[0].im == 0.0 && out[0].re.is_finite()).then_some(out[0].re)
+        let v = sample(&[target])?[0];
+        v.is_finite().then_some(v)
     } else {
         None
     };
-    Report { variable: variable.to_string(), target, side, left, right, defined }
+    let mut report = Report { variable: variable.to_string(), target, side, left, right, defined, sequence: false, lesson: Vec::new() };
+    if graph && finite {
+        let radius = (target.abs() / 8.0).max(1.0);
+        let xs: Vec<_> = (-64i32..=64).filter(|&i| i != 0)
+            .map(|i| target + radius * (f64::from(i) / 64.0).powi(3))
+            .filter(|&x| x.is_finite() && x != target)
+            .collect();
+        report.lesson = sample(&xs)?.into_iter().zip(xs).map(|(y, x)| [x, y]).collect();
+    }
+    Ok(report)
+}
+
+/// 数列は整数の位置だけで調べる。標本を連続して取る区間も設け、等比に増やした添字が周期と重なる場合を検出する。
+pub(crate) fn sequence(
+    sample: &mut impl FnMut(&[f64]) -> Result<Vec<f64>, String>,
+    variable: &str,
+    graph: bool,
+    start: f64,
+) -> Result<(Option<Graph>, Report), String> {
+    match sequence_through(sample, variable, graph, start, 4_096) {
+        Err(e) if e.contains("項が多すぎます") || e.contains("項の数を減らしてください") => {
+            sequence_through(sample, variable, graph, start, 512)
+        }
+        result => result,
+    }
+}
+
+fn sequence_through(
+    sample: &mut impl FnMut(&[f64]) -> Result<Vec<f64>, String>, variable: &str, graph: bool, start: f64, last: usize,
+) -> Result<(Option<Graph>, Report), String> {
+    const BLOCK: usize = 24;
+    let offset = start - 1.0;
+    let indices: Vec<f64> = (2..=last.ilog2()).map(|k| offset + f64::from(1 << k)).collect();
+    let shifted: Vec<f64> = (2..=last.ilog2()).map(|k| offset + f64::from(3 << (k - 2))).collect();
+    let tail = |end: usize| -> Vec<f64> { (end - BLOCK + 1..=end).map(|n| offset + n as f64).collect() };
+    let a = sample(&indices)?;
+    let b = sample(&shifted)?;
+    let near = sample(&tail(last))?;
+    let earlier = sample(&tail(last / 4))?;
+    let max_error = |ys: &[f64], value: f64| {
+        ys.iter().map(|y| if y.is_finite() { (y - value).abs() } else { f64::INFINITY }).fold(0.0, f64::max)
+    };
+    // 急に収束する列では、初期の外挿より十分離れた 2 つの連続区間の一致を優先する。
+    let plateau = a.last().copied().filter(|&v| {
+        a.iter().rev().take(3).chain(b.iter().rev().take(3)).chain(&earlier).chain(&near).all(|&y| close(y, v))
+    });
+    let finite = plateau.or_else(|| finite_estimate(&a, &b))
+        .or_else(|| sequence_extrapolate(&a, &b))
+        .filter(|&v| {
+            let previous = max_error(&earlier, v);
+            let last = max_error(&near, v);
+            last.is_finite() && (last <= 1e-8 * v.abs().max(1.0) || (previous.is_finite() && last < 0.8 * previous))
+        });
+    let width = |v: &[f64]| max_error(v, v[0]);
+    let divergent = || {
+        let sign = growing(&a, 32.0)?;
+        if growing(&b, 32.0)? != sign { return None; }
+        let bound = a.iter().rev().find(|y| y.is_finite())?.abs() / 4.0;
+        near.iter().all(|v| v.signum() == sign.signum() && v.abs() > bound).then_some(sign)
+    };
+    let right = if let Some(v) = finite.or_else(divergent) {
+        Behavior::Value(v)
+    } else if oscillates(&near) && width(&near) >= 0.5 * width(&earlier) {
+        Behavior::Oscillates
+    } else {
+        Behavior::Unknown
+    };
+    let mut report = Report {
+        variable: variable.to_string(), target: f64::INFINITY, side: 0, left: Behavior::Unknown, right, defined: None,
+        sequence: true, lesson: Vec::new(),
+    };
+    if !graph {
+        return Ok((None, report));
+    }
+    let xs: Vec<_> = (0..256).map(|i| start + f64::from(i)).collect();
+    let mut shown: Vec<_> = sample(&xs)?.into_iter().zip(xs).map(|(y, x)| [x, y]).collect();
+    for (xs, ys) in [(indices, a), (shifted, b), (tail(last / 4), earlier), (tail(last), near)] {
+        shown.extend(xs.into_iter().zip(ys).map(|(x, y)| [x, y]));
+    }
+    shown.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    shown.dedup_by(|a, b| a[0] == b[0]);
+    report.lesson = shown.clone();
+    Ok((Some(Graph::Sequence(shown)), report))
 }

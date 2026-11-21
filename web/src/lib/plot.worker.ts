@@ -48,6 +48,8 @@ function limitResult(result: MeshResult): LimitResult | undefined {
     variable, target, side, left: behavior(ls, lv), right: behavior(rs, rv),
     defined: Number.isNaN(defined) ? undefined : defined,
     value: Number.isNaN(value) ? undefined : value,
+    sequence: result.limit_sequence(),
+    samples: result.take_limit_samples(),
   }
 }
 
@@ -654,6 +656,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
         ...(res.sequenceTable ? [res.sequenceTable.buffer as ArrayBuffer] : []),
+        ...(res.limit?.samples.length ? [res.limit.samples.buffer as ArrayBuffer] : []),
         ...(res.mesh.volume ? [res.mesh.volume.values.buffer] : []),
         ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
         ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),

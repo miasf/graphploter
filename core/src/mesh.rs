@@ -8116,6 +8116,29 @@ pub(crate) fn limit_curve(prog: &Program, report: &crate::limit::Report, dom: Do
     Mesh { positions, ..Default::default() }
 }
 
+pub(crate) fn sampled_limit_curve(points: &[[f64; 2]], report: &crate::limit::Report) -> Mesh {
+    let mut positions = Vec::new();
+    let mut left = points.first().is_some_and(|p| p[0] < report.target);
+    let push = |positions: &mut Vec<f32>, x: f64, y: Option<f64>| {
+        positions.extend(match y.filter(|y| y.is_finite()) {
+            Some(y) => [x as f32, y as f32, 0.0],
+            None => [f32::NAN; 3],
+        });
+    };
+    for &[x, y] in points {
+        if left && x >= report.target {
+            push(&mut positions, report.target, report.left.value());
+            positions.extend([f32::NAN; 3]);
+            push(&mut positions, report.target, report.right.value());
+            left = false;
+        }
+        if x != report.target {
+            push(&mut positions, x, Some(y));
+        }
+    }
+    Mesh { positions, ..Default::default() }
+}
+
 /// 2D 表示の陰関数の曲線 F(x, y, 0) = 0。`prog` の変数は表示中の3つの座標（縦の座標は 0）。
 /// 格子の各マスで、辺の上の F = 0 の点を結ぶ（マーチング・スクエア法）。
 /// 線分ごとに (p, q, NaN) と並べる（NaN で線を切る）
