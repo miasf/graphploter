@@ -77,6 +77,8 @@ pub struct MeshResult {
     outline: (Vec<f32>, Vec<f32>),
     /// 実線の点ごとの値（ベクトル場の流線の大きさ）。ふつうは空
     outline_values: Vec<f32>,
+    /// 行列の列ベクトルや固有ベクトル。実線は矢印の軸。
+    vector_arrows: bool,
     /// ベクトル場なら true（描画側で鮮やかな色の対応表を使う）
     vivid: bool,
     /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
@@ -198,6 +200,10 @@ impl MeshResult {
     /// 実線の点ごとの値（Float32Array。ベクトル場の流線の大きさ。無ければ空）
     pub fn take_outline_values(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline_values)
+    }
+    #[wasm_bindgen(getter)]
+    pub fn vector_arrows(&self) -> bool {
+        self.vector_arrows
     }
     /// ≠ で除いた点（Float32Array。点ごとに 3 つ。無ければ空）。描画側で白丸を描く
     pub fn take_holes(&mut self) -> Vec<f32> {
@@ -453,6 +459,7 @@ pub fn coord_grid(
         flat_slice: false,
         outline: Default::default(),
         outline_values: Vec::new(),
+        vector_arrows: false,
         vivid: false,
         outline_target: Default::default(),
         coord: None,
@@ -789,6 +796,7 @@ pub fn plot(
         coords::trim_to_domain(&mut inner, dom, curve, flat);
     }
     let mut outline = built.outline;
+    let vector_arrows = matches!(plot, equation::Plot::Arrows { .. });
     // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
     outline.0.append(&mut inner.edge_lines);
     // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
@@ -807,7 +815,7 @@ pub fn plot(
     }
     // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
     // 流線（点ごとの値つきの線）・座標系があるときは足さない
-    if !flat && !curve && coord.is_none() && built.outline_values.is_empty() {
+    if !flat && !curve && !vector_arrows && coord.is_none() && built.outline_values.is_empty() {
         outline.0.extend(mesh::box_edge_lines(&inner, dom));
     }
     let mut outline_target = (Vec::new(), Vec::new());
@@ -836,6 +844,7 @@ pub fn plot(
         outline,
         outline_target,
         outline_values: built.outline_values,
+        vector_arrows,
         vivid: built.vivid,
         value_range: built.value_range,
         volume: built.volume,
@@ -1084,7 +1093,11 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
             }
             Some(b)
         }
-        equation::Plot::Arrows { vectors } => Some(arrows_built(field::vectors(vectors, ctx.flat), "ベクトル".into())),
+        equation::Plot::Arrows { vectors } => {
+            let axes = if ctx.flat { 2 } else { 3 };
+            let span = (0..axes).map(|i| ctx.dom.hi[i] - ctx.dom.lo[i]).fold(0.0, f64::max);
+            Some(Built { inner: field::vectors(vectors, ctx.flat, span), kind: plot.kind_label(), ..Default::default() })
+        }
         equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
         equation::Plot::Points { points, line, .. } => {
             let pts: Vec<[f64; 3]> = points.iter().map(|p| if ctx.flat { [p[0], p[1], 0.0] } else { *p }).collect();
@@ -2413,6 +2426,7 @@ impl Shape {
             flat_slice: self.flat_slice,
             outline: (lines, Vec::new()),
             outline_values: Vec::new(),
+            vector_arrows: false,
             vivid: false,
             outline_target: Default::default(),
             coord: None,
@@ -2529,6 +2543,7 @@ impl CapSource {
             flat_slice: false,
             outline: Default::default(),
             outline_values: Vec::new(),
+            vector_arrows: false,
             vivid: false,
             outline_target: Default::default(),
             coord: None,

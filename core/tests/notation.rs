@@ -8,6 +8,10 @@ fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, Stri
 }
 
 fn run_flags(src: &str, defs: &str, params: &[(&str, f64)], flags: u32) -> Result<MeshResult, String> {
+    run_in_view(src, defs, params, flags, false)
+}
+
+fn run_in_view(src: &str, defs: &str, params: &[(&str, f64)], flags: u32, flat: bool) -> Result<MeshResult, String> {
     definitions(defs);
     let names: Vec<&str> = params.iter().map(|p| p.0).collect();
     let values: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
@@ -33,7 +37,7 @@ fn run_flags(src: &str, defs: &str, params: &[(&str, f64)], flags: u32) -> Resul
         0.0,
         0,
         false,
-        false,
+        flat,
         1,
         false,
         flags,
@@ -906,13 +910,18 @@ fn determinant_line_and_columns() {
     // 成分に座標があれば、今までどおり「縦 = 式」
     assert!(max_diff("@det(⟦x, y; y, x⟧)", "z = x^2 - y^2", "") < 1e-6);
     // 行列の定義の行は、列ベクトルを原点からの線分で描く
-    let m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
+    let mut m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
     assert!(m.kind().contains("A の定義（列ベクトル）"), "{}", m.kind());
-    let p = points("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧");
-    // 矢印の先（矢じりの頂点）と、軸の線分の始点（原点）
+    assert!(m.vector_arrows());
+    let p: Vec<_> = m.positions().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    // 矢じりだけがメッシュ、軸は原点から矢じりの底面までの線分
     assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]));
-    // 軸の尾（太さのある軸の尾のふた）は原点のすぐそば
-    assert!(p.iter().any(|v| v.iter().map(|c| c * c).sum::<f32>().sqrt() < 0.2));
+    assert!(p.iter().all(|v| v[1] > 0.75 && v[2].abs() < 0.1));
+    let shafts = m.take_outline();
+    assert_eq!(shafts.len(), 18);
+    assert_eq!(&shafts[..3], &[0.0; 3]);
+    assert_eq!(&shafts[9..12], &[0.0; 3]);
+    assert_eq!(&shafts[12..15], &[0.0, 1.79, 0.0]);
     // ベクトルの定義は、そのベクトル
     let p = points("{vec_b} = (1, 2, 3)", "{vec_b} = (1, 2, 3)");
     assert!(p.iter().any(|v| *v == [1.0, 2.0, 3.0]));
@@ -1601,4 +1610,17 @@ fn eigenvalues_and_eigenspaces() {
     assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(A-3I)"), "ker (A − 3I) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0（1 次元。直線）");
     assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(1E - A)"), "ker (1E − A) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）");
     assert!(error_of("@ker(A - 3)", "A= ⟦2,1;1,2⟧").contains("単位行列は I か E"));
+}
+
+#[test]
+fn flat_eigenvectors_have_triangle_heads_and_line_shafts() {
+    let mut m = run_in_view("@eig(A)", "A=⟦2,0;0,3⟧", &[], 0, true).unwrap();
+    assert!(m.vector_arrows());
+    assert!(m.take_complex_values().is_empty());
+    assert_eq!(m.indices().len(), 6);
+    assert!(m.positions().chunks_exact(3).all(|p| p[2] == 0.0 && p[0].hypot(p[1]) > 1.0));
+    let shafts = m.take_outline();
+    assert_eq!(shafts.len(), 18);
+    assert_eq!(&shafts[..3], &[0.0; 3]);
+    assert_eq!(&shafts[9..12], &[0.0; 3]);
 }

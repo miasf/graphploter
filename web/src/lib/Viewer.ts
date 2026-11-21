@@ -2698,7 +2698,7 @@ export class Viewer {
     ] as const) {
       if (!pts || pts.length === 0) continue
       const mat = new LineMaterial({
-        linewidth: 2.5,
+        linewidth: mesh.vectorArrows ? 1.75 : 2.5,
         clippingPlanes: this.clipPlanes,
         dashed,
         dashSize: span * 0.02,
@@ -2709,6 +2709,7 @@ export class Viewer {
       line.frustumCulled = false // 表示範囲の中の線（視錐台の判定のための外接球を求めない）
       if (dashed) line.computeLineDistances()
       line.userData.dashed = dashed
+      line.userData.vectorShaft = mesh.vectorArrows === true
       // ベクトル場の流線: 点ごとの大きさで色を付ける（色は setStyle で塗る）
       const vr = mesh.valueRange
       const v = mesh.outlineValues
@@ -2949,15 +2950,26 @@ export class Viewer {
     p.grid.uColormap.value = COLORMAP_INDEX[p.vivid ? 'vivid' : (style.hidden?.colormap ?? 'viridis')]
     p.grid.uValueLog.value = style.hidden?.log ? 1 : 0
     if (p.volume) applyVolumeStyle(p.volume.u, style.hidden, c, style.opacity)
-    // 境目の線は、面の不透明度によらず式の色のまま。値のある線（ベクトル場の流線）は、矢印と同じ色の対応表で塗る
-    for (const l of p.outlines) (l.material as LineMaterial).color.copy(this.colorCurve(l, style, p.vivid ? 'vivid' : undefined) ? new THREE.Color(1, 1, 1) : c)
+    const opacity = Math.min(1, Math.max(0, style.opacity))
+    // 境目の線・流線を塗る。列ベクトルと固有ベクトルの軸は矢じりと同じ不透明度にする。
+    for (const l of p.outlines) {
+      const material = l.material as LineMaterial
+      material.color.copy(this.colorCurve(l, style, p.vivid ? 'vivid' : undefined) ? new THREE.Color(1, 1, 1) : c)
+      if (l.userData.vectorShaft) {
+        material.opacity = opacity
+        material.depthWrite = opacity === 1
+        if (material.transparent !== (opacity < 1)) {
+          material.transparent = opacity < 1
+          material.needsUpdate = true
+        }
+      }
+    }
     // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）
     const capColor = c.clone().lerp(new THREE.Color(0xffffff), 0.3)
     if (p.cap) (p.cap.material as THREE.MeshStandardMaterial).color.copy(capColor)
     if (p.stencil) (p.stencil.quad.material as THREE.MeshStandardMaterial).color.copy(capColor)
 
     // 面の不透明度。1 未満なら半透明として描き、奥の面や線も透けて見えるようにする
-    const opacity = Math.min(1, Math.max(0, style.opacity))
     if (p.stencil) {
       // ふたが半透明なら、ステンシルを数える面も同じ順番（半透明の物の列）で描く
       const transparent = opacity < 1
@@ -2990,7 +3002,8 @@ export class Viewer {
     // 間隔が 0 以下・数値でないものは描かない
     const g = style.grid
     // ベクトル場の矢印には引かない（細い矢印の上の筋になって、色が見えにくくなる）
-    const sp = (v: number) => (g.enabled && !p.vivid && Number.isFinite(v) && v > 0 ? v : 0)
+    const arrows = p.vivid || p.outlines.some((line) => line.userData.vectorShaft)
+    const sp = (v: number) => (g.enabled && !arrows && Number.isFinite(v) && v > 0 ? v : 0)
     if (p.uvSpan) {
       // 媒介変数表示: u, v の範囲をそれぞれ g.u, g.v 等分する線
       const div = (span: number, n: number) => (n > 0 ? span / n : 0)

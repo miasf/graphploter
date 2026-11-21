@@ -562,6 +562,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(outline.length > 0 ? { outline } : {}),
       ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
       ...(outlineValues.length > 0 ? { outlineValues } : {}),
+      ...(r.vector_arrows ? { vectorArrows: true } : {}),
       ...(holes.length > 0 ? { holes } : {}),
       ...(vivid ? { vivid } : {}),
       ...(target.length > 0 ? { target } : {}),
