@@ -547,6 +547,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const holes = r.take_holes()
     const limit = limitResult(r)
     const limitPoint = limit ? r.take_limit_point() : undefined
+    const limitSource = limit ? r.take_limit_source() : undefined
+    const limitSourceTarget = limit ? r.take_limit_source_target() : undefined
     const limitHolesTarget = limit ? r.take_limit_holes_target() : undefined
     const limitPointTarget = limit ? r.take_limit_point_target() : undefined
     const vivid = r.vivid
@@ -590,6 +592,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(r.vector_arrows ? { vectorArrows: true } : {}),
       ...(holes.length > 0 ? { holes } : {}),
       ...(limitPoint?.length ? { limitPoint } : {}),
+      ...(limitSource?.length ? { limitSource } : {}),
+      ...(limitSourceTarget?.length ? { limitSourceTarget } : {}),
       ...(limitHolesTarget?.length ? { limitHolesTarget } : {}),
       ...(limitPointTarget?.length ? { limitPointTarget } : {}),
       ...(vivid ? { vivid } : {}),
@@ -663,6 +667,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         ...(res.mesh.outlineValues ? [res.mesh.outlineValues.buffer] : []),
         ...(res.mesh.holes ? [res.mesh.holes.buffer] : []),
         ...(res.mesh.limitPoint ? [res.mesh.limitPoint.buffer] : []),
+        ...(res.mesh.limitSource ? [res.mesh.limitSource.buffer] : []),
+        ...(res.mesh.limitSourceTarget ? [res.mesh.limitSourceTarget.buffer] : []),
         ...(res.mesh.limitHolesTarget ? [res.mesh.limitHolesTarget.buffer] : []),
         ...(res.mesh.limitPointTarget ? [res.mesh.limitPointTarget.buffer] : []),
         ...(res.mesh.target ? [res.mesh.target.buffer] : []),

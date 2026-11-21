@@ -382,13 +382,13 @@ fn limit_values_and_binding() {
     close("@lim(t,0) (@lim(t,0) cos(t) + t)", 1.0, 1e-9);
     close("@lim(t,0) (@lim(u,0) (t+u))", 0.0, 1e-9);
 
-    let m = run("@lim(a,b) f(a)", "a = 99\nf(t) = t + b", &[("a", 99.0), ("b", 2.0)]).unwrap();
+    let mut m = run("@lim(a,b) f(a)", "a = 99\nf(t) = t + b", &[("a", 99.0), ("b", 2.0)]).unwrap();
     assert_eq!(m.limit_variable(), "a");
     let result = m.limit_values();
     assert_eq!([result[0], result[1], result[2], result[4], result[6]], [2.0, 0.0, 1.0, 1.0, 4.0]);
     assert!([result[3], result[5], result[7]].iter().all(|v| (v - 4.0).abs() < 1e-9));
     assert_eq!(m.used_params(), "b");
-    assert!(!m.positions().is_empty());
+    assert!(!m.take_limit_source().is_empty());
     same("z = @lim(t,0) sin(t)/t + x", "z = 1 + x", "");
 }
 
@@ -470,16 +470,16 @@ fn standalone_limits_plot_the_finite_value() {
     assert!(!integral.positions().is_empty());
     assert_eq!(plane.positions(), integral.positions());
     assert_eq!(plane.indices(), integral.indices());
-    assert!(plane.take_outline().chunks_exact(3).any(|p| p[0].abs() > 0.1 && p[2] == 0.0));
+    assert!(plane.take_limit_source().chunks_exact(3).any(|p| p[0].abs() > 0.1 && p[2] == 0.0));
 
     for (src, y) in [("@lim(x,1) 2x", 2.0), ("@lim(x,0,1) abs(x)/x", 1.0), ("@lim(n,∞) (1+1/n)", 1.0)] {
         let m = run_in_view(src, "", &[], 0, true).unwrap();
         let ps = m.positions();
-        assert_eq!(&ps[ps.len() - 6..], &[-3.0, y, 0.0, 3.0, y, 0.0], "{src}");
+        assert_eq!(&ps, &[-3.0, y, 0.0, 3.0, y, 0.0], "{src}");
     }
     let mut sequence = run("@lim(n,∞) (1+1/n)", "", &[]).unwrap();
     assert!(!sequence.indices().is_empty());
-    assert_eq!(&sequence.take_limit_point()[..3], &[1.0, 2.0, 0.0]);
+    assert_eq!(&sequence.take_limit_source()[..3], &[1.0, 2.0, 0.0]);
     assert!(run("@lim(x,0) 1/x^2", "", &[]).unwrap().indices().is_empty());
 }
 
@@ -490,7 +490,8 @@ fn limit_graph_marks_both_sides_and_the_defined_value() {
     assert!(hole.limit_values()[6..].iter().all(|x| x.is_nan()));
     assert_eq!(hole.take_holes(), vec![0.0, -1.0, 0.0, 0.0, 1.0, 0.0]);
     assert!(hole.take_limit_point().is_empty());
-    let positions = hole.positions();
+    assert!(hole.positions().is_empty());
+    let positions = hole.take_limit_source();
     assert!(positions.chunks_exact(3).any(|p| p[0] < 0.0 && p[1] == -1.0));
     assert!(positions.chunks_exact(3).any(|p| p[0] > 0.0 && p[1] == 1.0));
     assert!(positions.chunks_exact(3).collect::<Vec<_>>().windows(2).all(|p| {

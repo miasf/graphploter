@@ -396,6 +396,7 @@
       latex: it.latex,
       color: it.color,
       visible: it.visible,
+      limitSourceHidden: it.limitSourceHidden || undefined,
       opacity: it.opacity,
       grid: it.grid,
       lineWidth: it.lineWidth,
@@ -3219,6 +3220,10 @@
               toggle(item)
             }}
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
+            onLimitSource={(visible) => {
+              item.limitSourceHidden = !visible
+              viewer?.setStyle(item.id, item)
+            }}
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
             onDuplicate={() => duplicateItem(item)}

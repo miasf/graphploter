@@ -1079,6 +1079,7 @@ export class Viewer {
       if (p.kind === 'curve') (p.line.material as LineMaterial).resolution.set(w, h)
       else for (const l of p.outlines) (l.material as LineMaterial).resolution.set(w, h)
     }
+    for (const { line } of this.limitSources.values()) line.material.resolution.set(w, h)
     this.updateProjection()
   }
 
@@ -1446,9 +1447,14 @@ export class Viewer {
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
     for (const h of this.holeMarks.values()) {
-      const { uBg, uInk } = (h.material as THREE.ShaderMaterial).uniforms
+      const { uBg, uInk, uColor } = (h.material as THREE.ShaderMaterial).uniforms
       uBg.value.set(this.theme.background)
       uInk.value.set(this.theme.text)
+      if (h.userData.limit) uColor.value.set(this.theme.text)
+    }
+    for (const { line, dots } of this.limitSources.values()) {
+      line.material.color.set(this.theme.text)
+      dots.material.color.set(this.theme.text)
     }
     if (this.domain) this.buildFrame(this.domain)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
@@ -1701,12 +1707,13 @@ export class Viewer {
    * 移行のスライダーの値（[`setMorph`]）で位置を混ぜた形を描く
    */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
-    if (mesh.target && mesh.target.length === mesh.positions.length) {
-      const m = { mesh, weld: null }
-      this.morphSources.set(id, m)
-      mesh = this.morphed(id, m)
-    } else this.morphSources.delete(id)
+    const source = (mesh.target?.length === mesh.positions.length || mesh.limitSourceTarget)
+      ? { mesh, weld: null }
+      : null
+    if (source) mesh = this.morphed(id, source)
     this.applyPlot(id, mesh, style)
+    if (source) this.morphSources.set(id, source)
+    else this.morphSources.delete(id)
     this.notePickData(id, mesh)
   }
 
@@ -1883,11 +1890,11 @@ export class Viewer {
   private morphed(id: number, m: { mesh: MeshData; weld: Int32Array | null }): MeshData {
     const { mesh } = m
     const s = this.morphValues.get(id) ?? 0
-    const target = mesh.target!
-    const positions = mixPositions(mesh.positions, target, s)
+    const target = mesh.target?.length === mesh.positions.length ? mesh.target : undefined
+    const positions = target ? mixPositions(mesh.positions, target, s) : mesh.positions
     const surface = !mesh.curve && mesh.indices.length > 0
     let normals = mesh.normals
-    if (surface && s > 0) {
+    if (target && surface && s > 0) {
       normals = vertexNormals(positions, mesh.indices)
       // s = 1 では、周期のある座標の継ぎ目（φ = 0 と 2π）で同じ点になる頂点の法線をそろえる
       if (s >= 1) weldNormals(normals, (m.weld ??= weldGroups(target, mesh.indices)))
@@ -1911,6 +1918,7 @@ export class Viewer {
       outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
       holes: mix(mesh.holes, mesh.limitHolesTarget),
       limitPoint: mix(mesh.limitPoint, mesh.limitPointTarget),
+      limitSource: mix(mesh.limitSource, mesh.limitSourceTarget),
     }
   }
 
@@ -1955,6 +1963,7 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
+    this.setLimitSource(id, mesh.limitSource)
     this.setHoles(id, mesh)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
@@ -2343,6 +2352,10 @@ export class Viewer {
     }
     for (const id of this.plots.keys()) this.updateStencil(id)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.Material).clippingPlanes = this.clipPlanes
+    for (const { line, dots } of this.limitSources.values()) {
+      line.material.clippingPlanes = this.clipPlanes
+      dots.material.clippingPlanes = this.clipPlanes
+    }
     for (const trail of this.rotationTrails.values()) {
       if (trail.kind === 'surface') trail.surface.setClipping(this.clipPlanes)
       else trail.lines.material.clippingPlanes = trail.dots.material.clippingPlanes = this.clipPlanes
@@ -2755,7 +2768,7 @@ export class Viewer {
    * 点（曲線の中で、1 点に縮んだ所）を、小さな球として置く。球の半径は表示範囲のいちばん長い辺の 0.8%（× 線の太さの倍率）。
    * 表示範囲・太さが変わったら [`placeDots`] で置き直す
    */
-  private makeDots(pts: Float32Array, mat: THREE.MeshStandardMaterial, scale = 1): THREE.InstancedMesh {
+  private makeDots(pts: Float32Array, mat: THREE.MeshStandardMaterial, scale = 1) {
     const pos = dotPositions(pts)
     const count = pos.length / 3
     const dots = new THREE.InstancedMesh(count >= 1000 ? denseDotSphere() : dotSphere(), mat, count)
@@ -2855,6 +2868,44 @@ export class Viewer {
 
   /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
   private styles = new Map<number, PlotStyle>()
+  private limitSources = new Map<number, {
+    line: LineSegments2
+    dots: THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  }>()
+
+  private setLimitSource(id: number, positions?: Float32Array) {
+    const old = this.limitSources.get(id)
+    if (old) {
+      this.scene.remove(old.line)
+      old.line.geometry.dispose()
+      old.line.material.dispose()
+      old.dots.dispose()
+      old.dots.material.dispose()
+      this.limitSources.delete(id)
+    }
+    if (!positions?.length) return
+    const d = this.domain
+    const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin) : 20
+    const mat = new LineMaterial({
+      color: this.theme.text, linewidth: 2, dashed: true, dashSize: span * 0.011, gapSize: span * 0.008,
+      clippingPlanes: this.clipPlanes, transparent: true, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    })
+    mat.resolution.set(this.viewW, this.viewH)
+    const line = new LineSegments2(this.curveGeometry(positions), mat)
+    if (line.geometry.getAttribute('instanceStart')) line.computeLineDistances()
+    else line.geometry.instanceCount = 0
+    line.frustumCulled = false
+    line.raycast = () => {}
+    line.renderOrder = 5
+    const dots = this.makeDots(positions, new THREE.MeshStandardMaterial({
+      color: this.theme.text, roughness: 0.35, clippingPlanes: this.clipPlanes,
+    }))
+    line.add(dots)
+    this.limitSources.set(id, { line, dots })
+    this.scene.add(line)
+  }
+
   /** 穴と定義値の丸印（式ごと）。曲線を GPU で描くときも見えるよう、図形とは別に置く */
   private holeMarks = new Map<number, THREE.Points>()
 
@@ -2917,6 +2968,7 @@ export class Viewer {
     const pts = new THREE.Points(geo, mat)
     pts.frustumCulled = false
     pts.renderOrder = 10
+    pts.userData.limit = mesh.limitSource !== undefined
     pts.raycast = () => {}
     pts.visible = this.styles.get(id)?.visible ?? true
     this.holeMarks.set(id, pts)
@@ -2945,9 +2997,12 @@ export class Viewer {
       trail.dots.material.color.copy(c)
     }
     const holes = this.holeMarks.get(id)
+    const showLimitSource = style.visible && !style.limitSourceHidden
+    const source = this.limitSources.get(id)
+    if (source) source.line.visible = showLimitSource
     if (holes) {
-      holes.visible = style.visible
-      ;(holes.material as THREE.ShaderMaterial).uniforms.uColor.value.copy(c)
+      holes.visible = holes.userData.limit ? showLimitSource : style.visible
+      ;(holes.material as THREE.ShaderMaterial).uniforms.uColor.value.set(holes.userData.limit ? this.theme.text : c)
     }
 
     if (p.kind === 'curve') {
@@ -3043,6 +3098,7 @@ export class Viewer {
 
   removePlot(id: number) {
     this.clearRotationTrail(id)
+    this.setLimitSource(id)
     this.setHoles(id, { holes: undefined } as MeshData)
     this.setPoi(id, undefined)
     this.curvePts.delete(id)

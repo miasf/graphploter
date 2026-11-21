@@ -109,6 +109,8 @@ pub struct MeshResult {
 
 struct LimitMesh {
     report: limit::Report,
+    source: Vec<f32>,
+    source_target: Vec<f32>,
     point: Vec<f32>,
     holes_target: Vec<f32>,
     point_target: Vec<f32>,
@@ -242,6 +244,14 @@ impl MeshResult {
 
     pub fn take_limit_point(&mut self) -> Vec<f32> {
         self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.point))
+    }
+
+    pub fn take_limit_source(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.source))
+    }
+
+    pub fn take_limit_source_target(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.source_target))
     }
 
     pub fn take_limit_holes_target(&mut self) -> Vec<f32> {
@@ -856,23 +866,16 @@ pub fn plot(
             expand::add_note("≠ で全部除かれる");
         }
     }
-    let limit = if let equation::Plot::Limit { graph, report } = &plot {
+    let limit = if let equation::Plot::Limit { report, .. } = &plot {
         let (mut open, mut point) = report.marks();
-        // 3D では極限値の面と同じ行に数列の項も描く。
-        if !curve {
-            if let limit::Graph::Sequence(points) = graph {
-                point.extend(
-                    points.iter().filter(|p| p[1].is_finite() && (dom.lo[0]..=dom.hi[0]).contains(&p[0]))
-                        .flat_map(|p| [p[0] as f32, p[1] as f32, 0.0]),
-                );
-            }
-        }
+        let mut source = built.limit_source;
+        let source_target = coord.as_ref().map_or_else(Vec::new, |c| c.apply_line(&mut source, flat));
         let (holes_target, point_target) = coord.as_ref().map_or_else(
             || (Vec::new(), Vec::new()),
             |c| (c.apply_line(&mut open, flat), c.apply_line(&mut point, flat)),
         );
         holes.extend(open);
-        Some(LimitMesh { report: report.clone(), point, holes_target, point_target })
+        Some(LimitMesh { report: report.clone(), source, source_target, point, holes_target, point_target })
     } else {
         None
     };
@@ -1619,6 +1622,8 @@ struct Ctx<'a> {
 #[derive(Default)]
 struct Built {
     inner: mesh::Mesh,
+    /// 極限値から独立して表示する、元の曲線・数列の点。
+    limit_source: Vec<f32>,
     shape: Option<mesh::NdShape>,
     /// 陰関数・範囲で重ねた立体の中身（切り口のふた用）
     fields: Vec<mesh::Field>,
@@ -1716,22 +1721,19 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     }
     if let Some(mut b) = field_built(plot, ctx) {
         if let P::Limit { report, .. } = plot {
+            let source = std::mem::take(&mut b.inner.positions);
             if let Some(value) = report.finite_value() {
                 if ctx.flat {
                     let y = value as f32;
                     let [lo, hi] = [ctx.dom.lo[0] as f32, ctx.dom.hi[0] as f32];
-                    b.inner.positions.extend([f32::NAN, f32::NAN, f32::NAN, lo, y, 0.0, hi, y, 0.0]);
+                    b.inner.positions.extend([lo, y, 0.0, hi, y, 0.0]);
                 } else {
                     let mut level = build(&equation::constant_plot(value, ctx.space)?, ctx)?;
-                    if level.inner.positions.is_empty() && level.shape.is_none() {
-                        return Ok(b);
-                    }
                     level.kind = b.kind;
-                    level.outline.0.extend(b.inner.positions);
-                    level.outline.0.extend([f32::NAN; 3]);
-                    return Ok(level);
+                    b = level;
                 }
             }
+            b.limit_source = source;
         }
         return Ok(b);
     }

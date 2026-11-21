@@ -81,6 +81,7 @@
     autoAngles?: { name: string; range: [string, string] }[]
     onAngleRange?: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
+    onLimitSource: (visible: boolean) => void
     onToggleSettings: () => void
     onToggleVertical: () => void
     onRemove: () => void
@@ -177,6 +178,7 @@
     autoAngles = [],
     onAngleRange,
     onToggle,
+    onLimitSource,
     onToggleSettings,
     onToggleVertical,
     onRemove,
@@ -614,6 +616,16 @@
           {/if}
         {/if}
         <p class="hint">数値判定</p>
+      </div>
+      <div class="limit-legend">
+        {#if result.value !== undefined && Number.isFinite(Math.fround(result.value))}
+          <span><i class="limit-key" style:--key={item.color} aria-hidden="true"></i>極限値</span>
+        {/if}
+        <label>
+          <input type="checkbox" checked={!item.limitSourceHidden} onchange={(e) => onLimitSource(e.currentTarget.checked)} />
+          <i class="limit-key source-key" class:sequence-key={result.sequence} aria-hidden="true"></i>
+          {result.sequence ? '元の数列' : '元の関数'}
+        </label>
       </div>
       {#if result.samples.length > 0}
         <LimitLesson {result} {variable} />
@@ -1928,6 +1940,21 @@
     margin-top: 4px;
     font-size: 12px;
   }
+  .limit-legend, .limit-legend span, .limit-legend label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .limit-legend {
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 4px;
+    font-size: 12px;
+  }
+  .limit-legend input { margin: 0; }
+  .limit-key { width: 16px; border-top: 2px solid var(--key, currentColor); }
+  .source-key { border-top-style: dashed; }
+  .sequence-key { border-top-style: dotted; }
   .limit-result dl {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
