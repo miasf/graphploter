@@ -353,12 +353,13 @@ pub(crate) fn sequence_start(head: &SequenceHead, params: &Params) -> i64 {
     0
 }
 
-/// 開始項から、階段図に必要な連続した実数の項を求める。
-pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Result<Vec<f64>, String> {
-    const MAX_STEPS: i64 = 512;
-    let defs = current();
-    let mut expander = Expander::new(&defs, params);
-    let start_error = "階段図の最初の引数は a_1 や a_(N) のように数列の項を書いてください";
+const MAX_SEQUENCE_PLOT_STEPS: i64 = 512;
+
+fn sequence_plot_start<'a>(
+    expander: &mut Expander<'_>,
+    start: &'a Expr,
+    start_error: &str,
+) -> Result<(&'a str, i64), String> {
     let (name, first) = match start {
         Expr::Var(v) => {
             let (name, digits) = split_subscript(v).ok_or(start_error)?;
@@ -367,19 +368,54 @@ pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Resul
         Expr::Index { name, index } => (name.as_str(), expander.integer(index, "開始項の添字")?),
         _ => return Err(start_error.into()),
     };
-    if defs.seq(name).is_none() {
+    if expander.defs.seq(name).is_none() {
         return Err(format!("数列 {name} の定義を追加してください"));
     }
+    Ok((name, first))
+}
+
+fn sequence_plot_value(expander: &mut Expander<'_>, name: &str, k: i64, label: &str) -> Result<f64, String> {
+    let expr = expander.term_value(name, k)?;
+    let value = expander.constant_value(&expr).map(crate::eval::as_real);
+    value.filter(|v| (*v as f32).is_finite())
+        .ok_or_else(|| format!("{label}には有限の実数の項が必要です（{name}_{k}）"))
+}
+
+/// 開始項から、階段図に必要な連続した実数の項を求める。
+pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Result<Vec<f64>, String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "階段図の最初の引数は a_1 や a_(N) のように数列の項を書いてください";
+    let (name, first) = sequence_plot_start(&mut expander, start, start_error)?;
     let steps = expander.integer(steps, "階段図の反復回数")?;
-    if !(1..=MAX_STEPS).contains(&steps) {
-        return Err(format!("階段図の反復回数は 1〜{MAX_STEPS} にしてください"));
+    if !(1..=MAX_SEQUENCE_PLOT_STEPS).contains(&steps) {
+        return Err(format!("階段図の反復回数は 1〜{MAX_SEQUENCE_PLOT_STEPS} にしてください"));
     }
     let last = first.checked_add(steps).ok_or("最後の項の添字が大きすぎます")?;
-    (first..=last).map(|k| {
-        let expr = expander.term_value(name, k)?;
-        let value = expander.constant_value(&expr).map(crate::eval::as_real);
-        value.filter(|v| (*v as f32).is_finite())
-            .ok_or_else(|| format!("階段図には有限の実数の項が必要です（{name}_{k}）"))
+    (first..=last).map(|k| sequence_plot_value(&mut expander, name, k, "階段図")).collect()
+}
+
+/// 各数列の開始項を座標にし、全成分の添字を同時に進める。
+pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "軌道の座標には a_0 や a_(N) のように数列の項を書いてください";
+    let starts = starts.iter()
+        .map(|start| sequence_plot_start(&mut expander, start, start_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    let steps = expander.integer(steps, "軌道の反復回数")?;
+    if !(0..=MAX_SEQUENCE_PLOT_STEPS).contains(&steps) {
+        return Err(format!("軌道の反復回数は 0〜{MAX_SEQUENCE_PLOT_STEPS} にしてください"));
+    }
+    if starts.iter().any(|&(_, first)| first.checked_add(steps).is_none()) {
+        return Err("最後の項の添字が大きすぎます".into());
+    }
+    (0..=steps).map(|offset| {
+        let mut point = [0.0; 3];
+        for (coordinate, &(name, first)) in point.iter_mut().zip(&starts) {
+            *coordinate = sequence_plot_value(&mut expander, name, first + offset, "軌道")?;
+        }
+        Ok(point)
     }).collect()
 }
 

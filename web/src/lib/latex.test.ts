@@ -42,6 +42,7 @@ const cases: [string, string][] = [
   ['\\operatorname{Taylor}\\left(\\sin x,x,0,5\\right)', '@taylor ( sin x,x,0,5)'],
   ['\\operatorname{crit}\\left(x^3-3x+y^2\\right)', '@crit (x^(3)-3x+y^(2))'],
   ['\\operatorname{cobweb}\\left(a_1,12\\right)', '@cobweb (a_1,12)'],
+  ['\\operatorname{orbit}\\left(a_0,b_0,N\\right)', '@orbit (a_0,b_0,N)'],
   // 常微分方程式（M9）
   ["x'=-y,\\ y'=x", "x'=-y, y'=x"],
   ['\\dot{x}=10\\left(y-x\\right)', "x'=10(y-x)"],

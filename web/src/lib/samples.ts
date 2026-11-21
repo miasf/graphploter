@@ -354,6 +354,20 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '数列',
     samples: [
       {
+        label: '連立漸化式の軌道（初期値と反復回数を動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 4 },
+        items: [
+          { latex: 'p_0=3', param: 'p0', options: { slider: { min: -3, max: 3, complex: false, stack: false } } },
+          { latex: 'q_0=0', param: 'q0', options: { slider: { min: -3, max: 3, complex: false, stack: false } } },
+          { latex: 'N=24', param: 'N', options: { slider: { min: 0, max: 64, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: 'p_{n+1}=0.88p_n-0.42q_n', options: { visible: false } },
+          { latex: 'q_{n+1}=0.42p_n+0.88q_n', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(p_0,q_0,N\\right)', options: { color: '#2d70b3', lineWidth: 4 } },
+        ],
+      },
+      {
         label: '階段図で固定点を調べる（q を −1 にすると？）',
         flat: true,
         openFolder: true,

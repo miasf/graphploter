@@ -616,6 +616,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if source.trim_start().starts_with("@cobweb") {
         return cobweb_line(source, params);
     }
+    if source.trim_start().strip_prefix("@orbit").is_some_and(|rest| rest.trim_start().starts_with('(')) {
+        return orbit_line(source, params);
+    }
     // 数列の定義の行（計画 M10）
     if let Some(p) = sequence_line(source, params)? {
         return Ok(p);
@@ -1823,6 +1826,20 @@ fn cobweb_line(source: &str, params: &Params) -> Result<Plot, String> {
     let line = points.len() > 1;
     crate::expand::set_kind(format!("数列の階段図（{} 回の反復）", terms.len() - 1));
     Ok(Plot::Points { points, line, sequence: None })
+}
+
+fn orbit_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let usage = "軌道は orbit(a_0, b_0, 24) のように、2〜3 個の開始項と反復回数を書いてください";
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { op, args } = expr else { return Err(usage.into()) };
+    let Some((steps, starts)) = args.split_last() else { return Err(usage.into()) };
+    if op != "orbit" || !(2..=3).contains(&starts.len()) {
+        return Err(usage.into());
+    }
+    let mut points = crate::expand::orbit_points(starts, steps, params)?;
+    crate::expand::set_kind(format!("数列の軌道（{} 次元・{} 回の反復）", starts.len(), points.len() - 1));
+    points.dedup();
+    Ok(Plot::Points { line: points.len() > 1, points, sequence: None })
 }
 
 /// 常微分方程式（[`Plot::Ode`]）

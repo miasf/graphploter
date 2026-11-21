@@ -1152,6 +1152,28 @@ fn sequence_cobweb_uses_consecutive_terms() {
 }
 
 #[test]
+fn sequence_orbit_uses_the_same_step_for_each_coordinate() {
+    let rules = "a_(n+1)=-b_(n)\nb_(n+1)=a_(n)\nc_(n)=n";
+    let params = [("a0", 2.0), ("b0", 1.0), ("N", 2.0)];
+    let m = run("@orbit(a_0,b_0,c_(1),N)", rules, &params).unwrap();
+    assert!(m.kind().contains("軌道（3 次元・2 回の反復）"));
+    assert_eq!(m.positions(), vec![2.0, 1.0, 1.0, -1.0, 2.0, 2.0, -2.0, -1.0, 3.0]);
+    for param in ["a0", "b0", "N"] {
+        assert!(m.used_params().split(',').any(|p| p == param));
+    }
+    for name in ["a", "b", "c"] {
+        assert!(m.used_defs().split(',').any(|d| d == name));
+    }
+    let start = run("@orbit(a_0,b_0,0)", rules, &params).unwrap();
+    assert_eq!(&start.positions()[..3], &[2.0, 1.0, 0.0]);
+    let lag = run("@orbit(c_0,c_1,1)", rules, &[]).unwrap();
+    assert_eq!(lag.positions(), vec![0.0, 1.0, 0.0, 1.0, 2.0, 0.0]);
+    assert!(error_of("@orbit(a_0,2)", rules).contains("2〜3 個"));
+    assert!(error_of("@orbit(a_0,b_0,513)", rules).contains("0〜512"));
+    assert!(error_of("@orbit(a_0,b_0,1)", "a_(n)=i\nb_(n)=n").contains("有限の実数"));
+}
+
+#[test]
 fn recurrence_index_rules_and_dependencies() {
     let even = "a_(2n) = a_(n) + a_1";
     let odd = "a_(2n+1) = a_(n)^2 + a_1";
