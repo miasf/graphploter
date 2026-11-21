@@ -31,6 +31,7 @@ pub mod pixel;
 pub mod groebner;
 pub mod quad;
 pub mod series;
+mod limit;
 pub mod solve;
 mod region;
 pub mod implicit;
@@ -102,6 +103,15 @@ pub struct MeshResult {
     ode_states: Vec<String>,
     /// ≠ で除いた点（曲線が h = 0 を横切る所。点ごとに 3 つ）。描画側で白丸を描く
     holes: Vec<f32>,
+    /// 極限の行の数値結果と、近づく点での定義値を示す点の座標
+    limit: Option<LimitMesh>,
+}
+
+struct LimitMesh {
+    report: limit::Report,
+    point: Vec<f32>,
+    holes_target: Vec<f32>,
+    point_target: Vec<f32>,
 }
 
 /// 3D の陰関数を光線で描くための GLSL と、uniform の値
@@ -208,6 +218,30 @@ impl MeshResult {
     /// ≠ で除いた点（Float32Array。点ごとに 3 つ。無ければ空）。描画側で白丸を描く
     pub fn take_holes(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.holes)
+    }
+
+    pub fn limit_variable(&self) -> String {
+        self.limit.as_ref().map_or_else(String::new, |m| m.report.variable.clone())
+    }
+
+    /// [近づく先, 向き, 左の状態と値, 右の状態と値, 点での値, 指定した向きの極限値]
+    pub fn limit_values(&self) -> Vec<f64> {
+        let Some(LimitMesh { report: r, .. }) = &self.limit else { return Vec::new() };
+        let [ls, lv] = r.left.pair();
+        let [rs, rv] = r.right.pair();
+        vec![r.target, f64::from(r.side), ls, lv, rs, rv, r.defined.unwrap_or(f64::NAN), r.value().unwrap_or(f64::NAN)]
+    }
+
+    pub fn take_limit_point(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.point))
+    }
+
+    pub fn take_limit_holes_target(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.holes_target))
+    }
+
+    pub fn take_limit_point_target(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.point_target))
     }
     /// ベクトル場か（矢印・流線を鮮やかな色の対応表で塗る）
     #[wasm_bindgen(getter)]
@@ -471,6 +505,7 @@ pub fn coord_grid(
         gpu_reason: String::new(),
         ode_states: Vec::new(),
         holes: Vec::new(),
+        limit: None,
     })
 }
 
@@ -813,6 +848,17 @@ pub fn plot(
             expand::add_note("≠ で全部除かれる");
         }
     }
+    let limit = if let equation::Plot::Limit { report, .. } = &plot {
+        let (mut open, mut point) = report.marks();
+        let (holes_target, point_target) = coord.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |c| (c.apply_line(&mut open, flat), c.apply_line(&mut point, flat)),
+        );
+        holes.extend(open);
+        Some(LimitMesh { report: report.clone(), point, holes_target, point_target })
+    } else {
+        None
+    };
     // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
     // 流線（点ごとの値つきの線）・座標系があるときは足さない
     if !flat && !curve && !vector_arrows && coord.is_none() && built.outline_values.is_empty() {
@@ -905,6 +951,7 @@ pub fn plot(
         defs: (expand::used(), expand::def_line()),
         ode_states: expand::ode_states(),
         holes,
+        limit,
     })
 }
 
@@ -1099,6 +1146,12 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
             Some(Built { inner: field::vectors(vectors, ctx.flat, span), kind: plot.kind_label(), ..Default::default() })
         }
         equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
+        equation::Plot::Limit { prog, report } => Some(Built {
+            inner: mesh::limit_curve(prog, report, ctx.dom, ctx.size * 1e-4),
+            kind: plot.kind_label(),
+            curve: true,
+            ..Default::default()
+        }),
         equation::Plot::Points { points, line, .. } => {
             let pts: Vec<[f64; 3]> = points.iter().map(|p| if ctx.flat { [p[0], p[1], 0.0] } else { *p }).collect();
             let inner = if *line {
@@ -1779,7 +1832,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } | P::Limit { .. } => {}
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
         // 切り取った後の面が表示範囲に比べて小さければ（x² + y² = 1, 0 ≤ z ≤ 1 を ±6 で）、その周りだけで作り直す（fit_to_shape）
@@ -2025,7 +2078,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } | P::Limit { .. } => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
         P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
@@ -2452,6 +2505,7 @@ impl Shape {
             gpu_reason: String::new(),
             ode_states: Vec::new(),
             holes: Vec::new(),
+            limit: None,
         }
     }
 }
@@ -2555,6 +2609,7 @@ impl CapSource {
             gpu_reason: String::new(),
             ode_states: Vec::new(),
             holes: Vec::new(),
+            limit: None,
         })
     }
 }

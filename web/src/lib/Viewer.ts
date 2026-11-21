@@ -1445,7 +1445,11 @@ export class Viewer {
     this.dirty = true
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
-    for (const h of this.holeMarks.values()) (h.material as THREE.ShaderMaterial).uniforms.uBg.value.set(this.theme.background)
+    for (const h of this.holeMarks.values()) {
+      const { uBg, uInk } = (h.material as THREE.ShaderMaterial).uniforms
+      uBg.value.set(this.theme.background)
+      uInk.value.set(this.theme.text)
+    }
     if (this.domain) this.buildFrame(this.domain)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
   }
@@ -1905,6 +1909,8 @@ export class Viewer {
       lod,
       outline: mix(mesh.outline, mesh.outlineTarget),
       outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
+      holes: mix(mesh.holes, mesh.limitHolesTarget),
+      limitPoint: mix(mesh.limitPoint, mesh.limitPointTarget),
     }
   }
 
@@ -2849,10 +2855,10 @@ export class Viewer {
 
   /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
   private styles = new Map<number, PlotStyle>()
-  /** ≠ で除いた点の白丸（式ごと）。曲線を GPU の 2D の描き方で描いて線を隠すときも見えるよう、図形とは別に置く */
+  /** 穴と定義値の丸印（式ごと）。曲線を GPU で描くときも見えるよう、図形とは別に置く */
   private holeMarks = new Map<number, THREE.Points>()
 
-  /** ≠ で除いた点に白丸を置く（中を背景の色で塗り、縁を図形の色にする。画面の上の大きさは一定） */
+  /** 穴には白丸、極限の近づく点での定義値には塗りつぶした丸を置く（画面の上の大きさは一定） */
   private setHoles(id: number, mesh: MeshData) {
     const old = this.holeMarks.get(id)
     if (old) {
@@ -2861,18 +2867,32 @@ export class Viewer {
       ;(old.material as THREE.Material).dispose()
       this.holeMarks.delete(id)
     }
-    if (!mesh.holes || mesh.holes.length === 0) return
+    const open = mesh.holes?.length ?? 0
+    const filled = mesh.limitPoint?.length ?? 0
+    if (open + filled === 0) return
+    const positions = filled ? new Float32Array(open + filled) : mesh.holes!
+    const closed = new Float32Array(positions.length / 3)
+    if (filled) {
+      if (mesh.holes) positions.set(mesh.holes)
+      positions.set(mesh.limitPoint!, open)
+      closed.fill(1, open / 3)
+    }
     const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(mesh.holes, 3))
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geo.setAttribute('aFilled', new THREE.BufferAttribute(closed, 1))
     const mat = new THREE.ShaderMaterial({
       uniforms: {
         uColor: { value: new THREE.Color(this.styles.get(id)?.color ?? '#2b6cb0') },
         uBg: { value: new THREE.Color(this.theme.background) },
+        uInk: { value: new THREE.Color(this.theme.text) },
         uSize: { value: 11 * this.renderer.getPixelRatio() },
       },
       vertexShader: `
         uniform float uSize;
+        attribute float aFilled;
+        varying float vFilled;
         void main() {
+          vFilled = aFilled;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           // 線・面と同じ深さで重なってちらつかないよう、少し手前に出す
           gl_Position.z -= 2e-3 * gl_Position.w;
@@ -2881,11 +2901,14 @@ export class Viewer {
       fragmentShader: `
         uniform vec3 uColor;
         uniform vec3 uBg;
+        uniform vec3 uInk;
+        varying float vFilled;
         void main() {
           float r = length(gl_PointCoord - 0.5) * 2.0;
           if (r > 1.0) discard;
           float ring = smoothstep(0.5, 0.62, r);
-          gl_FragColor = vec4(mix(uBg, uColor, ring), 1.0 - smoothstep(0.88, 1.0, r));
+          vec3 color = mix(mix(uBg, uColor, ring), uInk, vFilled);
+          gl_FragColor = vec4(color, 1.0 - smoothstep(0.88, 1.0, r));
           // 色は線形の値で持っているので、画面の色空間（sRGB）に直す（線・面の材質と同じ色に見えるように）
           #include <colorspace_fragment>
         }`,

@@ -307,6 +307,7 @@ export interface PlotItem extends PlotStyle {
   folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
+  limit?: LimitResult
   /** スライダーの値の条件の行（ab > 1 のような、パラメータだけの不等式）なら true。図形は描かない。保存しない */
   condition?: boolean
   /** 座標系の番号（CoordSystem.id。無ければ直交座標） */
@@ -440,6 +441,11 @@ export interface MeshData {
   vectorArrows?: boolean
   /** ≠ で除いた点（点ごとに 3 つ）。白丸を描く */
   holes?: Float32Array
+  /** 極限の近づく点での定義値（座標 3 つ）。塗りつぶした点で描く。 */
+  limitPoint?: Float32Array
+  /** 極限の丸印を座標系で移した先 */
+  limitHolesTarget?: Float32Array
+  limitPointTarget?: Float32Array
   /** ベクトル場なら true（矢印・流線を、鮮やかな色の対応表 vivid で塗る） */
   vivid?: boolean
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
@@ -586,6 +592,7 @@ export type PlotResponse =
       ok: true
       mesh: MeshData
       kind: string
+      limit?: LimitResult
       ms: number
       usedParams: string[]
       /** この式が使った定義（関数）の名前 */
@@ -608,6 +615,20 @@ export type PlotResponse =
       cost: Cost
     }
   | { requestId: number; ok: false; error: string }
+
+export type LimitBehavior =
+  | { kind: 'finite' | 'infinite'; value: number }
+  | { kind: 'oscillating' | 'unknown' }
+
+export interface LimitResult {
+  variable: string
+  target: number
+  side: number
+  left: LimitBehavior
+  right: LimitBehavior
+  defined?: number
+  value?: number
+}
 
 /**
  * 計算担当の中での時間の内訳（ミリ秒）。eval + mesh + lod + copy ≈ total

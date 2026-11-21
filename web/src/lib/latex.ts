@@ -778,6 +778,22 @@ class Converter {
         this.out += s === 'e' || s === 'i' ? s : ` ${s} `
         return
       }
+      case 'lim': {
+        const { sub, sup, k } = limitsAt(this.toks, this.i - 1)
+        const parts = splitTop(sub ?? [], (t) => t === '\\to' || t === '\\rightarrow' || t === '\\longrightarrow' || t === '→')
+        if (sup !== null || parts.length !== 2) throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
+        const variable = new Converter(parts[0]).run()
+        const approach = new Converter(parts[1]).run()
+        const side = /\^\(\s*([+\-−])\s*\)$/.exec(approach)
+        const target = (side ? approach.slice(0, side.index) : approach).trim()
+        if (!/^(?:[A-Za-z][0-9]*|theta|phi|rho|sigma|tau|mu|nu|\{[A-Za-z]\w*\})$/.test(variable) || !target) {
+          throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
+        }
+        this.i = k
+        const direction = side ? (side[1] === '+' ? ',1' : ',-1') : ''
+        this.out += ` @lim(${variable},${target}${direction}) `
+        return
+      }
       case 'sum':
       case 'prod':
       case 'bigcup':

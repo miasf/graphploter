@@ -11,7 +11,7 @@
   import SequenceTable from './SequenceTable.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
   import { prettyCoordName } from './coords'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type LimitBehavior, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
   import { gpuByDefault } from './renderMode'
 
   interface Props {
@@ -457,6 +457,9 @@
 
   /** 積分の値を短く出す（有効 6 桁） */
   const formatValue = (v: number) => (Math.abs(v) < 1e-12 ? '0' : Number(v.toPrecision(6)).toString().replace('-', '−'))
+  const limitNumber = (v: number) => Number.isFinite(v)
+    ? Number(v.toPrecision(10)).toString().replaceAll('-', '−')
+    : v < 0 ? '−∞' : '+∞'
   /** 誤差（小さい数は指数表記） */
   const formatError = (v: number) => {
     const a = Math.abs(v)
@@ -568,6 +571,48 @@
       {#if parts && !item.vertical}
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
       {/if}
+    {/if}
+    {#if !item.error && item.limit}
+      {@const result = item.limit}
+      {@const variable = prettyName(result.variable)}
+      {@const target = limitNumber(result.target)}
+      {@const finite = Number.isFinite(result.target)}
+      {#snippet limitSide(behavior: LimitBehavior, side: number)}
+        <dt>
+          {finite ? (side > 0 ? '右極限' : '左極限') : '極限'}
+          <span class="limit-formula">lim<sub>{variable} → {target}{finite ? (side > 0 ? '⁺' : '⁻') : ''}</sub> f({variable})</span>
+        </dt>
+        <dd>
+          {#if behavior.kind === 'finite'}
+            <span>≈ {limitNumber(behavior.value)}</span>
+            <span class="limit-state">収束</span>
+          {:else if behavior.kind === 'infinite'}
+            {limitNumber(behavior.value)} に発散
+          {:else if behavior.kind === 'oscillating'}
+            振動
+          {:else}
+            判定できません
+          {/if}
+        </dd>
+      {/snippet}
+      <div class="limit-result" aria-label="極限の数値判定" aria-live="polite">
+        <dl>
+          {#if finite ? result.side >= 0 : result.target > 0}{@render limitSide(result.right, 1)}{/if}
+          {#if finite ? result.side <= 0 : result.target < 0}{@render limitSide(result.left, -1)}{/if}
+          {#if finite}
+            <dt>f({target})</dt>
+            <dd>{result.defined === undefined ? '未定義' : limitNumber(result.defined)}</dd>
+          {/if}
+        </dl>
+        {#if finite && result.side === 0 && result.value === undefined}
+          {#if 'value' in result.left && 'value' in result.right}
+            <p>極限なし（左右で値が異なります）</p>
+          {:else if result.left.kind === 'oscillating' || result.right.kind === 'oscillating'}
+            <p>極限なし（振動）</p>
+          {/if}
+        {/if}
+        <p class="hint">数値判定</p>
+      </div>
     {/if}
     <!-- 積分の範囲（∬_D の D）。式には名前だけを書き、範囲はここに書く。同じ名前は、どの式でも同じ範囲 -->
     {#each regionNames as name (name)}
@@ -1873,6 +1918,32 @@
     min-width: 5.5em;
     font: 12px var(--mono);
     color: var(--muted);
+  }
+  .limit-result {
+    margin-top: 4px;
+    font-size: 12px;
+  }
+  .limit-result dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 3px 8px;
+    margin: 0;
+  }
+  .limit-result dd,
+  .limit-result p {
+    margin: 0;
+  }
+  .limit-result dd {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 6px;
+  }
+  .limit-state {
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .limit-formula {
+    font-family: var(--mono);
   }
   .hint {
     margin: 0;

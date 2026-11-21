@@ -1055,6 +1055,10 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
     Ok(out)
 }
 
+pub(crate) fn limit_line(var: &str, args: &[Expr], body: &Expr, params: &Params) -> Result<(crate::eval::Program, crate::limit::Report), String> {
+    Expander::new(&current(), params).limit_program(var, args, body, true)
+}
+
 /// 式の途中（一番外でない所）に組があるか（ベクトルの計算。展開の段で成分の式にする）
 fn nested_tuple(e: &Expr, top: bool) -> bool {
     match e {
@@ -1295,6 +1299,7 @@ impl<'a> Expander<'a> {
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
+            Expr::Binder { op, var, args, body } if op == "lim" => Val::S(self.limit(var, args, body)?),
             Expr::Binder { op, var, args, body } if matches!(op.as_str(), "max" | "min" | "sup" | "inf") => {
                 Val::S(self.extremum(matches!(op.as_str(), "max" | "sup"), var, args, body)?)
             }
@@ -1901,6 +1906,58 @@ impl<'a> Expander<'a> {
             terms.push(t);
         }
         Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
+    }
+
+    /// 1 変数の実数の極限。近づく先と中身には、スライダーや定義を使える。
+    fn limit(&mut self, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        let (_, report) = self.limit_program(var, args, body, false)?;
+        report.value().map(Expr::Num)
+    }
+
+    fn limit_program(
+        &mut self,
+        var: &str,
+        args: &[Expr],
+        body: &Expr,
+        graph: bool,
+    ) -> Result<(crate::eval::Program, crate::limit::Report), String> {
+        use crate::eval::Program;
+        let (target, side) = match args {
+            [target] => (target, 0),
+            [target, Expr::Num(1.0)] => (target, 1),
+            [target, side] if side.is_minus_one() => (target, -1),
+            _ => return Err("極限の近づく先と向きを確かめてください（x → a、x → a⁺、x → a⁻）".into()),
+        };
+        let constant_error = |error: String| {
+            if error.starts_with("変数 '#") {
+                "極限の近づく先と中身には、外側で束縛されている変数を使えません".to_string()
+            } else {
+                error
+            }
+        };
+        let target_expr = self.scalar(target)?;
+        let infinity = matches!(&target_expr, Expr::Num(v) if v.is_infinite())
+            || matches!(&target_expr, Expr::Neg(e) if matches!(&**e, Expr::Num(v) if v.is_infinite()));
+        let target = Program::compile_with(&target_expr, &[], self.params).map_err(constant_error)?;
+        target.used_params().iter().for_each(|p| note_param(p));
+        let mut value = [num_complex::Complex64::default()];
+        target.eval_batch(&[], &mut value);
+        let point = value[0].re;
+        if value[0].im != 0.0 || (!point.is_finite() && !(infinity && point.is_infinite() && side == 0)) {
+            return Err("極限の近づく先には、実数または向きの付かない ±∞ を書いてください".into());
+        }
+
+        // 中身の変数は、同じ名前の定義・パラメータを隠す。入れ子の外側の変数とも区別する。
+        let mut local = "#limit".to_string();
+        while body.uses_var(&local) {
+            local.push('#');
+        }
+        let body = self.scalar(&body.substitute(&|name| (name == var).then(|| Expr::Var(local.clone()))))?;
+        let prog = Program::compile_with(&body, &[&local], self.params).map_err(constant_error)?;
+        prog.used_params().iter().for_each(|p| note_param(p));
+        let removable = crate::limit::removable_quotient(&body, &local, point, self.params);
+        let report = crate::limit::analyze(&prog, var, point, side, removable, graph);
+        Ok((prog, report))
     }
 
     /// 定積分 $\int_a^b g(t)\,dt$ を、区間を 2 つに分けたガウス・ルジャンドルの重み付きの和にする（2 重目は 8 点 × 2）。

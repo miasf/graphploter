@@ -368,6 +368,75 @@ fn close(src: &str, want: f64, tol: f64) {
 }
 
 #[test]
+fn limit_values_and_binding() {
+    close("@lim(x,0) sin(x)/x", 1.0, 1e-9);
+    close("@lim(x,0) (1-cos(x))/x^2", 0.5, 1e-12);
+    close("@lim(x,0) (exp(x)-1-x)/x^2", 0.5, 1e-12);
+    close("@lim(x,∞) (1+1/x)^x", std::f64::consts::E, 1e-8);
+    close("@lim(x,1) (x^2-1)/(x-1)", 2.0, 1e-8);
+    close("@lim(x,∞) (2x^2+1)/(x^2-1)", 2.0, 1e-8);
+    close("@lim(x,-∞) exp(x)", 0.0, 1e-9);
+    close("@lim(x,0,1) sign(x)", 1.0, 1e-9);
+    close("@lim(x,0,-1) sign(x)", -1.0, 1e-9);
+    close("@lim(x,0,1) sqrt(x)", 0.0, 1e-9);
+    close("@lim(t,0) (@lim(t,0) cos(t) + t)", 1.0, 1e-9);
+    assert!(error_of("@lim(t,0) (@lim(u,0) (t+u))", "").contains("外側で束縛"));
+
+    let m = run("@lim(a,b) f(a)", "a = 99\nf(t) = t + b", &[("a", 99.0), ("b", 2.0)]).unwrap();
+    assert_eq!(m.limit_variable(), "a");
+    let result = m.limit_values();
+    assert_eq!([result[0], result[1], result[2], result[4], result[6]], [2.0, 0.0, 1.0, 1.0, 4.0]);
+    assert!([result[3], result[5], result[7]].iter().all(|v| (v - 4.0).abs() < 1e-9));
+    assert_eq!(m.used_params(), "b");
+    assert!(!m.positions().is_empty());
+    same("z = @lim(t,0) sin(t)/t + x", "z = 1 + x", "");
+}
+
+#[test]
+fn limit_reports_divergence_and_uncertainty() {
+    let result = |src| run(src, "", &[]).unwrap().limit_values();
+    assert_eq!(&result("@lim(x,0) 1/x^2")[2..6], &[2.0, f64::INFINITY, 2.0, f64::INFINITY]);
+    assert_eq!(&result("@lim(x,0) 1/x")[2..6], &[2.0, f64::NEG_INFINITY, 2.0, f64::INFINITY]);
+    assert_eq!(result("@lim(x,0,-1) 1/x")[7], f64::NEG_INFINITY);
+    assert_eq!(result("@lim(x,0,1) ln(x)")[7], f64::NEG_INFINITY);
+    assert_eq!(result("@lim(x,∞) exp(x)")[7], f64::INFINITY);
+    let oscillation = result("@lim(x,0) sin(1/x)");
+    assert_eq!([oscillation[2], oscillation[4]], [3.0, 3.0]);
+    assert!(oscillation[7].is_nan());
+    assert_eq!(result("@lim(x,0) x sin(1/x)")[2], 1.0);
+    assert_eq!(result("@lim(x,0) ((1-cos(x))/x^2+2)")[2], 0.0);
+    assert_eq!(result("@lim(x,0,-1) sqrt(x)")[2], 0.0);
+    assert!(error_of("z = @lim(x,0) 1/x", "").contains("一致しません"));
+    assert!(error_of("z = @lim(x,0) sin(1/x)", "").contains("振動"));
+    assert!(error_of("@lim(x,∞,1) x", "").contains("近づく先"));
+    assert!(error_of("@lim(x,1/0) x", "").contains("近づく先"));
+}
+
+#[test]
+fn limit_graph_marks_both_sides_and_the_defined_value() {
+    let mut hole = run_in_view("@lim(x,0) abs(x)/x", "", &[], 0, true).unwrap();
+    assert_eq!(&hole.limit_values()[2..6], &[1.0, -1.0, 1.0, 1.0]);
+    assert!(hole.limit_values()[6..].iter().all(|x| x.is_nan()));
+    assert_eq!(hole.take_holes(), vec![0.0, -1.0, 0.0, 0.0, 1.0, 0.0]);
+    assert!(hole.take_limit_point().is_empty());
+    let positions = hole.positions();
+    assert!(positions.chunks_exact(3).any(|p| p[0] < 0.0 && p[1] == -1.0));
+    assert!(positions.chunks_exact(3).any(|p| p[0] > 0.0 && p[1] == 1.0));
+    assert!(positions.chunks_exact(3).collect::<Vec<_>>().windows(2).all(|p| {
+        p[0][0].is_nan() || p[1][0].is_nan() || p[0][1] == p[1][1]
+    }));
+
+    let mut filled = run("@lim(x,0) @cases(-1, x < 0; 1, x > 0; 0)", "", &[]).unwrap();
+    assert_eq!(filled.limit_values()[6], 0.0);
+    assert_eq!(filled.take_holes(), vec![0.0, -1.0, 0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(filled.take_limit_point(), vec![0.0, 0.0, 0.0]);
+
+    let mut endpoint = run("@lim(x,0) @cases(-1, x < 0; 1)", "", &[]).unwrap();
+    assert_eq!(endpoint.take_holes(), vec![0.0, -1.0, 0.0]);
+    assert_eq!(endpoint.take_limit_point(), vec![0.0, 1.0, 0.0]);
+}
+
+#[test]
 fn integral_values() {
     close("@int(t,0,1)(t^2)", 1.0 / 3.0, 1e-14);
     close("@int(t,0,pi)(sin(t))", 2.0, 1e-13);

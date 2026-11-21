@@ -340,7 +340,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
         // max・min・sup・inf: 添字つきの最大・最小 `@max(t, a, b) 項`（等分点での近似。計画 M12）
-        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" | "max" | "min" | "sup" | "inf" => OpKind::Binder,
+        "sum" | "prod" | "int" | "lim" | "diff" | "fdiff" | "bdiff" | "cdiff" | "max" | "min" | "sup" | "inf" => OpKind::Binder,
         // ∃・∀（行の先頭だけ。equation.rs が行ごと読む。計画 M12）
         "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,

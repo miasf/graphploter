@@ -988,6 +988,7 @@
     if (item.condition) {
       viewer.removePlot(item.id)
       item.error = undefined
+      item.limit = undefined
       refreshConditions()
       return
     }
@@ -1045,6 +1046,7 @@
     if (source === '') {
       viewer.removePlot(item.id)
       item.error = undefined
+      item.limit = undefined
       item.info = undefined
       item.usedParams = []
       dropParam(item)
@@ -1086,6 +1088,7 @@
     if (!res.ok) {
       viewer.removePlot(item.id)
       item.sequenceTable = undefined
+      item.limit = undefined
       // 「（8文字目）」のような位置は、変換後の式での位置なので入力欄とは合わない。表示しない
       item.error = res.error.replace(/（\d+文字目）/g, '')
       item.info = undefined
@@ -1096,6 +1099,7 @@
     }
 
     item.error = undefined
+    item.limit = item.latex === inputLatex ? res.limit : undefined
     if (!res.defName || !/（数列の(?:点|軌道)/.test(res.kind)) item.showSequenceTable = false
     if (item.showSequenceTable && item.latex === inputLatex) item.sequenceTable = res.sequenceTable
     item.usedParams = res.usedParams
@@ -1614,6 +1618,7 @@
     viewer?.clearRotationTrail(item.id)
     item.latex = latex
     item.sequenceTable = undefined
+    item.limit = undefined
     // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
     for (const r of regionsUsed(latex)) {
       if (!(r.name in regions)) regions[r.name] = r.template

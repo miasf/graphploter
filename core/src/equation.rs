@@ -317,6 +317,8 @@ pub enum Plot {
     Arrows { vectors: Vec<[f64; 3]> },
     /// 点（数列の点 (n, aₙ)。`line` なら順に線で結ぶ: 複素数の数列の軌道）。表示中の座標の空間の点
     Points { points: Vec<[f64; 3]>, line: bool, sequence: Option<SequencePoints> },
+    /// 極限だけの行。数値判定と、横を入力・縦を値とする関数のグラフ。
+    Limit { prog: Program, report: crate::limit::Report },
     /// 常微分方程式（計画 M9）。状態 $\mathbf y$ の右辺 `rhs`（変数は状態の名前と独立変数）、初期値の組（組み合わせの数だけ解く）
     Ode(Box<Ode>),
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
@@ -404,6 +406,7 @@ impl Plot {
             Plot::Arrows { .. } => "ベクトル".into(),
             Plot::Points { line: true, .. } => "数列の軌道（複素平面）".into(),
             Plot::Points { .. } => "数列の点".into(),
+            Plot::Limit { .. } => "極限".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
             Plot::ComplexPlane { label, .. } => label.clone(),
             Plot::System { base, eqs, cuts, .. } => {
@@ -441,7 +444,7 @@ impl Plot {
     /// 使われたパラメータ（と、断面で値を固定した座標）の名前
     pub fn used_params(&self) -> Vec<String> {
         let progs: Vec<&Program> = match self {
-            Plot::Explicit { prog, .. } | Plot::Implicit { prog, .. } => vec![prog],
+            Plot::Explicit { prog, .. } | Plot::Implicit { prog, .. } | Plot::Limit { prog, .. } => vec![prog],
             Plot::Tilted { prog, color, .. } => std::iter::once(prog).chain(color.as_ref()).collect(),
             Plot::Solid { prog, names, .. } => {
                 // 範囲で重ねている名前も「使ったもの」に含める（範囲が変わったら計算し直すため）
@@ -601,6 +604,9 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
+    if let Some(plot) = limit_line(source, params)? {
+        return Ok(plot);
+    }
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
@@ -672,6 +678,21 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         return Ok(Plot::Multi(plots));
     }
     compile_chains(chains, params, space)
+}
+
+/// 極限だけの行には、極限の判定と関数のグラフを出す。
+fn limit_line(source: &str, params: &Params) -> Result<Option<Plot>, String> {
+    if !source.split_once('(').is_some_and(|(head, _)| head.trim() == "@lim") {
+        return Ok(None);
+    }
+    let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
+    let [chain] = chains.as_slice() else { return Ok(None) };
+    let ([], [Expr::Binder { op, var, args, body }]) = (chain.rels.as_slice(), chain.exprs.as_slice()) else { return Ok(None) };
+    if op != "lim" {
+        return Ok(None);
+    }
+    let (prog, report) = crate::expand::limit_line(var, args, body, params)?;
+    Ok(Some(Plot::Limit { prog, report }))
 }
 
 /// 停留点 `@crit f` だけの行（計画 N4 の前半。[`crate::critical`]）。f が使う表示中の座標（1〜3 個）について
