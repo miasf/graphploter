@@ -3054,6 +3054,7 @@
     }
     domainError = ''
     viewer?.setDomain(domain)
+    viewer?.fitDomainIfNeeded()
     replotAll(300)
     // 積分の図の矢印の長さは表示範囲で決めるので、作り直す
     for (const it of items) if (!isAux(it) && integralItem(it)) updateIntegral(it, 300)

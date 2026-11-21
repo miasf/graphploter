@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
+import { axisTicks, axisTickText } from './axisTicks'
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
 import { SurfaceTransparency } from './SurfaceTransparency'
@@ -18,19 +19,6 @@ import { COLORMAP_INDEX, colormapColor, valueT, logRange, createGridUniforms, cr
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
 
-/** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
-function niceStep(range: number, target = 8): number {
-  const raw = range / target
-  const mag = 10 ** Math.floor(Math.log10(raw))
-  const norm = raw / mag
-  return (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag
-}
-
-/** 目盛りの数字を見やすく整形（0.30000000000000004 → 0.3） */
-function fmt(v: number): string {
-  return String(Number(v.toPrecision(10)))
-}
-
 /**
  * 目盛りの数字・軸の名前の文字。文字を描いた小さな画像（スプライト）として WebGL で描く。
  * （HTML の要素にすると、グラフを回すたびに全部の位置を書き換えることになって重い）
@@ -38,8 +26,13 @@ function fmt(v: number): string {
  */
 interface TextLabel {
   sprite: THREE.Sprite
+  anchor: THREE.Vector3
   w: number
   h: number
+  priority: number
+  nudgeX: number
+  x: number
+  y: number
 }
 
 function makeLabel(text: string, font: string, color: string, pos: THREE.Vector3): TextLabel {
@@ -64,7 +57,7 @@ function makeLabel(text: string, font: string, color: string, pos: THREE.Vector3
   const sprite = new THREE.Sprite(mat)
   sprite.position.copy(pos)
   sprite.renderOrder = 10 // いつも手前に描く
-  return { sprite, w, h }
+  return { sprite, anchor: pos, w, h, priority: 0, nudgeX: 0, x: 0, y: 0 }
 }
 
 interface Theme {
@@ -80,6 +73,7 @@ const LIGHT: Theme = { background: 0xf7f7f4, box: 0x9a9aa2, grid: 0xd6d6d2, tick
 const DARK: Theme = { background: 0x1b1c20, box: 0x6a6b72, grid: 0x34353b, tick: '#9a9aa3', text: '#e8e8ea' }
 const TICK_FONT = "11px ui-monospace, 'SF Mono', Consolas, monospace"
 const AXIS_FONT = "italic 600 15px 'Times New Roman', serif"
+const EDGE_FONT = `600 ${TICK_FONT}`
 
 /**
  * 媒介変数表示の立体の切り口のふた（ステンシルバッファを使う）。
@@ -175,6 +169,12 @@ export class Viewer {
   private renderer: THREE.WebGLRenderer
   /** 目盛りの数字・軸の名前 */
   private labels: TextLabel[] = []
+  private readonly positionedLabels: TextLabel[] = []
+  private readonly labelProjection = new THREE.Vector3()
+  private readonly labelView = new THREE.Matrix4()
+  private readonly lastLabelView = new THREE.Matrix4()
+  private labelLayoutWidth = 0
+  private labelLayoutHeight = 0
   private scene = new THREE.Scene()
   private camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000)
   private controls: OrbitControls
@@ -1341,8 +1341,56 @@ export class Viewer {
    * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
    */
   private updateLabelSizes() {
-    const k = 2 / ((this.viewH || 1) * this.camera.projectionMatrix.elements[5])
-    for (const l of this.labels) l.sprite.scale.set(l.w * k, l.h * k, 1)
+    const { viewW: width, viewH: height, camera } = this
+    if (!width || !height) return
+    const scale = 2 / (height * camera.projectionMatrix.elements[5])
+    const p = this.labelProjection
+    const placed = this.positionedLabels
+    camera.updateMatrixWorld()
+    const view = this.labelView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+    if (this.labelLayoutWidth === width && this.labelLayoutHeight === height && this.lastLabelView.equals(view)) return
+    this.lastLabelView.copy(view)
+    this.labelLayoutWidth = width
+    this.labelLayoutHeight = height
+    placed.length = 0
+
+    // 端の値を先に置く。狭い画面や斜めから見たときは、重なる途中の数字を間引く。
+    for (const label of this.labels) {
+      label.sprite.visible = false
+      p.copy(label.anchor).applyMatrix4(view)
+      if (!Number.isFinite(p.z) || p.z < -1 || p.z > 1) continue
+      const x = (p.x + 1) * width / 2
+      const y = (1 - p.y) * height / 2
+      const halfW = label.w / 2 + 2
+      const halfH = label.h / 2 + 2
+      const margin = label.priority ? Math.max(halfW, halfH) : 0
+      if (halfW * 2 > width || halfH * 2 > height || x < -margin || x > width + margin || y < -margin || y > height + margin) continue
+      const baseX = Math.min(width - halfW, Math.max(halfW, x))
+      const baseY = Math.min(height - halfH, Math.max(halfH, y))
+      if (!label.priority && (baseX !== x || baseY !== y)) continue
+
+      const attempts = label.priority ? 5 : 1
+      for (let i = 0; i < attempts; i++) {
+        let px = baseX
+        let py = baseY
+        // 角などで端の数値が近いときは、目盛りの方向と直交するほうへ先にずらす。
+        if (i > 0) {
+          const direction = i % 2 ? 1 : -1
+          if ((i <= 2) === (label.nudgeX !== 0)) px += direction * (label.nudgeX || -1) * (label.w + 4)
+          else py += direction * (label.h + 4)
+        }
+        if (px < halfW || px > width - halfW || py < halfH || py > height - halfH) continue
+        if (placed.some((other) => Math.abs(other.x - px) < (other.w + label.w) / 2 + 4 && Math.abs(other.y - py) < (other.h + label.h) / 2 + 3)) continue
+
+        label.x = px
+        label.y = py
+        label.sprite.position.copy(px === x && py === y ? label.anchor : p.set(px * 2 / width - 1, 1 - py * 2 / height, p.z).unproject(camera))
+        label.sprite.scale.set(label.w * scale, label.h * scale, 1)
+        label.sprite.visible = true
+        placed.push(label)
+        break
+      }
+    }
   }
 
   /** カメラから dist 離れた所での、1 画素（CSS の画素）の大きさ */
@@ -1466,8 +1514,27 @@ export class Viewer {
     if (this.domain) this.setDomain(this.domain, true)
   }
 
+  /** 範囲を直接編集したとき、枠が画面からはみ出す場合だけ画角を合わせる。 */
+  fitDomainIfNeeded() {
+    const d = this.domain
+    if (!d) return
+    this.camera.updateMatrixWorld()
+    const corner = this.labelProjection
+    for (const x of [d.xmin, d.xmax]) {
+      for (const y of [d.ymin, d.ymax]) {
+        for (const z of this.flat ? [0] : [d.zmin, d.zmax]) {
+          corner.set(x, y, z).project(this.camera)
+          if (Math.abs(corner.x) > 0.9 || Math.abs(corner.y) > 0.9 || Math.abs(corner.z) > 1) {
+            this.resetCamera(true)
+            return
+          }
+        }
+      }
+    }
+  }
+
   /** カメラを斜め上からの見やすい位置に戻す（2D 表示なら真上から） */
-  resetCamera() {
+  resetCamera(keepDirection = false) {
     this.wheelPending = 0
     this.dirty = true
     this.notMotion = true // 視点が跳ぶだけ（2D / 3D の切り替えなど）
@@ -1487,13 +1554,16 @@ export class Viewer {
     const size = this.sceneSize()
     // 縦長の画面（スマホ）では横幅に収まるよう、その分だけ遠くから見る
     const dist = (size * 0.56) / this.perspective / Math.min(1, this.camera.aspect)
+    const direction = keepDirection ? this.camera.position.clone().sub(this.controls.target) : new THREE.Vector3(1.1, -1.5, 0.9)
     this.controls.target.copy(center)
-    this.camera.position.copy(center).add(new THREE.Vector3(1.1, -1.5, 0.9).normalize().multiplyScalar(dist))
+    this.camera.position.copy(center).add(direction.setLength(dist))
     this.updateClipRange()
   }
 
   private buildFrame(d: Domain) {
     this.buildFrameLines(d)
+    this.labels.sort((a, b) => b.priority - a.priority)
+    this.labelLayoutWidth = 0
     this.applyLineScale(this.pixelScale.value) // 画素密度を下げている最中に作り直したときも、線の濃さを合わせる
   }
 
@@ -1511,11 +1581,11 @@ export class Viewer {
     }
     this.labels = []
     this.frame.clear()
-    const label = (text: string, kind: 'tick' | 'axis-name', pos: THREE.Vector3) => {
-      const l =
-        kind === 'tick'
-          ? makeLabel(text, TICK_FONT, this.theme.tick, pos)
-          : makeLabel(text, AXIS_FONT, this.theme.text, pos)
+    const label = (text: string, kind: 'tick' | 'edge' | 'axis-name', pos: THREE.Vector3, nudgeX = 0) => {
+      const font = kind === 'tick' ? TICK_FONT : kind === 'edge' ? EDGE_FONT : AXIS_FONT
+      const l = makeLabel(text, font, kind === 'tick' ? this.theme.tick : this.theme.text, pos)
+      l.priority = kind === 'tick' ? 0 : kind === 'axis-name' ? 1 : 2
+      l.nudgeX = nudgeX
       this.labels.push(l)
       return l.sprite
     }
@@ -1533,12 +1603,15 @@ export class Viewer {
 
     // 床（z = 0、範囲外なら一番下）の方眼
     const zFloor = this.flat ? 0 : d.zmin <= 0 && 0 <= d.zmax ? 0 : d.zmin
-    const step = niceStep(Math.max(d.xmax - d.xmin, d.ymax - d.ymin))
+    const xTicks = axisTicks(d.xmin, d.xmax)
+    const yTicks = axisTicks(d.ymin, d.ymax)
+    const zTicks = axisTicks(d.zmin, d.zmax)
+    const steps = [xTicks.step, yTicks.step, zTicks.step]
     const pts: number[] = []
-    for (let x = Math.ceil(d.xmin / step) * step; x <= d.xmax + 1e-9; x += step) {
+    for (const x of xTicks.grid) {
       pts.push(x, d.ymin, zFloor, x, d.ymax, zFloor)
     }
-    for (let y = Math.ceil(d.ymin / step) * step; y <= d.ymax + 1e-9; y += step) {
+    for (const y of yTicks.grid) {
       pts.push(d.xmin, y, zFloor, d.xmax, y, zFloor)
     }
     const gridGeo = new THREE.BufferGeometry()
@@ -1566,28 +1639,23 @@ export class Viewer {
       [new THREE.Vector3(o.x, o.y, d.zmin), new THREE.Vector3(o.x, o.y, d.zmax), 0x3f7fd9, this.axisNames[2]],
     ]
     if (this.flat) axes.pop() // 2D 表示では縦の軸は無い
-    for (const [a, b, color, name] of axes) {
+    for (const [i, [a, b, color, name]] of axes.entries()) {
       const g = new THREE.BufferGeometry().setFromPoints([a, b])
       this.frame.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color })))
-      const end = b.clone().add(b.clone().sub(a).normalize().multiplyScalar(step * 0.4))
+      const end = b.clone().add(b.clone().sub(a).normalize().multiplyScalar(steps[i] * 0.4))
       this.frame.add(label(name, 'axis-name', end))
     }
 
     // 目盛りの数字（x, y は床の手前の辺、z は左奥の縦の辺）
-    const ticks = (min: number, max: number, s: number) => {
-      const out: number[] = []
-      // 足していくと誤差がたまる（0 が -5.55e-17 になるなど）ので、刻みの整数倍として計算して丸める
-      for (let k = Math.ceil(min / s - 1e-9); k * s <= max + 1e-9; k++) out.push(Number((k * s).toPrecision(12)))
-      return out
+    const padX = xTicks.step * 0.35
+    const padY = yTicks.step * 0.35
+    for (const { value, edge } of xTicks.labels) {
+      this.frame.add(label(axisTickText(value, xTicks.step), edge ? 'edge' : 'tick', new THREE.Vector3(value, d.ymin - padY, zFloor)))
     }
-    const pad = step * 0.35
-    for (const x of ticks(d.xmin, d.xmax, step)) {
-      this.frame.add(label(fmt(x), 'tick', new THREE.Vector3(x, d.ymin - pad, zFloor)))
-    }
-    for (const y of ticks(d.ymin, d.ymax, step)) {
+    for (const { value, edge } of yTicks.labels) {
       // 2D 表示では左の辺に並べる
-      const x = this.flat ? d.xmin - pad * 1.3 : d.xmax + pad
-      this.frame.add(label(fmt(y), 'tick', new THREE.Vector3(x, y, zFloor)))
+      const x = this.flat ? d.xmin - padX * 1.3 : d.xmax + padX
+      this.frame.add(label(axisTickText(value, yTicks.step), edge ? 'edge' : 'tick', new THREE.Vector3(x, value, zFloor), this.flat ? -1 : 1))
     }
     if (!this.flat) {
       // 3D: 床の方眼・軸・枠の線を、深さだけ少し奥へずらす。面とちょうど同じ所にある線（floor(x) + floor(y) + floor(z) = 0 の
@@ -1618,8 +1686,8 @@ export class Viewer {
       })
       return
     }
-    for (const z of ticks(d.zmin, d.zmax, niceStep(d.zmax - d.zmin, 6))) {
-      this.frame.add(label(fmt(z), 'tick', new THREE.Vector3(d.xmin - pad, d.ymin - pad, z)))
+    for (const { value, edge } of zTicks.labels) {
+      this.frame.add(label(axisTickText(value, zTicks.step), edge ? 'edge' : 'tick', new THREE.Vector3(d.xmin - padX, d.ymin - padY, value), -1))
     }
   }
 
