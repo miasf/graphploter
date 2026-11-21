@@ -51,6 +51,10 @@ pub enum Graph {
 }
 
 impl Report {
+    pub(crate) fn finite_value(&self) -> Option<f64> {
+        self.value().ok().filter(|v| v.is_finite() && (*v as f32).is_finite())
+    }
+
     pub(crate) fn value(&self) -> Result<f64, String> {
         let value = match self.side {
             -1 => self.left,

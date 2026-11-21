@@ -464,6 +464,26 @@ fn limit_reports_divergence_and_uncertainty() {
 }
 
 #[test]
+fn standalone_limits_plot_the_finite_value() {
+    let mut plane = run("@lim(x,1) 2x", "", &[]).unwrap();
+    let integral = run("@int(t,0,2) 1", "", &[]).unwrap();
+    assert!(!integral.positions().is_empty());
+    assert_eq!(plane.positions(), integral.positions());
+    assert_eq!(plane.indices(), integral.indices());
+    assert!(plane.take_outline().chunks_exact(3).any(|p| p[0].abs() > 0.1 && p[2] == 0.0));
+
+    for (src, y) in [("@lim(x,1) 2x", 2.0), ("@lim(x,0,1) abs(x)/x", 1.0), ("@lim(n,∞) (1+1/n)", 1.0)] {
+        let m = run_in_view(src, "", &[], 0, true).unwrap();
+        let ps = m.positions();
+        assert_eq!(&ps[ps.len() - 6..], &[-3.0, y, 0.0, 3.0, y, 0.0], "{src}");
+    }
+    let mut sequence = run("@lim(n,∞) (1+1/n)", "", &[]).unwrap();
+    assert!(!sequence.indices().is_empty());
+    assert_eq!(&sequence.take_limit_point()[..3], &[1.0, 2.0, 0.0]);
+    assert!(run("@lim(x,0) 1/x^2", "", &[]).unwrap().indices().is_empty());
+}
+
+#[test]
 fn limit_graph_marks_both_sides_and_the_defined_value() {
     let mut hole = run_in_view("@lim(x,0) abs(x)/x", "", &[], 0, true).unwrap();
     assert_eq!(&hole.limit_values()[2..6], &[1.0, -1.0, 1.0, 1.0]);

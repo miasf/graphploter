@@ -856,8 +856,17 @@ pub fn plot(
             expand::add_note("≠ で全部除かれる");
         }
     }
-    let limit = if let equation::Plot::Limit { report, .. } = &plot {
+    let limit = if let equation::Plot::Limit { graph, report } = &plot {
         let (mut open, mut point) = report.marks();
+        // 3D では極限値の面と同じ行に数列の項も描く。
+        if !curve {
+            if let limit::Graph::Sequence(points) = graph {
+                point.extend(
+                    points.iter().filter(|p| p[1].is_finite() && (dom.lo[0]..=dom.hi[0]).contains(&p[0]))
+                        .flat_map(|p| [p[0] as f32, p[1] as f32, 0.0]),
+                );
+            }
+        }
         let (holes_target, point_target) = coord.as_ref().map_or_else(
             || (Vec::new(), Vec::new()),
             |c| (c.apply_line(&mut open, flat), c.apply_line(&mut point, flat)),
@@ -1705,7 +1714,25 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             .collect();
         return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
     }
-    if let Some(b) = field_built(plot, ctx) {
+    if let Some(mut b) = field_built(plot, ctx) {
+        if let P::Limit { report, .. } = plot {
+            if let Some(value) = report.finite_value() {
+                if ctx.flat {
+                    let y = value as f32;
+                    let [lo, hi] = [ctx.dom.lo[0] as f32, ctx.dom.hi[0] as f32];
+                    b.inner.positions.extend([f32::NAN, f32::NAN, f32::NAN, lo, y, 0.0, hi, y, 0.0]);
+                } else {
+                    let mut level = build(&equation::constant_plot(value, ctx.space)?, ctx)?;
+                    if level.inner.positions.is_empty() && level.shape.is_none() {
+                        return Ok(b);
+                    }
+                    level.kind = b.kind;
+                    level.outline.0.extend(b.inner.positions);
+                    level.outline.0.extend([f32::NAN; 3]);
+                    return Ok(level);
+                }
+            }
+        }
         return Ok(b);
     }
     if ctx.flat {

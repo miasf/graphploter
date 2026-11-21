@@ -697,6 +697,12 @@ fn limit_line(source: &str, params: &Params) -> Result<Option<Plot>, String> {
     Ok(Some(Plot::Limit { graph, report }))
 }
 
+/// 値だけの式（定積分など）と同じ高さの面。
+pub(crate) fn constant_plot(value: f64, space: &Space) -> Result<Plot, String> {
+    let chain = crate::parser::Chain { exprs: vec![Expr::Num(value)], rels: Vec::new(), pos: vec![0] };
+    compile_chains(vec![chain], &Params::new(), space)
+}
+
 /// 停留点 `@crit f` だけの行（計画 N4 の前半。[`crate::critical`]）。f が使う表示中の座標（1〜3 個）について
 /// $\nabla f = \mathbf 0$ の点を表示範囲の中で探し、極大・極小・鞍点に分けて説明に出す。図には点を描く:
 /// 1 変数 f(x) は (x, f(x))、2 変数 f(x, y) は曲面 z = f(x, y) の上の点 (x, y, f)、3 変数はその点
