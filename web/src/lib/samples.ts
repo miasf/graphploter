@@ -372,7 +372,7 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
         flat: true,
         view: { dims: 3, half: 24 },
         items: [
-          { latex: 'c_1=6', param: 'c1', options: { slider: { min: 1, max: 20, step: 1, complex: false, stack: false } } },
+          { latex: 'c_1=6', param: 'c1', options: { slider: { min: 1, max: 20, stepExpr: '1', step: 1, complex: false, stack: false } } },
           { latex: 'c_{n+1}=\\begin{cases}c_n/2&\\operatorname{mod}\\left(c_n,2\\right)=0\\\\3c_n+1&\\text{otherwise}\\end{cases}', options: { color: '#c74440', lineWidth: 6 } },
         ],
       },
