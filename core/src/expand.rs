@@ -95,6 +95,7 @@ enum SequenceInverse {
     Exp,
     TenToPower,
     Divide(Expr),
+    MultiplyByDivisor(Expr),
 }
 
 #[derive(Debug)]
@@ -222,6 +223,7 @@ impl Defs {
                     SequenceInverse::Exp => Expr::Call(crate::functions::Func::Exp, vec![body]),
                     SequenceInverse::TenToPower => power(Expr::Num(10.0), body),
                     SequenceInverse::Divide(factor) => Expr::Bin(BinOp::Div, Box::new(body), Box::new(factor)),
+                    SequenceInverse::MultiplyByDivisor(divisor) => undo_sequence_division(body, divisor),
                 };
             }
             let (recursive, has_cases) = sequence_body_features(&body, &head.name);
@@ -250,6 +252,18 @@ impl Defs {
 
 fn power(base: Expr, exponent: Expr) -> Expr {
     Expr::Bin(BinOp::Pow, Box::new(base), Box::new(exponent))
+}
+
+fn undo_sequence_division(body: Expr, divisor: Expr) -> Expr {
+    use crate::functions::Func;
+    let product = |divisor| Expr::Bin(BinOp::Mul, Box::new(body), Box::new(divisor));
+    if let Expr::Num(value) = divisor {
+        return if value != 0.0 && value.is_finite() { product(divisor) } else { Expr::Num(f64::NAN) };
+    }
+    // Multiplying by the denominator only preserves the equation where it is nonzero.
+    let nonzero = Expr::Op { op: "rel:>".into(), args: vec![Expr::Call(Func::Abs, vec![divisor.clone()]), Expr::Num(0.0)] };
+    let case = Expr::Op { op: "case".into(), args: vec![product(divisor), nonzero] };
+    Expr::Op { op: "sequence_division".into(), args: vec![case] }
 }
 
 /// 左辺の添字を、整数係数の 1 次式として読む。
@@ -300,6 +314,10 @@ pub(crate) fn sequence_head(mut e: &Expr) -> Option<SequenceHead> {
                 inverses.append(&mut head.inverses);
                 head.inverses = inverses;
                 return Some(head);
+            }
+            Expr::Bin(BinOp::Div, numerator, divisor) => {
+                inverses.push(SequenceInverse::MultiplyByDivisor(divisor.as_ref().clone()));
+                e = numerator;
             }
             Expr::Index { name, index } => {
                 let mut vars = Vec::new();
@@ -1270,7 +1288,7 @@ impl<'a> Expander<'a> {
                     _ => return Err("内部エラー: ± の形".into()),
                 }
             }
-            Expr::Op { op, args } if op == "cases" => Val::S(self.cases(args)?),
+            Expr::Op { op, args } if matches!(op.as_str(), "cases" | "sequence_division") => Val::S(self.cases(args)?),
             Expr::Op { op, args } if op == "sumset" || op == "prodset" => Val::S(self.set_sum(op == "sumset", args)?),
             Expr::Cond(_) => return Err("条件は、Σ・Π の下でだけ使えます".into()),
             Expr::Op { op, args } if op == "intset" => Val::S(self.region_integral(args)?),

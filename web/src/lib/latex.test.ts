@@ -396,6 +396,7 @@ for (const [latex, want] of typed) check(latex, latexToText(latex), want)
 check('添字と上付きの入力順', latexToText('a^{2}_{n+1}=a_n+1'), latexToText('a_{n+1}^{2}=a_n+1'))
 check('数列の項のべき乗', latexToText('a_{n+1}^{2}=a_n+1'), 'a_(n+1)^(2)=a_(n)+1')
 check('括弧を並べた数列の積', latexToText('\\left(a_{n+1}\\right)\\left(a_n\\right)=6'), '(a_(n+1))(a_(n))=6')
+check('分数の左辺と括弧のない正弦', latexToText('\\frac{a_{n+1}}{2}=\\sin a_n+1'), '((a_(n+1))/(2))= sin a_(n)+1')
 for (const [latex, want] of [
   ['sin^2{x}', 'sin^(2)(x)'],
   ['\\sin^{2}\\left\\lbrace x\\right\\rbrace', 'sin^(2)(x)'],

@@ -27,6 +27,9 @@ check('数列の比較は定義ではない', sequenceDefinitionName('a_(n)^2>=1
 check('括弧を並べた数列の積', sequenceDefinitionName('(a_(n+1))(a_(n))=6'), 'a')
 check('数列の積と固定の項', sequenceDefinitionName('a_(2n)*a_(2n+2)^(2)*a_2=36'), 'a')
 check('異なる数列の積', sequenceDefinitionName('a_(n+1)*b_(n)=6'), null)
+check('分数の形の漸化式', sequenceDefinitionName('((a_(n+1))/(2))=sin a_(n)+1'), 'a')
+check('手入力の除算の漸化式', sequenceDefinitionName('a_(n+1)/a_(n)=2'), 'a')
+check('分数の外に足し算', sequenceDefinitionName('a_(n+1)/2+1=2'), null)
 const hasSequence = (name: string) => name === 'a'
 check('初項の添字を補う', sequenceInitialLatex('a1=1.7', hasSequence), 'a_{1}=1.7')
 check('初項の右辺と空白を保つ', sequenceInitialLatex(' a12 = b3+1', hasSequence), ' a_{12} = b3+1')

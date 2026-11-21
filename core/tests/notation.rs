@@ -1124,6 +1124,24 @@ fn sequence_term_products() {
 }
 
 #[test]
+fn divided_sequence_terms() {
+    let recurrence = "((a_(n+1))/(2))=sin a_(n)+1";
+    let initial = [("a1", 0.0)];
+    assert_eq!(seq_value("a_2", recurrence, &initial).unwrap(), 2.0);
+    assert!((seq_value("a_3", recurrence, &initial).unwrap() - 2.0 * (2.0_f64.sin() + 1.0)).abs() < 1e-12);
+    let plot = run(recurrence, recurrence, &initial).unwrap();
+    assert!(plot.positions().chunks_exact(3).any(|p| p == [2.0, 2.0, 0.0]));
+
+    let previous = "a_(n+1)/a_(n)=3";
+    assert_eq!(seq_value("a_3", previous, &[("a1", 2.0)]).unwrap(), 18.0);
+    assert!(seq_value("a_2", previous, &initial).is_err());
+    assert!(seq_value("a_2", "a_(n+1)/0=1", &initial).is_err());
+    assert_eq!(seq_value("a_4", "a_(n+1)/(n-2)=1", &[]).unwrap(), 1.0);
+    assert!(seq_value("a_3", "a_(n+1)/(n-2)=1", &[]).is_err());
+    assert_eq!(seq_value("a_2", "a_(n+1)^2/2=8", &initial).unwrap(), 4.0);
+}
+
+#[test]
 fn recurrence_operations_and_initial_values() {
     let given = [("a1", 2.0)];
     assert_eq!(seq_value("a_3", "a_(n+1) = a_(n)^2 + a_1", &given).unwrap(), 38.0);

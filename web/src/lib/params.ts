@@ -114,11 +114,12 @@ function sequenceHeadName(lhs: string): string | null {
       lhs = lhs.slice(group[0].length, -1).trim()
       continue
     }
-    // Look only at factor boundaries outside the parentheses of an index or power.
+    // Look only at operators outside the parentheses of an index or power.
     const factors: string[] = []
     let start = 0
     for (let i = 0; i < lhs.length; i++) {
-      if (lhs[i] === '*') {
+      if ((lhs[i] === '+' || lhs[i] === '-') && /[\w)]\s*$/.test(lhs.slice(0, i))) return null
+      if (lhs[i] === '*' || lhs[i] === '/') {
         factors.push(lhs.slice(start, i).trim())
         start = i + 1
       } else if (lhs[i] === '(') {
@@ -136,6 +137,8 @@ function sequenceHeadName(lhs: string): string | null {
         i = end
       }
     }
+    // A trailing division keeps the sequence head in its numerator.
+    if (lhs[start - 1] === '/') return sequenceHeadName(lhs.slice(0, start - 1).trim())
     if (factors.length) {
       factors.push(lhs.slice(start).trim())
       let name: string | null = null
