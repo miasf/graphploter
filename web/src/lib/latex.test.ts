@@ -11,6 +11,12 @@ function check(name: string, got: unknown, want: unknown) {
 
 // LaTeX → 計算エンジン用の式
 const cases: [string, string][] = [
+  ['\\lim_{x\\to0}\\frac{\\sin x}{x}', '@lim(x,0) ((sin x)/(x))'],
+  ['\\lim\\limits_{x\\rightarrow(-1)^{+}}x', '@lim(x,(-1),1) x'],
+  ['\\lim_{\\alpha\\to a^{-}}f(\\alpha)', '@lim({alpha},a,-1) f( {alpha} )'],
+  ['\\lim_{t\\longrightarrow-\\infty}e^{t}', '@lim(t,-∞) e^(t)'],
+  ['\\lim_{k\\to\\infty,\\,k\\in\\mathbb{N}}a_k', '@seqlim(k,∞) a_(k)'],
+  ['\\lim_{x\\to0}f\\prime(x+a)', "@lim(x,0) f'(x+a)"],
   // 数学の記法（計画 docs/plan-math-notation.md の M1・M4）
   ['\\sum_{n=1}^{10}n^2', '@sum(n,1,10) n^(2)'],
   // 添字を並べた多重の和: \sum_{x,y,z=0}^{n} は x・y・z それぞれ 0〜n
@@ -41,6 +47,8 @@ const cases: [string, string][] = [
   ['\\dim\\ker A', '@dim @ker A'],
   ['\\operatorname{Taylor}\\left(\\sin x,x,0,5\\right)', '@taylor ( sin x,x,0,5)'],
   ['\\operatorname{crit}\\left(x^3-3x+y^2\\right)', '@crit (x^(3)-3x+y^(2))'],
+  ['\\operatorname{cobweb}\\left(a_1,12\\right)', '@cobweb (a_1,12)'],
+  ['\\operatorname{orbit}\\left(a_0,b_0,N\\right)', '@orbit (a_0,b_0,N)'],
   // 常微分方程式（M9）
   ["x'=-y,\\ y'=x", "x'=-y, y'=x"],
   ['\\dot{x}=10\\left(y-x\\right)', "x'=10(y-x)"],
@@ -391,6 +399,17 @@ const typed: [string, string][] = [
   ['\\int_{\\left\\lbrace\\left(\\cos t,\\sin t\\right)\\,\\middle\\vert\\,0\\le t\\le2\\pi\\right\\rbrace}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi; {d_s})(x^(2))'],
 ]
 for (const [latex, want] of typed) check(latex, latexToText(latex), want)
+check('添字と上付きの入力順', latexToText('a^{2}_{n+1}=a_n+1'), latexToText('a_{n+1}^{2}=a_n+1'))
+check('数列の項のべき乗', latexToText('a_{n+1}^{2}=a_n+1'), 'a_(n+1)^(2)=a_(n)+1')
+check('括弧を並べた数列の積', latexToText('\\left(a_{n+1}\\right)\\left(a_n\\right)=6'), '(a_(n+1))(a_(n))=6')
+check('分数の左辺と括弧のない正弦', latexToText('\\frac{a_{n+1}}{2}=\\sin a_n+1'), '((a_(n+1))/(2))= sin a_(n)+1')
+for (const [latex, want] of [
+  ['sin^2{x}', 'sin^(2)(x)'],
+  ['\\sin^{2}\\left\\lbrace x\\right\\rbrace', 'sin^(2)(x)'],
+  ['\\operatorname{erf}^{-3}\\lbrace x+1\\rbrace', 'erf^(-3)(x+1)'],
+  ['f^{p+1}{x,y}', 'f^(p+1)(x,y)'],
+  ['f^{p+1}\\{x,g^2\\{y,z\\}\\}', 'f^(p+1)(x,g^(2)(y,z))'],
+]) check(latex, squash(latexToText(latex)), want)
 // 範囲の欄に打った集合も同じ
 setRegions({ C: '\\left\\lbrace\\left(x,y,z\\right)\\,\\middle\\vert\\,x=y=z,0\\le x\\le1\\right\\rbrace' })
 check('範囲の欄の \\lbrace・\\middle\\vert', latexToText('\\int_C x\\,ds'), '@intset((x,y,z),x=y=z,0<=x<=1; {d_s})(x)')

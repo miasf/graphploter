@@ -88,6 +88,7 @@ export type RenderMode = 'auto' | 'mesh' | 'gpu'
 export interface PlotStyle {
   color: string
   visible: boolean
+  limitSourceHidden?: boolean
   /** 面の不透明度（0〜1）。0 にすると格子線だけの曲面になる */
   opacity: number
   grid: GridStyle
@@ -307,6 +308,7 @@ export interface PlotItem extends PlotStyle {
   folder?: number
   /** 最後に描けたときのグラフの種類（例: "z = f(x, y)", "陰関数"） */
   kind?: string
+  limit?: LimitResult
   /** スライダーの値の条件の行（ab > 1 のような、パラメータだけの不等式）なら true。図形は描かない。保存しない */
   condition?: boolean
   /** 座標系の番号（CoordSystem.id。無ければ直交座標） */
@@ -322,6 +324,9 @@ export interface PlotItem extends PlotStyle {
   def?: string
   /** この式が使った定義の名前（定義の行が変わったら計算し直す。保存しなくてよい） */
   usedDefs?: string[]
+  /** 数列の項の表。開いている間だけ計算担当から受け取る。 */
+  showSequenceTable?: boolean
+  sequenceTable?: Float64Array
 }
 
 /** 式の下に出す、積分の図の様子（App が作り、ExpressionItem が出す） */
@@ -433,8 +438,17 @@ export interface MeshData {
   outline?: Float32Array
   /** outline の点ごとの値（ベクトル場の流線の大きさ ‖F‖。valueRange の色の対応表で塗る）。無ければ省略 */
   outlineValues?: Float32Array
+  /** 列ベクトル・固有ベクトルの矢印。実線は軸、メッシュは矢じり */
+  vectorArrows?: boolean
   /** ≠ で除いた点（点ごとに 3 つ）。白丸を描く */
   holes?: Float32Array
+  /** 極限の近づく点での定義値（座標 3 つ）。塗りつぶした点で描く。 */
+  limitPoint?: Float32Array
+  limitSource?: Float32Array
+  limitSourceTarget?: Float32Array
+  /** 極限の丸印を座標系で移した先 */
+  limitHolesTarget?: Float32Array
+  limitPointTarget?: Float32Array
   /** ベクトル場なら true（矢印・流線を、鮮やかな色の対応表 vivid で塗る） */
   vivid?: boolean
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
@@ -539,6 +553,7 @@ export const PLOT_THOROUGH = 2
 export const PLOT_EDGES = 4
 /** ビット 4: 陽関数の注目する点（極値・零点など）も求める（点を押すと値が出る機能。止まっているときだけ） */
 export const PLOT_POI = 16
+export const PLOT_SEQUENCE_TABLE = 32
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
 export interface CapRequest {
@@ -580,6 +595,7 @@ export type PlotResponse =
       ok: true
       mesh: MeshData
       kind: string
+      limit?: LimitResult
       ms: number
       usedParams: string[]
       /** この式が使った定義（関数）の名前 */
@@ -588,6 +604,8 @@ export type PlotResponse =
       defName: string | null
       /** 常微分方程式なら、状態の成分の名前（初期値の欄の見出し） */
       odeStates?: string[]
+      /** 項ごとの [添字, 実部, 虚部, 規則に代入した添字]。初期値の行では最後が NaN。 */
+      sequenceTable?: Float64Array
       /** パラメータの定義だったときの名前と値 */
       param: ({ name: string } & ParamValue) | null
       /** 切り口のふた（陰関数・範囲で重ねた立体を切っているときだけ） */
@@ -600,6 +618,22 @@ export type PlotResponse =
       cost: Cost
     }
   | { requestId: number; ok: false; error: string }
+
+export type LimitBehavior =
+  | { kind: 'finite' | 'infinite'; value: number }
+  | { kind: 'oscillating' | 'unknown' }
+
+export interface LimitResult {
+  variable: string
+  target: number
+  side: number
+  left: LimitBehavior
+  right: LimitBehavior
+  defined?: number
+  value?: number
+  sequence: boolean
+  samples: Float64Array
+}
 
 /**
  * 計算担当の中での時間の内訳（ミリ秒）。eval + mesh + lod + copy ≈ total

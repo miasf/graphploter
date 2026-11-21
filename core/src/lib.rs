@@ -31,6 +31,7 @@ pub mod pixel;
 pub mod groebner;
 pub mod quad;
 pub mod series;
+mod limit;
 pub mod solve;
 mod region;
 pub mod implicit;
@@ -77,6 +78,8 @@ pub struct MeshResult {
     outline: (Vec<f32>, Vec<f32>),
     /// 実線の点ごとの値（ベクトル場の流線の大きさ）。ふつうは空
     outline_values: Vec<f32>,
+    /// 行列の列ベクトルや固有ベクトル。実線は矢印の軸。
+    vector_arrows: bool,
     /// ベクトル場なら true（描画側で鮮やかな色の対応表を使う）
     vivid: bool,
     /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
@@ -100,6 +103,17 @@ pub struct MeshResult {
     ode_states: Vec<String>,
     /// ≠ で除いた点（曲線が h = 0 を横切る所。点ごとに 3 つ）。描画側で白丸を描く
     holes: Vec<f32>,
+    /// 極限の行の数値結果と、近づく点での定義値を示す点の座標
+    limit: Option<LimitMesh>,
+}
+
+struct LimitMesh {
+    report: limit::Report,
+    source: Vec<f32>,
+    source_target: Vec<f32>,
+    point: Vec<f32>,
+    holes_target: Vec<f32>,
+    point_target: Vec<f32>,
 }
 
 /// 3D の陰関数を光線で描くための GLSL と、uniform の値
@@ -199,9 +213,53 @@ impl MeshResult {
     pub fn take_outline_values(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline_values)
     }
+    #[wasm_bindgen(getter)]
+    pub fn vector_arrows(&self) -> bool {
+        self.vector_arrows
+    }
     /// ≠ で除いた点（Float32Array。点ごとに 3 つ。無ければ空）。描画側で白丸を描く
     pub fn take_holes(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.holes)
+    }
+
+    pub fn limit_variable(&self) -> String {
+        self.limit.as_ref().map_or_else(String::new, |m| m.report.variable.clone())
+    }
+
+    pub fn limit_sequence(&self) -> bool {
+        self.limit.as_ref().is_some_and(|m| m.report.sequence)
+    }
+
+    pub fn take_limit_samples(&mut self) -> Vec<f64> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.report.lesson).into_iter().flatten().collect())
+    }
+
+    /// [近づく先, 向き, 左の状態と値, 右の状態と値, 点での値, 指定した向きの極限値]
+    pub fn limit_values(&self) -> Vec<f64> {
+        let Some(LimitMesh { report: r, .. }) = &self.limit else { return Vec::new() };
+        let [ls, lv] = r.left.pair();
+        let [rs, rv] = r.right.pair();
+        vec![r.target, f64::from(r.side), ls, lv, rs, rv, r.defined.unwrap_or(f64::NAN), r.value().unwrap_or(f64::NAN)]
+    }
+
+    pub fn take_limit_point(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.point))
+    }
+
+    pub fn take_limit_source(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.source))
+    }
+
+    pub fn take_limit_source_target(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.source_target))
+    }
+
+    pub fn take_limit_holes_target(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.holes_target))
+    }
+
+    pub fn take_limit_point_target(&mut self) -> Vec<f32> {
+        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.point_target))
     }
     /// ベクトル場か（矢印・流線を鮮やかな色の対応表で塗る）
     #[wasm_bindgen(getter)]
@@ -453,6 +511,7 @@ pub fn coord_grid(
         flat_slice: false,
         outline: Default::default(),
         outline_values: Vec::new(),
+        vector_arrows: false,
         vivid: false,
         outline_target: Default::default(),
         coord: None,
@@ -464,6 +523,7 @@ pub fn coord_grid(
         gpu_reason: String::new(),
         ode_states: Vec::new(),
         holes: Vec::new(),
+        limit: None,
     })
 }
 
@@ -538,10 +598,12 @@ const FLAG_LOCAL: u32 = 8;
 const FLAG_THOROUGH: u32 = 2;
 /// [`plot`] の `flags` のビット 2: 媒介変数が 3 つ以上の図形を、辺だけで描く
 const FLAG_EDGES: u32 = 4;
+const FLAG_SEQUENCE_TABLE: u32 = 32;
 
 thread_local! {
     /// 最後の [`plot`] で求めた注目する点（[`last_poi`]）
     static LAST_POI: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAST_SEQUENCE_TABLE: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// 最後の [`plot`] で求めた、陽関数の注目する点（極値・零点・縦軸との交点・停留点）。
@@ -550,6 +612,12 @@ thread_local! {
 #[wasm_bindgen]
 pub fn last_poi() -> Vec<f64> {
     LAST_POI.with(|p| p.borrow().clone())
+}
+
+/// 最後の描画で要求した数列表を、項ごとの [添字, 実部, 虚部, 規則へ渡した添字] として返す。
+#[wasm_bindgen]
+pub fn take_sequence_table() -> Vec<f64> {
+    LAST_SEQUENCE_TABLE.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 
 /// 式を解析して、曲面（または曲線）を作る。
@@ -678,6 +746,7 @@ pub fn plot(
 
     let _defs = take_definitions(&consts);
     LAST_POI.with(|p| p.borrow_mut().clear());
+    LAST_SEQUENCE_TABLE.with(|p| p.borrow_mut().clear());
     let _ = equation::take_last_explicit();
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
@@ -685,6 +754,11 @@ pub fn plot(
     expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
+    if flags & FLAG_SEQUENCE_TABLE != 0 {
+        if let equation::Plot::Points { sequence: Some(sequence), .. } = &plot {
+            LAST_SEQUENCE_TABLE.with(|p| *p.borrow_mut() = sequence.table(&consts));
+        }
+    }
     // 注目する点（陽関数の極値・零点など。点を押すと値が出る機能）: 画面側が頼んだとき（ビット 4。動かしている間は頼まない）
     if flags & 16 != 0 && coord_src.trim().is_empty() {
         if let (equation::Plot::Explicit { rotated: false, .. }, Some((axis, e, shown))) = (&plot, equation::take_last_explicit()) {
@@ -775,6 +849,7 @@ pub fn plot(
         coords::trim_to_domain(&mut inner, dom, curve, flat);
     }
     let mut outline = built.outline;
+    let vector_arrows = matches!(plot, equation::Plot::Arrows { .. });
     // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
     outline.0.append(&mut inner.edge_lines);
     // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
@@ -791,9 +866,22 @@ pub fn plot(
             expand::add_note("≠ で全部除かれる");
         }
     }
+    let limit = if let equation::Plot::Limit { report, .. } = &plot {
+        let (mut open, mut point) = report.marks();
+        let mut source = built.limit_source;
+        let source_target = coord.as_ref().map_or_else(Vec::new, |c| c.apply_line(&mut source, flat));
+        let (holes_target, point_target) = coord.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |c| (c.apply_line(&mut open, flat), c.apply_line(&mut point, flat)),
+        );
+        holes.extend(open);
+        Some(LimitMesh { report: report.clone(), source, source_target, point, holes_target, point_target })
+    } else {
+        None
+    };
     // 3D の面: 表示範囲の箱で切れた縁を線にする（真横を向いた面も見える。mesh::box_edge_lines）。
     // 流線（点ごとの値つきの線）・座標系があるときは足さない
-    if !flat && !curve && coord.is_none() && built.outline_values.is_empty() {
+    if !flat && !curve && !vector_arrows && coord.is_none() && built.outline_values.is_empty() {
         outline.0.extend(mesh::box_edge_lines(&inner, dom));
     }
     let mut outline_target = (Vec::new(), Vec::new());
@@ -822,6 +910,7 @@ pub fn plot(
         outline,
         outline_target,
         outline_values: built.outline_values,
+        vector_arrows,
         vivid: built.vivid,
         value_range: built.value_range,
         volume: built.volume,
@@ -882,6 +971,7 @@ pub fn plot(
         defs: (expand::used(), expand::def_line()),
         ode_states: expand::ode_states(),
         holes,
+        limit,
     })
 }
 
@@ -1070,9 +1160,27 @@ fn field_built(plot: &equation::Plot, ctx: &Ctx) -> Option<Built> {
             }
             Some(b)
         }
-        equation::Plot::Arrows { vectors } => Some(arrows_built(field::vectors(vectors, ctx.flat), "ベクトル".into())),
+        equation::Plot::Arrows { vectors } => {
+            let axes = if ctx.flat { 2 } else { 3 };
+            let span = (0..axes).map(|i| ctx.dom.hi[i] - ctx.dom.lo[i]).fold(0.0, f64::max);
+            Some(Built { inner: field::vectors(vectors, ctx.flat, span), kind: plot.kind_label(), ..Default::default() })
+        }
         equation::Plot::Ode(o) => Some(ode_built(o, ctx)),
-        equation::Plot::Points { points, line } => {
+        equation::Plot::Limit { graph, report } => Some(Built {
+            inner: match graph {
+                limit::Graph::Function(prog) => mesh::limit_curve(prog, report, ctx.dom, ctx.size * 1e-4),
+                limit::Graph::Sampled(points) => mesh::sampled_limit_curve(points, report),
+                limit::Graph::Sequence(points) => {
+                    let visible: Vec<_> = points.iter().filter(|p| p[1].is_finite() && (ctx.dom.lo[0]..=ctx.dom.hi[0]).contains(&p[0]))
+                        .map(|p| [p[0], p[1], 0.0]).collect();
+                    system::points_mesh(&visible)
+                }
+            },
+            kind: plot.kind_label(),
+            curve: true,
+            ..Default::default()
+        }),
+        equation::Plot::Points { points, line, .. } => {
             let pts: Vec<[f64; 3]> = points.iter().map(|p| if ctx.flat { [p[0], p[1], 0.0] } else { *p }).collect();
             let inner = if *line {
                 mesh::Mesh { positions: pts.iter().flat_map(|p| p.map(|v| v as f32)).collect(), ..Default::default() }
@@ -1514,6 +1622,8 @@ struct Ctx<'a> {
 #[derive(Default)]
 struct Built {
     inner: mesh::Mesh,
+    /// 極限値から独立して表示する、元の曲線・数列の点。
+    limit_source: Vec<f32>,
     shape: Option<mesh::NdShape>,
     /// 陰関数・範囲で重ねた立体の中身（切り口のふた用）
     fields: Vec<mesh::Field>,
@@ -1609,7 +1719,22 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             .collect();
         return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
     }
-    if let Some(b) = field_built(plot, ctx) {
+    if let Some(mut b) = field_built(plot, ctx) {
+        if let P::Limit { report, .. } = plot {
+            let source = std::mem::take(&mut b.inner.positions);
+            if let Some(value) = report.finite_value() {
+                if ctx.flat {
+                    let y = value as f32;
+                    let [lo, hi] = [ctx.dom.lo[0] as f32, ctx.dom.hi[0] as f32];
+                    b.inner.positions.extend([lo, y, 0.0, hi, y, 0.0]);
+                } else {
+                    let mut level = build(&equation::constant_plot(value, ctx.space)?, ctx)?;
+                    level.kind = b.kind;
+                    b = level;
+                }
+            }
+            b.limit_source = source;
+        }
         return Ok(b);
     }
     if ctx.flat {
@@ -1752,7 +1877,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::Curve { sets, vars } => {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 2e-4));
         }
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } | P::Limit { .. } => {}
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
         // 切り取った後の面が表示範囲に比べて小さければ（x² + y² = 1, 0 ≤ z ≤ 1 を ±6 で）、その周りだけで作り直す（fit_to_shape）
@@ -1998,7 +2123,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } | P::Limit { .. } => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
         P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
@@ -2399,6 +2524,7 @@ impl Shape {
             flat_slice: self.flat_slice,
             outline: (lines, Vec::new()),
             outline_values: Vec::new(),
+            vector_arrows: false,
             vivid: false,
             outline_target: Default::default(),
             coord: None,
@@ -2424,6 +2550,7 @@ impl Shape {
             gpu_reason: String::new(),
             ode_states: Vec::new(),
             holes: Vec::new(),
+            limit: None,
         }
     }
 }
@@ -2515,6 +2642,7 @@ impl CapSource {
             flat_slice: false,
             outline: Default::default(),
             outline_values: Vec::new(),
+            vector_arrows: false,
             vivid: false,
             outline_target: Default::default(),
             coord: None,
@@ -2526,6 +2654,7 @@ impl CapSource {
             gpu_reason: String::new(),
             ode_states: Vec::new(),
             holes: Vec::new(),
+            limit: None,
         })
     }
 }

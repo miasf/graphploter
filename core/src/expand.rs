@@ -29,7 +29,7 @@
 use crate::eval::Params;
 use crate::parser::{definition_head, parse_system_with, BinOp, Expr, Rel};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub mod linalg;
@@ -40,6 +40,19 @@ use linalg::{cross, norm, Mat};
 pub const MAX_NODES: usize = 1_500_000;
 /// Σ・Π の項の数の上限
 const MAX_TERMS: usize = 2_000;
+const LIMIT_INDEX_SAMPLE: &str = "数列の添字を標本ごとに評価します";
+const LIMIT_INTEGRAL_SAMPLE: &str = "積分を標本ごとに評価します";
+
+fn uses_internal_var(expr: &Expr, except: Option<&str>) -> bool {
+    let mut vars = Vec::new();
+    expr.collect_vars(&mut vars);
+    vars.iter().any(|v| v.starts_with('#') && Some(v.as_str()) != except)
+}
+
+fn arithmetic_sample_error(error: &str) -> bool {
+    ["左極限と右極限が一致しません", "振動のため", "極限の収束を数値計算で確認できません", "積分が収束しない"]
+        .iter().any(|prefix| error.starts_with(prefix))
+}
 /// `[a, …, c]` の要素の数の上限（リストの組み合わせの上限と同じ）
 const MAX_LIST: usize = 256;
 /// `±` の符号を表す変数（展開の後、[`crate::equation::compile_with`] が +1 と −1 の 2 つの図形にする。利用者は書けない名前）
@@ -58,12 +71,64 @@ pub enum Def {
     Set(crate::parser::SetE),
 }
 
-/// 数列の定義 `a_(n) = 式`（計画 M10）。`body` は添字の変数 `var` の式（左辺の添字のずれは、もう直してある）。
-/// 右辺に同じ数列の項があれば漸化式
-#[derive(Debug, Clone)]
+/// 同じ数列に、偶数項と奇数項など複数の規則を書ける。
+#[derive(Debug, Clone, Default)]
 pub struct Seq {
-    pub var: String,
-    pub body: Expr,
+    rules: Vec<SequenceRule>,
+}
+
+#[derive(Debug, Clone)]
+struct SequenceRule {
+    index: SequenceIndex,
+    body: Expr,
+    recursive: bool,
+    has_cases: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequenceIndex {
+    var: String,
+    step: i64,
+    shift: i64,
+}
+
+impl SequenceIndex {
+    fn parameter(&self, k: i64) -> Option<i64> {
+        let delta = k.checked_sub(self.shift)?;
+        if delta.checked_rem(self.step)? != 0 {
+            return None;
+        }
+        delta.checked_div(self.step)
+    }
+}
+
+#[derive(Debug)]
+enum SequenceInverse {
+    Root(f64),
+    Exp,
+    TenToPower,
+    Divide(Expr),
+    MultiplyByDivisor(Expr),
+}
+
+#[derive(Debug)]
+pub(crate) struct SequenceHead {
+    pub(crate) name: String,
+    index: SequenceIndex,
+    inverses: Vec<SequenceInverse>,
+}
+
+impl SequenceHead {
+    pub(crate) fn argument_at(&self, k: i64, params: &Params) -> Option<i64> {
+        if params.contains_key(&format!("{}{k}", self.name)) {
+            return None;
+        }
+        self.index.parameter(k)
+    }
+
+    pub(crate) fn uses_principal_root(&self) -> bool {
+        self.inverses.iter().any(|inverse| matches!(inverse, SequenceInverse::Root(p) if *p > 1.0))
+    }
 }
 
 /// 定義の表（名前 → 定義）
@@ -161,15 +226,21 @@ impl Defs {
             if chain.rels != [Rel::Eq] {
                 continue;
             }
-            let Some((name, var, shift)) = sequence_head(&chain.exprs[0]) else { continue };
-            if seqs.contains_key(&name) {
-                continue;
+            let Some(head) = sequence_head(&chain.exprs[0]) else { continue };
+            let mut body = chain.exprs[1].clone();
+            for inverse in head.inverses {
+                body = match inverse {
+                    SequenceInverse::Root(1.0) => body,
+                    SequenceInverse::Root(2.0) => Expr::Call(crate::functions::Func::Sqrt, vec![body]),
+                    SequenceInverse::Root(p) => power(body, Expr::Num(1.0 / p)),
+                    SequenceInverse::Exp => Expr::Call(crate::functions::Func::Exp, vec![body]),
+                    SequenceInverse::TenToPower => power(Expr::Num(10.0), body),
+                    SequenceInverse::Divide(factor) => Expr::Bin(BinOp::Div, Box::new(body), Box::new(factor)),
+                    SequenceInverse::MultiplyByDivisor(divisor) => undo_sequence_division(body, divisor),
+                };
             }
-            // a_(n + k) = f(n) → a_(m) = f(m − k)
-            let body = chain.exprs[1].substitute(&|v| {
-                (v == var && shift != 0).then(|| Expr::Bin(BinOp::Sub, Box::new(Expr::Var(var.clone())), Box::new(Expr::Num(shift as f64))))
-            });
-            seqs.insert(name, Seq { var, body });
+            let (recursive, has_cases) = sequence_body_features(&body, &head.name);
+            seqs.entry(head.name).or_insert_with(Seq::default).rules.push(SequenceRule { index: head.index, body, recursive, has_cases });
         }
         Defs { map, seqs }
     }
@@ -192,57 +263,414 @@ impl Defs {
     }
 }
 
-/// 数列の定義の左辺 `a_(n)`・`a_(n + k)`・`a_(n − k)` なら (名前, 添字の変数, k)
-pub fn sequence_head(e: &Expr) -> Option<(String, String, i64)> {
-    let Expr::Index { name, index } = e else { return None };
-    let int = |e: &Expr| match e {
-        Expr::Num(v) if v.fract() == 0.0 && v.abs() < 1e4 => Some(*v as i64),
-        _ => None,
-    };
-    let (var, k) = match &**index {
-        Expr::Var(v) => (v.clone(), 0),
-        Expr::Bin(BinOp::Add, a, b) => match (&**a, int(b)) {
-            (Expr::Var(v), Some(k)) => (v.clone(), k),
-            _ => return None,
-        },
-        Expr::Bin(BinOp::Sub, a, b) => match (&**a, int(b)) {
-            (Expr::Var(v), Some(k)) => (v.clone(), -k),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    (crate::equation::coord_index(&var).is_none()).then(|| (name.clone(), var, k))
+fn power(base: Expr, exponent: Expr) -> Expr {
+    Expr::Bin(BinOp::Pow, Box::new(base), Box::new(exponent))
 }
 
-/// 数列の項 a_from, …, a_to の値（複素数）。項が数にならない（座標を含む）なら None。初項が足りないなどはエラー
-pub fn sequence_terms(name: &str, from: i64, to: i64, params: &Params) -> Result<Option<Vec<(i64, num_complex::Complex64)>>, String> {
+fn undo_sequence_division(body: Expr, divisor: Expr) -> Expr {
+    use crate::functions::Func;
+    let product = |divisor| Expr::Bin(BinOp::Mul, Box::new(body), Box::new(divisor));
+    if let Expr::Num(value) = divisor {
+        return if value != 0.0 && value.is_finite() { product(divisor) } else { Expr::Num(f64::NAN) };
+    }
+    // Multiplying by the denominator only preserves the equation where it is nonzero.
+    let nonzero = Expr::Op { op: "rel:>".into(), args: vec![Expr::Call(Func::Abs, vec![divisor.clone()]), Expr::Num(0.0)] };
+    let case = Expr::Op { op: "case".into(), args: vec![product(divisor), nonzero] };
+    Expr::Op { op: "sequence_division".into(), args: vec![case] }
+}
+
+/// 左辺の添字を、整数係数の 1 次式として読む。
+fn sequence_index(e: &Expr, var: &str) -> Option<(i64, i64)> {
+    match e {
+        Expr::Var(v) if v == var => Some((1, 0)),
+        Expr::Num(n) if n.fract() == 0.0 && n.abs() <= (1_i64 << 53) as f64 => Some((0, *n as i64)),
+        Expr::Neg(a) => {
+            let (m, b) = sequence_index(a, var)?;
+            Some((m.checked_neg()?, b.checked_neg()?))
+        }
+        Expr::Bin(op, a, b) => {
+            let (am, ab) = sequence_index(a, var)?;
+            let (bm, bb) = sequence_index(b, var)?;
+            match op {
+                BinOp::Add => Some((am.checked_add(bm)?, ab.checked_add(bb)?)),
+                BinOp::Sub => Some((am.checked_sub(bm)?, ab.checked_sub(bb)?)),
+                BinOp::Mul if am == 0 => Some((ab.checked_mul(bm)?, ab.checked_mul(bb)?)),
+                BinOp::Mul if bm == 0 => Some((bb.checked_mul(am)?, bb.checked_mul(ab)?)),
+                BinOp::Div if bm == 0 && am.checked_rem(bb)? == 0 && ab.checked_rem(bb)? == 0 => Some((am.checked_div(bb)?, ab.checked_div(bb)?)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// a_(2n+1)、a_(n+1)^2、log(a_(n+1)) などの左辺。
+pub(crate) fn sequence_head(mut e: &Expr) -> Option<SequenceHead> {
+    use crate::functions::Func;
+    let mut inverses = Vec::new();
+    loop {
+        match e {
+            Expr::Bin(BinOp::Pow, base, exp) => match &**exp {
+                Expr::Num(p) if *p > 0.0 && p.fract() == 0.0 => {
+                    inverses.push(SequenceInverse::Root(*p));
+                    e = base;
+                }
+                _ => return None,
+            },
+            Expr::Call(f @ (Func::Ln | Func::Log10), args) => {
+                let [arg] = args.as_slice() else { return None };
+                inverses.push(if *f == Func::Ln { SequenceInverse::Exp } else { SequenceInverse::TenToPower });
+                e = arg;
+            }
+            Expr::Bin(BinOp::Mul, ..) => {
+                let mut head = sequence_product_head(e)?;
+                inverses.append(&mut head.inverses);
+                head.inverses = inverses;
+                return Some(head);
+            }
+            Expr::Bin(BinOp::Div, numerator, divisor) => {
+                inverses.push(SequenceInverse::MultiplyByDivisor(divisor.as_ref().clone()));
+                e = numerator;
+            }
+            Expr::Index { name, index } => {
+                let mut vars = Vec::new();
+                index.collect_vars(&mut vars);
+                let [var] = vars.as_slice() else { return None };
+                if crate::equation::coord_index(var).is_some() {
+                    return None;
+                }
+                let (step, shift) = sequence_index(index, var)?;
+                return (step != 0).then(|| SequenceHead {
+                    name: name.clone(),
+                    index: SequenceIndex { var: var.clone(), step, shift },
+                    inverses,
+                });
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn sequence_product_head(product: &Expr) -> Option<SequenceHead> {
+    let mut pending = vec![product];
+    let mut factors = Vec::new();
+    let mut target: Option<(usize, SequenceHead)> = None;
+    let mut tied = false;
+    while let Some(factor) = pending.pop() {
+        if let Expr::Bin(BinOp::Mul, left, right) = factor {
+            pending.extend([right.as_ref(), left.as_ref()]);
+            continue;
+        }
+        if let Some(head) = sequence_head(factor) {
+            if let Some((_, best)) = &target {
+                // Parallel indices of the same sequence have a fixed order for every n.
+                if head.name != best.name || head.index.var != best.index.var || head.index.step != best.index.step {
+                    return None;
+                }
+                if head.index.shift <= best.index.shift {
+                    tied |= head.index.shift == best.index.shift;
+                    factors.push(factor);
+                    continue;
+                }
+            }
+            target = Some((factors.len(), head));
+            tied = false;
+        } else if !matches!(factor, Expr::Num(_) | Expr::Const(_) | Expr::Var(_))
+            && !matches!(factor, Expr::Index { index, .. } if matches!(**index, Expr::Num(_)))
+        {
+            return None;
+        }
+        factors.push(factor);
+    }
+    let (target, mut head) = target?;
+    if tied {
+        return None;
+    }
+    // Divide out the other factors before undoing the target's own power or log.
+    head.inverses.splice(0..0, factors.into_iter().enumerate()
+        .filter(|(i, _)| *i != target)
+        .map(|(_, factor)| SequenceInverse::Divide(factor.clone())));
+    Some(head)
+}
+
+fn sequence_body_features(body: &Expr, name: &str) -> (bool, bool) {
+    let found = std::cell::Cell::new(false);
+    let has_cases = std::cell::Cell::new(false);
+    let _ = body.rewrite(&|e| {
+        let same = match e {
+            Expr::Index { name: n, .. } => n == name,
+            Expr::Var(n) => split_subscript(n).is_some_and(|(base, _)| base == name),
+            _ => false,
+        };
+        if same {
+            found.set(true);
+        }
+        if matches!(e, Expr::Op { op, .. } if op == "cases") {
+            has_cases.set(true);
+        }
+        None
+    });
+    (found.get(), has_cases.get())
+}
+
+fn initial_index(name: &str, param: &str) -> Option<i64> {
+    let suffix = param.strip_prefix(name)?;
+    let k: i64 = suffix.parse().ok()?;
+    (k >= 0 && suffix == k.to_string()).then_some(k)
+}
+
+/// 数列の初項の添字（パラメータ a1 などのうち、いちばん小さい番号）。
+pub fn first_term(name: &str, params: &Params) -> Option<i64> {
+    params.keys().filter_map(|param| initial_index(name, param)).min()
+}
+
+pub(crate) fn sequence_start(head: &SequenceHead, params: &Params) -> i64 {
     let defs = current();
-    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
+    if let Some(seq) = defs.seq(&head.name) {
+        if seq.rules.iter().any(|rule| rule.recursive) {
+            return first_term(&head.name, params).unwrap_or_else(|| i64::from(!seq.rules.iter().any(|rule| rule.has_cases)));
+        }
+    }
+    0
+}
+
+const MAX_SEQUENCE_PLOT_STEPS: i64 = 512;
+
+fn sequence_plot_start<'a>(
+    expander: &mut Expander<'_>,
+    start: &'a Expr,
+    start_error: &str,
+) -> Result<(&'a str, i64), String> {
+    let (name, first) = match start {
+        Expr::Var(v) => {
+            let (name, digits) = split_subscript(v).ok_or(start_error)?;
+            (name, digits.parse::<i64>().map_err(|_| "開始項の添字が大きすぎます")?)
+        }
+        Expr::Index { name, index } => (name.as_str(), expander.integer(index, "開始項の添字")?),
+        _ => return Err(start_error.into()),
+    };
+    if expander.defs.seq(name).is_none() {
+        return Err(format!("数列 {name} の定義を追加してください"));
+    }
+    Ok((name, first))
+}
+
+fn sequence_plot_term(expander: &mut Expander<'_>, name: &str, k: i64) -> Result<Option<num_complex::Complex64>, String> {
+    let expr = expander.term_value(name, k)?;
+    Ok(expander.constant_value(&expr))
+}
+
+fn sequence_plot_value(expander: &mut Expander<'_>, name: &str, k: i64, label: &str) -> Result<f64, String> {
+    let value = sequence_plot_term(expander, name, k)?.map(crate::eval::as_real);
+    value.filter(|v| (*v as f32).is_finite())
+        .ok_or_else(|| format!("{label}には有限の実数の項が必要です（{name}_{k}）"))
+}
+
+fn sequence_complex_value(expander: &mut Expander<'_>, name: &str, k: i64, label: &str) -> Result<num_complex::Complex64, String> {
+    sequence_plot_term(expander, name, k)?
+        .filter(|v| (v.re as f32).is_finite() && (v.im as f32).is_finite())
+        .ok_or_else(|| format!("{label}には描画できる範囲の有限な項が必要です（{name}_{k}）"))
+}
+
+/// 開始項から、階段図に必要な連続した実数の項を求める。
+pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Result<Vec<f64>, String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "階段図の最初の引数は a_1 や a_(N) のように数列の項を書いてください";
+    let (name, first) = sequence_plot_start(&mut expander, start, start_error)?;
+    let steps = expander.integer(steps, "階段図の反復回数")?;
+    if !(1..=MAX_SEQUENCE_PLOT_STEPS).contains(&steps) {
+        return Err(format!("階段図の反復回数は 1〜{MAX_SEQUENCE_PLOT_STEPS} にしてください"));
+    }
+    let last = first.checked_add(steps).ok_or("最後の項の添字が大きすぎます")?;
+    (first..=last).map(|k| sequence_plot_value(&mut expander, name, k, "階段図")).collect()
+}
+
+/// 各数列の開始項を座標にする。1 列の複素数列は実部と虚部を軸にする。
+pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, dots: bool, params: &Params) -> Result<(Vec<[f64; 3]>, bool), String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "軌道の座標には a_0 や a_(N) のように数列の項を書いてください";
+    let starts = starts.iter()
+        .map(|start| sequence_plot_start(&mut expander, start, start_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    let steps = orbit_steps(&mut expander, steps, dots)?;
+    if starts.iter().any(|&(_, first)| first.checked_add(steps).is_none()) {
+        return Err("最後の項の添字が大きすぎます".into());
+    }
+    if let [(name, first)] = starts.as_slice() {
+        let mut complex = false;
+        let points = (0..=steps).map(|offset| {
+            let v = sequence_complex_value(&mut expander, name, first + offset, "軌道")?;
+            let im = if crate::eval::as_real(v).is_finite() { 0.0 } else { v.im };
+            complex |= im != 0.0;
+            Ok([v.re, im, 0.0])
+        }).collect::<Result<_, String>>()?;
+        return Ok((points, complex));
+    }
+    let points = (0..=steps).map(|offset| {
+        let mut point = [0.0; 3];
+        for (coordinate, &(name, first)) in point.iter_mut().zip(&starts) {
+            *coordinate = sequence_plot_value(&mut expander, name, first + offset, "軌道")?;
+        }
+        Ok(point)
+    }).collect::<Result<_, String>>()?;
+    Ok((points, false))
+}
+
+fn orbit_steps(expander: &mut Expander<'_>, steps: &Expr, dots: bool) -> Result<i64, String> {
+    let steps = expander.integer(steps, "軌道の反復回数")?;
+    let max_steps = if dots { 8_192 } else { MAX_SEQUENCE_PLOT_STEPS };
+    if !(0..=max_steps).contains(&steps) {
+        return Err(format!("軌道の反復回数は 0〜{max_steps} にしてください"));
+    }
+    Ok(steps)
+}
+
+pub(crate) fn matrix_orbit(matrix: &Expr, start: &[Expr], steps: &Expr, dots: bool, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let mat = expander.scalar(matrix)?;
+    let mat = Mat::of(&mat).filter(|m| m.rows == start.len() && m.cols == start.len())
+        .ok_or("軌道の行列は、初期点と同じ次元の 2×2 または 3×3 の正方行列にしてください")?;
+    let steps = orbit_steps(&mut expander, steps, dots)?;
+    let weights: Vec<_> = mat.items.iter().map(|v| expander.number(v, "軌道の行列の成分")).collect::<Result<_, _>>()?;
+    let mut point = [0.0; 3];
+    for (p, expr) in point.iter_mut().zip(start) {
+        *p = expander.number(expr, "軌道の初期点")?;
+    }
+    let mut points = Vec::with_capacity(steps as usize + 1);
+    for _ in 0..=steps {
+        if point.iter().any(|p| !(*p as f32).is_finite()) {
+            return Err("軌道に描画できる範囲を超えた項があります（反復回数を減らしてください）".into());
+        }
+        points.push(point);
+        let mut next = [0.0; 3];
+        for (p, row) in next.iter_mut().zip(weights.chunks_exact(start.len())) {
+            *p = row.iter().zip(&point).map(|(a, x)| a * x).sum();
+        }
+        point = next;
+    }
+    Ok(points)
+}
+
+/// 各添字に対応する頂点を (添字, 実部, 虚部) に置く。
+pub(crate) fn recurrence_nodes(start: &Expr, count: &Expr, distance: &Expr, params: &Params) -> Result<(Vec<[f64; 3]>, f64), String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "リカレンスネットワークの開始項は a_0 などの数列の項を書いてください";
+    let (name, first) = sequence_plot_start(&mut expander, start, start_error)?;
+    let count = expander.integer(count, "リカレンスネットワークの項数")?;
+    if !(1..=128).contains(&count) {
+        return Err("リカレンスネットワークの項数は 1〜128 にしてください".into());
+    }
+    let distance = expander.number(distance, "リカレンスネットワークの距離")?;
+    if distance < 0.0 {
+        return Err("リカレンスネットワークの距離は 0 以上にしてください".into());
+    }
+    let last = first.checked_add(count - 1).ok_or("最後の項の添字が大きすぎます")?;
+    let nodes = (first..=last).map(|k| {
+        let value = sequence_complex_value(&mut expander, name, k, "リカレンスネットワーク")?;
+        Ok([k as f64, value.re, value.im])
+    }).collect::<Result<Vec<_>, String>>()?;
+    Ok((nodes, distance))
+}
+
+/// 二変数関数 f(x, r) を、各 r について同じ初期値から反復する。
+pub(crate) fn bifurcation_points(map: &str, start: &Expr, lo: &Expr, hi: &Expr, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+    const COLUMNS: usize = 401;
+    const BURN_IN: usize = 400;
+    const SAMPLES: usize = 48;
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start = expander.number(start, "分岐図の初期値")?;
+    let lo = expander.number(lo, "分岐図のパラメータの下限")?;
+    let hi = expander.number(hi, "分岐図のパラメータの上限")?;
+    if lo >= hi || !(lo as f32).is_finite() || !(hi as f32).is_finite() {
+        return Err("分岐図の範囲は、描画できる値で下限を上限より小さくしてください".into());
+    }
+    let vars = ["#state", "#parameter"];
+    let call = Expr::Apply { name: map.into(), primes: 0, args: vars.iter().map(|&v| Expr::Var(v.into())).collect() };
+    let expr = expander.scalar(&call)?;
+    if expr.node_count() > 512 {
+        return Err("分岐図の写像の式が大きすぎます".into());
+    }
+    let program = crate::eval::Program::compile_with(&expr, &vars, params)?;
+    record_used_params(program.used_params());
+    let controls: Vec<_> = (0..COLUMNS).map(|k| lo + (hi - lo) * (k as f64 / (COLUMNS - 1) as f64)).collect();
+    let mut states = vec![start; COLUMNS];
+    let mut values = vec![num_complex::Complex64::default(); COLUMNS];
+    let mut columns = vec![Vec::new(); COLUMNS];
+    for step in 0..BURN_IN + SAMPLES {
+        program.eval_batch(&[&states, &controls], &mut values);
+        for (i, (state, value)) in states.iter_mut().zip(&values).enumerate() {
+            if !state.is_finite() {
+                continue;
+            }
+            let value = crate::eval::as_real(*value);
+            *state = if (value as f32).is_finite() { value } else { f64::NAN };
+            if step >= BURN_IN && state.is_finite() {
+                let column = &mut columns[i];
+                let value = *state as f32;
+                if !column.contains(&value) {
+                    column.push(value);
+                }
+            }
+        }
+    }
+    Ok(controls.into_iter().zip(columns).flat_map(|(r, values)| {
+        values.into_iter().map(move |v| [r, f64::from(v), 0.0])
+    }).collect())
+}
+
+/// この行の規則で決まる項を描く。別の添字を指定する行には点を残す。
+pub(crate) fn sequence_terms(head: &SequenceHead, from: i64, to: i64, params: &Params) -> Result<Option<Vec<(i64, num_complex::Complex64)>>, String> {
+    let defs = current();
+    let Some(seq) = defs.seq(&head.name) else { return Ok(None) };
+    let mut x = Expander::new(&defs, params);
+    let step = i128::from(head.index.step).abs();
+    let start = i128::from(from) + (i128::from(head.index.shift) - i128::from(from)).rem_euclid(step);
+    let mut indices: BTreeSet<i64> = (0..MAX_TERMS)
+        .map(|i| start + i as i128 * step)
+        .take_while(|&k| k <= i128::from(to))
+        .map(|k| k as i64)
+        .collect();
+    indices.extend(params.keys().filter_map(|param| initial_index(&head.name, param)).filter(|k| (from..=to).contains(k)));
     let mut out = Vec::new();
-    for k in from..=to {
-        let e = x.term(name, &Expr::Num(k as f64))?;
-        let Ok(p) = crate::eval::Program::compile_with(&e, &[], params) else { return Ok(None) };
-        let mut v = [num_complex::Complex64::new(0.0, 0.0)];
-        p.eval_batch(&[], &mut v);
-        out.push((k, v[0]));
+    let mut first_missing = None;
+    let mut has_calculated_term = false;
+    for k in indices.into_iter().take(MAX_TERMS) {
+        let initial = params.contains_key(&format!("{}{k}", head.name));
+        let rule = seq.rules.iter().find(|r| r.index.parameter(k).is_some());
+        let belongs = match rule {
+            Some(r) => r.index == head.index,
+            None => seq.rules[0].index == head.index && initial,
+        };
+        if !belongs {
+            continue;
+        }
+        let e = match x.term_value(&head.name, k) {
+            Ok(e) => e,
+            Err(e) if e.starts_with("変数 '") && e.contains("（初項 ") => {
+                first_missing.get_or_insert(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(value) = x.numeric_value(&e) else { return Ok(None) };
+        out.push((k, value));
+        has_calculated_term |= !initial;
+    }
+    if let Some(error) = first_missing {
+        if !has_calculated_term {
+            return Err(error);
+        }
+        if let Some((_, message)) = error.split_once('（') {
+            add_note(message.trim_end_matches('）'));
+        }
     }
     Ok(Some(out))
 }
-
-/// 数列の初項の添字（パラメータ `a{k}` のうち、いちばん小さい k。無ければ None）
-pub fn first_term(name: &str, params: &Params) -> Option<i64> {
-    (0..=10_000).find(|k| params.contains_key(&format!("{name}{k}")))
-}
-
-/// 漸化式か（右辺に同じ数列の項がある）
-pub fn is_recurrence(name: &str) -> bool {
-    current().seq(name).is_some_and(|s| {
-        let mut vs = Vec::new();
-        s.body.rewrite(&|e| matches!(e, Expr::Index { name: n, .. } if n == name).then(|| Expr::Var("#self".into()))).collect_vars(&mut vs);
-        vs.iter().any(|v| v == "#self")
-    })
-}
-
 /// 横の座標の表示範囲（数列の点の添字の範囲に使う。`lib.rs` が入れる）
 pub fn set_view_x(lo: f64, hi: f64) {
     VIEW_X.with(|x| x.set((lo, hi)));
@@ -383,7 +811,7 @@ pub fn kind_label() -> Option<String> {
 /// 式を展開して、行列・ベクトルなら (行の数, 列の数, 成分の式)。そうでなければ None（計画 M7 の、行列を描く行の判定）
 pub fn matrix_value(e: &Expr, params: &Params) -> Result<Option<(usize, usize, Vec<Expr>)>, String> {
     let defs = current();
-    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
+    let mut x = Expander::new(&defs, params);
     Ok(match x.val(e)? {
         Val::S(v) => Mat::of(&v).map(|m| (m.rows, m.cols, m.items)),
         Val::Fn { .. } => None,
@@ -603,6 +1031,13 @@ fn apply_body(body: &Expr, args: &[Expr]) -> Expr {
     body.substitute(&|v: &str| v.strip_prefix('#').and_then(|k| k.parse::<usize>().ok()).and_then(|k| args.get(k).cloned()))
 }
 
+type TermKey = (String, i64);
+
+enum TermEvaluation {
+    Running,
+    Needs(TermKey),
+}
+
 struct Expander<'a> {
     defs: &'a Defs,
     params: &'a Params,
@@ -611,7 +1046,13 @@ struct Expander<'a> {
     /// 展開中の定義の名前（自分自身を使う定義を見つける）
     stack: Vec<String>,
     /// 漸化式の項（名前, 添字 → 値の式）。同じ展開の中で使い回す
-    memo: std::collections::HashMap<(String, i64), Expr>,
+    memo: HashMap<TermKey, Expr>,
+    /// 項の展開中に、先に求める必要がある項を記録する。
+    term_evaluation: Option<TermEvaluation>,
+    /// 極限の中身を先に式へ展開できるか調べている間だけ true。
+    probing_limit: bool,
+    limit_sample_depth: usize,
+    limit_samples_left: usize,
 }
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
@@ -620,7 +1061,7 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
         return Ok(e.clone());
     }
     let defs = current();
-    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
+    let mut x = Expander::new(&defs, params);
     let out = match x.val(e)? {
         Val::S(s) => s,
         Val::Fn { arity, body } => field_at_xyz(arity, &body).ok_or_else(|| fn_as_value_error(e))?,
@@ -629,6 +1070,13 @@ pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
         return Err("式が大きくなりすぎます（関数の入れ子・Σ の項の数を減らしてください）".into());
     }
     Ok(out)
+}
+
+pub(crate) fn limit_line(
+    op: &str, var: &str, args: &[Expr], body: &Expr, params: &Params,
+) -> Result<(crate::limit::Graph, crate::limit::Report), String> {
+    let (graph, report) = Expander::new(&current(), params).limit_expression(op, var, args, body, true)?;
+    Ok((graph.expect("極限だけの行にはグラフがある"), report))
 }
 
 /// 式の途中（一番外でない所）に組があるか（ベクトルの計算。展開の段で成分の式にする）
@@ -672,7 +1120,14 @@ fn fn_as_value_error(e: &Expr) -> String {
     }
 }
 
-impl Expander<'_> {
+impl<'a> Expander<'a> {
+    fn new(defs: &'a Defs, params: &'a Params) -> Self {
+        Self {
+            defs, params, int_depth: 0, stack: Vec::new(), memo: HashMap::new(), term_evaluation: None,
+            probing_limit: false, limit_sample_depth: 0, limit_samples_left: 12_000,
+        }
+    }
+
     fn enter(&mut self, name: &str) -> Result<(), String> {
         if self.stack.iter().any(|n| n == name) {
             return Err(format!("{name} の定義が {name} 自身を使っています"));
@@ -747,7 +1202,23 @@ impl Expander<'_> {
                 },
             },
             Expr::Apply { name, primes, args } => {
-                let Some(f) = self.def_value(name)? else {
+                if self.limit_sample_depth > 0 && *primes == 0 {
+                    if let Some(value) = self.apply_at_limit_sample(name, args)? {
+                        return Ok(value);
+                    }
+                }
+                let depth = self.stack.len();
+                let f = match self.def_value(name) {
+                    Err(e) if *primes == 0 && e.contains("'#") => {
+                        self.stack.truncate(depth);
+                        if let Some(value) = self.apply_at_limit_sample(name, args)? {
+                            return Ok(value);
+                        }
+                        return Err(e);
+                    }
+                    value => value?,
+                };
+                let Some(f) = f else {
                     return Err(format!("{name} は定義されていません"));
                 };
                 let args = args.iter().map(|a| self.scalar(a)).collect::<Result<Vec<_>, _>>()?;
@@ -860,13 +1331,17 @@ impl Expander<'_> {
                     _ => return Err("内部エラー: ± の形".into()),
                 }
             }
-            Expr::Op { op, args } if op == "cases" => Val::S(self.cases(args)?),
+            Expr::Op { op, args } if matches!(op.as_str(), "cases" | "sequence_division") => Val::S(self.cases(args)?),
             Expr::Op { op, args } if op == "sumset" || op == "prodset" => Val::S(self.set_sum(op == "sumset", args)?),
             Expr::Cond(_) => return Err("条件は、Σ・Π の下でだけ使えます".into()),
             Expr::Op { op, args } if op == "intset" => Val::S(self.region_integral(args)?),
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
+            Expr::Binder { op, var, args, body } if matches!(op.as_str(), "lim" | "seqlim") => {
+                let (_, report) = self.limit_expression(op, var, args, body, false)?;
+                Val::S(Expr::Num(report.value()?))
+            }
             Expr::Binder { op, var, args, body } if matches!(op.as_str(), "max" | "min" | "sup" | "inf") => {
                 Val::S(self.extremum(matches!(op.as_str(), "max" | "sup"), var, args, body)?)
             }
@@ -1037,117 +1512,103 @@ impl Expander<'_> {
         Ok(if kind == "ker" { m.cols - rank } else { rank })
     }
 
-    /// 数列の項 `a_(式)`（計画 M10）。添字は整数（数とパラメータの式）。
-    /// パラメータ `a{k}`（初項 `a_1 = 1` の行）があればその値。一般項なら添字を代入した式。漸化式なら、初項から順に作る
-    /// （項が数とパラメータだけなら数にしてから次へ進む。フィボナッチの a₈₀ も一瞬）
+    /// 数列の添字は整数に評価できる式。必要な項と初項だけを参照する。
     fn term(&mut self, name: &str, index: &Expr) -> Result<Expr, String> {
-        const MAX_SPAN: i64 = 10_000;
+        if self.probing_limit && uses_internal_var(index, None) {
+            return Err(LIMIT_INDEX_SAMPLE.into());
+        }
         let k = self.integer(index, &format!("{name} の添字"))?;
-        let Some(seq) = self.defs.seq(name).cloned() else { return Err(format!("{name} の数列は定義されていません")) };
-        let param = |k: i64| format!("{name}{k}");
-        let initial = |x: &Self, k: i64| -> Option<Expr> {
-            (k >= 0 && x.params.contains_key(&param(k))).then(|| {
-                note_param(&param(k));
-                Expr::Var(param(k))
-            })
-        };
-        if let Some(v) = initial(self, k) {
-            return Ok(v);
-        }
-        if let Some(v) = self.memo.get(&(name.to_string(), k)) {
-            return Ok(v.clone());
-        }
-        let recursive = {
-            let mut vs = Vec::new();
-            seq.body.rewrite(&|e| matches!(e, Expr::Index { name: n, .. } if n == name).then(|| Expr::Var("#self".into()))).collect_vars(&mut vs);
-            vs.iter().any(|v| v == "#self")
-        };
-        let at = |x: &mut Self, k: i64| -> Result<Expr, String> {
-            let body = seq.body.substitute(&|v| (v == seq.var).then_some(Expr::Num(k as f64)));
-            let e = x.scalar(&body)?;
-            // 数とパラメータだけなら数にする（式が育たないように）
-            Ok(match numbers(std::slice::from_ref(&e), x.params) {
-                Some(v) => Expr::Num(v[0]),
-                None => e,
-            })
-        };
-        if !recursive {
-            if self.stack.len() >= MAX_DEPTH {
-                return Err("数列の入れ子が深すぎます".into());
-            }
-            note_used(name);
-            return at(self, k);
-        }
-        // 漸化式: 添字 k 以下で、いちばん近い初項（パラメータ）から順に作る
-        let Some(lo) = (0..=k.max(0)).rev().take(MAX_SPAN as usize + 1).find(|&j| self.params.contains_key(&param(j))) else {
-            let first = if k >= 1 { 1 } else { 0 };
-            return Err(format!("変数 '{}' はここでは使えません（初項 {name}_{first} を定義してください）", param(first)));
-        };
-        // 初項より前の項が要る漸化式（2 つ前を使うなど）のために、続けて並んだ初項を全部入れる
-        let mut start = lo;
-        while start > 0 && self.params.contains_key(&param(start - 1)) {
-            start -= 1;
-        }
-        if k - start > MAX_SPAN {
-            return Err(format!("{name} の添字が初項から離れすぎています（{MAX_SPAN} 項まで）"));
-        }
-        note_used(name);
-        for j in start..=k {
-            if self.memo.contains_key(&(name.to_string(), j)) {
-                continue;
-            }
-            let v = match initial(self, j) {
-                Some(v) => v,
-                None => {
-                    // 項 j の式の中の同じ数列の項は、もう作った項（無ければ、初項が足りない）
-                    let missing = std::cell::RefCell::new(None);
-                    let memo = &self.memo;
-                    let body = seq.body.substitute(&|v| (v == seq.var).then_some(Expr::Num(j as f64)));
-                    let body = body.rewrite(&|e| match e {
-                        Expr::Index { name: n, index } if n == name => {
-                            let idx = crate::eval::Program::compile_with(index, &[], self.params).ok().map(|p| {
-                                let mut out = [num_complex::Complex64::new(0.0, 0.0)];
-                                p.eval_batch(&[], &mut out);
-                                crate::eval::as_real(out[0])
-                            });
-                            match idx {
-                                Some(i) if i.fract() == 0.0 => match memo.get(&(name.to_string(), i as i64)) {
-                                    Some(v) => Some(v.clone()),
-                                    None if self.params.contains_key(&param(i as i64)) => Some(Expr::Var(param(i as i64))),
-                                    None => {
-                                        missing.borrow_mut().get_or_insert(i as i64);
-                                        Some(Expr::Num(0.0))
-                                    }
-                                },
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    });
-                    if let Some(i) = missing.into_inner() {
-                        return Err(format!("変数 '{}' はここでは使えません（初項 {name}_{i} を定義してください）", param(i.max(0))));
-                    }
-                    for p in (start..j).map(param) {
-                        if body.uses_var(&p) {
-                            note_param(&p);
-                        }
-                    }
-                    let e = self.scalar(&body)?;
-                    let e = match numbers(std::slice::from_ref(&e), self.params) {
-                        Some(v) => Expr::Num(v[0]),
-                        None => e,
-                    };
-                    if e.node_count() > MAX_NODES {
-                        return Err(format!("{name} の項の式が大きくなりすぎます（添字を小さくしてください）"));
-                    }
-                    e
-                }
-            };
-            self.memo.insert((name.to_string(), j), v);
-        }
-        Ok(self.memo[&(name.to_string(), k)].clone())
+        self.term_value(name, k)
     }
 
+    fn term_value(&mut self, name: &str, k: i64) -> Result<Expr, String> {
+        note_used(name);
+        let param = format!("{name}{k}");
+        if k >= 0 && self.params.contains_key(&param) {
+            note_param(&param);
+            return Ok(Expr::Var(param));
+        }
+        let key = (name.to_owned(), k);
+        if let Some(value) = self.memo.get(&key) {
+            return Ok(value.clone());
+        }
+        if let Some(evaluation) = &mut self.term_evaluation {
+            // 展開の途中で必要になった項を積み、先にその項の値を求めてから再開する。
+            if matches!(evaluation, TermEvaluation::Running) {
+                *evaluation = TermEvaluation::Needs(key);
+            }
+            return Err("数列の項を計算中".into());
+        }
+        self.resolve_term(key)
+    }
+
+    fn term_body(&self, (name, k): &TermKey, root: &TermKey) -> Result<Expr, String> {
+        let missing = |i| format!("変数 '{name}{i}' はここでは使えません（初項 {name}_{i} を定義してください）");
+        let Some(seq) = self.defs.seq(name) else { return Err(format!("{name} の数列は定義されていません")) };
+        let Some((rule, n)) = seq.rules.iter().find_map(|rule| rule.index.parameter(*k).map(|n| (rule, n))) else {
+            return Err(if *k >= 0 { missing(*k) } else { format!("{name} の添字 {k} に対応する定義がありません") });
+        };
+        if rule.recursive {
+            if rule.has_cases {
+                if *k < 0 {
+                    return Err(missing(0));
+                }
+            } else if let Some(first) = first_term(name, self.params) {
+                if *k < 0 || (*k < first && (root.0 != *name || root.1 >= first)) {
+                    return Err(missing((*k).max(0)));
+                }
+            } else if *k < 0 || (*k == 0 && root.0 == *name && root.1 > 0 && rule.index.step.unsigned_abs() == 1) {
+                return Err(missing(i64::from(root.0 == *name && root.1 > 0 && rule.index.step.unsigned_abs() == 1)));
+            }
+        }
+        Ok(rule.body.substitute(&|v| (v == rule.index.var).then_some(Expr::Num(n as f64))))
+    }
+
+    fn resolve_term(&mut self, root: TermKey) -> Result<Expr, String> {
+        const MAX_SEQUENCE_TERMS: usize = 10_000;
+        let body = self.term_body(&root, &root)?;
+        let mut active = HashSet::from([root.clone()]);
+        let mut frames = vec![(root.clone(), body)];
+        let mut work = 1;
+        let stack_len = self.stack.len();
+        let int_depth = self.int_depth;
+        while let Some((_, body)) = frames.last() {
+            self.term_evaluation = Some(TermEvaluation::Running);
+            let result = self.scalar(body);
+            let evaluation = self.term_evaluation.take();
+            self.stack.truncate(stack_len);
+            self.int_depth = int_depth;
+            if let Some(TermEvaluation::Needs(key)) = evaluation {
+                if !active.insert(key.clone()) {
+                    return Err(format!("数列の参照が循環しています（{}_{}）", key.0, key.1));
+                }
+                if work == MAX_SEQUENCE_TERMS {
+                    return Err(format!("数列の計算に必要な項が多すぎます（{MAX_SEQUENCE_TERMS} 項まで）"));
+                }
+                let body = self.term_body(&key, &root)?;
+                frames.push((key, body));
+                work += 1;
+                continue;
+            }
+            let e = result?;
+            let value = match self.numeric_value(&e) {
+                Some(v) if v.im == 0.0 || crate::eval::as_real(v).is_finite() => Expr::Num(v.re),
+                Some(v) if v.re.is_finite() && v.im.is_finite() => {
+                    let imaginary = Expr::Bin(BinOp::Mul, Box::new(Expr::Num(v.im)), Box::new(Expr::Const(crate::parser::Constant::I)));
+                    Expr::Bin(BinOp::Add, Box::new(Expr::Num(v.re)), Box::new(imaginary))
+                }
+                Some(_) => Expr::Num(f64::NAN),
+                None => e,
+            };
+            if value.node_count() > MAX_NODES {
+                return Err(format!("{} の項の式が大きくなりすぎます（添字を小さくしてください）", root.0));
+            }
+            let (key, _) = frames.pop().unwrap();
+            active.remove(&key);
+            self.memo.insert(key, value);
+        }
+        Ok(self.memo[&root].clone())
+    }
     /// 成分の取り出し `v_(2)`・`A_(1, 2)`（番号は 1 から）
     fn component(&mut self, name: &str, value: &Expr, index: &Expr) -> Result<Expr, String> {
         let Some(m) = Mat::of(value) else { return Err(format!("{name} はベクトル・行列ではありません")) };
@@ -1189,9 +1650,9 @@ impl Expander<'_> {
     fn cases(&mut self, cases: &[Expr]) -> Result<Expr, String> {
         use crate::functions::Func;
         let mut out = Vec::new();
+        let mut choose_branch = self.term_evaluation.is_some();
         for (k, case) in cases.iter().enumerate() {
             let Expr::Op { args, .. } = case else { return Err("内部エラー: 場合分けの形".into()) };
-            let value = self.scalar(&args[0])?;
             let mut margins = Vec::new();
             let mut strict: u64 = 0;
             for chain in &args[1..] {
@@ -1220,10 +1681,30 @@ impl Expander<'_> {
             if margins.is_empty() && k + 1 != cases.len() {
                 return Err("条件の無い場合（それ以外）は、最後に書いてください".into());
             }
+            if choose_branch {
+                // 添字の代入後に条件が決まる数列では、必要な分岐の項だけを求める。
+                let mut matches = true;
+                for (j, margin) in margins.iter().enumerate() {
+                    let Some(v) = self.numeric_value(margin) else {
+                        choose_branch = false;
+                        break;
+                    };
+                    matches &= if strict >> j & 1 == 1 { v.re > 0.0 } else { v.re >= 0.0 };
+                }
+                if choose_branch {
+                    if matches {
+                        return self.scalar(&args[0]);
+                    }
+                    continue;
+                }
+            }
             out.push(Expr::Num(margins.len() as f64));
             out.push(Expr::Num(strict as f64));
             out.extend(margins);
-            out.push(value);
+            out.push(self.scalar(&args[0])?);
+        }
+        if choose_branch {
+            return Ok(Expr::Num(f64::NAN));
         }
         Ok(Expr::Call(Func::Piece, out))
     }
@@ -1472,6 +1953,141 @@ impl Expander<'_> {
         Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
     }
 
+    /// 1 変数の実数の極限。近づく先と中身には、スライダーや定義を使える。
+    fn limit_expression(
+        &mut self,
+        op: &str,
+        var: &str,
+        args: &[Expr],
+        body: &Expr,
+        graph: bool,
+    ) -> Result<(Option<crate::limit::Graph>, crate::limit::Report), String> {
+        use crate::{eval::Program, limit::{self, Graph}};
+        let (target, side) = match args {
+            [target] => (target, 0),
+            [target, Expr::Num(1.0)] => (target, 1),
+            [target, side] if side.is_minus_one() => (target, -1),
+            _ => return Err("極限の近づく先と向きを確かめてください（x → a、x → a⁺、x → a⁻）".into()),
+        };
+        let target_expr = self.scalar(target)?;
+        let infinity = matches!(&target_expr, Expr::Num(v) if v.is_infinite())
+            || matches!(&target_expr, Expr::Neg(e) if matches!(&**e, Expr::Num(v) if v.is_infinite()));
+        let target = Program::compile_with(&target_expr, &[], self.params)?;
+        target.used_params().iter().for_each(|p| note_param(p));
+        let mut value = [num_complex::Complex64::default()];
+        target.eval_batch(&[], &mut value);
+        let point = value[0].re;
+        if value[0].im != 0.0 || (!point.is_finite() && !(infinity && point.is_infinite() && side == 0)) {
+            return Err("極限の近づく先には、実数または向きの付かない ±∞ を書いてください".into());
+        }
+        if op == "seqlim" && point != f64::INFINITY {
+            return Err("自然数の添字の極限は n → ∞ の形で書いてください".into());
+        }
+
+        // 中身の変数は、同じ名前の定義・パラメータを隠す。入れ子の外側の変数とも区別する。
+        let mut local = "#limit".to_string();
+        while body.uses_var(&local) {
+            local.push('#');
+        }
+        let body = body.substitute(&|name| (name == var).then(|| Expr::Var(local.clone())));
+        let sequence = point == f64::INFINITY && (op == "seqlim" || var == "n");
+        let start = match &body {
+            Expr::Index { name, index } if matches!(&**index, Expr::Var(v) if v == &local)
+                && self.defs.seq(name).is_some_and(|seq| seq.rules.iter().any(|r| r.recursive)) =>
+            {
+                first_term(name, self.params).unwrap_or(1).max(1) as f64
+            }
+            _ => 1.0,
+        };
+        let stack_len = self.stack.len();
+        let int_depth = self.int_depth;
+        let previous_probe = std::mem::replace(&mut self.probing_limit, true);
+        let symbolic = self.scalar(&body).and_then(|expanded| {
+            let prog = Program::compile_with(&expanded, &[&local], self.params)?;
+            Ok((expanded, prog))
+        });
+        self.probing_limit = previous_probe;
+        self.stack.truncate(stack_len);
+        self.int_depth = int_depth;
+        if let Ok((expanded, prog)) = symbolic {
+            prog.used_params().iter().for_each(|p| note_param(p));
+            let mut sample = |xs: &[f64]| Ok(limit::program_samples(&prog, xs));
+            if sequence {
+                return limit::sequence(&mut sample, var, graph, start);
+            }
+            let removable = limit::removable_quotient(&expanded, &local, point, self.params);
+            let report = limit::analyze(&mut sample, var, point, side, removable, graph)?;
+            return Ok((graph.then_some(Graph::Function(prog)), report));
+        }
+        let error = symbolic.err().unwrap();
+        let indexed = error == LIMIT_INDEX_SAMPLE;
+        if !indexed && error != LIMIT_INTEGRAL_SAMPLE && !error.contains(&local)
+            && !(error.contains("'#") && body.uses_var(&local))
+        {
+            return Err(error);
+        }
+        let mut sample = |xs: &[f64]| self.limit_samples(&body, &local, xs);
+        if sequence || (indexed && point == f64::INFINITY) {
+            return limit::sequence(&mut sample, var, graph, start);
+        }
+        let report = limit::analyze(&mut sample, var, point, side, None, graph)?;
+        let curve = if graph {
+            let (lo, hi) = view_x();
+            let xs: Vec<_> = (0..=128).map(|i| lo + (hi - lo) * f64::from(i) / 128.0).collect();
+            let pairs = sample(&xs)?.into_iter().zip(xs).map(|(y, x)| [x, y]).collect();
+            Some(Graph::Sampled(pairs))
+        } else {
+            None
+        };
+        Ok((curve, report))
+    }
+
+    fn limit_samples(&mut self, body: &Expr, var: &str, xs: &[f64]) -> Result<Vec<f64>, String> {
+        self.limit_samples_left = self.limit_samples_left.checked_sub(xs.len())
+            .ok_or("極限の標本の計算量が上限に達しました")?;
+        let previous_probe = std::mem::take(&mut self.probing_limit);
+        self.limit_sample_depth += 1;
+        let stack_len = self.stack.len();
+        let int_depth = self.int_depth;
+        let values = xs.iter().map(|&x| {
+            if !x.is_finite() { return Ok(f64::NAN); }
+            let at_x = |name: &str| (name == var).then_some(Expr::Num(x));
+            let result = self.scalar(&body.substitute(&at_x));
+            self.stack.truncate(stack_len);
+            self.int_depth = int_depth;
+            let value = match result {
+                Ok(value) => value.substitute(&at_x),
+                Err(e) if arithmetic_sample_error(&e) => return Ok(f64::NAN),
+                Err(e) => return Err(e),
+            };
+            let p = crate::eval::Program::compile_with(&value, &[], self.params)?;
+            p.used_params().iter().for_each(|p| note_param(p));
+            let mut out = [num_complex::Complex64::default()];
+            p.eval_batch(&[], &mut out);
+            Ok(crate::limit::real_sample(out[0]))
+        }).collect();
+        self.limit_sample_depth -= 1;
+        self.probing_limit = previous_probe;
+        values
+    }
+
+    fn apply_at_limit_sample(&mut self, name: &str, actual: &[Expr]) -> Result<Option<Val>, String> {
+        let Some(Def::Function { args, body }) = self.defs.get(name).cloned() else { return Ok(None) };
+        if args.len() != actual.len() { return Ok(None); }
+        let mut values = Vec::with_capacity(actual.len());
+        for arg in actual {
+            let arg = self.scalar(arg)?;
+            let Some(v) = self.constant_value(&arg).filter(|v| v.im == 0.0) else { return Ok(None) };
+            values.push(Expr::Num(v.re));
+        }
+        self.enter(name)?;
+        let stack_len = self.stack.len() - 1;
+        let expr = body.substitute(&|v| args.iter().position(|a| a == v).map(|i| values[i].clone()));
+        let result = self.val(&expr);
+        self.stack.truncate(stack_len);
+        result.map(Some)
+    }
+
     /// 定積分 $\int_a^b g(t)\,dt$ を、区間を 2 つに分けたガウス・ルジャンドルの重み付きの和にする（2 重目は 8 点 × 2）。
     /// 端 a, b は式のまま（x を使ってよい）。∞ の端は変数変換で有限の区間にする:
     /// $[a, \infty)$ は $t = a + \frac{s}{1-s}$、$(-\infty, b]$ は $t = b - \frac{s}{1-s}$（$s \in [0, 1)$）、
@@ -1481,10 +2097,20 @@ impl Expander<'_> {
             return self.indefinite(var, body);
         }
         let [lo, hi] = args else { return Err("積分の範囲を書いてください（∫_0^1 の形）".into()) };
+        if self.probing_limit
+            && (uses_internal_var(lo, None) || uses_internal_var(hi, None) || uses_internal_var(body, Some(var)))
+        {
+            return Err(LIMIT_INTEGRAL_SAMPLE.into());
+        }
         if self.int_depth >= 3 {
             return Err("積分の入れ子は 3 重までにしてください".into());
         }
         let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
+        if self.limit_sample_depth > 0 {
+            if let Some(value) = self.wide_integral_primitive(var, &lo, &hi, body) {
+                return Ok(Expr::Num(value));
+            }
+        }
         // 値が定数になる積分は、適応型の積分で 1 つの数にする（決まった点の和より、ずっと正確）
         if let Some(v) = self.closed_integral(var, &lo, &hi, body)? {
             return Ok(Expr::Num(v));
@@ -1570,6 +2196,29 @@ impl Expander<'_> {
         Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
     }
 
+    fn wide_integral_primitive(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Option<f64> {
+        let a = self.constant_value(lo)?;
+        let b = self.constant_value(hi)?;
+        if a.im != 0.0 || b.im != 0.0 || (b.re - a.re).abs() < 32.0 {
+            return None;
+        }
+        let mut local = "#integral".to_string();
+        while body.uses_var(&local) { local.push('#'); }
+        let depth = self.stack.len();
+        let integral_depth = self.int_depth;
+        self.int_depth += 1;
+        let expanded = self.scalar(&body.substitute(&|v| (v == var).then(|| Expr::Var(local.clone()))));
+        self.stack.truncate(depth);
+        self.int_depth = integral_depth;
+        let primitive = crate::integrate::regular_antiderivative(&expanded.ok()?, &local)?;
+        let prog = crate::eval::Program::compile_with(&primitive, &[&local], self.params).ok()?;
+        prog.used_params().iter().for_each(|p| note_param(p));
+        let mut out = [num_complex::Complex64::default(); 2];
+        prog.eval_batch(&[&[a.re, b.re]], &mut out);
+        let value = out[1] - out[0];
+        (value.im == 0.0 && value.re.is_finite()).then_some(value.re)
+    }
+
     /// 値が定数になる積分（端と中身が、積分の変数とパラメータだけの式）を、適応型の積分（`quad.rs`）で数にする。
     /// すぐ内側に続く積分 ∫∫∫（内側の端は外側の積分の変数の式でよい）も、まとめて入れ子のまま計算する
     /// （内側を決まった点の和にすると、内側の誤差がそのまま残る）。定数にならない・計算が多すぎるときは None
@@ -1626,9 +2275,13 @@ impl Expander<'_> {
                 }
             }
         });
-        let budget = crate::quad::Budget::new(CLOSED_BUDGET);
-        let v = nested_integral(&bounds, &f, 0, [0.0; 3], &budget);
+        let limit_sample = self.limit_sample_depth > 0;
+        let budget = crate::quad::Budget::new(if limit_sample { 24_000 } else { CLOSED_BUDGET });
+        let v = nested_integral(&bounds, &f, 0, [0.0; 3], &budget, limit_sample);
         let infinite = bounds.iter().any(|(a, b)| matches!(a, Bound::Inf(_)) || matches!(b, Bound::Inf(_)));
+        if limit_sample && (budget.exhausted() || budget.rough.get() || !v.is_finite()) {
+            return Some((f64::NAN, true, infinite));
+        }
         if budget.exhausted() {
             return None;
         }
@@ -3022,6 +3675,19 @@ impl Expander<'_> {
 
     /// 数とパラメータだけの式の値（変数を含めば None）。使ったパラメータを覚える
     fn constant_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
+        self.numeric_value(e).filter(|v| v.re.is_finite() && v.im.is_finite())
+    }
+
+    fn numeric_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
+        // 数列で既に数にした項や初期値を、表と描画のために再コンパイルしない。
+        if let Expr::Num(n) = e {
+            return Some(num_complex::Complex64::new(*n, 0.0));
+        }
+        if let Expr::Var(name) = e {
+            let value = self.params.get(name)?;
+            note_param(name);
+            return Some(*value);
+        }
         let prog = crate::eval::Program::compile_with(e, &[], self.params).ok()?;
         USED_PARAMS.with(|u| {
             let mut u = u.borrow_mut();
@@ -3033,7 +3699,7 @@ impl Expander<'_> {
         });
         let mut out = [num_complex::Complex64::new(0.0, 0.0)];
         prog.eval_batch(&[], &mut out);
-        (out[0].re.is_finite() && out[0].im.is_finite()).then_some(out[0])
+        Some(out[0])
     }
 
     fn integer(&mut self, e: &Expr, what: &str) -> Result<i64, String> {
@@ -3249,7 +3915,7 @@ impl Expander<'_> {
             }
             (Val::Fn { arity, body }, Val::S(c)) => {
                 if op == BinOp::Pow {
-                    if matches!(&c, Expr::Neg(x) if matches!(**x, Expr::Num(n) if n == 1.0)) {
+                    if c.is_minus_one() {
                         return Err("逆関数 f⁻¹ は、y = f⁻¹(x) の形（片側がそれだけ）でだけ使えます".into());
                     }
                     return Err("関数のべき乗 f² は使えません（f(x)^2 と書いてください）".into());
@@ -3502,7 +4168,7 @@ enum Bound {
     Inf(f64),
 }
 
-fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize, p: [f64; 3], budget: &crate::quad::Budget) -> f64 {
+fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize, p: [f64; 3], budget: &crate::quad::Budget, wide: bool) -> f64 {
     use num_complex::Complex64 as C;
     let n = bounds.len();
     let at = |b: &Bound| {
@@ -3519,6 +4185,7 @@ fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize
     let (a, b) = (at(&bounds[i].0), at(&bounds[i].1));
     // 外側ほど目標を厳しくする（内側の積分の誤差は、外側の値の誤差として足される）
     let tol = crate::quad::Tol { rel: if n == 1 { 1e-10 } else if i == 0 { 1e-9 } else { 1e-11 }, panels: [[20_000, 0, 0], [400, 200, 0], [200, 100, 100]][n - 1][i], ends: true };
+    let integrate = if wide { crate::quad::integrate_wide } else { crate::quad::integrate };
     if i + 1 == n {
         let mut g = |ts: &[f64], out: &mut [f64]| {
             let cols: Vec<Vec<f64>> = (0..n).map(|k| if k == i { ts.to_vec() } else { vec![p[k]; ts.len()] }).collect();
@@ -3529,16 +4196,16 @@ fn nested_integral(bounds: &[(Bound, Bound)], f: &crate::eval::Program, i: usize
                 *o = crate::eval::as_real(*v);
             }
         };
-        crate::quad::integrate(&mut g, a, b, tol, budget)
+        integrate(&mut g, a, b, tol, budget)
     } else {
         let mut g = |ts: &[f64], out: &mut [f64]| {
             for (o, &t) in out.iter_mut().zip(ts) {
                 let mut q = p;
                 q[i] = t;
-                *o = nested_integral(bounds, f, i + 1, q, budget);
+                *o = nested_integral(bounds, f, i + 1, q, budget, wide);
             }
         };
-        crate::quad::integrate(&mut g, a, b, tol, budget)
+        integrate(&mut g, a, b, tol, budget)
     }
 }
 
@@ -3686,7 +4353,7 @@ fn balanced(mut terms: Vec<Expr>, op: BinOp) -> Expr {
 pub fn expand_big(f: &crate::parser::Formula, params: &Params) -> Result<crate::parser::Formula, String> {
     use crate::parser::Formula as F;
     let defs = current();
-    let mut x = Expander { defs: &defs, params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
+    let mut x = Expander::new(&defs, params);
     fn go(f: &F, x: &mut Expander) -> Result<F, String> {
         let b = |g: &F, x: &mut Expander| go(g, x).map(Box::new);
         Ok(match f {
@@ -3730,17 +4397,16 @@ pub fn rewrite_inverse(l: Expr, r: Expr) -> (Expr, Expr) {
         let Expr::Bin(BinOp::Mul, a, arg) = e else { return None };
         let Expr::Bin(BinOp::Pow, f, k) = &**a else { return None };
         let Expr::Var(name) = &**f else { return None };
-        let minus_one = matches!(&**k, Expr::Neg(x) if matches!(**x, Expr::Num(n) if n == 1.0)) || matches!(**k, Expr::Num(n) if n == -1.0);
         let one_arg = match defs.get(name) {
             Some(Def::Function { args, .. }) => args.len() == 1,
             Some(Def::Value(_)) => {
                 let params = Params::new();
-                let mut x = Expander { defs: &defs, params: &params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
+                let mut x = Expander::new(&defs, &params);
                 matches!(x.def_value(name), Ok(Some(Val::Fn { arity: 1, .. })))
             }
             Some(Def::Set(_)) | None => false,
         };
-        (minus_one && one_arg).then(|| (name.clone(), (**arg).clone()))
+        (k.is_minus_one() && one_arg).then(|| (name.clone(), (**arg).clone()))
     };
     if let Some((f, arg)) = inv(&l) {
         return (Expr::Apply { name: f, primes: 0, args: vec![r] }, arg);
@@ -3768,7 +4434,7 @@ pub fn definition_line(l: &Expr) -> Option<(String, usize, bool)> {
         _ => return None,
     };
     let params = Params::new();
-    let mut x = Expander { defs: &defs, params: &params, int_depth: 0, stack: Vec::new(), memo: Default::default() };
+    let mut x = Expander::new(&defs, &params);
     Some(match x.def_value(name) {
         Ok(Some(Val::Fn { arity, body })) => (name.clone(), arity, matches!(body, Expr::Tuple(_))),
         _ => (

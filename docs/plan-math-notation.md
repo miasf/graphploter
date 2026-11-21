@@ -343,12 +343,14 @@ $$\text{文字列} \xrightarrow{\ \texttt{parse}\ } \text{構文木（新しい�
 - 関係: `\approx`・`\sim`・`\simeq`・`\cong`・`\propto`・`\asymp`・`\doteq` の仲間、`\ll`・`\gg`・`\lll`・`\ggg`、`\lesssim`・`\lessgtr` の仲間、`\prec`・`\succ` の仲間、`\models`・`\vdash` の仲間、三角の関係（`\lhd`・`\bowtie`・`\multimap` など）、`\between`・`\pitchfork`・`\smile`・`\frown`、`\nmid`・`\nparallel`、`\triangleq`・`\coloneq`・`\eqdef`
 - 集合の関係: `\subset`・`\supset`・`\subseteq` の仲間全部（集合どうしの関係は真偽の 1 つの値で、点の集まりではない）、`\sqsubset` の仲間、`\nexists`
 - 演算: `\oplus`・`\otimes`・`\ominus`・`\oslash`・`\odot` の仲間、`\boxplus` の仲間、`\Cap`・`\Cup`・`\sqcap`・`\sqcup`・`\uplus`、`\curlywedge` の仲間、`\amalg`・`\wr`・`\diamond`・`\ltimes`・`\rtimes`・`\dagger`（2 項）・`\interleave`・`\dotplus`・`\divideontimes`
-- 矢印: `\mapsto`・`\to`（M12 の `\max_{t \to …}` には使わない）以外の全部
-- 大きい演算子: `\coprod`・`\bigsqcup`・`\bigoplus`・`\bigotimes`・`\bigodot`・`\biguplus`、`\iint`・`\iiint`・`\oint`・`\oiint`・`\oiiint`（領域・曲線の上の積分は、積分する領域の書き方が決まらない。2 重積分は `\int\int` の入れ子で書ける）、`\lim`・`\limsup`・`\liminf`（数値の極限は当てにならない。微分は $\frac{d}{dx}$ で書ける）、`\deg`・`\hom`・`\Pr`
+- 矢印: `\mapsto` と、極限の下付きに使う `\to`・`\rightarrow`・`\longrightarrow` 以外
+- 大きい演算子: `\coprod`・`\bigsqcup`・`\bigoplus`・`\bigotimes`・`\bigodot`・`\biguplus`、`\iint`・`\iiint`・`\oint`・`\oiint`・`\oiiint`（領域・曲線の上の積分は、積分する領域の書き方が決まらない。2 重積分は `\int\int` の入れ子で書ける）、`\limsup`・`\liminf`、`\deg`・`\hom`・`\Pr`
 - 括弧・飾り: `\llbracket`・`\lgroup`・`\lmoustache`・`\ulcorner`・`\llcorner`・`\Lbag`、`\overset`・`\underset`・`\stackrel`、`\cancel`、`\utilde`・`\underline`・`\overleftarrow`・`\overleftrightarrow`・`\underrightarrow`・`\underleftarrow`・`\overarc`・`\overparen`・`\underparen`
 - そのほか: `\therefore`・`\because`・`\lightning`・`\checkmark`・`\maltese`・`\S`、`\vdots`・`\ddots`、図形・その他のページのほとんど（`\triangle`・`\square`・`\clubsuit`・`\flat`・`\yen`・`\#`・`\&`・`\$` など）、`\Laplace`・`\laplace`・`\differencedelta`・`\imageof`・`\originalof`・`\circledS`・`\Finv`・`\Game`
 
 10.2 のとおり、除外しても、ほかの所から入れた LaTeX は今と同じく「… はまだ使えません」と出す。
+
+`\lim` は 1 変数の実数関数に実装した。有限点の分数で桁落ちする場合はテイラー係数から値を求め、その他は 2 系列の標本から収束を数値判定する。
 
 ---
 

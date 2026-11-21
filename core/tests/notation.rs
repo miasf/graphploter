@@ -4,6 +4,14 @@ use graph_core::{definitions, ode_init, plot, MeshResult};
 
 /// 3 次元・既定に近い範囲で描く。`defs` は式の一覧のほかの行（`\n` 区切り）、`params` は (名前, 値) の並び
 fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, String> {
+    run_flags(src, defs, params, 0)
+}
+
+fn run_flags(src: &str, defs: &str, params: &[(&str, f64)], flags: u32) -> Result<MeshResult, String> {
+    run_in_view(src, defs, params, flags, false)
+}
+
+fn run_in_view(src: &str, defs: &str, params: &[(&str, f64)], flags: u32, flat: bool) -> Result<MeshResult, String> {
     definitions(defs);
     let names: Vec<&str> = params.iter().map(|p| p.0).collect();
     let values: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
@@ -29,10 +37,10 @@ fn run(src: &str, defs: &str, params: &[(&str, f64)]) -> Result<MeshResult, Stri
         0.0,
         0,
         false,
-        false,
+        flat,
         1,
         false,
-        0,
+        flags,
     )
     .map_err(|_| format!("{src} が描けない"))
 }
@@ -128,6 +136,16 @@ fn used_definitions_are_reported() {
 fn inverse_function() {
     same("y = f^(-1)(x)", "y^2 = x", "f(x) = x^2");
     assert!(error_of("z = f^(-1)(x) + 1", "f(x) = x^2").contains("逆関数"));
+}
+
+#[test]
+fn powers_of_function_calls() {
+    same("z = sin^(2)(x) + cos^(3)(y)", "z = sin(x)^2 + cos(y)^3", "");
+    same("z = erf^(-2)(x+2)", "z = erf(x+2)^(-2)", "");
+    same("z = max^(2)(x,y)", "z = max(x,y)^2", "");
+    same("z = f^(x+1)(y)^2", "z = ((y+2)^(x+1))^2", "f(t) = t+2");
+    same("z = g^(3)(x,y)", "z = (x+y)^3", "g(s,t) = s+t");
+    same("z = x^2(y)", "z = x^2*y", "");
 }
 
 #[test]
@@ -347,6 +365,147 @@ fn piecewise_step_is_cut_like_sign() {
 fn close(src: &str, want: f64, tol: f64) {
     let v = value(src);
     assert!((v - want).abs() <= tol, "{src} = {v}（{want} から {} 離れている）", (v - want).abs());
+}
+
+#[test]
+fn limit_values_and_binding() {
+    close("@lim(x,0) sin(x)/x", 1.0, 1e-9);
+    close("@lim(x,0) (1-cos(x))/x^2", 0.5, 1e-12);
+    close("@lim(x,0) (exp(x)-1-x)/x^2", 0.5, 1e-12);
+    close("@lim(x,∞) (1+1/x)^x", std::f64::consts::E, 1e-8);
+    close("@lim(x,1) (x^2-1)/(x-1)", 2.0, 1e-8);
+    close("@lim(x,∞) (2x^2+1)/(x^2-1)", 2.0, 1e-8);
+    close("@lim(x,-∞) exp(x)", 0.0, 1e-9);
+    close("@lim(x,0,1) sign(x)", 1.0, 1e-9);
+    close("@lim(x,0,-1) sign(x)", -1.0, 1e-9);
+    close("@lim(x,0,1) sqrt(x)", 0.0, 1e-9);
+    close("@lim(t,0) (@lim(t,0) cos(t) + t)", 1.0, 1e-9);
+    close("@lim(t,0) (@lim(u,0) (t+u))", 0.0, 1e-9);
+
+    let mut m = run("@lim(a,b) f(a)", "a = 99\nf(t) = t + b", &[("a", 99.0), ("b", 2.0)]).unwrap();
+    assert_eq!(m.limit_variable(), "a");
+    let result = m.limit_values();
+    assert_eq!([result[0], result[1], result[2], result[4], result[6]], [2.0, 0.0, 1.0, 1.0, 4.0]);
+    assert!([result[3], result[5], result[7]].iter().all(|v| (v - 4.0).abs() < 1e-9));
+    assert_eq!(m.used_params(), "b");
+    assert!(!m.take_limit_source().is_empty());
+    same("z = @lim(t,0) sin(t)/t + x", "z = 1 + x", "");
+}
+
+#[test]
+fn limits_compose_with_integrals_derivatives_and_definitions() {
+    close("@lim(x,0) (@int(t,0,x) cos(t))/x", 1.0, 1e-8);
+    close("@lim(x,∞) @int(t,0,x) exp(-t)", 1.0, 1e-8);
+    close("@lim(x,∞) @int(t,0,x) exp(-t^2)", std::f64::consts::PI.sqrt() / 2.0, 1e-8);
+    close("@lim(x,∞) @int(t,1,x) exp(-(t-x)^2)", std::f64::consts::PI.sqrt() / 2.0, 1e-8);
+    close("@lim(x,∞) (@int(t,0,x) sin(t))/x", 0.0, 1e-8);
+    let improper = run("@lim(x,0,1) @int(t,x,1) 1/t", "", &[]).unwrap();
+    assert_eq!(improper.limit_values()[7], f64::INFINITY);
+    close("@lim(x,1) @diff(x) (x^3)", 3.0, 1e-8);
+    close("@lim(h,0) (@lim(x,h) x^2)", 0.0, 1e-8);
+    let mut m = run("@lim(x,0) f'(x+a)", "f(x) = x^3", &[("a", 2.0)]).unwrap();
+    assert!((m.limit_values()[7] - 12.0).abs() < 1e-8);
+    assert_eq!(m.used_params(), "a");
+    let samples = m.take_limit_samples();
+    assert!(samples.len() >= 100 && samples.chunks_exact(2).all(|p| p[0] != 0.0));
+    let integral = run("@lim(x,∞) f(x)", "f(x) = @int(t,0,x) exp(-t)", &[]).unwrap();
+    assert!((integral.limit_values()[7] - 1.0).abs() < 1e-8);
+    let nested = run("@lim(x,0) g(x+a)", "g(t) = @lim(u,t) sin(u)", &[("a", 0.3)]).unwrap();
+    assert!((nested.limit_values()[7] - 0.3_f64.sin()).abs() < 1e-8);
+}
+
+#[test]
+fn sequence_limits_use_integers_and_distinguish_persistent_oscillation() {
+    close("@lim(n,∞) (-1)^n/n", 0.0, 1e-8);
+    close("@lim(n,∞) 1/(n+1)", 0.0, 1e-8);
+    close("@lim(n,∞) (1+1/n)^n", std::f64::consts::E, 1e-8);
+    close("@sum(k,1,512) 1/2^k", 1.0, 1e-10);
+    close("@lim(n,∞) @sum(k,1,n) 1/2^k", 1.0, 1e-8);
+    let mut m = run("@lim(k,∞) (1+b_(k+1))", "b_(n) = 1/n^2", &[]).unwrap();
+    assert!(m.limit_sequence());
+    assert!((m.limit_values()[7] - 1.0).abs() < 1e-7);
+    let samples = m.take_limit_samples();
+    assert!(samples.chunks_exact(2).all(|p| p[0].fract() == 0.0));
+    assert!(samples.chunks_exact(2).any(|p| p[0] == 4_096.0));
+    let recur = run("@lim(n,∞) a_(n)", "a_(n+1) = (a_(n)+2)/2", &[("a1", 0.0)]).unwrap();
+    assert!((recur.limit_values()[7] - 2.0).abs() < 1e-8);
+    assert!(recur.used_params().contains("a1"));
+    let later = run("@lim(n,∞) a_(n)", "a_(n+1) = (a_(n)+2)/2", &[("a20", 0.0)]).unwrap();
+    assert!((later.limit_values()[7] - 2.0).abs() < 1e-8);
+    let alias = run("@lim(k,∞) f(k)", "f(k) = a_(k)\na_(n) = 1/n", &[]).unwrap();
+    assert!(alias.limit_sequence());
+    assert!(alias.limit_values()[7].abs() < 1e-8);
+    let oscillation = run("@seqlim(k,∞) (-1)^k", "", &[]).unwrap();
+    assert_eq!(oscillation.limit_values()[4], 3.0);
+    let divergent = run("@lim(n,∞) n", "", &[]).unwrap();
+    assert_eq!(divergent.limit_values()[7], f64::INFINITY);
+    let overflow = run("@lim(n,∞) 2^n", "", &[]).unwrap();
+    assert_eq!(overflow.limit_values()[7], f64::INFINITY);
+}
+
+#[test]
+fn limit_reports_divergence_and_uncertainty() {
+    let result = |src| run(src, "", &[]).unwrap().limit_values();
+    assert_eq!(&result("@lim(x,0) 1/x^2")[2..6], &[2.0, f64::INFINITY, 2.0, f64::INFINITY]);
+    assert_eq!(&result("@lim(x,0) 1/x")[2..6], &[2.0, f64::NEG_INFINITY, 2.0, f64::INFINITY]);
+    assert_eq!(result("@lim(x,0,-1) 1/x")[7], f64::NEG_INFINITY);
+    assert_eq!(result("@lim(x,0,1) ln(x)")[7], f64::NEG_INFINITY);
+    assert_eq!(result("@lim(x,∞) exp(x)")[7], f64::INFINITY);
+    let oscillation = result("@lim(x,0) sin(1/x)");
+    assert_eq!([oscillation[2], oscillation[4]], [3.0, 3.0]);
+    assert!(oscillation[7].is_nan());
+    assert_eq!(result("@lim(x,0) x sin(1/x)")[2], 1.0);
+    assert_eq!(result("@lim(x,0) ((1-cos(x))/x^2+2)")[2], 0.0);
+    assert_eq!(result("@lim(x,0,-1) sqrt(x)")[2], 0.0);
+    assert!(error_of("z = @lim(x,0) 1/x", "").contains("一致しません"));
+    assert!(error_of("z = @lim(x,0) sin(1/x)", "").contains("振動"));
+    assert!(error_of("@lim(x,∞,1) x", "").contains("近づく先"));
+    assert!(error_of("@lim(x,1/0) x", "").contains("近づく先"));
+}
+
+#[test]
+fn standalone_limits_plot_the_finite_value() {
+    let mut plane = run("@lim(x,1) 2x", "", &[]).unwrap();
+    let integral = run("@int(t,0,2) 1", "", &[]).unwrap();
+    assert!(!integral.positions().is_empty());
+    assert_eq!(plane.positions(), integral.positions());
+    assert_eq!(plane.indices(), integral.indices());
+    assert!(plane.take_limit_source().chunks_exact(3).any(|p| p[0].abs() > 0.1 && p[2] == 0.0));
+
+    for (src, y) in [("@lim(x,1) 2x", 2.0), ("@lim(x,0,1) abs(x)/x", 1.0), ("@lim(n,∞) (1+1/n)", 1.0)] {
+        let m = run_in_view(src, "", &[], 0, true).unwrap();
+        let ps = m.positions();
+        assert_eq!(&ps, &[-3.0, y, 0.0, 3.0, y, 0.0], "{src}");
+    }
+    let mut sequence = run("@lim(n,∞) (1+1/n)", "", &[]).unwrap();
+    assert!(!sequence.indices().is_empty());
+    assert_eq!(&sequence.take_limit_source()[..3], &[1.0, 2.0, 0.0]);
+    assert!(run("@lim(x,0) 1/x^2", "", &[]).unwrap().indices().is_empty());
+}
+
+#[test]
+fn limit_graph_marks_both_sides_and_the_defined_value() {
+    let mut hole = run_in_view("@lim(x,0) abs(x)/x", "", &[], 0, true).unwrap();
+    assert_eq!(&hole.limit_values()[2..6], &[1.0, -1.0, 1.0, 1.0]);
+    assert!(hole.limit_values()[6..].iter().all(|x| x.is_nan()));
+    assert_eq!(hole.take_holes(), vec![0.0, -1.0, 0.0, 0.0, 1.0, 0.0]);
+    assert!(hole.take_limit_point().is_empty());
+    assert!(hole.positions().is_empty());
+    let positions = hole.take_limit_source();
+    assert!(positions.chunks_exact(3).any(|p| p[0] < 0.0 && p[1] == -1.0));
+    assert!(positions.chunks_exact(3).any(|p| p[0] > 0.0 && p[1] == 1.0));
+    assert!(positions.chunks_exact(3).collect::<Vec<_>>().windows(2).all(|p| {
+        p[0][0].is_nan() || p[1][0].is_nan() || p[0][1] == p[1][1]
+    }));
+
+    let mut filled = run("@lim(x,0) @cases(-1, x < 0; 1, x > 0; 0)", "", &[]).unwrap();
+    assert_eq!(filled.limit_values()[6], 0.0);
+    assert_eq!(filled.take_holes(), vec![0.0, -1.0, 0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(filled.take_limit_point(), vec![0.0, 0.0, 0.0]);
+
+    let mut endpoint = run("@lim(x,0) @cases(-1, x < 0; 1)", "", &[]).unwrap();
+    assert_eq!(endpoint.take_holes(), vec![0.0, -1.0, 0.0]);
+    assert_eq!(endpoint.take_limit_point(), vec![0.0, 1.0, 0.0]);
 }
 
 #[test]
@@ -892,13 +1051,18 @@ fn determinant_line_and_columns() {
     // 成分に座標があれば、今までどおり「縦 = 式」
     assert!(max_diff("@det(⟦x, y; y, x⟧)", "z = x^2 - y^2", "") < 1e-6);
     // 行列の定義の行は、列ベクトルを原点からの線分で描く
-    let m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
+    let mut m = run("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧", &[]).unwrap();
     assert!(m.kind().contains("A の定義（列ベクトル）"), "{}", m.kind());
-    let p = points("A = ⟦1, 0; 1, 2⟧", "A = ⟦1, 0; 1, 2⟧");
-    // 矢印の先（矢じりの頂点）と、軸の線分の始点（原点）
+    assert!(m.vector_arrows());
+    let p: Vec<_> = m.positions().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    // 矢じりだけがメッシュ、軸は原点から矢じりの底面までの線分
     assert!(p.iter().any(|v| *v == [1.0, 1.0, 0.0]) && p.iter().any(|v| *v == [0.0, 2.0, 0.0]));
-    // 軸の尾（太さのある軸の尾のふた）は原点のすぐそば
-    assert!(p.iter().any(|v| v.iter().map(|c| c * c).sum::<f32>().sqrt() < 0.2));
+    assert!(p.iter().all(|v| v[1] > 0.75 && v[2].abs() < 0.1));
+    let shafts = m.take_outline();
+    assert_eq!(shafts.len(), 18);
+    assert_eq!(&shafts[..3], &[0.0; 3]);
+    assert_eq!(&shafts[9..12], &[0.0; 3]);
+    assert_eq!(&shafts[12..15], &[0.0, 1.79, 0.0]);
     // ベクトルの定義は、そのベクトル
     let p = points("{vec_b} = (1, 2, 3)", "{vec_b} = (1, 2, 3)");
     assert!(p.iter().any(|v| *v == [1.0, 2.0, 3.0]));
@@ -1065,6 +1229,250 @@ fn sequences() {
     assert!(e.contains("変数 'a1' はここでは使えません"), "{e}");
     // 添字が数字の名前は今までどおり（パラメータ a1・座標 w₂）
     assert_eq!(seq_value("a_1 + 1", "", &[("a1", 2.0)]).unwrap(), 3.0);
+}
+
+#[test]
+fn powered_sequence_terms() {
+    let recurrence = "a_(n+1)^(2) = a_(n)+1";
+    let init = [("a1", 3.0)];
+    assert_eq!(seq_value("a_(2)", recurrence, &init).unwrap(), 2.0);
+    let m = run(recurrence, recurrence, &init).unwrap();
+    assert!(m.positions().chunks_exact(3).any(|p| p == [2.0, 2.0, 0.0]));
+    assert!(m.kind().contains("根の主値"));
+    let third = seq_value("b_(3)", "b_(n+2)^3 = b_(n) + n", &[("b1", 7.0), ("b2", 0.0)]).unwrap();
+    assert!((third - 2.0).abs() < 1e-14);
+}
+
+#[test]
+fn sequence_term_products() {
+    let recurrence = "(a_(n+1))(a_(n))=6";
+    let initial = [("a1", 2.0)];
+    assert_eq!(seq_value("a_2", recurrence, &initial).unwrap(), 3.0);
+    assert_eq!(seq_value("a_3", recurrence, &initial).unwrap(), 2.0);
+    let plotted = run(recurrence, recurrence, &initial).unwrap();
+    assert!(plotted.positions().chunks_exact(3).any(|p| p == [2.0, 3.0, 0.0]));
+    assert!(seq_value("a_2", recurrence, &[("a1", 0.0)]).is_err());
+    assert!(seq_value("a_2", "(a_(n+1))(a_(n))=0", &[("a1", 0.0)]).is_err());
+
+    let reversed = "a_(n)*a_(n+1)=6";
+    assert_eq!(seq_value("a_2", reversed, &initial).unwrap(), 3.0);
+    let sparse = "a_(2n)*a_(2n+2)^2*a_2=36";
+    assert_eq!(seq_value("a_4", sparse, &[("a2", 2.0)]).unwrap(), 3.0);
+    let derived = "a_(n)=n+1\nb_(n)=(a_(n+1))(a_(n))";
+    assert_eq!(seq_value("b_2", derived, &[]).unwrap(), 12.0);
+    let product_recurrence = "a_(n+2)=(a_(n+1))(a_(n))";
+    assert_eq!(seq_value("a_4", product_recurrence, &[("a1", 2.0), ("a2", 3.0)]).unwrap(), 18.0);
+}
+
+#[test]
+fn divided_sequence_terms() {
+    let recurrence = "((a_(n+1))/(2))=sin a_(n)+1";
+    let initial = [("a1", 0.0)];
+    assert_eq!(seq_value("a_2", recurrence, &initial).unwrap(), 2.0);
+    assert!((seq_value("a_3", recurrence, &initial).unwrap() - 2.0 * (2.0_f64.sin() + 1.0)).abs() < 1e-12);
+    let plot = run(recurrence, recurrence, &initial).unwrap();
+    assert!(plot.positions().chunks_exact(3).any(|p| p == [2.0, 2.0, 0.0]));
+
+    let previous = "a_(n+1)/a_(n)=3";
+    assert_eq!(seq_value("a_3", previous, &[("a1", 2.0)]).unwrap(), 18.0);
+    assert!(seq_value("a_2", previous, &initial).is_err());
+    assert!(seq_value("a_2", "a_(n+1)/0=1", &initial).is_err());
+    assert_eq!(seq_value("a_4", "a_(n+1)/(n-2)=1", &[]).unwrap(), 1.0);
+    assert!(seq_value("a_3", "a_(n+1)/(n-2)=1", &[]).is_err());
+    assert_eq!(seq_value("a_2", "a_(n+1)^2/2=8", &initial).unwrap(), 4.0);
+}
+
+#[test]
+fn recurrence_operations_and_initial_values() {
+    let given = [("a1", 2.0)];
+    assert_eq!(seq_value("a_3", "a_(n+1) = a_(n)^2 + a_1", &given).unwrap(), 38.0);
+    assert!((seq_value("a_2", "a_(n+1) = log(a_(n)) + a_1", &given).unwrap() - (2.0_f64.log10() + 2.0)).abs() < 1e-12);
+    let given = [("a1", 0.5)];
+    assert_eq!(seq_value("a_2", "log(a_(n+1)) = a_(n) + a_1", &given).unwrap(), 10.0);
+    assert!((seq_value("a_2", "ln(a_(n+1)^2) = a_(n) + a_1", &given).unwrap() - 0.5_f64.exp()).abs() < 1e-12);
+    // 多くの項をたどっても、呼び出しの深さには依存しない。
+    assert_eq!(seq_value("a_1500", "a_(n+1) = a_(n) + a_1", &[("a1", 2.0)]).unwrap(), 3000.0);
+    let overflow = seq_value("a_100", "a_(n+1) = a_(n)^2 + a_(n)", &[("a1", 2.0)]).unwrap_err();
+    assert_eq!(overflow, "実数の値になりません");
+}
+
+#[test]
+fn recurrence_cases_skip_unused_terms() {
+    let rule = "a_(n) = @cases(1, n=0; a_(n-1)+2)";
+    assert_eq!(seq_value("a_5", rule, &[]).unwrap(), 11.0);
+    assert_eq!(seq_value("a_0", "a_(n) = @cases(2, n=0; a_(n))", &[]).unwrap(), 2.0);
+    let plot = run(rule, rule, &[]).unwrap();
+    assert!(plot.positions().chunks_exact(3).any(|p| p == [0.0, 1.0, 0.0]));
+}
+
+#[test]
+fn sequence_table_uses_the_same_values_as_the_plot() {
+    let rule = "a_(2n) = a_(n) + a_1";
+    let params = [("a1", 3.0)];
+    let plotted = run(rule, rule, &params).unwrap();
+    assert!(graph_core::take_sequence_table().is_empty());
+    let inspected = run_flags(rule, rule, &params, 32).unwrap();
+    assert!(plotted.positions().iter().map(|x| x.to_bits()).eq(inspected.positions().iter().map(|x| x.to_bits())));
+    let rows = graph_core::take_sequence_table();
+    assert_eq!(&rows[..3], &[1.0, 3.0, 0.0]);
+    assert!(rows[3].is_nan());
+    assert_eq!(&rows[4..], &[2.0, 6.0, 0.0, 1.0]);
+
+    let complex = "b_(n) = n + 2i";
+    run_flags(complex, complex, &[], 32).unwrap();
+    assert_eq!(&graph_core::take_sequence_table()[4..8], &[1.0, 1.0, 2.0, 1.0]);
+}
+
+#[test]
+fn sequence_cobweb_uses_consecutive_terms() {
+    let rule = "a_(n+1)=1+r(a_(n)-1)";
+    let params = [("a1", 2.0), ("r", -0.5), ("N", 2.0)];
+    let m = run("@cobweb(a_1,N)", rule, &params).unwrap();
+    assert!(m.kind().contains("階段図（2 回の反復）"));
+    assert_eq!(m.positions(), vec![2.0, 2.0, 0.0, 2.0, 0.5, 0.0, 0.5, 0.5, 0.0, 0.5, 1.25, 0.0, 1.25, 1.25, 0.0]);
+    for param in ["a1", "r", "N"] {
+        assert!(m.used_params().split(',').any(|p| p == param));
+    }
+    let fixed = run("@cobweb(a_(0),512)", "a_(n)=1", &[]).unwrap();
+    assert_eq!(&fixed.positions()[..3], &[1.0, 1.0, 0.0]);
+    assert!(error_of("@cobweb(a_1,513)", rule).contains("1〜512"));
+    assert!(error_of("@cobweb(a_1,2)", "a_(n)=i").contains("有限の実数"));
+    assert!(error_of("@cobweb(a_1,2)", "").contains("数列 a の定義"));
+}
+
+#[test]
+fn sequence_orbit_uses_the_same_step_for_each_coordinate() {
+    let rules = "a_(n+1)=-b_(n)\nb_(n+1)=a_(n)\nc_(n)=n";
+    let params = [("a0", 2.0), ("b0", 1.0), ("N", 2.0)];
+    let m = run("@orbit(a_0,b_0,c_(1),N)", rules, &params).unwrap();
+    assert!(m.kind().contains("軌道（3 次元・2 回の反復）"));
+    let points = m.positions();
+    assert_eq!(&points[..9], &[2.0, 1.0, 1.0, -1.0, 2.0, 2.0, -2.0, -1.0, 3.0]);
+    assert!(points[9..12].iter().all(|p| p.is_nan()));
+    assert_eq!(&points[12..], &[-2.0, -1.0, 3.0]);
+    for param in ["a0", "b0", "N"] {
+        assert!(m.used_params().split(',').any(|p| p == param));
+    }
+    for name in ["a", "b", "c"] {
+        assert!(m.used_defs().split(',').any(|d| d == name));
+    }
+    let start = run("@orbit(a_0,b_0,0)", rules, &params).unwrap();
+    assert_eq!(&start.positions()[..3], &[2.0, 1.0, 0.0]);
+    let lag = run("@orbit(c_0,c_1,1)", rules, &[]).unwrap();
+    assert_eq!(&lag.positions()[..6], &[0.0, 1.0, 0.0, 1.0, 2.0, 0.0]);
+    assert!(error_of("@orbit(a_0,b_0,c_0,d_0,2)", rules).contains("1〜3 個"));
+    assert!(error_of("@orbit(a_0,b_0,513)", rules).contains("0〜512"));
+    assert!(error_of("@orbit(a_0,b_0,1)", "a_(n)=i\nb_(n)=n").contains("有限の実数"));
+}
+
+#[test]
+fn sequence_orbit_can_iterate_a_matrix_from_an_initial_point() {
+    let m = run("@orbit(A,(s,2),2)", "A=⟦0,-1;1,0⟧", &[("s", 1.0)]).unwrap();
+    assert_eq!(&m.positions()[..9], &[1.0, 2.0, 0.0, -2.0, 1.0, 0.0, -1.0, -2.0, 0.0]);
+    assert_eq!(m.used_params(), "s");
+    assert_eq!(m.used_defs(), "A");
+    assert!(error_of("@orbit(A,(1,2,3),2)", "A=⟦0,-1;1,0⟧").contains("正方行列"));
+}
+
+#[test]
+fn sequence_orbit_number_line_and_scatter() {
+    let rules = "a_(n+1)=-a_(n)/2";
+    let params = [("a0", 2.0)];
+    let hops = run("@orbit(a_0,2)", rules, &params).unwrap().positions();
+    let hops: Vec<_> = hops.chunks_exact(3).collect();
+    assert_eq!(hops[0], &[2.0, 0.0, 0.0]);
+    assert!(hops[6][1] < 0.0);
+    assert_eq!(hops[12], &[-1.0, 0.0, 0.0]);
+    assert!(hops[20][1] > 0.0);
+    assert_eq!(hops.last().unwrap(), &&[0.5, 0.0, 0.0]);
+
+    let dots = run("@orbitpoints(a_0,a_1,2)", rules, &params).unwrap().positions();
+    assert_eq!(&dots[..6], &[2.0, -1.0, 0.0, 2.0, -1.0, 0.0]);
+    assert!(dots[6..9].iter().all(|p| p.is_nan()));
+    assert_eq!(&dots[9..12], &[-1.0, 0.5, 0.0]);
+    assert!(error_of("@orbitpoints(a_0,8193)", rules).contains("8192"));
+}
+
+#[test]
+fn complex_sequence_orbit_uses_real_and_imaginary_coordinates() {
+    let rules = "Z_(n+1)=i*Z_(n)";
+    let init = run("Z_0=2+i", rules, &[]).unwrap();
+    assert_eq!(init.param_name(), "Z0");
+    assert_eq!(init.param_value(), vec![2.0, 1.0]);
+    let params = [("Z0", 2.0), ("N", 2.0)];
+    let orbit = run_in_view("@orbit(Z_0,N)", rules, &params, 0, true).unwrap();
+    assert!(orbit.kind().contains("複素平面・2 回"));
+    let positions = orbit.positions();
+    assert_eq!(&positions[..9], &[2.0, 0.0, 0.0, 0.0, 2.0, 0.0, -2.0, 0.0, 0.0]);
+    assert!(positions[9..11].iter().all(|p| p.is_nan()));
+    assert_eq!(&positions[12..], &[-2.0, 0.0, 0.0]);
+    assert!(orbit.used_params().split(',').any(|p| p == "Z0"));
+    let dots = run("@orbitpoints(Z_0,N)", rules, &params).unwrap().positions();
+    assert_eq!(&dots[9..12], &[0.0, 2.0, 0.0]);
+    assert_eq!(&dots[18..21], &[-2.0, 0.0, 0.0]);
+}
+
+#[test]
+fn recurrence_network_joins_similar_terms_without_joining_different_groups() {
+    let rules = "a_(n)=mod(n,2)";
+    let m = run("@recurrence(a_1,4,d)", rules, &[("d", 0.0)]).unwrap();
+    assert!(m.kind().contains("4 頂点・2 辺"));
+    assert_eq!(m.used_params(), "d");
+    let points = m.positions();
+    let runs: Vec<_> = points.chunks_exact(3).collect::<Vec<_>>()
+        .split(|p| p[0].is_nan()).filter(|run| !run.is_empty()).map(|run| run.to_vec()).collect();
+    let edges: Vec<_> = runs.iter().filter(|run| run.len() > 1)
+        .map(|run| (run[0], *run.last().unwrap())).collect();
+    assert_eq!(edges, vec![(&[1.0, 1.0, 0.0][..], &[3.0, 1.0, 0.0][..]), (&[2.0, 0.0, 0.0][..], &[4.0, 0.0, 0.0][..])]);
+    assert!(error_of("@recurrence(a_1,4,-1)", rules).contains("0 以上"));
+}
+
+#[test]
+fn complex_recurrence_network_uses_both_parts_for_distance() {
+    let rules = "a_(n)=i*mod(n,2)";
+    let graph = run("@recurrence(a_0,4,0.5)", rules, &[]).unwrap();
+    assert!(graph.kind().contains("4 頂点・2 辺"));
+    assert!(graph.positions().chunks_exact(3).any(|p| p == [1.0, 0.0, 1.0]));
+}
+
+#[test]
+fn bifurcation_restarts_each_column_then_plots_the_remaining_orbit() {
+    let rules = "F(x,r)=r*x*(1-x)+a";
+    let m = run("@bifurcation(F,0.2,2.8,3.2)", rules, &[("a", 0.0)]).unwrap();
+    assert!(m.kind().contains("分岐図"));
+    assert_eq!(m.used_params(), "a");
+    assert_eq!(m.used_defs(), "F");
+    let points = m.positions();
+    let samples: Vec<_> = points.chunks_exact(9).map(|p| &p[..3]).collect();
+    let left: Vec<_> = samples.iter().filter(|p| p[0] == 2.8).collect();
+    let right: Vec<_> = samples.iter().filter(|p| p[0] == 3.2).collect();
+    assert_eq!(left.len(), 1);
+    assert!((left[0][1] - (1.0 - 1.0 / 2.8)).abs() < 1e-6);
+    assert_eq!(right.len(), 2);
+    assert!(right.iter().all(|p| p[2] == 0.0));
+    assert!(error_of("@bifurcation(F,0.2,4,3)", rules).contains("下限"));
+}
+
+#[test]
+fn recurrence_index_rules_and_dependencies() {
+    let even = "a_(2n) = a_(n) + a_1";
+    let odd = "a_(2n+1) = a_(n)^2 + a_1";
+    let both = format!("{even}\n{odd}");
+    let given = [("a1", 2.0)];
+    assert_eq!(seq_value("a_6", &both, &given).unwrap(), 8.0);
+    assert_eq!(seq_value("a_(a_2)", &both, &given).unwrap(), 6.0);
+    assert_eq!(seq_value("b_125", "b_(2(2n+1)+3) = n", &[]).unwrap(), 30.0);
+    assert_eq!(seq_value("a_4", even, &given).unwrap(), 6.0);
+    assert_eq!(seq_value("a_2", "a_(n) = a_(2n) + 1", &[("a8", 3.0)]).unwrap(), 5.0);
+    assert_eq!(seq_value("a_7", "a_(n+1) = a_(floor(n/2)) + a_1", &[("a0", 1.0), ("a1", 2.0)]).unwrap(), 6.0);
+    let missing = seq_value("a_6", even, &given).unwrap_err();
+    assert!(missing.contains("初項 a_3"), "{missing}");
+    assert!(seq_value("a_(3/2)", &both, &given).unwrap_err().contains("整数"));
+    let plot = run(even, even, &given).unwrap();
+    assert!(plot.positions().chunks_exact(3).any(|p| p == [2.0, 4.0, 0.0]));
+    let runaway = seq_value("a_4", "a_(n) = a_(n+1) + a_(n-1)", &given).unwrap_err();
+    assert!(runaway.contains("必要な項が多すぎ"), "{runaway}");
+    assert!(seq_value("a_4", "a_(n) = a_(n)", &given).unwrap_err().contains("循環"));
 }
 
 #[test]
@@ -1409,4 +1817,17 @@ fn eigenvalues_and_eigenspaces() {
     assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(A-3I)"), "ker (A − 3I) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0（1 次元。直線）");
     assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(1E - A)"), "ker (1E − A) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）");
     assert!(error_of("@ker(A - 3)", "A= ⟦2,1;1,2⟧").contains("単位行列は I か E"));
+}
+
+#[test]
+fn flat_eigenvectors_have_triangle_heads_and_line_shafts() {
+    let mut m = run_in_view("@eig(A)", "A=⟦2,0;0,3⟧", &[], 0, true).unwrap();
+    assert!(m.vector_arrows());
+    assert!(m.take_complex_values().is_empty());
+    assert_eq!(m.indices().len(), 6);
+    assert!(m.positions().chunks_exact(3).all(|p| p[2] == 0.0 && p[0].hypot(p[1]) > 1.0));
+    let shafts = m.take_outline();
+    assert_eq!(shafts.len(), 18);
+    assert_eq!(&shafts[..3], &[0.0; 3]);
+    assert_eq!(&shafts[9..12], &[0.0; 3]);
 }

@@ -315,18 +315,58 @@ pub fn streamlines(progs: &[Program], rot: Option<[[f64; 3]; 3]>, dom: Domain, m
     (out, mags)
 }
 
-/// 原点からのベクトル（行列の列ベクトル・ベクトルの定義）の矢印。色にする値は、ベクトルの番号
-pub fn vectors(vs: &[[f64; 3]], flat: bool) -> Arrows {
+/// 原点からのベクトル。軸は線分、先端は表示範囲に合わせた小さな三角形・円錐。
+pub fn vectors(vs: &[[f64; 3]], flat: bool, span: f64) -> Mesh {
     let mut b = Builder::new(flat, vs.len());
-    let mut count = 0;
-    for (k, v) in vs.iter().enumerate() {
+    for v in vs {
         let tip = if flat { [v[0], v[1], 0.0] } else { *v };
-        if len(tip) > 0.0 {
-            b.arrow([0.0; 3], tip, k as f64, 0.9 * len(tip));
-            count += 1;
+        let length = len(tip);
+        if length == 0.0 || !length.is_finite() || tip.iter().any(|&x| !(x as f32).is_finite()) {
+            continue;
+        }
+        let d = scale(tip, 1.0 / length);
+        let height = (0.16 * length).min(0.035 * span);
+        let radius = 0.36 * height;
+        let base = sub(tip, scale(d, height));
+        b.mesh.edge_lines.extend([0.0; 3]);
+        b.mesh.edge_lines.extend(base.map(|x| x as f32));
+        b.mesh.edge_lines.extend([f32::NAN; 3]);
+        if flat {
+            let side = scale([-d[1], d[0], 0.0], radius);
+            let n = [0.0, 0.0, 1.0];
+            let left = b.vertex(sub(base, side), n, 0.0);
+            let apex = b.vertex(tip, n, 0.0);
+            let right = b.vertex(add(base, side), n, 0.0);
+            b.mesh.indices.extend([left, apex, right]);
+            continue;
+        }
+
+        const SIDES: usize = 12;
+        let helper = if d[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let a = cross(d, helper);
+        let a = scale(a, 1.0 / len(a));
+        let e = cross(d, a);
+        let ring = |step: f64| {
+            let angle = std::f64::consts::TAU * step / SIDES as f64;
+            add(scale(a, angle.cos()), scale(e, angle.sin()))
+        };
+        let cap = b.vertex(base, scale(d, -1.0), 0.0);
+        for k in 0..SIDES {
+            let (r1, r2) = (ring(k as f64), ring((k + 1) as f64));
+            let (p, q) = (add(base, scale(r1, radius)), add(base, scale(r2, radius)));
+            let normal = |r| scale(add(r, scale(d, 0.36)), 1.0 / 1.0_f64.hypot(0.36));
+            let i = b.vertex(p, normal(r1), 0.0);
+            let j = b.vertex(q, normal(r2), 0.0);
+            let apex = b.vertex(tip, normal(ring(k as f64 + 0.5)), 0.0);
+            let i_cap = b.vertex(p, scale(d, -1.0), 0.0);
+            let j_cap = b.vertex(q, scale(d, -1.0), 0.0);
+            b.mesh.indices.extend([apex, i, j, cap, j_cap, i_cap]);
         }
     }
-    b.finish(None, count)
+    // 単色の矢じり。複素数の偏角で塗る頂点値は送らない。
+    b.mesh.complex.clear();
+    b.mesh.keep_full = true;
+    b.mesh
 }
 
 #[cfg(test)]

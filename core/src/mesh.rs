@@ -8086,6 +8086,59 @@ pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> 
     Mesh { positions: points.iter().map(|&v| v as f32).collect(), ..Default::default() }
 }
 
+/// 極限の近づく点で曲線を切る。左右の枝はそれぞれの極限値に向かい、点での定義値とは結ばない。
+pub(crate) fn limit_curve(prog: &Program, report: &crate::limit::Report, dom: Domain, tol: f64) -> Mesh {
+    let (lo, hi) = (dom.lo[0], dom.hi[0]);
+    let center = report.target;
+    let ranges = if (lo..=hi).contains(&center) {
+        [(lo, center, report.left.value()), (center, hi, report.right.value())]
+    } else {
+        [(lo, hi, None), (hi, hi, None)]
+    };
+    let mut positions = Vec::new();
+    for (a, b, endpoint) in ranges {
+        if a >= b {
+            continue;
+        }
+        let eval = |xs: &[f64]| {
+            let mut out = vec![C::default(); xs.len()];
+            prog.eval_batch(&[xs], &mut out);
+            xs.iter().zip(out).flat_map(|(&x, v)| {
+                let y = if x == center { endpoint.unwrap_or(f64::NAN) } else { as_real(v) };
+                if y.is_finite() { [x, y, 0.0] } else { [f64::NAN; 3] }
+            }).collect()
+        };
+        if !positions.is_empty() {
+            positions.extend([f32::NAN; 3]);
+        }
+        positions.extend(curve_nd(&eval, 3, (a, b), 200, tol).into_iter().map(|v| v as f32));
+    }
+    Mesh { positions, ..Default::default() }
+}
+
+pub(crate) fn sampled_limit_curve(points: &[[f64; 2]], report: &crate::limit::Report) -> Mesh {
+    let mut positions = Vec::new();
+    let mut left = points.first().is_some_and(|p| p[0] < report.target);
+    let push = |positions: &mut Vec<f32>, x: f64, y: Option<f64>| {
+        positions.extend(match y.filter(|y| y.is_finite()) {
+            Some(y) => [x as f32, y as f32, 0.0],
+            None => [f32::NAN; 3],
+        });
+    };
+    for &[x, y] in points {
+        if left && x >= report.target {
+            push(&mut positions, report.target, report.left.value());
+            positions.extend([f32::NAN; 3]);
+            push(&mut positions, report.target, report.right.value());
+            left = false;
+        }
+        if x != report.target {
+            push(&mut positions, x, Some(y));
+        }
+    }
+    Mesh { positions, ..Default::default() }
+}
+
 /// 2D 表示の陰関数の曲線 F(x, y, 0) = 0。`prog` の変数は表示中の3つの座標（縦の座標は 0）。
 /// 格子の各マスで、辺の上の F = 0 の点を結ぶ（マーチング・スクエア法）。
 /// 線分ごとに (p, q, NaN) と並べる（NaN で線を切る）

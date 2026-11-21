@@ -6,15 +6,18 @@
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
+  import LimitLesson from './LimitLesson.svelte'
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
+  import SequenceTable from './SequenceTable.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
   import { prettyCoordName } from './coords'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type LimitBehavior, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
   import { gpuByDefault } from './renderMode'
 
   interface Props {
     item: PlotItem
+    onToggleSequenceTable: () => void
     index: number
     /** 表示範囲（格子線の間隔の選択肢を決めるのに使う） */
     domain: Domain
@@ -78,6 +81,7 @@
     autoAngles?: { name: string; range: [string, string] }[]
     onAngleRange?: (name: string, side: 0 | 1, value: string) => void
     onToggle: () => void
+    onLimitSource: (visible: boolean) => void
     onToggleSettings: () => void
     onToggleVertical: () => void
     onRemove: () => void
@@ -135,6 +139,7 @@
   }
   let {
     item,
+    onToggleSequenceTable,
     index,
     domain,
     axisNames,
@@ -173,6 +178,7 @@
     autoAngles = [],
     onAngleRange,
     onToggle,
+    onLimitSource,
     onToggleSettings,
     onToggleVertical,
     onRemove,
@@ -215,6 +221,7 @@
 
   /** 未定義の文字を使っていてエラーになっているなら、その文字（スライダーを追加できる） */
   const missing = $derived(missingParam(item.error))
+  const hasSequenceTable = $derived(item.visible && !item.error && !item.param && !!item.def && /（数列の(?:点|軌道)/.test(item.kind ?? ''))
   /**
    * 積分の範囲の欄・積分の図にだけ出ている、未定義の文字（式そのものは、積分の図を出すと非表示になって計算し直さないことがある）。
    * 式のエラーで出しているときは出さない
@@ -453,6 +460,9 @@
 
   /** 積分の値を短く出す（有効 6 桁） */
   const formatValue = (v: number) => (Math.abs(v) < 1e-12 ? '0' : Number(v.toPrecision(6)).toString().replace('-', '−'))
+  const limitNumber = (v: number) => Number.isFinite(v)
+    ? Number(v.toPrecision(10)).toString().replaceAll('-', '−')
+    : v < 0 ? '−∞' : '+∞'
   /** 誤差（小さい数は指数表記） */
   const formatError = (v: number) => {
     const a = Math.abs(v)
@@ -563,6 +573,62 @@
       />
       {#if parts && !item.vertical}
         <button class="link" onclick={onToggleVertical}>縦に並べる</button>
+      {/if}
+    {/if}
+    {#if !item.error && item.limit}
+      {@const result = item.limit}
+      {@const variable = prettyName(result.variable)}
+      {@const target = limitNumber(result.target)}
+      {@const finite = Number.isFinite(result.target)}
+      {#snippet limitSide(behavior: LimitBehavior, side: number)}
+        <dt>
+          {finite ? (side > 0 ? '右極限' : '左極限') : result.sequence ? '数列の極限' : '極限'}
+          <span class="limit-formula">lim<sub>{variable} → {target}{finite ? (side > 0 ? '⁺' : '⁻') : ''}</sub>
+            {#if result.sequence}a<sub>{variable}</sub>{:else}f({variable}){/if}</span>
+        </dt>
+        <dd>
+          {#if behavior.kind === 'finite'}
+            <span>≈ {limitNumber(behavior.value)}</span>
+            <span class="limit-state">収束</span>
+          {:else if behavior.kind === 'infinite'}
+            {limitNumber(behavior.value)} に発散
+          {:else if behavior.kind === 'oscillating'}
+            振動
+          {:else}
+            判定できません
+          {/if}
+        </dd>
+      {/snippet}
+      <div class="limit-result" aria-label="極限の数値判定" aria-live="polite">
+        <dl>
+          {#if finite ? result.side >= 0 : result.target > 0}{@render limitSide(result.right, 1)}{/if}
+          {#if finite ? result.side <= 0 : result.target < 0}{@render limitSide(result.left, -1)}{/if}
+          {#if finite}
+            <dt>f({target})</dt>
+            <dd>{result.defined === undefined ? '未定義' : limitNumber(result.defined)}</dd>
+          {/if}
+        </dl>
+        {#if finite && result.side === 0 && result.value === undefined}
+          {#if 'value' in result.left && 'value' in result.right}
+            <p>極限なし（左右で値が異なります）</p>
+          {:else if result.left.kind === 'oscillating' || result.right.kind === 'oscillating'}
+            <p>極限なし（振動）</p>
+          {/if}
+        {/if}
+        <p class="hint">数値判定</p>
+      </div>
+      <div class="limit-legend">
+        {#if result.value !== undefined && Number.isFinite(Math.fround(result.value))}
+          <span><i class="limit-key" style:--key={item.color} aria-hidden="true"></i>極限値</span>
+        {/if}
+        <label>
+          <input type="checkbox" checked={!item.limitSourceHidden} onchange={(e) => onLimitSource(e.currentTarget.checked)} />
+          <i class="limit-key source-key" class:sequence-key={result.sequence} aria-hidden="true"></i>
+          {result.sequence ? '元の数列' : '元の関数'}
+        </label>
+      </div>
+      {#if result.samples.length > 0}
+        <LimitLesson {result} {variable} />
       {/if}
     {/if}
     <!-- 積分の範囲（∬_D の D）。式には名前だけを書き、範囲はここに書く。同じ名前は、どの式でも同じ範囲 -->
@@ -844,11 +910,17 @@
       <!-- 計算時間（〇〇 ms）は桁数が変わっても幅が変わらないようにする。
            そうしないと、1桁 ⇔ 2桁で改行の位置が変わり、下の行が上下にカクカク動く -->
       {@const m = /^(.*?)(\d+) ms(.*)$/s.exec(item.info)}
-      {#if m}
-        <p class="info">{m[1]}<span class="ms">{m[2]} ms</span>{m[3]}</p>
-      {:else}
-        <p class="info">{item.info}</p>
-      {/if}
+      <p class="info">
+        {#if m}{m[1]}<span class="ms">{m[2]} ms</span>{m[3]}{:else}{item.info}{/if}
+        {#if hasSequenceTable}
+          <button type="button" class="sequence-table-toggle" aria-expanded={!!item.showSequenceTable}
+            aria-label={item.showSequenceTable ? '項の表を閉じる' : '項の表を開く'} onclick={onToggleSequenceTable}>項の表</button>
+        {/if}
+      </p>
+    {/if}
+
+    {#if hasSequenceTable && item.showSequenceTable}
+      <SequenceTable values={item.sequenceTable} />
     {/if}
 
     {#if choosingFolder}
@@ -1390,6 +1462,19 @@
 </li>
 
 <style>
+  .sequence-table-toggle {
+    min-height: 28px;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: transparent;
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .sequence-table-toggle:hover { background: var(--hover); }
+
   .item {
     display: grid;
     grid-template-columns: 44px 1fr auto;
@@ -1850,6 +1935,47 @@
     min-width: 5.5em;
     font: 12px var(--mono);
     color: var(--muted);
+  }
+  .limit-result {
+    margin-top: 4px;
+    font-size: 12px;
+  }
+  .limit-legend, .limit-legend span, .limit-legend label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .limit-legend {
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 4px;
+    font-size: 12px;
+  }
+  .limit-legend input { margin: 0; }
+  .limit-key { width: 16px; border-top: 2px solid var(--key, currentColor); }
+  .source-key { border-top-style: dashed; }
+  .sequence-key { border-top-style: dotted; }
+  .limit-result dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 3px 8px;
+    margin: 0;
+  }
+  .limit-result dd,
+  .limit-result p {
+    margin: 0;
+  }
+  .limit-result dd {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 6px;
+  }
+  .limit-state {
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .limit-formula {
+    font-family: var(--mono);
   }
   .hint {
     margin: 0;

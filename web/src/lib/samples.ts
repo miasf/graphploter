@@ -16,6 +16,8 @@ export interface Sample {
   /** 必要な次元（足りなければ自動で増やす） */
   dims?: number
   items: SampleItem[]
+  /** 初項や係数をすぐ操作できるよう、追加したフォルダを開いておく。 */
+  openFolder?: boolean
   /** 式を追加するだけでなく、次元・回転・表示範囲も設定する例（今ある式は非表示にする） */
   view?: SampleView
   /** 追加したら、このパラメータを再生する（値を自動で動かす） */
@@ -43,6 +45,8 @@ export interface SampleView {
   perspective?: number
   /** 表示範囲（−half 〜 half） */
   half: number
+  /** 横・縦に別の表示範囲が必要な例の端（x 最小・最大、y 最小・最大） */
+  xy?: [number, number, number, number]
   /** 再生する回転（座標の組の番号） */
   play?: number
 }
@@ -349,14 +353,222 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     ],
   },
   {
+    title: '極限',
+    samples: [
+      { label: 'ε–δ　2x の極限', flat: true, items: [{ latex: '\\lim_{x\\to1}2x' }] },
+      { label: 'ε–N　1/n の極限', flat: true, items: [{ latex: 'a_n=\\frac{1}{n}' }, { latex: '\\lim_{n\\to\\infty}a_n' }] },
+      { label: 'ε–N　交互に振動する数列', flat: true, items: [{ latex: '\\lim_{n\\to\\infty}(-1)^n' }] },
+      { label: '積分の上端を無限遠に動かす', flat: true, items: [{ latex: '\\lim_{x\\to\\infty}\\int_0^x e^{-t}\\,dt' }] },
+      { label: 'ずらした導関数の極限', flat: true, items: [
+        { latex: 'a=2', param: 'a' }, { latex: 'f(x)=x^3' }, { latex: '\\lim_{x\\to0}f\\prime(x+a)' },
+      ] },
+    ],
+  },
+  {
     title: '数列',
     samples: [
       {
-        label: '収束する数列 aₙ₊₁ = aₙ/2 + 1（a₁ を動かす）',
+        label: '複素数列の軌道（初期値を複素平面で動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 3 },
+        items: [
+          { latex: 'Z_0=2+i', param: 'Z0', options: { slider: { min: -3, max: 3, complex: true, stack: false } } },
+          { latex: 'P=28', param: 'P', options: { slider: { min: 0, max: 64, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: 'Z_{n+1}=(0.86+0.36i)Z_n', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(Z_0,P\\right)', options: { color: '#2d70b3', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '数直線上のステップ移動（倍率 k、歩幅 b、反復数 M）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 5, xy: [-5, 5, -2, 2] },
+        items: [
+          { latex: 'm_0=2', param: 'm0' },
+          { latex: 'k=-0.7', param: 'k', options: { slider: { min: -1, max: 1, step: 0.1, complex: false, stack: false } } },
+          { latex: 'b=0', param: 'b', options: { slider: { min: -1, max: 1, step: 0.1, complex: false, stack: false } } },
+          { latex: 'M=5', param: 'M', options: { slider: { min: 0, max: 24, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: 'm_{n+1}=km_n+b', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(m_0,M\\right)', options: { color: '#2d70b3', lineWidth: 4 } },
+        ],
+      },
+      {
+        label: '連立漸化式の軌道（初期値と反復回数を動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 4 },
+        items: [
+          { latex: 'p_0=3', param: 'p0', options: { slider: { min: -3, max: 3, complex: false, stack: false } } },
+          { latex: 'q_0=0', param: 'q0', options: { slider: { min: -3, max: 3, complex: false, stack: false } } },
+          { latex: 'N=24', param: 'N', options: { slider: { min: 0, max: 64, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: 'p_{n+1}=0.88p_n-0.42q_n', options: { visible: false } },
+          { latex: 'q_{n+1}=0.42p_n+0.88q_n', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(p_0,q_0,N\\right)', options: { color: '#2d70b3', lineWidth: 4 } },
+        ],
+      },
+      {
+        label: '階段図で固定点を調べる（q を −1 にすると？）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 4 },
+        items: [
+          { latex: 'j_1=2', param: 'j1' },
+          { latex: 'q=-0.5', param: 'q', options: { slider: { min: -1.2, max: 1.2, step: 0.05, complex: false, stack: false } } },
+          { latex: 'h(x)=1+q(x-1)', options: { color: '#2d70b3' } },
+          { latex: 'y=x', options: { color: '#888888' } },
+          { latex: 'j_{n+1}=h(j_n)', options: { visible: false } },
+          { latex: 'J=12', param: 'J', options: { slider: { min: 1, max: 32, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: '\\operatorname{cobweb}\\left(j_1,J\\right)', options: { color: '#c74440', lineWidth: 4 } },
+        ],
+      },
+      {
+        label: '3項間漸化式（隣接 2 項の軌道）',
+        flat: true,
+        view: { dims: 3, half: 2.5 },
+        items: [
+          { latex: 'D_0=2', param: 'D0' },
+          { latex: 'D_1=1', param: 'D1' },
+          { latex: 'D_{n+2}=0.7D_{n+1}-0.81D_n', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(D_1,D_0,32\\right)', options: { color: '#388c46', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '行列を反復する軌道（固有ベクトルと比較）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 4 },
+        items: [
+          { latex: 'Y=\\begin{pmatrix}1.04&0.18\\\\0.18&0.84\\end{pmatrix}', options: { color: '#888888', opacity: 0.3 } },
+          { latex: '\\operatorname{eig}\\left(Y\\right)', options: { color: '#888888', opacity: 0.5 } },
+          { latex: '\\operatorname{orbit}\\left(Y,\\left(1,-1\\right),20\\right)', options: { color: '#2d70b3', lineWidth: 3 } },
+          { latex: '\\operatorname{orbit}\\left(Y,\\left(0.6,0.6\\right),10\\right)', options: { color: '#c74440', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '4項間漸化式（隣接 3 項の軌道と固有値）',
+        flat: false,
+        view: { dims: 3, half: 2.5 },
+        items: [
+          { latex: 'H_0=2', param: 'H0' },
+          { latex: 'H_1=1', param: 'H1' },
+          { latex: 'H_2=-0.5', param: 'H2' },
+          { latex: 'H_{n+3}=0.5H_{n+2}-0.64H_{n+1}+0.32H_n', options: { visible: false } },
+          { latex: '\\operatorname{eig}\\left(\\begin{pmatrix}0.5&-0.64&0.32\\\\1&0&0\\\\0&1&0\\end{pmatrix}\\right)', options: { color: '#888888', opacity: 0.55 } },
+          { latex: '\\operatorname{orbit}\\left(H_2,H_1,H_0,27\\right)', options: { color: '#6042a6', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '3元連立漸化式（安定な平面と不安定な軸）',
+        flat: false,
+        view: { dims: 3, half: 2.7 },
+        items: [
+          { latex: 'S_0=1', param: 'S0' },
+          { latex: 'T_0=1', param: 'T0' },
+          { latex: 'U_0=0.06', param: 'U0' },
+          { latex: 'S_{n+1}=0.88S_n-0.4T_n', options: { visible: false } },
+          { latex: 'T_{n+1}=0.4S_n+0.88T_n', options: { visible: false } },
+          { latex: 'U_{n+1}=1.16U_n', options: { visible: false } },
+          { latex: 'z=0', options: { color: '#388c46', opacity: 0.15 } },
+          { latex: '\\left(0,0,t\\right)', options: { color: '#c74440', opacity: 0.45, ranges: { t: ['-2.7', '2.7'] } } },
+          { latex: '\\operatorname{orbit}\\left(S_0,T_0,24\\right)', options: { color: '#388c46', lineWidth: 3 } },
+          { latex: '\\operatorname{orbit}\\left(S_0,T_0,U_0,24\\right)', options: { color: '#c74440', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '線形漸化式のリカレンスネットワーク（倍率と近接距離を動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 12, xy: [-1, 21, -3, 6] },
+        items: [
+          { latex: 'L_0=2', param: 'L0' },
+          { latex: 'K=-0.86', param: 'K', options: { slider: { min: -1, max: 1, step: 0.02, complex: false, stack: false } } },
+          { latex: '\\varepsilon=0.22', param: 'varepsilon', options: { slider: { min: 0, max: 1, step: 0.01, complex: false, stack: false } } },
+          { latex: 'L_{n+1}=KL_n+0.1', options: { visible: false } },
+          { latex: '\\operatorname{recurrence}\\left(L_0,20,\\varepsilon\\right)', options: { color: '#6042a6', lineWidth: 1.5 } },
+        ],
+      },
+      {
+        label: 'ロジスティック写像の分岐図（周期倍化・周期窓・カオス）',
+        flat: true,
+        view: { dims: 3, half: 1, xy: [2.44, 4.06, -0.03, 1.03] },
+        items: [
+          { latex: 'F(x,r)=rx(1-x)', options: { visible: false } },
+          { latex: '\\operatorname{bifurcation}\\left(F,0.2,2.5,4\\right)', options: { color: '#2d70b3', lineWidth: 1 } },
+        ],
+      },
+      {
+        label: 'ロジスティック写像のリカレンスネットワーク（R を動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 14, xy: [83, 110, -1, 5] },
+        items: [
+          { latex: 'Q_0=0.2', param: 'Q0' },
+          { latex: 'R=3.5', param: 'R', options: { slider: { min: 2.8, max: 4, step: 0.005, complex: false, stack: false } } },
+          { latex: 'Q_{n+1}=RQ_n(1-Q_n)', options: { visible: false } },
+          { latex: '\\operatorname{recurrence}\\left(Q_{84},24,0.03\\right)', options: { color: '#2d70b3', lineWidth: 1.5 } },
+        ],
+      },
+      {
+        label: 'グモースキー・ミラ写像（軌道の点群）',
+        flat: true,
+        view: { dims: 3, half: 31 },
+        items: [
+          { latex: 'V_0=0.1', param: 'V0' },
+          { latex: 'W_0=0.1', param: 'W0' },
+          { latex: 'G(x)=-0.8x+\\frac{3.6x^2}{1+x^2}', options: { visible: false } },
+          { latex: 'V_{n+1}=0.999W_n+G(V_n)', options: { visible: false } },
+          { latex: 'W_{n+1}=G(V_{n+1})-V_n', options: { visible: false } },
+          { latex: '\\operatorname{orbitpoints}\\left(V_0,W_0,8000\\right)', options: { color: '#6042a6', lineWidth: 1 } },
+        ],
+      },
+      {
+        label: 'ホパロン・アトラクタ（軌道の点群）',
+        flat: true,
+        view: { dims: 3, half: 1.35 },
+        items: [
+          { latex: 'B_0=0', param: 'B0' },
+          { latex: 'C_0=0', param: 'C0' },
+          { latex: 'B_{n+1}=C_n-\\operatorname{sign}\\left(B_n\\right)\\sqrt{\\left|B_n\\right|}', options: { visible: false } },
+          { latex: 'C_{n+1}=0.4-B_n', options: { visible: false } },
+          { latex: '\\operatorname{orbitpoints}\\left(B_0,C_0,8000\\right)', options: { color: '#c74440', lineWidth: 1 } },
+        ],
+      },
+      {
+        label: 'コラッツ数列（初項を変えて 1 に着くまでを比べる）',
+        flat: true,
+        view: { dims: 3, half: 24 },
+        items: [
+          { latex: 'c_1=6', param: 'c1', options: { slider: { min: 1, max: 20, stepExpr: '1', step: 1, complex: false, stack: false } } },
+          { latex: 'c_{n+1}=\\begin{cases}c_n/2&\\operatorname{mod}\\left(c_n,2\\right)=0\\\\3c_n+1&\\text{otherwise}\\end{cases}', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: '偶数項と奇数項を別々に定義する（a₁ を動かす）',
+        flat: true,
+        view: { dims: 3, half: 12 },
+        items: [
+          { latex: 'a_0=0', param: 'a0' },
+          { latex: 'a_1=1', param: 'a1' },
+          { latex: 'a_{2n}=a_n+a_1', options: { color: '#2d70b3', lineWidth: 6 } },
+          { latex: 'a_{2n+1}=a_n^2+a_1', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: 'a₁ を変えると、どちら側から 2 に近づく？',
         view: { dims: 3, half: 12 },
         items: [
           { latex: 'a_1=8', param: 'a1', options: { slider: { min: -10, max: 10, complex: false, stack: false } } },
           { latex: 'a_{n+1}=\\frac{a_n}{2}+1', options: { color: '#c74440', lineWidth: 6 } },
+        ],
+      },
+      {
+        label: '1/n と 1/n² の部分和はどう違う？',
+        flat: true,
+        view: { dims: 3, half: 30 },
+        items: [
+          { latex: 's_n=\\sum_{k=1}^n\\frac{1}{k}', options: { color: '#2d70b3', lineWidth: 5 } },
+          { latex: 'p_n=\\sum_{k=1}^n\\frac{1}{k^2}', options: { color: '#c74440', lineWidth: 5 } },
         ],
       },
       {

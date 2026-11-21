@@ -16,6 +16,7 @@ import init, {
   coord_grid,
   definitions,
   last_poi,
+  take_sequence_table,
   last_used_params,
   plot,
   take_field_values,
@@ -25,11 +26,32 @@ import init, {
 } from '../wasm-core/graph_core.js'
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
-import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_THOROUGH } from './types'
+import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, LimitBehavior, LimitResult, PlotRequest, PlotResponse, PlotTiming } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
+
+function limitResult(result: MeshResult): LimitResult | undefined {
+  const variable = result.limit_variable()
+  if (!variable) return undefined
+  const [target, side, ls, lv, rs, rv, defined, value] = result.limit_values()
+  const behavior = (status: number, value: number): LimitBehavior => {
+    switch (status) {
+      case 1: return { kind: 'finite', value }
+      case 2: return { kind: 'infinite', value }
+      case 3: return { kind: 'oscillating' }
+      default: return { kind: 'unknown' }
+    }
+  }
+  return {
+    variable, target, side, left: behavior(ls, lv), right: behavior(rs, rv),
+    defined: Number.isNaN(defined) ? undefined : defined,
+    value: Number.isNaN(value) ? undefined : value,
+    sequence: result.limit_sequence(),
+    samples: result.take_limit_samples(),
+  }
+}
 
 /**
  * 範囲の文字列（"2pi" や、パラメータを使った "b" など）を数値にする。誤りがあれば説明付きで投げる。
@@ -392,6 +414,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     }
     let r: MeshResult | null = null
     let poi: Float64Array | undefined
+    let sequenceTable: Float64Array | undefined
     /** メッシュの配列を取り出す結果（回す前の形のメッシュを返すときは、r とは別） */
     let geom: MeshResult | null = null
     let localTransform: Float64Array | null = null
@@ -457,6 +480,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       r = callPlot()
       // 注目する点（陽関数の極値・零点。頼んだときだけ。plot のすぐ後に読む）
       poi = last_poi()
+      if (req.flags & PLOT_SEQUENCE_TABLE) sequenceTable = take_sequence_table()
       lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null, ode: r.ode_states.split(',').filter((s) => s !== '') })
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
@@ -521,6 +545,12 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const outlineDashed = r.take_outline_dashed()
     const outlineValues = r.take_outline_values()
     const holes = r.take_holes()
+    const limit = limitResult(r)
+    const limitPoint = limit ? r.take_limit_point() : undefined
+    const limitSource = limit ? r.take_limit_source() : undefined
+    const limitSourceTarget = limit ? r.take_limit_source_target() : undefined
+    const limitHolesTarget = limit ? r.take_limit_holes_target() : undefined
+    const limitPointTarget = limit ? r.take_limit_point_target() : undefined
     const vivid = r.vivid
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
@@ -559,7 +589,13 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(outline.length > 0 ? { outline } : {}),
       ...(outlineDashed.length > 0 ? { outlineDashed } : {}),
       ...(outlineValues.length > 0 ? { outlineValues } : {}),
+      ...(r.vector_arrows ? { vectorArrows: true } : {}),
       ...(holes.length > 0 ? { holes } : {}),
+      ...(limitPoint?.length ? { limitPoint } : {}),
+      ...(limitSource?.length ? { limitSource } : {}),
+      ...(limitSourceTarget?.length ? { limitSourceTarget } : {}),
+      ...(limitHolesTarget?.length ? { limitHolesTarget } : {}),
+      ...(limitPointTarget?.length ? { limitPointTarget } : {}),
       ...(vivid ? { vivid } : {}),
       ...(target.length > 0 ? { target } : {}),
       ...(outlineTarget.length > 0 ? { outlineTarget } : {}),
@@ -607,7 +643,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     geom?.free()
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
-    res = { requestId, ok: true, mesh, kind, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, odeStates: defs.ode, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
+    res = { requestId, ok: true, mesh, kind, limit, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, odeStates: defs.ode, sequenceTable, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     field_mode_reset()
     forget(itemId)
@@ -623,11 +659,18 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         res.mesh.lodIndices.buffer,
         res.mesh.gridCoords.buffer,
         res.mesh.complexValues.buffer,
+        ...(res.sequenceTable ? [res.sequenceTable.buffer as ArrayBuffer] : []),
+        ...(res.limit?.samples.length ? [res.limit.samples.buffer as ArrayBuffer] : []),
         ...(res.mesh.volume ? [res.mesh.volume.values.buffer] : []),
         ...(res.mesh.outline ? [res.mesh.outline.buffer] : []),
         ...(res.mesh.outlineDashed ? [res.mesh.outlineDashed.buffer] : []),
         ...(res.mesh.outlineValues ? [res.mesh.outlineValues.buffer] : []),
         ...(res.mesh.holes ? [res.mesh.holes.buffer] : []),
+        ...(res.mesh.limitPoint ? [res.mesh.limitPoint.buffer] : []),
+        ...(res.mesh.limitSource ? [res.mesh.limitSource.buffer] : []),
+        ...(res.mesh.limitSourceTarget ? [res.mesh.limitSourceTarget.buffer] : []),
+        ...(res.mesh.limitHolesTarget ? [res.mesh.limitHolesTarget.buffer] : []),
+        ...(res.mesh.limitPointTarget ? [res.mesh.limitPointTarget.buffer] : []),
         ...(res.mesh.target ? [res.mesh.target.buffer] : []),
         ...(res.mesh.outlineTarget ? [res.mesh.outlineTarget.buffer] : []),
         ...(res.mesh.outlineDashedTarget ? [res.mesh.outlineDashedTarget.buffer] : []),

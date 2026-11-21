@@ -86,6 +86,86 @@ export function latexName(name: string): string {
   return name.replace(/^([a-zA-Z])(\d+)$/, '$1_{$2}')
 }
 
+/** 計算エンジン用の式から、数列の定義の名前を取り出す。左辺の項にはべきが付くこともある。 */
+export function sequenceDefinitionName(source: string): string | null {
+  const relation = /[=<>]/.exec(source)
+  if (relation?.[0] !== '=') return null
+  return sequenceHeadName(source.slice(0, relation.index).trim())
+}
+
+function sequenceHeadName(lhs: string): string | null {
+  const closingParen = (text: string, open: number): number => {
+    let depth = 0
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === '(') depth++
+      if (text[i] === ')' && --depth === 0) return i
+    }
+    return -1
+  }
+  while (lhs) {
+    lhs = lhs.replace(/\s*\^\s*(?:\(\s*\d+(?:\.0*)?\s*\)|\d+(?:\.0*)?)$/, '').trimEnd()
+    const log = /^(?:ln|log)\s+/.exec(lhs)
+    if (log && lhs[log[0].length] !== '(') {
+      lhs = lhs.slice(log[0].length)
+      continue
+    }
+    const group = /^(?:(?:ln|log)\s*)?\(/.exec(lhs)
+    if (group && closingParen(lhs, group[0].length - 1) === lhs.length - 1) {
+      lhs = lhs.slice(group[0].length, -1).trim()
+      continue
+    }
+    // Look only at operators outside the parentheses of an index or power.
+    const factors: string[] = []
+    let start = 0
+    for (let i = 0; i < lhs.length; i++) {
+      if ((lhs[i] === '+' || lhs[i] === '-') && /[\w)]\s*$/.test(lhs.slice(0, i))) return null
+      if (lhs[i] === '*' || lhs[i] === '/') {
+        factors.push(lhs.slice(start, i).trim())
+        start = i + 1
+      } else if (lhs[i] === '(') {
+        const end = closingParen(lhs, i)
+        if (end < 0) return null
+        const prefix = lhs.slice(start, i).trim()
+        if (/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(prefix)) {
+          factors.push(prefix)
+          start = i
+        }
+        if (/^\s*[(\w{]/.test(lhs.slice(end + 1))) {
+          factors.push(lhs.slice(start, end + 1).trim())
+          start = end + 1
+        }
+        i = end
+      }
+    }
+    // A trailing division keeps the sequence head in its numerator.
+    if (lhs[start - 1] === '/') return sequenceHeadName(lhs.slice(0, start - 1).trim())
+    if (factors.length) {
+      factors.push(lhs.slice(start).trim())
+      let name: string | null = null
+      for (const factor of factors) {
+        if (/^(?:\d+(?:\.\d*)?|\.\d+|[A-Za-z](?:_?(?:\d+|\(\d+\)))?|\{\w+\})$/.test(factor)) continue
+        const head = sequenceHeadName(factor)
+        if (!head || (name && name !== head)) return null
+        name = head
+      }
+      return name
+    }
+    const head = /^([A-Za-z]|\{\w+\})_\(/.exec(lhs)
+    if (!head || closingParen(lhs, head[0].length - 1) !== lhs.length - 1) return null
+    const index = lhs.slice(head[0].length, -1)
+    return /[A-Za-z]/.test(index) ? head[1].replace(/^\{|\}$/g, '') : null
+  }
+  return null
+}
+
+/** 添字なしで入力された初項を、同じ名前の数列がある場合に限り a_{1} の形にそろえる。 */
+export function sequenceInitialLatex(latex: string, hasSequence: (name: string) => boolean): string {
+  return latex.replace(/^(\s*)([A-Za-z])(\d+)(?=\s*=)/, (original, space: string, name: string, index: string) => {
+    const param = name + index
+    return !isReserved(param) && hasSequence(name) ? space + latexName(param) : original
+  })
+}
+
 /** 範囲 range をおよそ n 個に区切る「きりの良い」刻み（1, 2, 5 × 10^k） */
 export function niceStep(range: number, n: number): number {
   const raw = range / n

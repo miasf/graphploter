@@ -87,6 +87,26 @@ pub fn antiderivative(e: &Expr, var: &str) -> Option<Expr> {
     }
 }
 
+/// 区間の途中に極や実数の定義域の端を作らない形だけ、不定積分の差で定積分を計算する。
+pub(crate) fn regular_antiderivative(e: &Expr, var: &str) -> Option<Expr> {
+    fn regular(e: &Expr, var: &str) -> bool {
+        if !e.uses_var(var) { return true; }
+        match e {
+            Expr::Var(_) => true,
+            Expr::Neg(a) => regular(a, var),
+            Expr::Bin(BinOp::Add | BinOp::Sub | BinOp::Mul, a, b) => regular(a, var) && regular(b, var),
+            Expr::Bin(BinOp::Div, a, b) => !b.uses_var(var) && regular(a, var),
+            Expr::Bin(BinOp::Pow, a, b) => {
+                (as_num(b).is_some_and(|p| p >= 0.0 && p.fract() == 0.0) && regular(a, var))
+                    || (matches!(&**a, Expr::Const(crate::parser::Constant::E)) && regular(b, var))
+            }
+            Expr::Call(Func::Sin | Func::Cos | Func::Exp | Func::Sinh | Func::Cosh, args) => args.iter().all(|a| regular(a, var)),
+            _ => false,
+        }
+    }
+    if regular(e, var) { antiderivative(e, var) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

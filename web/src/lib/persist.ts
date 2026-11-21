@@ -10,6 +10,7 @@ export interface SavedItem {
   latex: string
   color: string
   visible: boolean
+  limitSourceHidden?: boolean
   opacity: number
   grid: GridStyle
   lineWidth: number

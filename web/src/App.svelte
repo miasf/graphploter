@@ -12,7 +12,7 @@
     UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
   } from './lib/library'
   import GraphsDialog from './lib/GraphsDialog.svelte'
-  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sliderStep, snapToStep } from './lib/params'
+  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
   import { keyboardOcclusion, setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -40,7 +40,7 @@
     Space,
     RenderMode,
   } from './lib/types'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_THOROUGH } from './lib/types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './lib/types'
   import { Viewer, type PickResult } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
@@ -396,6 +396,7 @@
       latex: it.latex,
       color: it.color,
       visible: it.visible,
+      limitSourceHidden: it.limitSourceHidden || undefined,
       opacity: it.opacity,
       grid: it.grid,
       lineWidth: it.lineWidth,
@@ -779,12 +780,17 @@
     // 非表示の式は計算しない（表示したときに計算する）。パラメータの行は、ほかの式が使うので計算する
     if (!item.visible && !item.param) {
       item.stale = true
+      item.sequenceTable = undefined
+      const previous = sourceDefinitionName(lastDefSource.get(item.id) ?? '')
       // 計算はしないが、式の書き方の誤りだけは今の式で調べ直す（範囲の欄を直したのに、前の誤りが残って見えないように）。
       // 計算の誤りは分からないので、表示したときに計算し直すまで出さない
       try {
-        latexToText(item.latex)
+        const source = latexToText(item.latex)
+        const definition = sourceDefinitionName(source)
+        if (definition || previous) noteDefinition(item, definition, source)
         item.error = undefined
       } catch (e) {
+        if (previous) noteDefinition(item, null, '')
         item.error = e instanceof Error ? e.message : String(e)
       }
       return
@@ -822,16 +828,15 @@
   /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
   const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
 
-  /** 計算エンジン用の式の、数列の定義 `a_(n) = …`・`a_(n+1) = …`（計画 M10） */
-  const SEQ_DEF_HEAD = /^\s*([A-Za-z])_\(\s*[A-Za-z]\w*\s*([+-]\s*\d+\s*)?\)\s*=/
+  function sourceDefinitionName(source: string): string | null {
+    return (source.match(DEF_HEAD) ?? source.match(SET_DEF_HEAD))?.[1] ?? sequenceDefinitionName(source)
+  }
 
   /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
   function defNameOf(it: PlotItem): string | null {
     if (it.def) return it.def
     try {
-      const text = latexToText(it.latex)
-      const m = text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD) ?? text.match(SEQ_DEF_HEAD)
-      return m ? m[1] : null
+      return sourceDefinitionName(latexToText(it.latex))
     } catch {
       return null
     }
@@ -965,7 +970,7 @@
 
   /** 「a のスライダーを追加」（次元の設定の欄から）: 一覧の一番上に a = 1 の行を足す */
   function addSliderTop(name: string) {
-    items.unshift(newItem(`${name}=1`))
+    items.unshift(newItem(`${latexName(name)}=1`))
     schedule(items[0], 0)
   }
 
@@ -984,6 +989,7 @@
     if (item.condition) {
       viewer.removePlot(item.id)
       item.error = undefined
+      item.limit = undefined
       refreshConditions()
       return
     }
@@ -1013,8 +1019,17 @@
     let ranges: ParamRanges
     let spaceRanges: Space['ranges']
     let coord: ReturnType<typeof coordRequest>
+    const inputLatex = item.latex
+    const initialLatex = sequenceInitialLatex(inputLatex, (name) => items.some((other) => {
+      if (other === item) return false
+      try {
+        return sequenceDefinitionName(latexToText(other.latex)) === name
+      } catch {
+        return false
+      }
+    }))
     try {
-      source = latexToText(item.latex)
+      source = latexToText(initialLatex)
       ranges = Object.fromEntries(
         Object.entries(item.ranges).map(([k, [a, b]]) => [k, [latexToText(a), latexToText(b)] as [string, string]]),
       )
@@ -1032,6 +1047,7 @@
     if (source === '') {
       viewer.removePlot(item.id)
       item.error = undefined
+      item.limit = undefined
       item.info = undefined
       item.usedParams = []
       dropParam(item)
@@ -1041,6 +1057,7 @@
 
     const rotationGroup = groupIdOf(item)
     const pose = rotationIn(rotationGroup)
+    const sequenceTableFlag = item.showSequenceTable ? PLOT_SEQUENCE_TABLE : 0
     const res = await requestPlot(
       item.id,
       source,
@@ -1057,7 +1074,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse || !pickValues ? 0 : PLOT_POI),
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse || !pickValues ? 0 : PLOT_POI) | sequenceTableFlag,
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
@@ -1071,17 +1088,21 @@
 
     if (!res.ok) {
       viewer.removePlot(item.id)
+      item.sequenceTable = undefined
+      item.limit = undefined
       // 「（8文字目）」のような位置は、変換後の式での位置なので入力欄とは合わない。表示しない
       item.error = res.error.replace(/（\d+文字目）/g, '')
       item.info = undefined
       dropParam(item)
       // 誤りのある定義の行も定義の行のまま（左辺の形で決める）。定義が消えた・変わったら、使う式を計算し直す
-      const head = source.match(DEF_HEAD)
-      noteDefinition(item, head ? head[1] : null, source)
+      noteDefinition(item, source.match(DEF_HEAD)?.[1] ?? sequenceDefinitionName(source), source)
       return
     }
 
     item.error = undefined
+    item.limit = item.latex === inputLatex ? res.limit : undefined
+    if (!res.defName || !/（数列の(?:点|軌道)/.test(res.kind)) item.showSequenceTable = false
+    if (item.showSequenceTable && item.latex === inputLatex) item.sequenceTable = res.sequenceTable
     item.usedParams = res.usedParams
     item.usedDefs = res.usedDefs
     item.odeStates = res.odeStates && res.odeStates.length > 0 ? res.odeStates : undefined
@@ -1112,6 +1133,7 @@
       for (const it of items.slice(k + 1)) if (it.param?.name === name) schedule(it, 0)
       const prev = item.param
       item.param = res.param
+      if (initialLatex !== inputLatex && item.latex === inputLatex) item.latex = initialLatex
       if (res.param.im !== 0) item.slider.complex = true
       // 値がスライダーの範囲の外なら、範囲を広げる（範囲の中なら、そのまま）
       const { re, im } = res.param
@@ -1161,24 +1183,27 @@
     if (!res.mesh.transformOnly) viewer.setPlot(item.id, res.mesh, item)
     else viewer.dropPixelLayers(item.id) // 回した後の式で描いている光線は、向きだけが変わったらメッシュに戻す（回す前の式なら、setPlotTransform で回す）
     viewer.setPlotTransform(item.id, res.mesh.transform)
-    if (!isAux(item) && trailGroups.includes(rotationGroup) && groupIdOf(item) === rotationGroup) {
-      viewer.recordRotationTrail(item.id, pose.rotation)
-    }
     viewer.setCap(item.id, res.cap, item)
+    if (!isAux(item) && trailGroups.includes(rotationGroup) && groupIdOf(item) === rotationGroup) {
+      viewer.recordRotationTrail(item.id, pose.rotation, pose.center)
+    }
     recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
     const plain = space.axes.every((a, k) => a === k) && space.rotation.every((a) => a === 0)
-    const size = /^複素平面の点/.test(res.kind) && plain
+    // 漸化式の図は種類の欄で反復数や点・辺の数を示す。描画用の補間点と区切りは数えない。
+    const size = /^@(cobweb|orbit|orbitpoints|recurrence|bifurcation)\s*\(/.test(source)
+      ? ''
+      : /^複素平面の点/.test(res.kind) && plain
       ? `(${complexPointText(res.mesh.positions)})`
       : /^複素平面の点/.test(res.kind)
       ? '点'
       : res.mesh.curve
-      ? `${(res.mesh.positions.length / 3).toLocaleString()} 個の点`
+      ? `${(res.mesh.positions.length / (res.kind.includes('（数列の点') ? 9 : 3)).toLocaleString()} 個の点`
       : `${(res.mesh.indices.length / 3).toLocaleString()} 個の三角形`
     // 回転だけを変えた（形はそのまま）なら、三角形の数は前の表示のまま
     if (res.mesh.transformOnly) {
       if (item.info) item.info = item.info.replace(/ · [\d.]+ ms/, ` · ${res.ms.toFixed(0)} ms`)
-    } else item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
+    } else item.info = [res.kind, size, `${res.ms.toFixed(0)} ms`].filter(Boolean).join(' · ')
     if (preview !== null) {
       // 2段階の表示: 粗い版を出したので、続けて細かく計算する（終わったら1回だけ差し替える）
       item.info += ' · 計算中'
@@ -1593,6 +1618,8 @@
     if (pickedId === item.id) clearPick()
     viewer?.clearRotationTrail(item.id)
     item.latex = latex
+    item.sequenceTable = undefined
+    item.limit = undefined
     // 初めて出てきた範囲の名前（∬_D の D）には、範囲の欄に雛形を入れておく
     for (const r of regionsUsed(latex)) {
       if (!(r.name in regions)) regions[r.name] = r.template
@@ -2627,9 +2654,9 @@
     if (enabled) {
       if (trailGroups.includes(gid)) return
       trailGroups = [...trailGroups, gid]
-      const angles = rotationIn(gid).rotation
+      const { rotation, center } = rotationIn(gid)
       for (const item of items) {
-        if (!isAux(item) && groupIdOf(item) === gid) viewer?.recordRotationTrail(item.id, angles)
+        if (!isAux(item) && groupIdOf(item) === gid) viewer?.recordRotationTrail(item.id, rotation, center)
       }
     } else {
       trailGroups = trailGroups.filter((id) => id !== gid)
@@ -2872,7 +2899,7 @@
     const defined = new Set(items.map((it) => it.param?.name ?? latexParamName(it.latex)))
     const adding = sample.items.filter((si) => !(si.param && defined.has(si.param))) // 同じ名前のパラメータがすでにあれば足さない
     // 式が3つ以上の例は、フォルダにまとめる（4つ以上なら折りたたんでおく）
-    const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4).id : undefined
+    const folder = adding.length >= 3 ? addFolder(sample.label.replace(/（.*$/, ''), adding.length >= 4 && !sample.openFolder).id : undefined
     // 座標系で描く例: 用意した座標系（式・範囲が初期値のまま）があれば使い回し、無ければ作る
     let coordSys: number | undefined
     if (sample.coord) {
@@ -2894,7 +2921,7 @@
       if (play) togglePlayMorph(coordSys)
       if (toFlat && !flat) setFlat(true)
     }
-    if (sample.flat && !flat) setFlat(true)
+    if (sample.flat !== undefined && sample.flat !== flat) setFlat(sample.flat)
     for (const si of adding) {
       // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
       pushItem(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))
@@ -2952,7 +2979,8 @@
     }
     // 図形が大きく見えるよう、表示範囲を合わせて視点もリセットする
     const h = view.half
-    domain = { xmin: -h, xmax: h, ymin: -h, ymax: h, zmin: -h, zmax: h }
+    const [xmin, xmax, ymin, ymax] = view.xy ?? [-h, h, -h, h]
+    domain = { xmin, xmax, ymin, ymax, zmin: -h, zmax: h }
     domainError = ''
     viewer?.setDomain(domain, true)
     updateSpaceRangeErrors()
@@ -3039,6 +3067,7 @@
     }
     domainError = ''
     viewer?.setDomain(domain)
+    viewer?.fitDomainIfNeeded()
     replotAll(300)
     // 積分の図の矢印の長さは表示範囲で決めるので、作り直す
     for (const it of items) if (!isAux(it) && integralItem(it)) updateIntegral(it, 300)
@@ -3140,6 +3169,11 @@
             {@const i = row.index}
           <ExpressionItem
             {item}
+            onToggleSequenceTable={() => {
+              item.showSequenceTable = !item.showSequenceTable
+              if (item.showSequenceTable) schedule(item, 0)
+              else item.sequenceTable = undefined
+            }}
             index={i}
             {domain}
             {axisNames}
@@ -3186,6 +3220,10 @@
               toggle(item)
             }}
             onToggleSettings={() => (item.showSettings = !item.showSettings)}
+            onLimitSource={(visible) => {
+              item.limitSourceHidden = !visible
+              viewer?.setStyle(item.id, item)
+            }}
           onToggleVertical={() => (item.vertical = !item.vertical)}
             onRemove={() => removeItem(item)}
             onDuplicate={() => duplicateItem(item)}

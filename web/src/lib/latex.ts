@@ -451,6 +451,21 @@ class Converter {
     return s
   }
 
+  private superscript(): string {
+    // 度: x^{\circ} → x·(π/180)
+    if (this.peek() === '\\circ' || (this.peek() === '{' && this.toks[this.i + 1] === '\\circ' && this.toks[this.i + 2] === '}')) {
+      this.i += this.peek() === '{' ? 3 : 1
+      return '*(pi/180)'
+    }
+    const exp = this.arg()
+    // 共役・補集合・転置・導関数の上付き記号
+    if (exp === '*' || exp === '∗') return '^(∗)'
+    if (exp === '∁') return 'ᶜ'
+    if (exp === '⊤' || exp === '⊺') return '^(T)'
+    const primes = exp.replace(/\s+/g, '')
+    return /^'+$/.test(primes) ? primes : `^(${exp})`
+  }
+
   private token(t: Token) {
     // ---- 1文字のもの ----
     if (t === '{') {
@@ -458,30 +473,13 @@ class Converter {
       return
     }
     if (t === '^') {
-      // 度: x^{\circ} → x·(π/180)
-      if (this.peek() === '\\circ' || (this.peek() === '{' && this.toks[this.i + 1] === '\\circ' && this.toks[this.i + 2] === '}')) {
-        this.i += this.peek() === '{' ? 3 : 1
-        this.out += '*(pi/180)'
-        return
+      const exp = this.superscript()
+      // MathLive の入力順にかかわらず、a^{2}_{n+1} は添字付きの項を 2 乗する。
+      if (this.peek() === '_') {
+        this.i++
+        this.token('_')
       }
-      const a = this.arg()
-      // 共役 z^{\ast}・z^{*}（行列なら成分ごと。計算エンジンの展開の段が決める）
-      if (a.trim() === '*' || a.trim() === '∗') {
-        this.out += '^(∗)'
-        return
-      }
-      // 補集合 A^{\complement}
-      if (a.trim() === '∁') {
-        this.out += 'ᶜ'
-        return
-      }
-      // 転置 A^{\top}・A^{\intercal} は A^T と同じ（底が行列かどうかは、計算エンジンの展開の段が決める）
-      if (a.trim() === '⊤' || a.trim() === '⊺') {
-        this.out += '^(T)'
-        return
-      }
-      // f^{\prime} は f'（導関数）
-      this.out += /^'+$/.test(a.replace(/\s+/g, '')) ? a.replace(/\s+/g, '') : '^(' + a + ')'
+      this.out += exp
       return
     }
     if (t === '_') {
@@ -662,7 +660,14 @@ class Converter {
       case 'lbrace':
         // \{ 点 \mid 条件 \}（\left の無い集合の括弧）
         if (this.setBuilder(null)) return
-        throw new LatexError('集合は \\{(x, y) \\mid 条件\\} の形で書いてください')
+        // 条件が無ければ、\left\{ と同じく有限集合または引数の括弧。
+        const finiteSet = /[∈∉]$/.test(this.out.trimEnd())
+        this.out += finiteSet ? '⦃' : '('
+        this.seq('\\}')
+        if (this.peek() !== '\\}') throw new LatexError('括弧が閉じていません')
+        this.i++
+        this.out += finiteSet ? '⦄' : ')'
+        return
       case 'mathbb': {
         const c = this.rawGroup(true)
         const sets: Record<string, string> = { R: 'ℝ', Z: 'ℤ', N: 'ℕ', C: 'ℂ', Q: 'ℚ' }
@@ -756,6 +761,10 @@ class Converter {
           this.out += ' @crit '
           return
         }
+        if (name === 'operatorname' && ['cobweb', 'orbit', 'orbitpoints', 'recurrence', 'bifurcation'].includes(s)) {
+          this.out += ` @${s} `
+          return
+        }
         // 行列の演算子の名前
         if (['tr', 'rank', 'det', 'ker', 'dim'].includes(s)) {
           this.out += ` @${s} `
@@ -767,6 +776,26 @@ class Converter {
           return
         }
         this.out += s === 'e' || s === 'i' ? s : ` ${s} `
+        return
+      }
+      case 'lim': {
+        const { sub, sup, k } = limitsAt(this.toks, this.i - 1)
+        const [head, domain, ...extra] = splitTop(sub ?? [], (t) => t === ',' || t === ';')
+        const parts = splitTop(head, (t) => t === '\\to' || t === '\\rightarrow' || t === '\\longrightarrow' || t === '→')
+        if (sup !== null || extra.length > 0 || parts.length !== 2) throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
+        const variable = new Converter(parts[0]).run()
+        const approach = new Converter(parts[1]).run()
+        const side = /\^\(\s*([+\-−])\s*\)$/.exec(approach)
+        const target = (side ? approach.slice(0, side.index) : approach).trim()
+        if (!/^(?:[A-Za-z][0-9]*|theta|phi|rho|sigma|tau|mu|nu|\{[A-Za-z]\w*\})$/.test(variable) || !target) {
+          throw new LatexError('lim の下に x → a の形で変数と近づく先を書いてください')
+        }
+        if (domain && new Converter(domain).run().replace(/\s/g, '') !== variable + '∈ℕ') {
+          throw new LatexError('数列の極限は n → ∞, n ∈ ℕ の形で書いてください')
+        }
+        this.i = k
+        const direction = side ? (side[1] === '+' ? ',1' : ',-1') : ''
+        this.out += ` @${domain ? 'seqlim' : 'lim'}(${variable},${target}${direction}) `
         return
       }
       case 'sum':
@@ -1037,20 +1066,17 @@ class Converter {
     const bars: number[] = []
     for (let k = this.i; k < this.toks.length; k++) {
       const t = this.toks[k]
-      if (t === '{') depth++
+      if (t === '{' || t === '\\{') depth++
       else if (t === '\\left') {
         depth++
         k++ // 括弧の形（\\left| の | など）は区切りに数えない
-      } else if (t === '}' || t === '\\right') {
-        if (depth === 0 && end === '\\right' && t === '\\right') {
+      } else if (t === '}' || t === '\\right' || t === '\\}') {
+        if (depth === 0 && (t === end || (end === null && t === '\\}'))) {
           close = k
           break
         }
         depth--
         if (t === '\\right') k++
-      } else if (depth === 0 && end === null && (t === '\\}' || t === '\\rbrace')) {
-        close = k
-        break
       } else if (depth === 0 && sep < 0 && (t === '\\mid' || t === ':' || t === '\\colon')) sep = k
       else if (depth === 0 && (t === '|' || t === '\\vert')) bars.push(k)
     }
@@ -1738,7 +1764,7 @@ export function hasIntegral(latex: string): boolean {
 /** トークンを LaTeX に戻す（コマンドの後に空白を入れる） */
 const joinToks = (ts: Token[]) => ts.map((t) => (/^\\[A-Za-z]+$/.test(t) ? `${t} ` : t)).join('')
 
-/** 同じ深さの区切り sep で分ける（括弧・{ }・\left \right の中では分けない） */
+/** 括弧の外にある区切り sep で分ける */
 function splitTop(toks: Token[], sep: (t: Token) => boolean): Token[][] {
   const out: Token[][] = [[]]
   let depth = 0
@@ -1750,8 +1776,8 @@ function splitTop(toks: Token[], sep: (t: Token) => boolean): Token[][] {
       if (k + 1 < toks.length) out[out.length - 1].push(toks[++k]) // 括弧そのものは深さに数えない
       continue
     }
-    if (t === '{' || t === '(' || t === '[') depth++
-    else if (t === '}' || t === ')' || t === ']') depth--
+    if (t === '{' || t === '(' || t === '[' || t === '\\{') depth++
+    else if (t === '}' || t === ')' || t === ']' || t === '\\}') depth--
     if (depth === 0 && sep(t)) out.push([])
     else out[out.length - 1].push(t)
   }

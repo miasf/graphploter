@@ -7,27 +7,17 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
+import { axisTicks, axisTickText } from './axisTicks'
 import { mixPositions, vertexNormals, weldGroups, weldNormals } from './coords'
 import { MotionQuality, pickLod, type MotionMode, type Stage } from './motionQuality'
+import { SurfaceTransparency } from './SurfaceTransparency'
+import { RotationSurfaceTrail, regionTrailTriangles } from './RotationSurfaceTrail'
 import { gpu2dMaterial, gpu2dMesh, setGpu2dUniforms, type Gpu2dUniforms } from './gpu2dMaterial'
 import { wantGpu } from './renderMode'
 import { applyShownRotation, createRaycastMaterial, createRaycastUniforms, RAY_MOVING, RAY_STILL, raycastMesh, setRayAffine, type RaycastUniforms } from './raycastMaterial'
 import { COLORMAP_INDEX, colormapColor, valueT, logRange, createGridUniforms, createSurfaceMaterial, type GridUniforms } from './surfaceMaterial'
 import { applyVolumeStyle, createVolumeMaterial, createVolumeUniforms, regionBounds, volumeTexture, type VolumeUniforms } from './volumeMaterial'
 import type { CapData, CutRequest, Domain, MeshData, ParamSpan, PlotStyle } from './types'
-
-/** 範囲 range をおよそ target 個に区切る「きりの良い」間隔（1, 2, 5 × 10^n） */
-function niceStep(range: number, target = 8): number {
-  const raw = range / target
-  const mag = 10 ** Math.floor(Math.log10(raw))
-  const norm = raw / mag
-  return (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag
-}
-
-/** 目盛りの数字を見やすく整形（0.30000000000000004 → 0.3） */
-function fmt(v: number): string {
-  return String(Number(v.toPrecision(10)))
-}
 
 /**
  * 目盛りの数字・軸の名前の文字。文字を描いた小さな画像（スプライト）として WebGL で描く。
@@ -36,8 +26,13 @@ function fmt(v: number): string {
  */
 interface TextLabel {
   sprite: THREE.Sprite
+  anchor: THREE.Vector3
   w: number
   h: number
+  priority: number
+  nudgeX: number
+  x: number
+  y: number
 }
 
 function makeLabel(text: string, font: string, color: string, pos: THREE.Vector3): TextLabel {
@@ -62,7 +57,7 @@ function makeLabel(text: string, font: string, color: string, pos: THREE.Vector3
   const sprite = new THREE.Sprite(mat)
   sprite.position.copy(pos)
   sprite.renderOrder = 10 // いつも手前に描く
-  return { sprite, w, h }
+  return { sprite, anchor: pos, w, h, priority: 0, nudgeX: 0, x: 0, y: 0 }
 }
 
 interface Theme {
@@ -78,6 +73,7 @@ const LIGHT: Theme = { background: 0xf7f7f4, box: 0x9a9aa2, grid: 0xd6d6d2, tick
 const DARK: Theme = { background: 0x1b1c20, box: 0x6a6b72, grid: 0x34353b, tick: '#9a9aa3', text: '#e8e8ea' }
 const TICK_FONT = "11px ui-monospace, 'SF Mono', Consolas, monospace"
 const AXIS_FONT = "italic 600 15px 'Times New Roman', serif"
+const EDGE_FONT = `600 ${TICK_FONT}`
 
 /**
  * 媒介変数表示の立体の切り口のふた（ステンシルバッファを使う）。
@@ -136,14 +132,18 @@ type PlotObject =
     }
 
 type TrailFrame = { lines: Float32Array; dots: Float32Array }
-type RotationTrail = {
+type CurveTrail = {
+  kind: 'curve'
   lines: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>
   dots: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   frames: TrailFrame[]
-  angles: number[]
-  at: number
   lastPoint?: number[]
 }
+type RotationTrail = {
+  angles: number[]
+  center: number[]
+  at: number
+} & (CurveTrail | { kind: 'surface'; surface: RotationSurfaceTrail })
 const TRAIL_FRAMES = 80 // 約 1 回転分（再生は毎秒 30°）
 
 /** ホイールの1画素あたりの拡大縮小の量（距離の対数）。1目盛り（約 100 px）で e^0.22 ≈ 1.25 倍 */
@@ -169,6 +169,12 @@ export class Viewer {
   private renderer: THREE.WebGLRenderer
   /** 目盛りの数字・軸の名前 */
   private labels: TextLabel[] = []
+  private readonly positionedLabels: TextLabel[] = []
+  private readonly labelProjection = new THREE.Vector3()
+  private readonly labelView = new THREE.Matrix4()
+  private readonly lastLabelView = new THREE.Matrix4()
+  private labelLayoutWidth = 0
+  private labelLayoutHeight = 0
   private scene = new THREE.Scene()
   private camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000)
   private controls: OrbitControls
@@ -250,6 +256,7 @@ export class Viewer {
     // 描画の土台
     // ステンシルバッファは、媒介変数表示の立体の切り口のふたに使う
     this.renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true })
+    this.transparency = new SurfaceTransparency(this.renderer)
     this.renderer.setPixelRatio(this.basePixelRatio)
     this.renderer.localClippingEnabled = true // 表示範囲の外を切り落とすため
     container.appendChild(this.renderer.domElement)
@@ -924,6 +931,7 @@ export class Viewer {
     this.clearRotationTrails()
     this.resizeObserver.disconnect()
     this.controls.dispose()
+    this.transparency.dispose()
     this.renderer.dispose()
     this.container.replaceChildren()
   }
@@ -1071,6 +1079,7 @@ export class Viewer {
       if (p.kind === 'curve') (p.line.material as LineMaterial).resolution.set(w, h)
       else for (const l of p.outlines) (l.material as LineMaterial).resolution.set(w, h)
     }
+    for (const { line } of this.limitSources.values()) line.material.resolution.set(w, h)
     this.updateProjection()
   }
 
@@ -1142,7 +1151,7 @@ export class Viewer {
     this.notMotionLastTick = this.notMotion
     this.notMotion = false
     if (this.frameLog) this.renderMeasured(renderedBefore ? dt : null)
-    else this.renderer.render(this.scene, this.camera)
+    else this.renderScene()
     this.placePickLabel()
   }
   private renderedLastTick = false
@@ -1150,6 +1159,12 @@ export class Viewer {
   private notMotion = false
   /** 前の回に描いたコマが、形の差し替え・視点の跳びを含んでいたか */
   private notMotionLastTick = false
+  private readonly transparency: SurfaceTransparency
+
+  private renderScene() {
+    if (this.flat) this.renderer.render(this.scene, this.camera)
+    else this.transparency.render(this.scene, this.camera, this.camera.position.distanceTo(this.controls.target), this.sceneSize())
+  }
 
   // ---- ベンチマーク（?bench=1）用。ふつうに開いたときは使わない ----
 
@@ -1222,7 +1237,7 @@ export class Viewer {
     const q = ext && this.pendingQueries.length < 8 ? gl.createQuery() : null
     if (q) gl.beginQuery(ext!.TIME_ELAPSED_EXT, q)
     const t0 = performance.now()
-    this.renderer.render(this.scene, this.camera)
+    this.renderScene()
     const cpu = performance.now() - t0
     if (q) {
       gl.endQuery(ext!.TIME_ELAPSED_EXT)
@@ -1278,7 +1293,7 @@ export class Viewer {
     this.updateClipRange()
     this.updateLabelSizes()
     this.updateStencilSides()
-    this.renderer.render(this.scene, this.camera)
+    this.renderScene()
     // 描いた直後（同じ処理の中）なら、preserveDrawingBuffer なしでも絵を読める
     const c = document.createElement('canvas')
     c.width = w
@@ -1302,7 +1317,7 @@ export class Viewer {
       this.updateClipRange()
       this.updateLabelSizes()
       this.updateStencilSides()
-      this.renderer.render(this.scene, this.camera)
+      this.renderScene()
       const src = this.renderer.domElement
       if (!src.width || !src.height) return null
       // 縦長の画面（スマホ）でも一覧で見やすいよう、横 : 縦 = 4 : 3 に中央を切り抜く
@@ -1327,8 +1342,56 @@ export class Viewer {
    * sizeAttenuation: false のスプライトは、大きさ 1 が「画面の高さ × 射影行列の [1][1] / 2」になるので、その逆数をかける
    */
   private updateLabelSizes() {
-    const k = 2 / ((this.viewH || 1) * this.camera.projectionMatrix.elements[5])
-    for (const l of this.labels) l.sprite.scale.set(l.w * k, l.h * k, 1)
+    const { viewW: width, viewH: height, camera } = this
+    if (!width || !height) return
+    const scale = 2 / (height * camera.projectionMatrix.elements[5])
+    const p = this.labelProjection
+    const placed = this.positionedLabels
+    camera.updateMatrixWorld()
+    const view = this.labelView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+    if (this.labelLayoutWidth === width && this.labelLayoutHeight === height && this.lastLabelView.equals(view)) return
+    this.lastLabelView.copy(view)
+    this.labelLayoutWidth = width
+    this.labelLayoutHeight = height
+    placed.length = 0
+
+    // 端の値を先に置く。狭い画面や斜めから見たときは、重なる途中の数字を間引く。
+    for (const label of this.labels) {
+      label.sprite.visible = false
+      p.copy(label.anchor).applyMatrix4(view)
+      if (!Number.isFinite(p.z) || p.z < -1 || p.z > 1) continue
+      const x = (p.x + 1) * width / 2
+      const y = (1 - p.y) * height / 2
+      const halfW = label.w / 2 + 2
+      const halfH = label.h / 2 + 2
+      const margin = label.priority ? Math.max(halfW, halfH) : 0
+      if (halfW * 2 > width || halfH * 2 > height || x < -margin || x > width + margin || y < -margin || y > height + margin) continue
+      const baseX = Math.min(width - halfW, Math.max(halfW, x))
+      const baseY = Math.min(height - halfH, Math.max(halfH, y))
+      if (!label.priority && (baseX !== x || baseY !== y)) continue
+
+      const attempts = label.priority ? 5 : 1
+      for (let i = 0; i < attempts; i++) {
+        let px = baseX
+        let py = baseY
+        // 角などで端の数値が近いときは、目盛りの方向と直交するほうへ先にずらす。
+        if (i > 0) {
+          const direction = i % 2 ? 1 : -1
+          if ((i <= 2) === (label.nudgeX !== 0)) px += direction * (label.nudgeX || -1) * (label.w + 4)
+          else py += direction * (label.h + 4)
+        }
+        if (px < halfW || px > width - halfW || py < halfH || py > height - halfH) continue
+        if (placed.some((other) => Math.abs(other.x - px) < (other.w + label.w) / 2 + 4 && Math.abs(other.y - py) < (other.h + label.h) / 2 + 3)) continue
+
+        label.x = px
+        label.y = py
+        label.sprite.position.copy(px === x && py === y ? label.anchor : p.set(px * 2 / width - 1, 1 - py * 2 / height, p.z).unproject(camera))
+        label.sprite.scale.set(label.w * scale, label.h * scale, 1)
+        label.sprite.visible = true
+        placed.push(label)
+        break
+      }
+    }
   }
 
   /** カメラから dist 離れた所での、1 画素（CSS の画素）の大きさ */
@@ -1383,7 +1446,16 @@ export class Viewer {
     this.dirty = true
     this.theme = dark ? DARK : LIGHT
     ;(this.scene.background as THREE.Color).set(this.theme.background)
-    for (const h of this.holeMarks.values()) (h.material as THREE.ShaderMaterial).uniforms.uBg.value.set(this.theme.background)
+    for (const h of this.holeMarks.values()) {
+      const { uBg, uInk, uColor } = (h.material as THREE.ShaderMaterial).uniforms
+      uBg.value.set(this.theme.background)
+      uInk.value.set(this.theme.text)
+      if (h.userData.limit) uColor.value.set(this.theme.text)
+    }
+    for (const { line, dots } of this.limitSources.values()) {
+      line.material.color.set(this.theme.text)
+      dots.material.color.set(this.theme.text)
+    }
     if (this.domain) this.buildFrame(this.domain)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.LineBasicMaterial).color.set(this.theme.box)
   }
@@ -1452,8 +1524,27 @@ export class Viewer {
     if (this.domain) this.setDomain(this.domain, true)
   }
 
+  /** 範囲を直接編集したとき、枠が画面からはみ出す場合だけ画角を合わせる。 */
+  fitDomainIfNeeded() {
+    const d = this.domain
+    if (!d) return
+    this.camera.updateMatrixWorld()
+    const corner = this.labelProjection
+    for (const x of [d.xmin, d.xmax]) {
+      for (const y of [d.ymin, d.ymax]) {
+        for (const z of this.flat ? [0] : [d.zmin, d.zmax]) {
+          corner.set(x, y, z).project(this.camera)
+          if (Math.abs(corner.x) > 0.9 || Math.abs(corner.y) > 0.9 || Math.abs(corner.z) > 1) {
+            this.resetCamera(true)
+            return
+          }
+        }
+      }
+    }
+  }
+
   /** カメラを斜め上からの見やすい位置に戻す（2D 表示なら真上から） */
-  resetCamera() {
+  resetCamera(keepDirection = false) {
     this.wheelPending = 0
     this.dirty = true
     this.notMotion = true // 視点が跳ぶだけ（2D / 3D の切り替えなど）
@@ -1473,13 +1564,16 @@ export class Viewer {
     const size = this.sceneSize()
     // 縦長の画面（スマホ）では横幅に収まるよう、その分だけ遠くから見る
     const dist = (size * 0.56) / this.perspective / Math.min(1, this.camera.aspect)
+    const direction = keepDirection ? this.camera.position.clone().sub(this.controls.target) : new THREE.Vector3(1.1, -1.5, 0.9)
     this.controls.target.copy(center)
-    this.camera.position.copy(center).add(new THREE.Vector3(1.1, -1.5, 0.9).normalize().multiplyScalar(dist))
+    this.camera.position.copy(center).add(direction.setLength(dist))
     this.updateClipRange()
   }
 
   private buildFrame(d: Domain) {
     this.buildFrameLines(d)
+    this.labels.sort((a, b) => b.priority - a.priority)
+    this.labelLayoutWidth = 0
     this.applyLineScale(this.pixelScale.value) // 画素密度を下げている最中に作り直したときも、線の濃さを合わせる
   }
 
@@ -1497,11 +1591,11 @@ export class Viewer {
     }
     this.labels = []
     this.frame.clear()
-    const label = (text: string, kind: 'tick' | 'axis-name', pos: THREE.Vector3) => {
-      const l =
-        kind === 'tick'
-          ? makeLabel(text, TICK_FONT, this.theme.tick, pos)
-          : makeLabel(text, AXIS_FONT, this.theme.text, pos)
+    const label = (text: string, kind: 'tick' | 'edge' | 'axis-name', pos: THREE.Vector3, nudgeX = 0) => {
+      const font = kind === 'tick' ? TICK_FONT : kind === 'edge' ? EDGE_FONT : AXIS_FONT
+      const l = makeLabel(text, font, kind === 'tick' ? this.theme.tick : this.theme.text, pos)
+      l.priority = kind === 'tick' ? 0 : kind === 'axis-name' ? 1 : 2
+      l.nudgeX = nudgeX
       this.labels.push(l)
       return l.sprite
     }
@@ -1519,12 +1613,15 @@ export class Viewer {
 
     // 床（z = 0、範囲外なら一番下）の方眼
     const zFloor = this.flat ? 0 : d.zmin <= 0 && 0 <= d.zmax ? 0 : d.zmin
-    const step = niceStep(Math.max(d.xmax - d.xmin, d.ymax - d.ymin))
+    const xTicks = axisTicks(d.xmin, d.xmax)
+    const yTicks = axisTicks(d.ymin, d.ymax)
+    const zTicks = axisTicks(d.zmin, d.zmax)
+    const steps = [xTicks.step, yTicks.step, zTicks.step]
     const pts: number[] = []
-    for (let x = Math.ceil(d.xmin / step) * step; x <= d.xmax + 1e-9; x += step) {
+    for (const x of xTicks.grid) {
       pts.push(x, d.ymin, zFloor, x, d.ymax, zFloor)
     }
-    for (let y = Math.ceil(d.ymin / step) * step; y <= d.ymax + 1e-9; y += step) {
+    for (const y of yTicks.grid) {
       pts.push(d.xmin, y, zFloor, d.xmax, y, zFloor)
     }
     const gridGeo = new THREE.BufferGeometry()
@@ -1552,28 +1649,23 @@ export class Viewer {
       [new THREE.Vector3(o.x, o.y, d.zmin), new THREE.Vector3(o.x, o.y, d.zmax), 0x3f7fd9, this.axisNames[2]],
     ]
     if (this.flat) axes.pop() // 2D 表示では縦の軸は無い
-    for (const [a, b, color, name] of axes) {
+    for (const [i, [a, b, color, name]] of axes.entries()) {
       const g = new THREE.BufferGeometry().setFromPoints([a, b])
       this.frame.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color })))
-      const end = b.clone().add(b.clone().sub(a).normalize().multiplyScalar(step * 0.4))
+      const end = b.clone().add(b.clone().sub(a).normalize().multiplyScalar(steps[i] * 0.4))
       this.frame.add(label(name, 'axis-name', end))
     }
 
     // 目盛りの数字（x, y は床の手前の辺、z は左奥の縦の辺）
-    const ticks = (min: number, max: number, s: number) => {
-      const out: number[] = []
-      // 足していくと誤差がたまる（0 が -5.55e-17 になるなど）ので、刻みの整数倍として計算して丸める
-      for (let k = Math.ceil(min / s - 1e-9); k * s <= max + 1e-9; k++) out.push(Number((k * s).toPrecision(12)))
-      return out
+    const padX = xTicks.step * 0.35
+    const padY = yTicks.step * 0.35
+    for (const { value, edge } of xTicks.labels) {
+      this.frame.add(label(axisTickText(value, xTicks.step), edge ? 'edge' : 'tick', new THREE.Vector3(value, d.ymin - padY, zFloor)))
     }
-    const pad = step * 0.35
-    for (const x of ticks(d.xmin, d.xmax, step)) {
-      this.frame.add(label(fmt(x), 'tick', new THREE.Vector3(x, d.ymin - pad, zFloor)))
-    }
-    for (const y of ticks(d.ymin, d.ymax, step)) {
+    for (const { value, edge } of yTicks.labels) {
       // 2D 表示では左の辺に並べる
-      const x = this.flat ? d.xmin - pad * 1.3 : d.xmax + pad
-      this.frame.add(label(fmt(y), 'tick', new THREE.Vector3(x, y, zFloor)))
+      const x = this.flat ? d.xmin - padX * 1.3 : d.xmax + padX
+      this.frame.add(label(axisTickText(value, yTicks.step), edge ? 'edge' : 'tick', new THREE.Vector3(x, value, zFloor), this.flat ? -1 : 1))
     }
     if (!this.flat) {
       // 3D: 床の方眼・軸・枠の線を、深さだけ少し奥へずらす。面とちょうど同じ所にある線（floor(x) + floor(y) + floor(z) = 0 の
@@ -1604,8 +1696,8 @@ export class Viewer {
       })
       return
     }
-    for (const z of ticks(d.zmin, d.zmax, niceStep(d.zmax - d.zmin, 6))) {
-      this.frame.add(label(fmt(z), 'tick', new THREE.Vector3(d.xmin - pad, d.ymin - pad, z)))
+    for (const { value, edge } of zTicks.labels) {
+      this.frame.add(label(axisTickText(value, zTicks.step), edge ? 'edge' : 'tick', new THREE.Vector3(d.xmin - padX, d.ymin - padY, value), -1))
     }
   }
 
@@ -1615,17 +1707,18 @@ export class Viewer {
    * 移行のスライダーの値（[`setMorph`]）で位置を混ぜた形を描く
    */
   setPlot(id: number, mesh: MeshData, style: PlotStyle) {
-    if (mesh.target && mesh.target.length === mesh.positions.length) {
-      const m = { mesh, weld: null }
-      this.morphSources.set(id, m)
-      mesh = this.morphed(id, m)
-    } else this.morphSources.delete(id)
+    const source = (mesh.target?.length === mesh.positions.length || mesh.limitSourceTarget)
+      ? { mesh, weld: null }
+      : null
+    if (source) mesh = this.morphed(id, source)
     this.applyPlot(id, mesh, style)
+    if (source) this.morphSources.set(id, source)
+    else this.morphSources.delete(id)
     this.notePickData(id, mesh)
   }
 
-  /** 回転中の形を、表示座標で軽い線・点の形にして記録する。 */
-  recordRotationTrail(id: number, angles: number[]) {
+  /** 回転中の形を、表示座標で記録する。 */
+  recordRotationTrail(id: number, angles: number[], center: number[]) {
     const plot = this.plots.get(id)
     const style = this.styles.get(id)
     if (!plot || !style?.visible) return
@@ -1637,62 +1730,62 @@ export class Viewer {
         const d = Math.abs((a - (previousAngles[i] ?? 0)) % 360)
         return Math.min(d, 360 - d)
       }))
-      if (delta < 0.01 || (now - trail.at < 160 && delta < 8)) return
+      const previousCenter = trail.center
+      const centerMoved = center.length !== previousCenter.length || center.some((v, i) => v !== previousCenter[i])
+      if ((delta < 0.01 && !centerMoved) || (now - trail.at < (plot.kind === 'surface' ? 240 : 160) && delta < 8)) return
+    }
+    if (plot.kind === 'surface') {
+      const surface = trail?.kind === 'surface' ? trail.surface : new RotationSurfaceTrail()
+      const mesh = plot.group.children[0] as THREE.Mesh
+      const geo = (plot.geo.userData.lod as THREE.BufferGeometry | undefined) ?? plot.geo
+      const volume = plot.volume?.u
+      const region = !geo.index?.count && volume?.uRegion.value
+        ? regionTrailTriangles(volume)
+        : undefined
+      if (!surface.record(mesh, geo, plot.cap, region, style.color, this.clipPlanes, this.transparency)) return
+      if (!surface.group.parent) this.scene.add(surface.group)
+      this.rotationTrails.set(id, { kind: 'surface', surface, angles: [...angles], center: [...center], at: now })
+      this.dirty = true
+      return
     }
 
     const lines: number[] = []
     let dots: number[] = []
-    if (plot.kind === 'curve') {
-      const pts = this.curvePts.get(id)
-      if (!pts) return
-      const step = Math.max(1, Math.ceil(pts.length / (3 * 256)))
-      let previous = -1
-      for (let i = 0; i < pts.length; i += 3) {
-        if (!Number.isFinite(pts[i]) || !Number.isFinite(pts[i + 1]) || !Number.isFinite(pts[i + 2])) {
-          previous = -1
-        } else if (previous < 0 || i - previous >= 3 * step || !Number.isFinite(pts[i + 3])) {
-          if (previous >= 0 && lines.length < 6 * 384 &&
-              (pts[previous] !== pts[i] || pts[previous + 1] !== pts[i + 1] || pts[previous + 2] !== pts[i + 2])) {
-            lines.push(pts[previous], pts[previous + 1], pts[previous + 2], pts[i], pts[i + 1], pts[i + 2])
-          }
-          previous = i
+    const pts = this.curvePts.get(id)
+    if (!pts) return
+    const step = Math.max(1, Math.ceil(pts.length / (3 * 256)))
+    let previous = -1
+    for (let i = 0; i < pts.length; i += 3) {
+      if (!Number.isFinite(pts[i]) || !Number.isFinite(pts[i + 1]) || !Number.isFinite(pts[i + 2])) {
+        previous = -1
+      } else if (previous < 0 || i - previous >= 3 * step || !Number.isFinite(pts[i + 3])) {
+        if (previous >= 0 && lines.length < 6 * 384 &&
+            (pts[previous] !== pts[i] || pts[previous + 1] !== pts[i + 1] || pts[previous + 2] !== pts[i + 2])) {
+          lines.push(pts[previous], pts[previous + 1], pts[previous + 2], pts[i], pts[i + 1], pts[i + 2])
         }
-      }
-      const points = plot.dots.userData.pos as number[]
-      const stride = Math.max(1, Math.ceil(points.length / (3 * 128))) * 3
-      for (let i = 0; i < points.length; i += stride) dots.push(points[i], points[i + 1], points[i + 2])
-    } else {
-      const mesh = plot.group.children[0] as THREE.Mesh
-      const geo = (plot.geo.userData.lod as THREE.BufferGeometry | undefined) ?? plot.geo
-      const pos = geo.getAttribute('position')
-      const index = geo.getIndex()
-      if (!pos || !index) return
-      const stride = Math.max(1, Math.ceil(index.count / (3 * 128))) * 3
-      const point = new THREE.Vector3()
-      mesh.updateWorldMatrix(true, false)
-      for (let i = 0; i + 2 < index.count; i += stride) {
-        for (const j of [0, 1, 1, 2, 2, 0]) {
-          point.fromBufferAttribute(pos, index.getX(i + j)).applyMatrix4(mesh.matrixWorld)
-          lines.push(point.x, point.y, point.z)
-        }
+        previous = i
       }
     }
+    const points = plot.dots.userData.pos as number[]
+    const stride = Math.max(1, Math.ceil(points.length / (3 * 128))) * 3
+    for (let i = 0; i < points.length; i += stride) dots.push(points[i], points[i + 1], points[i + 2])
     const lonePoint = lines.length === 0 && dots.length === 3 ? dots : undefined
-    if (lonePoint && trail?.lastPoint) {
+    if (lonePoint && trail?.kind === 'curve' && trail.lastPoint) {
       lines.push(...trail.lastPoint, ...lonePoint)
       dots = []
     }
     if (!lines.length && !dots.length) return
-    if (!trail) {
+    if (trail?.kind !== 'curve') {
       const appearance = { color: style.color, transparent: true, opacity: 0.26, depthWrite: false, clippingPlanes: this.clipPlanes }
       const strokes = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial(appearance))
       const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ ...appearance, size: 3, sizeAttenuation: false }))
       strokes.raycast = points.raycast = () => {}
       this.scene.add(strokes, points)
-      trail = { lines: strokes, dots: points, frames: [], angles, at: now }
+      trail = { kind: 'curve', lines: strokes, dots: points, frames: [], angles, center, at: now }
       this.rotationTrails.set(id, trail)
     }
     trail.angles = [...angles]
+    trail.center = [...center]
     trail.at = now
     trail.lastPoint = lonePoint
     trail.frames.push({ lines: new Float32Array(lines), dots: new Float32Array(dots) })
@@ -1715,10 +1808,15 @@ export class Viewer {
   clearRotationTrail(id: number) {
     const trail = this.rotationTrails.get(id)
     if (!trail) return
-    for (const object of [trail.lines, trail.dots]) {
-      this.scene.remove(object)
-      object.geometry.dispose()
-      object.material.dispose()
+    if (trail.kind === 'surface') {
+      this.scene.remove(trail.surface.group)
+      trail.surface.dispose()
+    } else {
+      for (const object of [trail.lines, trail.dots]) {
+        this.scene.remove(object)
+        object.geometry.dispose()
+        object.material.dispose()
+      }
     }
     this.rotationTrails.delete(id)
     this.dirty = true
@@ -1792,11 +1890,11 @@ export class Viewer {
   private morphed(id: number, m: { mesh: MeshData; weld: Int32Array | null }): MeshData {
     const { mesh } = m
     const s = this.morphValues.get(id) ?? 0
-    const target = mesh.target!
-    const positions = mixPositions(mesh.positions, target, s)
+    const target = mesh.target?.length === mesh.positions.length ? mesh.target : undefined
+    const positions = target ? mixPositions(mesh.positions, target, s) : mesh.positions
     const surface = !mesh.curve && mesh.indices.length > 0
     let normals = mesh.normals
-    if (surface && s > 0) {
+    if (target && surface && s > 0) {
       normals = vertexNormals(positions, mesh.indices)
       // s = 1 では、周期のある座標の継ぎ目（φ = 0 と 2π）で同じ点になる頂点の法線をそろえる
       if (s >= 1) weldNormals(normals, (m.weld ??= weldGroups(target, mesh.indices)))
@@ -1818,6 +1916,9 @@ export class Viewer {
       lod,
       outline: mix(mesh.outline, mesh.outlineTarget),
       outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
+      holes: mix(mesh.holes, mesh.limitHolesTarget),
+      limitPoint: mix(mesh.limitPoint, mesh.limitPointTarget),
+      limitSource: mix(mesh.limitSource, mesh.limitSourceTarget),
     }
   }
 
@@ -1862,6 +1963,7 @@ export class Viewer {
       } else this.setSurface(id, mesh)
     }
     this.updateStencil(id)
+    this.setLimitSource(id, mesh.limitSource)
     this.setHoles(id, mesh)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
@@ -1960,11 +2062,13 @@ export class Viewer {
     this.applyRayBudget(ray)
     // 格子線・色付けの値は、その式の曲面と同じもの（式の ⚙ の設定がそのまま効く）
     const mat = createRaycastMaterial(glsl, Math.floor(info.affine.length / 4), p.grid, ray)
+    this.transparency.register(mat, true)
     // 不透明・半透明は、コンパイルの前に面の材質に合わせる（three.js は別のシェーダーにするので、後で変えると
     // 画面のスレッドを止めてコンパイルし直す。光線のシェーダーは重く、Windows の Chrome で 2 秒ほど固まった）
     const src = (p.group.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial
     mat.transparent = src.transparent
     mat.depthWrite = src.depthWrite
+    mat.alphaToCoverage = !src.transparent
     const m = raycastMesh(mat, ray, d)
     const layer = { mesh: m, mat, ray, glsl, key, ready: false, axes: info.axes, params: info.params }
     this.gpu3d.set(id, layer)
@@ -2059,7 +2163,7 @@ export class Viewer {
       layer.ray.uProbe.value = 0
       delete layer.mesh.userData.pixelH
       // 左下を確かめのために塗ったので、画面に出る前に、ふつうの絵で描き直す
-      this.renderer.render(this.scene, this.camera)
+      this.renderScene()
       this.dirty = true
     }
     let drawn = 0
@@ -2148,6 +2252,7 @@ export class Viewer {
     if (m.transparent !== src.transparent) {
       // 不透明・半透明が変わると three.js は別のシェーダーにするので、裏でコンパイルし直し、その間はメッシュの面を見せる
       m.transparent = src.transparent
+      m.alphaToCoverage = !src.transparent
       m.needsUpdate = true
       layer.ready = false
       this.scene.remove(layer.mesh)
@@ -2247,7 +2352,14 @@ export class Viewer {
     }
     for (const id of this.plots.keys()) this.updateStencil(id)
     for (const g of this.coordGrids.values()) (g.line.material as THREE.Material).clippingPlanes = this.clipPlanes
-    for (const trail of this.rotationTrails.values()) trail.lines.material.clippingPlanes = trail.dots.material.clippingPlanes = this.clipPlanes
+    for (const { line, dots } of this.limitSources.values()) {
+      line.material.clippingPlanes = this.clipPlanes
+      dots.material.clippingPlanes = this.clipPlanes
+    }
+    for (const trail of this.rotationTrails.values()) {
+      if (trail.kind === 'surface') trail.surface.setClipping(this.clipPlanes)
+      else trail.lines.material.clippingPlanes = trail.dots.material.clippingPlanes = this.clipPlanes
+    }
     this.dirty = true
   }
 
@@ -2295,6 +2407,7 @@ export class Viewer {
     } else {
       // 格子線は曲面と同じ設定（x, y, z の間隔）で引く
       p.cap = new THREE.Mesh(geo, createSurfaceMaterial(p.grid, this.boxPlanes, true))
+      this.transparency.register(p.cap.material as THREE.MeshStandardMaterial)
       p.cap.frustumCulled = false // 切り口は表示範囲の中（外接球を求めない。下の曲面と同じ）
       p.group.add(p.cap)
       this.setStyle(id, style)
@@ -2333,6 +2446,8 @@ export class Viewer {
         })
       const inc = new THREE.Mesh(p.geo, pass(THREE.IncrementWrapStencilOp))
       const dec = new THREE.Mesh(p.geo, pass(THREE.DecrementStencilOp))
+      this.transparency.register(inc.material)
+      this.transparency.register(dec.material)
       const quadMat = new THREE.MeshStandardMaterial({
         side: THREE.DoubleSide,
         roughness: 0.7,
@@ -2346,6 +2461,7 @@ export class Viewer {
         clippingPlanes: this.boxPlanes,
       })
       const quad = new THREE.Mesh(new THREE.BufferGeometry(), quadMat)
+      this.transparency.register(quadMat)
       // 次の立体のために、ステンシルを 0 に戻しておく（ふたが描かれなかった画素も含めて）
       quad.onAfterRender = (r) => r.clearStencil()
       const base = -3000 + 3 * p.order
@@ -2447,6 +2563,7 @@ export class Viewer {
     const group = new THREE.Group()
     const geo = this.surfaceGeometry(mesh)
     const surface = new THREE.Mesh(geo, createSurfaceMaterial(grid, this.clipPlanes))
+    this.transparency.register(surface.material)
     // 曲面はいつも表示範囲の箱の中にあるので、視錐台の判定はしない。判定すると、three.js が新しい形ごとに外接球を
     // 点を 1 つずつ読んで求める（再生中は返事のたびに。数十万点の形で数十 ms）。カーソルの下の点を探すときは、
     // three.js が必要になったときに求める
@@ -2600,7 +2717,7 @@ export class Viewer {
     ] as const) {
       if (!pts || pts.length === 0) continue
       const mat = new LineMaterial({
-        linewidth: 2.5,
+        linewidth: mesh.vectorArrows ? 1.75 : 2.5,
         clippingPlanes: this.clipPlanes,
         dashed,
         dashSize: span * 0.02,
@@ -2611,6 +2728,7 @@ export class Viewer {
       line.frustumCulled = false // 表示範囲の中の線（視錐台の判定のための外接球を求めない）
       if (dashed) line.computeLineDistances()
       line.userData.dashed = dashed
+      line.userData.vectorShaft = mesh.vectorArrows === true
       // ベクトル場の流線: 点ごとの大きさで色を付ける（色は setStyle で塗る）
       const vr = mesh.valueRange
       const v = mesh.outlineValues
@@ -2650,16 +2768,17 @@ export class Viewer {
    * 点（曲線の中で、1 点に縮んだ所）を、小さな球として置く。球の半径は表示範囲のいちばん長い辺の 0.8%（× 線の太さの倍率）。
    * 表示範囲・太さが変わったら [`placeDots`] で置き直す
    */
-  private makeDots(pts: Float32Array, mat: THREE.MeshStandardMaterial, scale = 1): THREE.InstancedMesh {
+  private makeDots(pts: Float32Array, mat: THREE.MeshStandardMaterial, scale = 1) {
     const pos = dotPositions(pts)
-    const dots = new THREE.InstancedMesh(dotSphere(), mat, pos.length / 3)
+    const count = pos.length / 3
+    const dots = new THREE.InstancedMesh(count >= 1000 ? denseDotSphere() : dotSphere(), mat, count)
     dots.frustumCulled = false
     dots.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
     dots.userData.pos = pos
     dots.userData.scale = scale
     this.placeDots(dots)
     // 視点が動いたら、画面の上の大きさの上限に合わせて置き直す（点が少ないときだけ。多い点の集まりは空間の大きさのまま）
-    if (pos.length / 3 <= 4096) {
+    if (count <= 4096) {
       dots.onBeforeRender = (_r, _s, camera) => {
         const c = camera as THREE.PerspectiveCamera
         const key = `${c.position.x},${c.position.y},${c.position.z},${c.fov},${this.viewH}`
@@ -2676,7 +2795,7 @@ export class Viewer {
   private placeDots(dots: THREE.InstancedMesh) {
     const d = this.domain
     const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin, this.flat ? 0 : d.zmax - d.zmin) : 10
-    const r = span * 0.006 * dots.userData.scale
+    const r = span * (dots.count >= 1000 ? 0.0025 : 0.006) * dots.userData.scale
     const pos = dots.userData.pos as number[]
     const m = new THREE.Matrix4()
     // 空間の大きさ（表示範囲の 0.6 %）のまま描くが、画面の上で半径 4 画素（太さの倍率をかける）を超えないようにする。
@@ -2749,10 +2868,48 @@ export class Viewer {
 
   /** 式ごとの最後の見た目（後から作ったふたにも同じ色を付けるため） */
   private styles = new Map<number, PlotStyle>()
-  /** ≠ で除いた点の白丸（式ごと）。曲線を GPU の 2D の描き方で描いて線を隠すときも見えるよう、図形とは別に置く */
+  private limitSources = new Map<number, {
+    line: LineSegments2
+    dots: THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  }>()
+
+  private setLimitSource(id: number, positions?: Float32Array) {
+    const old = this.limitSources.get(id)
+    if (old) {
+      this.scene.remove(old.line)
+      old.line.geometry.dispose()
+      old.line.material.dispose()
+      old.dots.dispose()
+      old.dots.material.dispose()
+      this.limitSources.delete(id)
+    }
+    if (!positions?.length) return
+    const d = this.domain
+    const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin) : 20
+    const mat = new LineMaterial({
+      color: this.theme.text, linewidth: 2, dashed: true, dashSize: span * 0.011, gapSize: span * 0.008,
+      clippingPlanes: this.clipPlanes, transparent: true, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    })
+    mat.resolution.set(this.viewW, this.viewH)
+    const line = new LineSegments2(this.curveGeometry(positions), mat)
+    if (line.geometry.getAttribute('instanceStart')) line.computeLineDistances()
+    else line.geometry.instanceCount = 0
+    line.frustumCulled = false
+    line.raycast = () => {}
+    line.renderOrder = 5
+    const dots = this.makeDots(positions, new THREE.MeshStandardMaterial({
+      color: this.theme.text, roughness: 0.35, clippingPlanes: this.clipPlanes,
+    }))
+    line.add(dots)
+    this.limitSources.set(id, { line, dots })
+    this.scene.add(line)
+  }
+
+  /** 穴と定義値の丸印（式ごと）。曲線を GPU で描くときも見えるよう、図形とは別に置く */
   private holeMarks = new Map<number, THREE.Points>()
 
-  /** ≠ で除いた点に白丸を置く（中を背景の色で塗り、縁を図形の色にする。画面の上の大きさは一定） */
+  /** 穴には白丸、極限の近づく点での定義値には塗りつぶした丸を置く（画面の上の大きさは一定） */
   private setHoles(id: number, mesh: MeshData) {
     const old = this.holeMarks.get(id)
     if (old) {
@@ -2761,18 +2918,32 @@ export class Viewer {
       ;(old.material as THREE.Material).dispose()
       this.holeMarks.delete(id)
     }
-    if (!mesh.holes || mesh.holes.length === 0) return
+    const open = mesh.holes?.length ?? 0
+    const filled = mesh.limitPoint?.length ?? 0
+    if (open + filled === 0) return
+    const positions = filled ? new Float32Array(open + filled) : mesh.holes!
+    const closed = new Float32Array(positions.length / 3)
+    if (filled) {
+      if (mesh.holes) positions.set(mesh.holes)
+      positions.set(mesh.limitPoint!, open)
+      closed.fill(1, open / 3)
+    }
     const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(mesh.holes, 3))
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geo.setAttribute('aFilled', new THREE.BufferAttribute(closed, 1))
     const mat = new THREE.ShaderMaterial({
       uniforms: {
         uColor: { value: new THREE.Color(this.styles.get(id)?.color ?? '#2b6cb0') },
         uBg: { value: new THREE.Color(this.theme.background) },
+        uInk: { value: new THREE.Color(this.theme.text) },
         uSize: { value: 11 * this.renderer.getPixelRatio() },
       },
       vertexShader: `
         uniform float uSize;
+        attribute float aFilled;
+        varying float vFilled;
         void main() {
+          vFilled = aFilled;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           // 線・面と同じ深さで重なってちらつかないよう、少し手前に出す
           gl_Position.z -= 2e-3 * gl_Position.w;
@@ -2781,11 +2952,14 @@ export class Viewer {
       fragmentShader: `
         uniform vec3 uColor;
         uniform vec3 uBg;
+        uniform vec3 uInk;
+        varying float vFilled;
         void main() {
           float r = length(gl_PointCoord - 0.5) * 2.0;
           if (r > 1.0) discard;
           float ring = smoothstep(0.5, 0.62, r);
-          gl_FragColor = vec4(mix(uBg, uColor, ring), 1.0 - smoothstep(0.88, 1.0, r));
+          vec3 color = mix(mix(uBg, uColor, ring), uInk, vFilled);
+          gl_FragColor = vec4(color, 1.0 - smoothstep(0.88, 1.0, r));
           // 色は線形の値で持っているので、画面の色空間（sRGB）に直す（線・面の材質と同じ色に見えるように）
           #include <colorspace_fragment>
         }`,
@@ -2794,6 +2968,7 @@ export class Viewer {
     const pts = new THREE.Points(geo, mat)
     pts.frustumCulled = false
     pts.renderOrder = 10
+    pts.userData.limit = mesh.limitSource !== undefined
     pts.raycast = () => {}
     pts.visible = this.styles.get(id)?.visible ?? true
     this.holeMarks.set(id, pts)
@@ -2814,16 +2989,20 @@ export class Viewer {
     this.dirty = true
     const c = new THREE.Color(style.color)
     const trail = this.rotationTrails.get(id)
-    if (trail) {
+    if (trail?.kind === 'surface') trail.surface.setStyle(c, style.visible)
+    else if (trail) {
       trail.lines.visible = trail.dots.visible = style.visible
       if (!style.visible) trail.lastPoint = undefined
       trail.lines.material.color.copy(c)
       trail.dots.material.color.copy(c)
     }
     const holes = this.holeMarks.get(id)
+    const showLimitSource = style.visible && !style.limitSourceHidden
+    const source = this.limitSources.get(id)
+    if (source) source.line.visible = showLimitSource
     if (holes) {
-      holes.visible = style.visible
-      ;(holes.material as THREE.ShaderMaterial).uniforms.uColor.value.copy(c)
+      holes.visible = holes.userData.limit ? showLimitSource : style.visible
+      ;(holes.material as THREE.ShaderMaterial).uniforms.uColor.value.set(holes.userData.limit ? this.theme.text : c)
     }
 
     if (p.kind === 'curve') {
@@ -2849,15 +3028,26 @@ export class Viewer {
     p.grid.uColormap.value = COLORMAP_INDEX[p.vivid ? 'vivid' : (style.hidden?.colormap ?? 'viridis')]
     p.grid.uValueLog.value = style.hidden?.log ? 1 : 0
     if (p.volume) applyVolumeStyle(p.volume.u, style.hidden, c, style.opacity)
-    // 境目の線は、面の不透明度によらず式の色のまま。値のある線（ベクトル場の流線）は、矢印と同じ色の対応表で塗る
-    for (const l of p.outlines) (l.material as LineMaterial).color.copy(this.colorCurve(l, style, p.vivid ? 'vivid' : undefined) ? new THREE.Color(1, 1, 1) : c)
+    const opacity = Math.min(1, Math.max(0, style.opacity))
+    // 境目の線・流線を塗る。列ベクトルと固有ベクトルの軸は矢じりと同じ不透明度にする。
+    for (const l of p.outlines) {
+      const material = l.material as LineMaterial
+      material.color.copy(this.colorCurve(l, style, p.vivid ? 'vivid' : undefined) ? new THREE.Color(1, 1, 1) : c)
+      if (l.userData.vectorShaft) {
+        material.opacity = opacity
+        material.depthWrite = opacity === 1
+        if (material.transparent !== (opacity < 1)) {
+          material.transparent = opacity < 1
+          material.needsUpdate = true
+        }
+      }
+    }
     // 切り口のふたは、少し明るい色で塗る（曲面の裏側と見分けやすいように）
     const capColor = c.clone().lerp(new THREE.Color(0xffffff), 0.3)
     if (p.cap) (p.cap.material as THREE.MeshStandardMaterial).color.copy(capColor)
     if (p.stencil) (p.stencil.quad.material as THREE.MeshStandardMaterial).color.copy(capColor)
 
     // 面の不透明度。1 未満なら半透明として描き、奥の面や線も透けて見えるようにする
-    const opacity = Math.min(1, Math.max(0, style.opacity))
     if (p.stencil) {
       // ふたが半透明なら、ステンシルを数える面も同じ順番（半透明の物の列）で描く
       const transparent = opacity < 1
@@ -2890,7 +3080,8 @@ export class Viewer {
     // 間隔が 0 以下・数値でないものは描かない
     const g = style.grid
     // ベクトル場の矢印には引かない（細い矢印の上の筋になって、色が見えにくくなる）
-    const sp = (v: number) => (g.enabled && !p.vivid && Number.isFinite(v) && v > 0 ? v : 0)
+    const arrows = p.vivid || p.outlines.some((line) => line.userData.vectorShaft)
+    const sp = (v: number) => (g.enabled && !arrows && Number.isFinite(v) && v > 0 ? v : 0)
     if (p.uvSpan) {
       // 媒介変数表示: u, v の範囲をそれぞれ g.u, g.v 等分する線
       const div = (span: number, n: number) => (n > 0 ? span / n : 0)
@@ -2907,6 +3098,7 @@ export class Viewer {
 
   removePlot(id: number) {
     this.clearRotationTrail(id)
+    this.setLimitSource(id)
     this.setHoles(id, { holes: undefined } as MeshData)
     this.setPoi(id, undefined)
     this.curvePts.delete(id)
@@ -2973,4 +3165,10 @@ let dotSphereGeo: THREE.BufferGeometry | null = null
 function dotSphere(): THREE.BufferGeometry {
   if (!dotSphereGeo) dotSphereGeo = new THREE.SphereGeometry(1, 24, 16)
   return dotSphereGeo
+}
+
+/** 点群でも他の点と同じ材質を使い、球の面数を抑える。 */
+let denseDotSphereGeo: THREE.BufferGeometry | null = null
+function denseDotSphere(): THREE.BufferGeometry {
+  return denseDotSphereGeo ??= new THREE.SphereGeometry(1, 6, 4)
 }

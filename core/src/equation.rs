@@ -316,7 +316,9 @@ pub enum Plot {
     /// 原点からのベクトルの矢印（行列の列ベクトル・ベクトルの定義。計画 M7・M8）
     Arrows { vectors: Vec<[f64; 3]> },
     /// 点（数列の点 (n, aₙ)。`line` なら順に線で結ぶ: 複素数の数列の軌道）。表示中の座標の空間の点
-    Points { points: Vec<[f64; 3]>, line: bool },
+    Points { points: Vec<[f64; 3]>, line: bool, sequence: Option<SequencePoints> },
+    /// 極限だけの行。数値判定と、横を入力・縦を値とする関数のグラフ。
+    Limit { graph: crate::limit::Graph, report: crate::limit::Report },
     /// 常微分方程式（計画 M9）。状態 $\mathbf y$ の右辺 `rhs`（変数は状態の名前と独立変数）、初期値の組（組み合わせの数だけ解く）
     Ode(Box<Ode>),
     /// パラメータの定義 `name = value`。`uses` は右辺で使われたほかのパラメータ。
@@ -404,6 +406,7 @@ impl Plot {
             Plot::Arrows { .. } => "ベクトル".into(),
             Plot::Points { line: true, .. } => "数列の軌道（複素平面）".into(),
             Plot::Points { .. } => "数列の点".into(),
+            Plot::Limit { .. } => "極限".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
             Plot::ComplexPlane { label, .. } => label.clone(),
             Plot::System { base, eqs, cuts, .. } => {
@@ -441,7 +444,8 @@ impl Plot {
     /// 使われたパラメータ（と、断面で値を固定した座標）の名前
     pub fn used_params(&self) -> Vec<String> {
         let progs: Vec<&Program> = match self {
-            Plot::Explicit { prog, .. } | Plot::Implicit { prog, .. } => vec![prog],
+            Plot::Explicit { prog, .. } | Plot::Implicit { prog, .. } | Plot::Limit { graph: crate::limit::Graph::Function(prog), .. } => vec![prog],
+            Plot::Limit { .. } => return Vec::new(),
             Plot::Tilted { prog, color, .. } => std::iter::once(prog).chain(color.as_ref()).collect(),
             Plot::Solid { prog, names, .. } => {
                 // 範囲で重ねている名前も「使ったもの」に含める（範囲が変わったら計算し直すため）
@@ -601,6 +605,9 @@ pub fn compile(source: &str) -> Result<Plot, String> {
 
 /// 式をコンパイルする。`params` はほかの行で定義されたパラメータ。
 pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
+    if let Some(plot) = limit_line(source, params)? {
+        return Ok(plot);
+    }
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
@@ -612,6 +619,17 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     // 直交 u ⟂ v（u · v = 0）・平行 u ∥ v（u × v = 0）。計画 M13
     if let Some(p) = perp_line(source, params, space)? {
         return Ok(p);
+    }
+    if source.trim_start().starts_with("@cobweb") {
+        return cobweb_line(source, params);
+    }
+    if let Some((head, _)) = source.split_once('(') {
+        match head.trim() {
+            "@orbit" | "@orbitpoints" => return orbit_line(source, params),
+            "@recurrence" => return recurrence_line(source, params),
+            "@bifurcation" => return bifurcation_line(source, params),
+            _ => {}
+        }
     }
     // 数列の定義の行（計画 M10）
     if let Some(p) = sequence_line(source, params)? {
@@ -661,6 +679,28 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
         return Ok(Plot::Multi(plots));
     }
     compile_chains(chains, params, space)
+}
+
+/// 極限だけの行には、極限の判定と関数のグラフを出す。
+fn limit_line(source: &str, params: &Params) -> Result<Option<Plot>, String> {
+    let start = source.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+    if !start.starts_with("@lim") && !start.starts_with("@seqlim") {
+        return Ok(None);
+    }
+    let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
+    let [chain] = chains.as_slice() else { return Ok(None) };
+    let ([], [Expr::Binder { op, var, args, body }]) = (chain.rels.as_slice(), chain.exprs.as_slice()) else { return Ok(None) };
+    if !matches!(op.as_str(), "lim" | "seqlim") {
+        return Ok(None);
+    }
+    let (graph, report) = crate::expand::limit_line(op, var, args, body, params)?;
+    Ok(Some(Plot::Limit { graph, report }))
+}
+
+/// 値だけの式（定積分など）と同じ高さの面。
+pub(crate) fn constant_plot(value: f64, space: &Space) -> Result<Plot, String> {
+    let chain = crate::parser::Chain { exprs: vec![Expr::Num(value)], rels: Vec::new(), pos: vec![0] };
+    compile_chains(vec![chain], &Params::new(), space)
 }
 
 /// 停留点 `@crit f` だけの行（計画 N4 の前半。[`crate::critical`]）。f が使う表示中の座標（1〜3 個）について
@@ -752,7 +792,7 @@ fn critical_line(source: &str, params: &Params, space: &Space) -> Result<Option<
         parts.push(format!("{}: {} f = {}（{}）", at(c), crate::critical::class_name(c.class), crate::critical::num_text(c.value), c.reason));
     }
     crate::expand::set_kind(parts.join(" ／ "));
-    Ok(Some(Plot::Points { points, line: false }))
+    Ok(Some(Plot::Points { points, line: false, sequence: None }))
 }
 
 /// 行列を描く行（計画 M7 の 3.4）。そうでなければ None（今までの道へ）
@@ -1753,28 +1793,25 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
     }
     let Ok(chains) = parse_system_with(source, &crate::expand::names()) else { return Ok(None) };
     let [chain] = chains.as_slice() else { return Ok(None) };
-    let Some((name, _, _)) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
-    if chain.rels != [Rel::Eq] || crate::expand::seq_def(&name).is_none() {
+    let Some(head) = crate::expand::sequence_head(&chain.exprs[0]) else { return Ok(None) };
+    let name = &head.name;
+    if chain.rels != [Rel::Eq] || crate::expand::seq_def(name).is_none() {
         return Ok(None);
     }
+    if head.uses_principal_root() {
+        crate::expand::add_note("各項には根の主値を使用");
+    }
     let (lo, hi) = crate::expand::view_x();
-    let first = if crate::expand::is_recurrence(&name) {
-        match crate::expand::first_term(&name, params) {
-            Some(k) => k,
-            None => return Err(format!("変数 '{name}1' はここでは使えません（初項 {name}_1 を定義してください）")),
-        }
-    } else {
-        0
-    };
+    let first = crate::expand::sequence_start(&head, params);
     let from = (lo.ceil() as i64).max(first);
-    let to = (hi.floor() as i64).min(from + 1999);
-    crate::expand::mark_def_line(&name, Some("数列の点".into()));
+    let to = hi.floor() as i64;
+    crate::expand::mark_def_line(name, Some("数列の点".into()));
     if to < from {
         return Ok(Some(Plot::Multi(Vec::new())));
     }
-    let Some(terms) = crate::expand::sequence_terms(&name, from, to, params)? else {
+    let Some(terms) = crate::expand::sequence_terms(&head, from, to, params)? else {
         // 項が座標を含む（関数の列）: 点は描かない
-        crate::expand::mark_def_line(&name, None);
+        crate::expand::mark_def_line(name, None);
         return Ok(Some(Plot::Multi(Vec::new())));
     };
     let complex = terms.iter().any(|(_, v)| v.im.abs() > 1e-12 * v.re.abs().max(1.0) && v.im.is_finite());
@@ -1784,9 +1821,126 @@ fn sequence_line(source: &str, params: &Params) -> Result<Option<Plot>, String> 
         .map(|(k, v)| if complex { [v.re, v.im, 0.0] } else { [*k as f64, v.re, 0.0] })
         .collect();
     if complex {
-        crate::expand::mark_def_line(&name, Some("数列の軌道（複素平面）".into()));
+        crate::expand::mark_def_line(name, Some("数列の軌道（複素平面）".into()));
     }
-    Ok(Some(Plot::Points { points, line: complex }))
+    Ok(Some(Plot::Points { points, line: complex, sequence: Some(SequencePoints { head, terms }) }))
+}
+
+/// 数列の値を描画座標に変換する前の添字と値。
+pub struct SequencePoints {
+    head: crate::expand::SequenceHead,
+    terms: Vec<(i64, C)>,
+}
+
+impl SequencePoints {
+    pub(crate) fn table(&self, params: &Params) -> Vec<f64> {
+        self.terms.iter().flat_map(|(k, v)| {
+            let argument = self.head.argument_at(*k, params).map_or(f64::NAN, |n| n as f64);
+            [*k as f64, v.re, v.im, argument]
+        }).collect()
+    }
+}
+
+fn cobweb_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { op, args } = expr else { return Err("階段図は単独の式の行に書いてください".into()) };
+    let [start, steps] = args.as_slice() else { return Err("階段図は cobweb(a_1, 12) のように開始項と反復回数を書いてください".into()) };
+    if op != "cobweb" {
+        return Err("階段図は cobweb(a_1, 12) の形で書いてください".into());
+    }
+    let terms = crate::expand::cobweb_terms(start, steps, params)?;
+    let mut points = Vec::with_capacity(2 * terms.len() - 1);
+    points.push([terms[0], terms[0], 0.0]);
+    for pair in terms.windows(2) {
+        if pair[0] != pair[1] {
+            points.push([pair[0], pair[1], 0.0]);
+            points.push([pair[1], pair[1], 0.0]);
+        }
+    }
+    let line = points.len() > 1;
+    crate::expand::set_kind(format!("数列の階段図（{} 回の反復）", terms.len() - 1));
+    Ok(Plot::Points { points, line, sequence: None })
+}
+
+fn orbit_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let usage = "軌道は orbit(a_0, 24) や orbit(a_0, b_0, 24) のように、1〜3 個の開始項と反復回数を書いてください";
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { op, args } = expr else { return Err(usage.into()) };
+    let Some((steps, starts)) = args.split_last() else { return Err(usage.into()) };
+    let dots = op == "orbitpoints";
+    let (mut points, dims, complex) = match starts {
+        [matrix, Expr::Tuple(initial)] if (2..=3).contains(&initial.len()) => {
+            (crate::expand::matrix_orbit(matrix, initial, steps, dots, params)?, initial.len(), false)
+        }
+        starts if (1..=3).contains(&starts.len()) => {
+            let (points, complex) = crate::expand::orbit_points(starts, steps, dots, params)?;
+            (points, starts.len(), complex)
+        }
+        _ => return Err(usage.into()),
+    };
+    let steps = points.len() - 1;
+    let label = if dots { "数列の軌道の点" } else { "数列の軌道" };
+    let plane = if complex { "複素平面".into() } else { format!("{dims} 次元") };
+    crate::expand::set_kind(format!("{label}（{plane}・{steps} 回の反復）"));
+    if dots {
+        return Ok(Plot::Points { line: false, points, sequence: None });
+    }
+    points.dedup();
+    if points.len() == 1 {
+        return Ok(Plot::Points { line: false, points, sequence: None });
+    }
+    let last = *points.last().unwrap();
+    if dims == 1 && !complex {
+        // 数直線上の移動を、行きは上、戻りは下の弧で表示する。
+        points = points.windows(2).flat_map(|pair| {
+            let [a, b] = [pair[0][0], pair[1][0]];
+            (0..=12).map(move |j| {
+                let t = f64::from(j) / 12.0;
+                [a + (b - a) * t, (b - a) * t * (1.0 - t), 0.0]
+            }).chain(std::iter::once([f64::NAN; 3]))
+        }).collect();
+    } else {
+        points.push([f64::NAN; 3]);
+    }
+    points.push(last);
+    Ok(Plot::Points { line: true, points, sequence: None })
+}
+
+fn recurrence_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let usage = "リカレンスネットワークは recurrence(a_0, 32, 0.1) のように、開始項・項数・距離を書いてください";
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { args, .. } = expr else { return Err(usage.into()) };
+    let [start, count, distance] = args.as_slice() else { return Err(usage.into()) };
+    let (nodes, distance) = crate::expand::recurrence_nodes(start, count, distance, params)?;
+    let mut points = Vec::new();
+    let mut edges = 0;
+    for (i, &a) in nodes.iter().enumerate() {
+        points.extend([a, [f64::NAN; 3]]);
+        for &b in &nodes[i + 1..] {
+            if (a[1] - b[1]).hypot(a[2] - b[2]) <= distance {
+                // 同じ値に戻る辺も重ならないよう、添字の間隔に応じた弧にする。
+                points.extend((0..=8).map(|j| {
+                    let t = f64::from(j) / 8.0;
+                    let dx = b[0] - a[0];
+                    [a[0] + dx * t, a[1] + (b[1] - a[1]) * t + 0.6 * dx * t * (1.0 - t), a[2] + (b[2] - a[2]) * t]
+                }));
+                points.push([f64::NAN; 3]);
+                edges += 1;
+            }
+        }
+    }
+    crate::expand::set_kind(format!("リカレンスネットワーク（{} 頂点・{edges} 辺）", nodes.len()));
+    Ok(Plot::Points { line: true, points, sequence: None })
+}
+
+fn bifurcation_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let usage = "分岐図は bifurcation(f, 0.2, 2.5, 4) のように、二変数関数 f(x,r)・初期値・パラメータの下限と上限を書いてください";
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { args, .. } = expr else { return Err(usage.into()) };
+    let [Expr::Var(map), start, lo, hi] = args.as_slice() else { return Err(usage.into()) };
+    let points = crate::expand::bifurcation_points(map, start, lo, hi, params)?;
+    crate::expand::set_kind(format!("分岐図（{} 点）", points.len()));
+    Ok(Plot::Points { line: false, points, sequence: None })
 }
 
 /// 常微分方程式（[`Plot::Ode`]）

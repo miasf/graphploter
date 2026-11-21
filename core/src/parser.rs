@@ -52,6 +52,11 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub(crate) fn is_minus_one(&self) -> bool {
+        matches!(self, Expr::Num(n) if *n == -1.0)
+            || matches!(self, Expr::Neg(x) if matches!(**x, Expr::Num(n) if n == 1.0))
+    }
+
     /// 式の中で使われている変数名を集める（重複なし、出てきた順）
     pub fn collect_vars(&self, out: &mut Vec<String>) {
         match self {
@@ -335,7 +340,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
     Some(match name {
         // fdiff・bdiff・cdiff: 前進・後退・中心差分（総和の逆）
         // max・min・sup・inf: 添字つきの最大・最小 `@max(t, a, b) 項`（等分点での近似。計画 M12）
-        "sum" | "prod" | "int" | "diff" | "fdiff" | "bdiff" | "cdiff" | "max" | "min" | "sup" | "inf" => OpKind::Binder,
+        "sum" | "prod" | "int" | "lim" | "seqlim" | "diff" | "fdiff" | "bdiff" | "cdiff" | "max" | "min" | "sup" | "inf" => OpKind::Binder,
         // ∃・∀（行の先頭だけ。equation.rs が行ごと読む。計画 M12）
         "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
@@ -344,7 +349,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         // テイラー多項式 @taylor(f, x, a, n)
         "taylor" => OpKind::Func,
         // 停留点 @crit f（1 行にそれだけ。equation.rs が行ごと読む）
-        "crit" => OpKind::Func,
+        "crit" | "cobweb" | "orbit" | "orbitpoints" | "recurrence" | "bifurcation" => OpKind::Func,
         // 点での値 @at(式, x, a, y, b, …)
         "at" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）
@@ -825,7 +830,11 @@ impl Parser<'_> {
     }
 
     fn power(&mut self) -> Result<Expr, ParseError> {
-        let mut base = self.primary()?;
+        let base = self.primary()?;
+        self.after_primary(base)
+    }
+
+    fn after_primary(&mut self, mut base: Expr) -> Result<Expr, ParseError> {
         // 階乗 x! = Γ(x + 1)。累乗より先に計算する（3!^2 = (3!)^2）
         while *self.peek() == Tok::Bang {
             self.next();
@@ -835,6 +844,20 @@ impl Parser<'_> {
         if *self.peek() == Tok::Caret {
             self.next();
             let exp = self.unary()?;
+            // f^2(x) は呼び出し結果のべき。f^(-1)(x) は既存の逆関数の記法を保つ。
+            if *self.peek() == Tok::LParen {
+                let callable = match &base {
+                    Expr::Var(name) if !exp.is_minus_one() => Some((name, 0)),
+                    Expr::Prime { name, order } => Some((name, *order)),
+                    _ => None,
+                };
+                if let Some((name, primes)) = callable.filter(|(name, _)| self.names.contains(name)) {
+                    self.next();
+                    let args = self.args_until(Tok::RParen, "閉じ括弧 ')'")?;
+                    let call = Expr::Apply { name: name.clone(), primes, args };
+                    return self.after_primary(Expr::Bin(BinOp::Pow, Box::new(call), Box::new(exp)));
+                }
+            }
             return Ok(Expr::Bin(BinOp::Pow, Box::new(base), Box::new(exp)));
         }
         Ok(base)

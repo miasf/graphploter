@@ -248,7 +248,7 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
       tpl('\\bigotimes_{#?}#?', 'テンソル積（大） \\bigotimes', '⨂'),
       tpl('\\bigodot_{#?}#?', '\\bigodot', '⨀'),
       tpl('\\biguplus_{#?}#?', '\\biguplus', '⨄'),
-      tpl('\\lim_{#?\\to#?}#?', '極限 \\lim', 'lim'),
+      tpl('\\lim_{#?\\to#?}#?', '極限（片側極限は近づく先に上付きの + または −）', 'lim'),
       tpl('\\limsup_{#?}#?', '上極限 \\limsup', 'lim sup'),
       tpl('\\liminf_{#?}#?', '下極限 \\liminf', 'lim inf'),
       tpl('\\sup_{#?}#?', '上限 \\sup', 'sup'),

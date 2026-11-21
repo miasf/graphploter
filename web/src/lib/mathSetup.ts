@@ -189,16 +189,13 @@ const SPECIAL_PAGES: { title: string; keys: ReturnType<typeof sp>[] }[] = [
 ]
 
 /**
- * 入力欄の中に足す見た目の指定: 右肩の指数と、下付き（積分の範囲・添字）を大きくする。
- * MathLive は肩や下付きを本文の 70%（その中の肩はさらに小さく）で描くので、スマホでは読みにくい。
- * 肩と下付きの両方が付く所（x₂³）は、大きくしすぎると上下がぶつかるので控えめにする。
- * 入力欄は Shadow DOM の中にあるので、ページの CSS ではなく、入力欄ごとにこのスタイルシートを足す（MathInput.svelte）
+ * 独立した上付きだけを読みやすく拡大する。MathLive は下付きがあると、
+ * 基準線より下の余白を含む ML__vlist-t2 を作る。その場合は計算済みの添字の寸法を使う。
  */
 export const SCRIPT_SIZE_SHEET = new CSSStyleSheet()
 SCRIPT_SIZE_SHEET.replaceSync(`
-  .ML__msubsup span[style*="font-size: 70%"] { font-size: 78% !important; }
-  .ML__msubsup .ML__vlist > span:only-child > span[style*="font-size: 70%"] { font-size: 86% !important; }
-  .ML__msubsup span[style*="font-size: 50%"] { font-size: 72% !important; }
+  .ML__msubsup > .ML__vlist-t:not(.ML__vlist-t2) > .ML__vlist-r > .ML__vlist > span > span[style*="font-size: 70%"] { font-size: 86% !important; }
+  .ML__msubsup > .ML__vlist-t:not(.ML__vlist-t2) > .ML__vlist-r > .ML__vlist > span > span[style*="font-size: 50%"] { font-size: 72% !important; }
 `)
 
 /** 特殊関数のタブ: ページごとに層（layer）を分け、下の段の ◀ ▶ でページをめくる */
@@ -794,6 +791,8 @@ function keyboardLayouts(dims: number): typeof window.mathVirtualKeyboard.layout
           fn('max', '大きいほう', { operator: true, args: 2 }),
           fn('nCr', '組み合わせの数', { operator: true, args: 2 }),
           fn('nPr', '順列の数', { operator: true, args: 2 }),
+          fn('gcd', '最大公約数', { operator: true, args: 2 }),
+          fn('lcm', '最小公倍数', { operator: true, args: 2 }),
         ],
         [
           fn('Re', '実部', { operator: true }),
