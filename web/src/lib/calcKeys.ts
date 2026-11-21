@@ -185,8 +185,6 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('ẍ', '\\ddot{#0}', '2 階の時間の導関数 ẍ'),
         key('dx/dt', '\\frac{dx}{dt}', '導関数 dx/dt'),
         key("y″", "y''", '2 階の導関数（y″ + y = 0 は 1 本の常微分方程式）'),
-        key('aₙ₊₁', 'a_{n+1}=#?', '数列の漸化式（初項は a_1 = … の行）'),
-        key('aₙ', 'a_{#?}', '数列の項'),
         key('mod', '\\bmod', 'a mod b（余り）'),
       ],
       [
@@ -199,11 +197,27 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('gcd', '\\gcd\\left(#?,#?\\right)', '最大公約数'),
         key('C(n,k)', '\\binom{#?}{#?}', '二項係数'),
       ],
+      [key('f|ₓ', '\\left.#?\\right|_{x=#?}', '点での値（x に指定した値を代入する）')],
+    ],
+  },
+  {
+    title: '漸化式',
+    rows: [
       [
-        key('cobweb', '\\operatorname{cobweb}\\left(#?,#?\\right)', '漸化式の階段図 cobweb(a₀, N)（開始項・反復回数）'),
+        key('aₙ₊₁', 'a_{n+1}=#?', '数列の漸化式（初項は a_0 = … の行）'),
+        key('aₙ', 'a_{#?}', '数列の項'),
+        key('cobweb', '\\operatorname{cobweb}\\left(#?,#?\\right)', 'クモの巣図 cobweb(a₀, N)（開始項・反復回数）'),
+        key('行列軌道', '\\operatorname{orbit}\\left(#?,\\left(#?,#?\\right),#?\\right)', '行列の反復 orbit(A, (x₀,y₀), N)。3D は初期点に第 3 成分を追加'),
+      ],
+      [
+        key('orbit₁', '\\operatorname{orbit}\\left(#?,#?\\right)', '数直線上の移動 orbit(a₀, N)（開始項・反復回数）'),
         key('orbit₂', '\\operatorname{orbit}\\left(#?,#?,#?\\right)', '2D の軌道 orbit(a₀, b₀, N)（2 個の開始項・反復回数）'),
         key('orbit₃', '\\operatorname{orbit}\\left(#?,#?,#?,#?\\right)', '3D の軌道 orbit(a₀, b₀, c₀, N)（3 個の開始項・反復回数）'),
-        key('f|ₓ', '\\left.#?\\right|_{x=#?}', '点での値（x に指定した値を代入する）'),
+      ],
+      [
+        key('軌道の点', '\\operatorname{orbitpoints}\\left(#?,#?,#?\\right)', '軌道を点で表示 orbitpoints(a₀, b₀, N)'),
+        key('近接網', '\\operatorname{recurrence}\\left(#?,#?,#?\\right)', 'リカレンスネットワーク recurrence(a₀, 項数, 距離)'),
+        key('分岐図', '\\operatorname{bifurcation}\\left(#?,#?,#?,#?\\right)', '分岐図 bifurcation(f, 初期値, 下限, 上限)。f(x, r) を別の行に定義'),
       ],
     ],
   },

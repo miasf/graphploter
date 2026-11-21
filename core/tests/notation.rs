@@ -1157,7 +1157,10 @@ fn sequence_orbit_uses_the_same_step_for_each_coordinate() {
     let params = [("a0", 2.0), ("b0", 1.0), ("N", 2.0)];
     let m = run("@orbit(a_0,b_0,c_(1),N)", rules, &params).unwrap();
     assert!(m.kind().contains("軌道（3 次元・2 回の反復）"));
-    assert_eq!(m.positions(), vec![2.0, 1.0, 1.0, -1.0, 2.0, 2.0, -2.0, -1.0, 3.0]);
+    let points = m.positions();
+    assert_eq!(&points[..9], &[2.0, 1.0, 1.0, -1.0, 2.0, 2.0, -2.0, -1.0, 3.0]);
+    assert!(points[9..12].iter().all(|p| p.is_nan()));
+    assert_eq!(&points[12..], &[-2.0, -1.0, 3.0]);
     for param in ["a0", "b0", "N"] {
         assert!(m.used_params().split(',').any(|p| p == param));
     }
@@ -1167,10 +1170,71 @@ fn sequence_orbit_uses_the_same_step_for_each_coordinate() {
     let start = run("@orbit(a_0,b_0,0)", rules, &params).unwrap();
     assert_eq!(&start.positions()[..3], &[2.0, 1.0, 0.0]);
     let lag = run("@orbit(c_0,c_1,1)", rules, &[]).unwrap();
-    assert_eq!(lag.positions(), vec![0.0, 1.0, 0.0, 1.0, 2.0, 0.0]);
-    assert!(error_of("@orbit(a_0,2)", rules).contains("2〜3 個"));
+    assert_eq!(&lag.positions()[..6], &[0.0, 1.0, 0.0, 1.0, 2.0, 0.0]);
+    assert!(error_of("@orbit(a_0,b_0,c_0,d_0,2)", rules).contains("1〜3 個"));
     assert!(error_of("@orbit(a_0,b_0,513)", rules).contains("0〜512"));
     assert!(error_of("@orbit(a_0,b_0,1)", "a_(n)=i\nb_(n)=n").contains("有限の実数"));
+}
+
+#[test]
+fn sequence_orbit_can_iterate_a_matrix_from_an_initial_point() {
+    let m = run("@orbit(A,(s,2),2)", "A=⟦0,-1;1,0⟧", &[("s", 1.0)]).unwrap();
+    assert_eq!(&m.positions()[..9], &[1.0, 2.0, 0.0, -2.0, 1.0, 0.0, -1.0, -2.0, 0.0]);
+    assert_eq!(m.used_params(), "s");
+    assert_eq!(m.used_defs(), "A");
+    assert!(error_of("@orbit(A,(1,2,3),2)", "A=⟦0,-1;1,0⟧").contains("正方行列"));
+}
+
+#[test]
+fn sequence_orbit_number_line_and_scatter() {
+    let rules = "a_(n+1)=-a_(n)/2";
+    let params = [("a0", 2.0)];
+    let hops = run("@orbit(a_0,2)", rules, &params).unwrap().positions();
+    let hops: Vec<_> = hops.chunks_exact(3).collect();
+    assert_eq!(hops[0], &[2.0, 0.0, 0.0]);
+    assert!(hops[6][1] < 0.0);
+    assert_eq!(hops[12], &[-1.0, 0.0, 0.0]);
+    assert!(hops[20][1] > 0.0);
+    assert_eq!(hops.last().unwrap(), &&[0.5, 0.0, 0.0]);
+
+    let dots = run("@orbitpoints(a_0,a_1,2)", rules, &params).unwrap().positions();
+    assert_eq!(&dots[..6], &[2.0, -1.0, 0.0, 2.0, -1.0, 0.0]);
+    assert!(dots[6..9].iter().all(|p| p.is_nan()));
+    assert_eq!(&dots[9..12], &[-1.0, 0.5, 0.0]);
+    assert!(error_of("@orbitpoints(a_0,8193)", rules).contains("8192"));
+}
+
+#[test]
+fn recurrence_network_joins_similar_terms_without_joining_different_groups() {
+    let rules = "a_(n)=mod(n,2)";
+    let m = run("@recurrence(a_1,4,d)", rules, &[("d", 0.0)]).unwrap();
+    assert!(m.kind().contains("4 頂点・2 辺"));
+    assert_eq!(m.used_params(), "d");
+    let points = m.positions();
+    let runs: Vec<_> = points.chunks_exact(3).collect::<Vec<_>>()
+        .split(|p| p[0].is_nan()).filter(|run| !run.is_empty()).map(|run| run.to_vec()).collect();
+    let edges: Vec<_> = runs.iter().filter(|run| run.len() > 1)
+        .map(|run| (run[0], *run.last().unwrap())).collect();
+    assert_eq!(edges, vec![(&[1.0, 1.0, 0.0][..], &[3.0, 1.0, 0.0][..]), (&[2.0, 0.0, 0.0][..], &[4.0, 0.0, 0.0][..])]);
+    assert!(error_of("@recurrence(a_1,4,-1)", rules).contains("0 以上"));
+}
+
+#[test]
+fn bifurcation_restarts_each_column_then_plots_the_remaining_orbit() {
+    let rules = "F(x,r)=r*x*(1-x)+a";
+    let m = run("@bifurcation(F,0.2,2.8,3.2)", rules, &[("a", 0.0)]).unwrap();
+    assert!(m.kind().contains("分岐図"));
+    assert_eq!(m.used_params(), "a");
+    assert_eq!(m.used_defs(), "F");
+    let points = m.positions();
+    let samples: Vec<_> = points.chunks_exact(9).map(|p| &p[..3]).collect();
+    let left: Vec<_> = samples.iter().filter(|p| p[0] == 2.8).collect();
+    let right: Vec<_> = samples.iter().filter(|p| p[0] == 3.2).collect();
+    assert_eq!(left.len(), 1);
+    assert!((left[0][1] - (1.0 - 1.0 / 2.8)).abs() < 1e-6);
+    assert_eq!(right.len(), 2);
+    assert!(right.iter().all(|p| p[2] == 0.0));
+    assert!(error_of("@bifurcation(F,0.2,4,3)", rules).contains("下限"));
 }
 
 #[test]

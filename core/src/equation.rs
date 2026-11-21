@@ -616,8 +616,13 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if source.trim_start().starts_with("@cobweb") {
         return cobweb_line(source, params);
     }
-    if source.trim_start().strip_prefix("@orbit").is_some_and(|rest| rest.trim_start().starts_with('(')) {
-        return orbit_line(source, params);
+    if let Some((head, _)) = source.split_once('(') {
+        match head.trim() {
+            "@orbit" | "@orbitpoints" => return orbit_line(source, params),
+            "@recurrence" => return recurrence_line(source, params),
+            "@bifurcation" => return bifurcation_line(source, params),
+            _ => {}
+        }
     }
     // 数列の定義の行（計画 M10）
     if let Some(p) = sequence_line(source, params)? {
@@ -1829,17 +1834,82 @@ fn cobweb_line(source: &str, params: &Params) -> Result<Plot, String> {
 }
 
 fn orbit_line(source: &str, params: &Params) -> Result<Plot, String> {
-    let usage = "軌道は orbit(a_0, b_0, 24) のように、2〜3 個の開始項と反復回数を書いてください";
+    let usage = "軌道は orbit(a_0, 24) や orbit(a_0, b_0, 24) のように、1〜3 個の開始項と反復回数を書いてください";
     let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
     let Expr::Op { op, args } = expr else { return Err(usage.into()) };
     let Some((steps, starts)) = args.split_last() else { return Err(usage.into()) };
-    if op != "orbit" || !(2..=3).contains(&starts.len()) {
-        return Err(usage.into());
+    let dots = op == "orbitpoints";
+    let (mut points, dims) = match starts {
+        [matrix, Expr::Tuple(initial)] if (2..=3).contains(&initial.len()) => {
+            (crate::expand::matrix_orbit(matrix, initial, steps, dots, params)?, initial.len())
+        }
+        starts if (1..=3).contains(&starts.len()) => {
+            (crate::expand::orbit_points(starts, steps, dots, params)?, starts.len())
+        }
+        _ => return Err(usage.into()),
+    };
+    let steps = points.len() - 1;
+    let label = if dots { "数列の軌道の点" } else { "数列の軌道" };
+    crate::expand::set_kind(format!("{label}（{dims} 次元・{steps} 回の反復）"));
+    if dots {
+        return Ok(Plot::Points { line: false, points, sequence: None });
     }
-    let mut points = crate::expand::orbit_points(starts, steps, params)?;
-    crate::expand::set_kind(format!("数列の軌道（{} 次元・{} 回の反復）", starts.len(), points.len() - 1));
     points.dedup();
-    Ok(Plot::Points { line: points.len() > 1, points, sequence: None })
+    if points.len() == 1 {
+        return Ok(Plot::Points { line: false, points, sequence: None });
+    }
+    let last = *points.last().unwrap();
+    if dims == 1 {
+        // 数直線上の移動を、行きは上、戻りは下の弧で表示する。
+        points = points.windows(2).flat_map(|pair| {
+            let [a, b] = [pair[0][0], pair[1][0]];
+            (0..=12).map(move |j| {
+                let t = f64::from(j) / 12.0;
+                [a + (b - a) * t, (b - a) * t * (1.0 - t), 0.0]
+            }).chain(std::iter::once([f64::NAN; 3]))
+        }).collect();
+    } else {
+        points.push([f64::NAN; 3]);
+    }
+    points.push(last);
+    Ok(Plot::Points { line: true, points, sequence: None })
+}
+
+fn recurrence_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let usage = "リカレンスネットワークは recurrence(a_0, 32, 0.1) のように、開始項・項数・距離を書いてください";
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { args, .. } = expr else { return Err(usage.into()) };
+    let [start, count, distance] = args.as_slice() else { return Err(usage.into()) };
+    let (nodes, distance) = crate::expand::recurrence_nodes(start, count, distance, params)?;
+    let mut points = Vec::new();
+    let mut edges = 0;
+    for (i, &a) in nodes.iter().enumerate() {
+        points.extend([a, [f64::NAN; 3]]);
+        for &b in &nodes[i + 1..] {
+            if (a[1] - b[1]).abs() <= distance {
+                // 同じ値に戻る辺も重ならないよう、添字の間隔に応じた弧にする。
+                points.extend((0..=8).map(|j| {
+                    let t = f64::from(j) / 8.0;
+                    let dx = b[0] - a[0];
+                    [a[0] + dx * t, a[1] + (b[1] - a[1]) * t + 0.6 * dx * t * (1.0 - t), 0.0]
+                }));
+                points.push([f64::NAN; 3]);
+                edges += 1;
+            }
+        }
+    }
+    crate::expand::set_kind(format!("リカレンスネットワーク（{} 頂点・{edges} 辺）", nodes.len()));
+    Ok(Plot::Points { line: true, points, sequence: None })
+}
+
+fn bifurcation_line(source: &str, params: &Params) -> Result<Plot, String> {
+    let usage = "分岐図は bifurcation(f, 0.2, 2.5, 4) のように、二変数関数 f(x,r)・初期値・パラメータの下限と上限を書いてください";
+    let expr = parse_with(source, &crate::expand::names()).map_err(|e| e.to_string())?;
+    let Expr::Op { args, .. } = expr else { return Err(usage.into()) };
+    let [Expr::Var(map), start, lo, hi] = args.as_slice() else { return Err(usage.into()) };
+    let points = crate::expand::bifurcation_points(map, start, lo, hi, params)?;
+    crate::expand::set_kind(format!("分岐図（{} 点）", points.len()));
+    Ok(Plot::Points { line: false, points, sequence: None })
 }
 
 /// 常微分方程式（[`Plot::Ode`]）

@@ -2750,14 +2750,15 @@ export class Viewer {
    */
   private makeDots(pts: Float32Array, mat: THREE.MeshStandardMaterial, scale = 1): THREE.InstancedMesh {
     const pos = dotPositions(pts)
-    const dots = new THREE.InstancedMesh(dotSphere(), mat, pos.length / 3)
+    const count = pos.length / 3
+    const dots = new THREE.InstancedMesh(count >= 1000 ? denseDotSphere() : dotSphere(), mat, count)
     dots.frustumCulled = false
     dots.raycast = () => {} // 視点の操作の「カーソルの下の図形」には使わない
     dots.userData.pos = pos
     dots.userData.scale = scale
     this.placeDots(dots)
     // 視点が動いたら、画面の上の大きさの上限に合わせて置き直す（点が少ないときだけ。多い点の集まりは空間の大きさのまま）
-    if (pos.length / 3 <= 4096) {
+    if (count <= 4096) {
       dots.onBeforeRender = (_r, _s, camera) => {
         const c = camera as THREE.PerspectiveCamera
         const key = `${c.position.x},${c.position.y},${c.position.z},${c.fov},${this.viewH}`
@@ -2774,7 +2775,7 @@ export class Viewer {
   private placeDots(dots: THREE.InstancedMesh) {
     const d = this.domain
     const span = d ? Math.max(d.xmax - d.xmin, d.ymax - d.ymin, this.flat ? 0 : d.zmax - d.zmin) : 10
-    const r = span * 0.006 * dots.userData.scale
+    const r = span * (dots.count >= 1000 ? 0.0025 : 0.006) * dots.userData.scale
     const pos = dots.userData.pos as number[]
     const m = new THREE.Matrix4()
     // 空間の大きさ（表示範囲の 0.6 %）のまま描くが、画面の上で半径 4 画素（太さの倍率をかける）を超えないようにする。
@@ -3072,4 +3073,10 @@ let dotSphereGeo: THREE.BufferGeometry | null = null
 function dotSphere(): THREE.BufferGeometry {
   if (!dotSphereGeo) dotSphereGeo = new THREE.SphereGeometry(1, 24, 16)
   return dotSphereGeo
+}
+
+/** 点群でも他の点と同じ材質を使い、球の面数を抑える。 */
+let denseDotSphereGeo: THREE.BufferGeometry | null = null
+function denseDotSphere(): THREE.BufferGeometry {
+  return denseDotSphereGeo ??= new THREE.SphereGeometry(1, 6, 4)
 }

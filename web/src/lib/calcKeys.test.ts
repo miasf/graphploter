@@ -33,15 +33,20 @@ for (const page of [...CALC_PAGES, { title: '行列', rows: MATRIX_ROWS }]) {
 }
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 
-const equationKeys = CALC_PAGES.find((page) => page.title === '方程式')?.rows.flat() ?? []
+const recurrenceKeys = CALC_PAGES.find((page) => page.title === '漸化式')?.rows.flat() ?? []
 for (const [label, args, expected] of [
   ['cobweb', ['a_0', '12'], '@cobweb (a_0,12)'],
+  ['orbit₁', ['a_0', 'N'], '@orbit (a_0,N)'],
   ['orbit₂', ['a_0', 'b_0', 'N'], '@orbit (a_0,b_0,N)'],
   ['orbit₃', ['a_0', 'b_0', 'c_0', 'N'], '@orbit (a_0,b_0,c_0,N)'],
+  ['行列軌道', ['A', '1', '2', 'N'], '@orbit (A,(1,2),N)'],
+  ['軌道の点', ['a_0', 'b_0', 'N'], '@orbitpoints (a_0,b_0,N)'],
+  ['近接網', ['a_0', '32', '0.1'], '@recurrence (a_0,32,0.1)'],
+  ['分岐図', ['f', '0.2', '2.5', '4'], '@bifurcation (f,0.2,2.5,4)'],
 ] as const) {
-  const template = equationKeys.find((key) => key.label === label)
+  const template = recurrenceKeys.find((key) => key.label === label)
   if (!template || template.insert.match(/#\?/g)?.length !== args.length) {
-    throw new Error(`方程式の ${label} に ${args.length} 個の入力欄が必要です`)
+    throw new Error(`漸化式の ${label} に ${args.length} 個の入力欄が必要です`)
   }
   let index = 0
   const actual = latexToText(template.insert.replace(/#\?/g, () => args[index++]))

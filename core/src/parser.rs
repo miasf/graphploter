@@ -349,7 +349,7 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         // テイラー多項式 @taylor(f, x, a, n)
         "taylor" => OpKind::Func,
         // 停留点 @crit f（1 行にそれだけ。equation.rs が行ごと読む）
-        "crit" | "cobweb" | "orbit" => OpKind::Func,
+        "crit" | "cobweb" | "orbit" | "orbitpoints" | "recurrence" | "bifurcation" => OpKind::Func,
         // 点での値 @at(式, x, a, y, b, …)
         "at" => OpKind::Func,
         // ベクトル場の演算子: 勾配・発散・回転・ラプラシアン（直後の項に掛かる）

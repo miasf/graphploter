@@ -761,7 +761,7 @@ class Converter {
           this.out += ' @crit '
           return
         }
-        if (name === 'operatorname' && (s === 'cobweb' || s === 'orbit')) {
+        if (name === 'operatorname' && ['cobweb', 'orbit', 'orbitpoints', 'recurrence', 'bifurcation'].includes(s)) {
           this.out += ` @${s} `
           return
         }

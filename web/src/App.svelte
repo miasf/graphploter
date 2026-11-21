@@ -780,13 +780,13 @@
     if (!item.visible && !item.param) {
       item.stale = true
       item.sequenceTable = undefined
-      const previous = sequenceDefinitionName(lastDefSource.get(item.id) ?? '')
+      const previous = sourceDefinitionName(lastDefSource.get(item.id) ?? '')
       // 計算はしないが、式の書き方の誤りだけは今の式で調べ直す（範囲の欄を直したのに、前の誤りが残って見えないように）。
       // 計算の誤りは分からないので、表示したときに計算し直すまで出さない
       try {
         const source = latexToText(item.latex)
-        const sequence = sequenceDefinitionName(source)
-        if (sequence || previous) noteDefinition(item, sequence, source)
+        const definition = sourceDefinitionName(source)
+        if (definition || previous) noteDefinition(item, definition, source)
         item.error = undefined
       } catch (e) {
         if (previous) noteDefinition(item, null, '')
@@ -827,12 +827,15 @@
   /** 計算エンジン用の式の、集合の定義 `S = {…}`・`S = A ∪ B`（右辺に集合の記号がある） */
   const SET_DEF_HEAD = /^\s*([A-Za-z]\d*|\{\w+\})\s*=.*[⦃∪∩∖△ᶜ∁]/
 
+  function sourceDefinitionName(source: string): string | null {
+    return (source.match(DEF_HEAD) ?? source.match(SET_DEF_HEAD))?.[1] ?? sequenceDefinitionName(source)
+  }
+
   /** 行が定義の行か（計算エンジンが定義の行と答えた行と、関数の定義の左辺の形の行）。定義の名前か null */
   function defNameOf(it: PlotItem): string | null {
     if (it.def) return it.def
     try {
-      const text = latexToText(it.latex)
-      return (text.match(DEF_HEAD) ?? text.match(SET_DEF_HEAD))?.[1] ?? sequenceDefinitionName(text)
+      return sourceDefinitionName(latexToText(it.latex))
     } catch {
       return null
     }
@@ -1182,7 +1185,10 @@
     recordBreakdown(item.id, { ...res.timing, transfer, setPlot: performance.now() - s0, source, kind: res.kind, reprojected: !!res.reprojected, transformOnly: !!res.mesh.transformOnly, triangles: res.mesh.indices.length / 3 })
     // 複素平面の点は値を書く（回転・表示する座標の入れ替えで、画面の位置が値と違うときは書かない）
     const plain = space.axes.every((a, k) => a === k) && space.rotation.every((a) => a === 0)
-    const size = /^複素平面の点/.test(res.kind) && plain
+    // 漸化式の図は種類の欄で反復数や点・辺の数を示す。描画用の補間点と区切りは数えない。
+    const size = /^@(cobweb|orbit|orbitpoints|recurrence|bifurcation)\s*\(/.test(source)
+      ? ''
+      : /^複素平面の点/.test(res.kind) && plain
       ? `(${complexPointText(res.mesh.positions)})`
       : /^複素平面の点/.test(res.kind)
       ? '点'
@@ -1192,7 +1198,7 @@
     // 回転だけを変えた（形はそのまま）なら、三角形の数は前の表示のまま
     if (res.mesh.transformOnly) {
       if (item.info) item.info = item.info.replace(/ · [\d.]+ ms/, ` · ${res.ms.toFixed(0)} ms`)
-    } else item.info = `${res.kind} · ${size} · ${res.ms.toFixed(0)} ms`
+    } else item.info = [res.kind, size, `${res.ms.toFixed(0)} ms`].filter(Boolean).join(' · ')
     if (preview !== null) {
       // 2段階の表示: 粗い版を出したので、続けて細かく計算する（終わったら1回だけ差し替える）
       item.info += ' · 計算中'
@@ -2909,7 +2915,7 @@
       if (play) togglePlayMorph(coordSys)
       if (toFlat && !flat) setFlat(true)
     }
-    if (sample.flat && !flat) setFlat(true)
+    if (sample.flat !== undefined && sample.flat !== flat) setFlat(sample.flat)
     for (const si of adding) {
       // 次元・回転を変える例は、全体の回転で描く（例の回転・再生は全体の回転に入れる）
       pushItem(newItem(si.latex, { ...si.options, folder, ...(view ? { rotGroup: GLOBAL_GROUP } : {}), ...(coordSys !== undefined ? { coordSys } : {}) }))
@@ -2967,7 +2973,8 @@
     }
     // 図形が大きく見えるよう、表示範囲を合わせて視点もリセットする
     const h = view.half
-    domain = { xmin: -h, xmax: h, ymin: -h, ymax: h, zmin: -h, zmax: h }
+    const [xmin, xmax, ymin, ymax] = view.xy ?? [-h, h, -h, h]
+    domain = { xmin, xmax, ymin, ymax, zmin: -h, zmax: h }
     domainError = ''
     viewer?.setDomain(domain, true)
     updateSpaceRangeErrors()

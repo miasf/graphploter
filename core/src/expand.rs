@@ -396,17 +396,14 @@ pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Resul
 }
 
 /// 各数列の開始項を座標にし、全成分の添字を同時に進める。
-pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, dots: bool, params: &Params) -> Result<Vec<[f64; 3]>, String> {
     let defs = current();
     let mut expander = Expander::new(&defs, params);
     let start_error = "軌道の座標には a_0 や a_(N) のように数列の項を書いてください";
     let starts = starts.iter()
         .map(|start| sequence_plot_start(&mut expander, start, start_error))
         .collect::<Result<Vec<_>, _>>()?;
-    let steps = expander.integer(steps, "軌道の反復回数")?;
-    if !(0..=MAX_SEQUENCE_PLOT_STEPS).contains(&steps) {
-        return Err(format!("軌道の反復回数は 0〜{MAX_SEQUENCE_PLOT_STEPS} にしてください"));
-    }
+    let steps = orbit_steps(&mut expander, steps, dots)?;
     if starts.iter().any(|&(_, first)| first.checked_add(steps).is_none()) {
         return Err("最後の項の添字が大きすぎます".into());
     }
@@ -417,6 +414,111 @@ pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, params: &Params) -> Re
         }
         Ok(point)
     }).collect()
+}
+
+fn orbit_steps(expander: &mut Expander<'_>, steps: &Expr, dots: bool) -> Result<i64, String> {
+    let steps = expander.integer(steps, "軌道の反復回数")?;
+    let max_steps = if dots { 8_192 } else { MAX_SEQUENCE_PLOT_STEPS };
+    if !(0..=max_steps).contains(&steps) {
+        return Err(format!("軌道の反復回数は 0〜{max_steps} にしてください"));
+    }
+    Ok(steps)
+}
+
+pub(crate) fn matrix_orbit(matrix: &Expr, start: &[Expr], steps: &Expr, dots: bool, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let mat = expander.scalar(matrix)?;
+    let mat = Mat::of(&mat).filter(|m| m.rows == start.len() && m.cols == start.len())
+        .ok_or("軌道の行列は、初期点と同じ次元の 2×2 または 3×3 の正方行列にしてください")?;
+    let steps = orbit_steps(&mut expander, steps, dots)?;
+    let weights: Vec<_> = mat.items.iter().map(|v| expander.number(v, "軌道の行列の成分")).collect::<Result<_, _>>()?;
+    let mut point = [0.0; 3];
+    for (p, expr) in point.iter_mut().zip(start) {
+        *p = expander.number(expr, "軌道の初期点")?;
+    }
+    let mut points = Vec::with_capacity(steps as usize + 1);
+    for _ in 0..=steps {
+        if point.iter().any(|p| !(*p as f32).is_finite()) {
+            return Err("軌道に描画できる範囲を超えた項があります（反復回数を減らしてください）".into());
+        }
+        points.push(point);
+        let mut next = [0.0; 3];
+        for (p, row) in next.iter_mut().zip(weights.chunks_exact(start.len())) {
+            *p = row.iter().zip(&point).map(|(a, x)| a * x).sum();
+        }
+        point = next;
+    }
+    Ok(points)
+}
+
+/// 各添字に対応する頂点を (添字, 値) に置く。
+pub(crate) fn recurrence_nodes(start: &Expr, count: &Expr, distance: &Expr, params: &Params) -> Result<(Vec<[f64; 3]>, f64), String> {
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start_error = "リカレンスネットワークの開始項は a_0 などの数列の項を書いてください";
+    let (name, first) = sequence_plot_start(&mut expander, start, start_error)?;
+    let count = expander.integer(count, "リカレンスネットワークの項数")?;
+    if !(1..=128).contains(&count) {
+        return Err("リカレンスネットワークの項数は 1〜128 にしてください".into());
+    }
+    let distance = expander.number(distance, "リカレンスネットワークの距離")?;
+    if distance < 0.0 {
+        return Err("リカレンスネットワークの距離は 0 以上にしてください".into());
+    }
+    let last = first.checked_add(count - 1).ok_or("最後の項の添字が大きすぎます")?;
+    let nodes = (first..=last).map(|k| {
+        let value = sequence_plot_value(&mut expander, name, k, "リカレンスネットワーク")?;
+        Ok([k as f64, value, 0.0])
+    }).collect::<Result<Vec<_>, String>>()?;
+    Ok((nodes, distance))
+}
+
+/// 二変数関数 f(x, r) を、各 r について同じ初期値から反復する。
+pub(crate) fn bifurcation_points(map: &str, start: &Expr, lo: &Expr, hi: &Expr, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+    const COLUMNS: usize = 401;
+    const BURN_IN: usize = 400;
+    const SAMPLES: usize = 48;
+    let defs = current();
+    let mut expander = Expander::new(&defs, params);
+    let start = expander.number(start, "分岐図の初期値")?;
+    let lo = expander.number(lo, "分岐図のパラメータの下限")?;
+    let hi = expander.number(hi, "分岐図のパラメータの上限")?;
+    if lo >= hi || !(lo as f32).is_finite() || !(hi as f32).is_finite() {
+        return Err("分岐図の範囲は、描画できる値で下限を上限より小さくしてください".into());
+    }
+    let vars = ["#state", "#parameter"];
+    let call = Expr::Apply { name: map.into(), primes: 0, args: vars.iter().map(|&v| Expr::Var(v.into())).collect() };
+    let expr = expander.scalar(&call)?;
+    if expr.node_count() > 512 {
+        return Err("分岐図の写像の式が大きすぎます".into());
+    }
+    let program = crate::eval::Program::compile_with(&expr, &vars, params)?;
+    record_used_params(program.used_params());
+    let controls: Vec<_> = (0..COLUMNS).map(|k| lo + (hi - lo) * (k as f64 / (COLUMNS - 1) as f64)).collect();
+    let mut states = vec![start; COLUMNS];
+    let mut values = vec![num_complex::Complex64::default(); COLUMNS];
+    let mut columns = vec![Vec::new(); COLUMNS];
+    for step in 0..BURN_IN + SAMPLES {
+        program.eval_batch(&[&states, &controls], &mut values);
+        for (i, (state, value)) in states.iter_mut().zip(&values).enumerate() {
+            if !state.is_finite() {
+                continue;
+            }
+            let value = crate::eval::as_real(*value);
+            *state = if (value as f32).is_finite() { value } else { f64::NAN };
+            if step >= BURN_IN && state.is_finite() {
+                let column = &mut columns[i];
+                let value = *state as f32;
+                if !column.contains(&value) {
+                    column.push(value);
+                }
+            }
+        }
+    }
+    Ok(controls.into_iter().zip(columns).flat_map(|(r, values)| {
+        values.into_iter().map(move |v| [r, f64::from(v), 0.0])
+    }).collect())
 }
 
 /// この行の規則で決まる項を描く。別の添字を指定する行には点を残す。

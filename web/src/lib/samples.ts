@@ -45,6 +45,8 @@ export interface SampleView {
   perspective?: number
   /** 表示範囲（−half 〜 half） */
   half: number
+  /** 横・縦に別の表示範囲が必要な例の端（x 最小・最大、y 最小・最大） */
+  xy?: [number, number, number, number]
   /** 再生する回転（座標の組の番号） */
   play?: number
 }
@@ -354,6 +356,20 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '数列',
     samples: [
       {
+        label: '数直線上のステップ移動（倍率 k、歩幅 b、反復数 M）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 5, xy: [-5, 5, -2, 2] },
+        items: [
+          { latex: 'm_0=2', param: 'm0' },
+          { latex: 'k=-0.7', param: 'k', options: { slider: { min: -1, max: 1, step: 0.1, complex: false, stack: false } } },
+          { latex: 'b=0', param: 'b', options: { slider: { min: -1, max: 1, step: 0.1, complex: false, stack: false } } },
+          { latex: 'M=5', param: 'M', options: { slider: { min: 0, max: 24, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: 'm_{n+1}=km_n+b', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(m_0,M\\right)', options: { color: '#2d70b3', lineWidth: 4 } },
+        ],
+      },
+      {
         label: '連立漸化式の軌道（初期値と反復回数を動かす）',
         flat: true,
         openFolder: true,
@@ -378,7 +394,120 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           { latex: 'h(x)=1+q(x-1)', options: { color: '#2d70b3' } },
           { latex: 'y=x', options: { color: '#888888' } },
           { latex: 'j_{n+1}=h(j_n)', options: { visible: false } },
-          { latex: '\\operatorname{cobweb}\\left(j_1,12\\right)', options: { color: '#c74440', lineWidth: 4 } },
+          { latex: 'J=12', param: 'J', options: { slider: { min: 1, max: 32, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: '\\operatorname{cobweb}\\left(j_1,J\\right)', options: { color: '#c74440', lineWidth: 4 } },
+        ],
+      },
+      {
+        label: '3項間漸化式（隣接 2 項の軌道）',
+        flat: true,
+        view: { dims: 3, half: 2.5 },
+        items: [
+          { latex: 'D_0=2', param: 'D0' },
+          { latex: 'D_1=1', param: 'D1' },
+          { latex: 'D_{n+2}=0.7D_{n+1}-0.81D_n', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(D_1,D_0,32\\right)', options: { color: '#388c46', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '行列を反復する軌道（固有ベクトルと比較）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 4 },
+        items: [
+          { latex: 'Y=\\begin{pmatrix}1.04&0.18\\\\0.18&0.84\\end{pmatrix}', options: { color: '#888888', opacity: 0.3 } },
+          { latex: '\\operatorname{eig}\\left(Y\\right)', options: { color: '#888888', opacity: 0.5 } },
+          { latex: '\\operatorname{orbit}\\left(Y,\\left(1,-1\\right),20\\right)', options: { color: '#2d70b3', lineWidth: 3 } },
+          { latex: '\\operatorname{orbit}\\left(Y,\\left(0.6,0.6\\right),10\\right)', options: { color: '#c74440', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '4項間漸化式（隣接 3 項の軌道と固有値）',
+        flat: false,
+        view: { dims: 3, half: 2.5 },
+        items: [
+          { latex: 'H_0=2', param: 'H0' },
+          { latex: 'H_1=1', param: 'H1' },
+          { latex: 'H_2=-0.5', param: 'H2' },
+          { latex: 'H_{n+3}=0.5H_{n+2}-0.64H_{n+1}+0.32H_n', options: { visible: false } },
+          { latex: '\\operatorname{eig}\\left(\\begin{pmatrix}0.5&-0.64&0.32\\\\1&0&0\\\\0&1&0\\end{pmatrix}\\right)', options: { color: '#888888', opacity: 0.55 } },
+          { latex: '\\operatorname{orbit}\\left(H_2,H_1,H_0,27\\right)', options: { color: '#6042a6', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '3元連立漸化式（安定な平面と不安定な軸）',
+        flat: false,
+        view: { dims: 3, half: 2.7 },
+        items: [
+          { latex: 'S_0=1', param: 'S0' },
+          { latex: 'T_0=1', param: 'T0' },
+          { latex: 'U_0=0.06', param: 'U0' },
+          { latex: 'S_{n+1}=0.88S_n-0.4T_n', options: { visible: false } },
+          { latex: 'T_{n+1}=0.4S_n+0.88T_n', options: { visible: false } },
+          { latex: 'U_{n+1}=1.16U_n', options: { visible: false } },
+          { latex: 'z=0', options: { color: '#388c46', opacity: 0.15 } },
+          { latex: '\\left(0,0,t\\right)', options: { color: '#c74440', opacity: 0.45, ranges: { t: ['-2.7', '2.7'] } } },
+          { latex: '\\operatorname{orbit}\\left(S_0,T_0,24\\right)', options: { color: '#388c46', lineWidth: 3 } },
+          { latex: '\\operatorname{orbit}\\left(S_0,T_0,U_0,24\\right)', options: { color: '#c74440', lineWidth: 3 } },
+        ],
+      },
+      {
+        label: '線形漸化式のリカレンスネットワーク（倍率と近接距離を動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 12, xy: [-1, 21, -3, 6] },
+        items: [
+          { latex: 'L_0=2', param: 'L0' },
+          { latex: 'K=-0.86', param: 'K', options: { slider: { min: -1, max: 1, step: 0.02, complex: false, stack: false } } },
+          { latex: '\\varepsilon=0.22', param: 'varepsilon', options: { slider: { min: 0, max: 1, step: 0.01, complex: false, stack: false } } },
+          { latex: 'L_{n+1}=KL_n+0.1', options: { visible: false } },
+          { latex: '\\operatorname{recurrence}\\left(L_0,20,\\varepsilon\\right)', options: { color: '#6042a6', lineWidth: 1.5 } },
+        ],
+      },
+      {
+        label: 'ロジスティック写像の分岐図（周期倍化・周期窓・カオス）',
+        flat: true,
+        view: { dims: 3, half: 1, xy: [2.44, 4.06, -0.03, 1.03] },
+        items: [
+          { latex: 'F(x,r)=rx(1-x)', options: { visible: false } },
+          { latex: '\\operatorname{bifurcation}\\left(F,0.2,2.5,4\\right)', options: { color: '#2d70b3', lineWidth: 1 } },
+        ],
+      },
+      {
+        label: 'ロジスティック写像のリカレンスネットワーク（R を動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 14, xy: [83, 110, -1, 5] },
+        items: [
+          { latex: 'Q_0=0.2', param: 'Q0' },
+          { latex: 'R=3.5', param: 'R', options: { slider: { min: 2.8, max: 4, step: 0.005, complex: false, stack: false } } },
+          { latex: 'Q_{n+1}=RQ_n(1-Q_n)', options: { visible: false } },
+          { latex: '\\operatorname{recurrence}\\left(Q_{84},24,0.03\\right)', options: { color: '#2d70b3', lineWidth: 1.5 } },
+        ],
+      },
+      {
+        label: 'グモースキー・ミラ写像（軌道の点群）',
+        flat: true,
+        view: { dims: 3, half: 31 },
+        items: [
+          { latex: 'V_0=0.1', param: 'V0' },
+          { latex: 'W_0=0.1', param: 'W0' },
+          { latex: 'G(x)=-0.8x+\\frac{3.6x^2}{1+x^2}', options: { visible: false } },
+          { latex: 'V_{n+1}=0.999W_n+G(V_n)', options: { visible: false } },
+          { latex: 'W_{n+1}=G(V_{n+1})-V_n', options: { visible: false } },
+          { latex: '\\operatorname{orbitpoints}\\left(V_0,W_0,8000\\right)', options: { color: '#6042a6', lineWidth: 1 } },
+        ],
+      },
+      {
+        label: 'ホパロン・アトラクタ（軌道の点群）',
+        flat: true,
+        view: { dims: 3, half: 1.35 },
+        items: [
+          { latex: 'B_0=0', param: 'B0' },
+          { latex: 'C_0=0', param: 'C0' },
+          { latex: 'B_{n+1}=C_n-\\operatorname{sign}\\left(B_n\\right)\\sqrt{\\left|B_n\\right|}', options: { visible: false } },
+          { latex: 'C_{n+1}=0.4-B_n', options: { visible: false } },
+          { latex: '\\operatorname{orbitpoints}\\left(B_0,C_0,8000\\right)', options: { color: '#c74440', lineWidth: 1 } },
         ],
       },
       {
