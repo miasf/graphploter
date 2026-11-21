@@ -1839,18 +1839,20 @@ fn orbit_line(source: &str, params: &Params) -> Result<Plot, String> {
     let Expr::Op { op, args } = expr else { return Err(usage.into()) };
     let Some((steps, starts)) = args.split_last() else { return Err(usage.into()) };
     let dots = op == "orbitpoints";
-    let (mut points, dims) = match starts {
+    let (mut points, dims, complex) = match starts {
         [matrix, Expr::Tuple(initial)] if (2..=3).contains(&initial.len()) => {
-            (crate::expand::matrix_orbit(matrix, initial, steps, dots, params)?, initial.len())
+            (crate::expand::matrix_orbit(matrix, initial, steps, dots, params)?, initial.len(), false)
         }
         starts if (1..=3).contains(&starts.len()) => {
-            (crate::expand::orbit_points(starts, steps, dots, params)?, starts.len())
+            let (points, complex) = crate::expand::orbit_points(starts, steps, dots, params)?;
+            (points, starts.len(), complex)
         }
         _ => return Err(usage.into()),
     };
     let steps = points.len() - 1;
     let label = if dots { "数列の軌道の点" } else { "数列の軌道" };
-    crate::expand::set_kind(format!("{label}（{dims} 次元・{steps} 回の反復）"));
+    let plane = if complex { "複素平面".into() } else { format!("{dims} 次元") };
+    crate::expand::set_kind(format!("{label}（{plane}・{steps} 回の反復）"));
     if dots {
         return Ok(Plot::Points { line: false, points, sequence: None });
     }
@@ -1859,7 +1861,7 @@ fn orbit_line(source: &str, params: &Params) -> Result<Plot, String> {
         return Ok(Plot::Points { line: false, points, sequence: None });
     }
     let last = *points.last().unwrap();
-    if dims == 1 {
+    if dims == 1 && !complex {
         // 数直線上の移動を、行きは上、戻りは下の弧で表示する。
         points = points.windows(2).flat_map(|pair| {
             let [a, b] = [pair[0][0], pair[1][0]];
@@ -1886,12 +1888,12 @@ fn recurrence_line(source: &str, params: &Params) -> Result<Plot, String> {
     for (i, &a) in nodes.iter().enumerate() {
         points.extend([a, [f64::NAN; 3]]);
         for &b in &nodes[i + 1..] {
-            if (a[1] - b[1]).abs() <= distance {
+            if (a[1] - b[1]).hypot(a[2] - b[2]) <= distance {
                 // 同じ値に戻る辺も重ならないよう、添字の間隔に応じた弧にする。
                 points.extend((0..=8).map(|j| {
                     let t = f64::from(j) / 8.0;
                     let dx = b[0] - a[0];
-                    [a[0] + dx * t, a[1] + (b[1] - a[1]) * t + 0.6 * dx * t * (1.0 - t), 0.0]
+                    [a[0] + dx * t, a[1] + (b[1] - a[1]) * t + 0.6 * dx * t * (1.0 - t), a[2] + (b[2] - a[2]) * t]
                 }));
                 points.push([f64::NAN; 3]);
                 edges += 1;

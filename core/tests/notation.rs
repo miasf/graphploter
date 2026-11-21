@@ -1214,6 +1214,25 @@ fn sequence_orbit_number_line_and_scatter() {
 }
 
 #[test]
+fn complex_sequence_orbit_uses_real_and_imaginary_coordinates() {
+    let rules = "Z_(n+1)=i*Z_(n)";
+    let init = run("Z_0=2+i", rules, &[]).unwrap();
+    assert_eq!(init.param_name(), "Z0");
+    assert_eq!(init.param_value(), vec![2.0, 1.0]);
+    let params = [("Z0", 2.0), ("N", 2.0)];
+    let orbit = run_in_view("@orbit(Z_0,N)", rules, &params, 0, true).unwrap();
+    assert!(orbit.kind().contains("複素平面・2 回"));
+    let positions = orbit.positions();
+    assert_eq!(&positions[..9], &[2.0, 0.0, 0.0, 0.0, 2.0, 0.0, -2.0, 0.0, 0.0]);
+    assert!(positions[9..11].iter().all(|p| p.is_nan()));
+    assert_eq!(&positions[12..], &[-2.0, 0.0, 0.0]);
+    assert!(orbit.used_params().split(',').any(|p| p == "Z0"));
+    let dots = run("@orbitpoints(Z_0,N)", rules, &params).unwrap().positions();
+    assert_eq!(&dots[9..12], &[0.0, 2.0, 0.0]);
+    assert_eq!(&dots[18..21], &[-2.0, 0.0, 0.0]);
+}
+
+#[test]
 fn recurrence_network_joins_similar_terms_without_joining_different_groups() {
     let rules = "a_(n)=mod(n,2)";
     let m = run("@recurrence(a_1,4,d)", rules, &[("d", 0.0)]).unwrap();
@@ -1226,6 +1245,14 @@ fn recurrence_network_joins_similar_terms_without_joining_different_groups() {
         .map(|run| (run[0], *run.last().unwrap())).collect();
     assert_eq!(edges, vec![(&[1.0, 1.0, 0.0][..], &[3.0, 1.0, 0.0][..]), (&[2.0, 0.0, 0.0][..], &[4.0, 0.0, 0.0][..])]);
     assert!(error_of("@recurrence(a_1,4,-1)", rules).contains("0 以上"));
+}
+
+#[test]
+fn complex_recurrence_network_uses_both_parts_for_distance() {
+    let rules = "a_(n)=i*mod(n,2)";
+    let graph = run("@recurrence(a_0,4,0.5)", rules, &[]).unwrap();
+    assert!(graph.kind().contains("4 頂点・2 辺"));
+    assert!(graph.positions().chunks_exact(3).any(|p| p == [1.0, 0.0, 1.0]));
 }
 
 #[test]

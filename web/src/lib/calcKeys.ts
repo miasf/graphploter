@@ -210,11 +210,12 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key('行列軌道', '\\operatorname{orbit}\\left(#?,\\left(#?,#?\\right),#?\\right)', '行列の反復 orbit(A, (x₀,y₀), N)。3D は初期点に第 3 成分を追加'),
       ],
       [
-        key('orbit₁', '\\operatorname{orbit}\\left(#?,#?\\right)', '数直線上の移動 orbit(a₀, N)（開始項・反復回数）'),
+        key('orbit₁', '\\operatorname{orbit}\\left(#?,#?\\right)', '1 列の軌道 orbit(a₀, N)（実数は数直線、複素数は複素平面）'),
         key('orbit₂', '\\operatorname{orbit}\\left(#?,#?,#?\\right)', '2D の軌道 orbit(a₀, b₀, N)（2 個の開始項・反復回数）'),
         key('orbit₃', '\\operatorname{orbit}\\left(#?,#?,#?,#?\\right)', '3D の軌道 orbit(a₀, b₀, c₀, N)（3 個の開始項・反復回数）'),
       ],
       [
+        key('点₁', '\\operatorname{orbitpoints}\\left(#?,#?\\right)', '1 列の軌道を点で表示 orbitpoints(a₀, N)（複素数は複素平面）'),
         key('軌道の点', '\\operatorname{orbitpoints}\\left(#?,#?,#?\\right)', '軌道を点で表示 orbitpoints(a₀, b₀, N)'),
         key('近接網', '\\operatorname{recurrence}\\left(#?,#?,#?\\right)', 'リカレンスネットワーク recurrence(a₀, 項数, 距離)'),
         key('分岐図', '\\operatorname{bifurcation}\\left(#?,#?,#?,#?\\right)', '分岐図 bifurcation(f, 初期値, 下限, 上限)。f(x, r) を別の行に定義'),

@@ -356,6 +356,18 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
     title: '数列',
     samples: [
       {
+        label: '複素数列の軌道（初期値を複素平面で動かす）',
+        flat: true,
+        openFolder: true,
+        view: { dims: 3, half: 3 },
+        items: [
+          { latex: 'Z_0=2+i', param: 'Z0', options: { slider: { min: -3, max: 3, complex: true, stack: false } } },
+          { latex: 'P=28', param: 'P', options: { slider: { min: 0, max: 64, step: 1, stepExpr: '1', complex: false, stack: false } } },
+          { latex: 'Z_{n+1}=(0.86+0.36i)Z_n', options: { visible: false } },
+          { latex: '\\operatorname{orbit}\\left(Z_0,P\\right)', options: { color: '#2d70b3', lineWidth: 3 } },
+        ],
+      },
+      {
         label: '数直線上のステップ移動（倍率 k、歩幅 b、反復数 M）',
         flat: true,
         openFolder: true,

@@ -374,11 +374,21 @@ fn sequence_plot_start<'a>(
     Ok((name, first))
 }
 
-fn sequence_plot_value(expander: &mut Expander<'_>, name: &str, k: i64, label: &str) -> Result<f64, String> {
+fn sequence_plot_term(expander: &mut Expander<'_>, name: &str, k: i64) -> Result<Option<num_complex::Complex64>, String> {
     let expr = expander.term_value(name, k)?;
-    let value = expander.constant_value(&expr).map(crate::eval::as_real);
+    Ok(expander.constant_value(&expr))
+}
+
+fn sequence_plot_value(expander: &mut Expander<'_>, name: &str, k: i64, label: &str) -> Result<f64, String> {
+    let value = sequence_plot_term(expander, name, k)?.map(crate::eval::as_real);
     value.filter(|v| (*v as f32).is_finite())
         .ok_or_else(|| format!("{label}には有限の実数の項が必要です（{name}_{k}）"))
+}
+
+fn sequence_complex_value(expander: &mut Expander<'_>, name: &str, k: i64, label: &str) -> Result<num_complex::Complex64, String> {
+    sequence_plot_term(expander, name, k)?
+        .filter(|v| (v.re as f32).is_finite() && (v.im as f32).is_finite())
+        .ok_or_else(|| format!("{label}には描画できる範囲の有限な項が必要です（{name}_{k}）"))
 }
 
 /// 開始項から、階段図に必要な連続した実数の項を求める。
@@ -395,8 +405,8 @@ pub(crate) fn cobweb_terms(start: &Expr, steps: &Expr, params: &Params) -> Resul
     (first..=last).map(|k| sequence_plot_value(&mut expander, name, k, "階段図")).collect()
 }
 
-/// 各数列の開始項を座標にし、全成分の添字を同時に進める。
-pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, dots: bool, params: &Params) -> Result<Vec<[f64; 3]>, String> {
+/// 各数列の開始項を座標にする。1 列の複素数列は実部と虚部を軸にする。
+pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, dots: bool, params: &Params) -> Result<(Vec<[f64; 3]>, bool), String> {
     let defs = current();
     let mut expander = Expander::new(&defs, params);
     let start_error = "軌道の座標には a_0 や a_(N) のように数列の項を書いてください";
@@ -407,13 +417,24 @@ pub(crate) fn orbit_points(starts: &[Expr], steps: &Expr, dots: bool, params: &P
     if starts.iter().any(|&(_, first)| first.checked_add(steps).is_none()) {
         return Err("最後の項の添字が大きすぎます".into());
     }
-    (0..=steps).map(|offset| {
+    if let [(name, first)] = starts.as_slice() {
+        let mut complex = false;
+        let points = (0..=steps).map(|offset| {
+            let v = sequence_complex_value(&mut expander, name, first + offset, "軌道")?;
+            let im = if crate::eval::as_real(v).is_finite() { 0.0 } else { v.im };
+            complex |= im != 0.0;
+            Ok([v.re, im, 0.0])
+        }).collect::<Result<_, String>>()?;
+        return Ok((points, complex));
+    }
+    let points = (0..=steps).map(|offset| {
         let mut point = [0.0; 3];
         for (coordinate, &(name, first)) in point.iter_mut().zip(&starts) {
             *coordinate = sequence_plot_value(&mut expander, name, first + offset, "軌道")?;
         }
         Ok(point)
-    }).collect()
+    }).collect::<Result<_, String>>()?;
+    Ok((points, false))
 }
 
 fn orbit_steps(expander: &mut Expander<'_>, steps: &Expr, dots: bool) -> Result<i64, String> {
@@ -452,7 +473,7 @@ pub(crate) fn matrix_orbit(matrix: &Expr, start: &[Expr], steps: &Expr, dots: bo
     Ok(points)
 }
 
-/// 各添字に対応する頂点を (添字, 値) に置く。
+/// 各添字に対応する頂点を (添字, 実部, 虚部) に置く。
 pub(crate) fn recurrence_nodes(start: &Expr, count: &Expr, distance: &Expr, params: &Params) -> Result<(Vec<[f64; 3]>, f64), String> {
     let defs = current();
     let mut expander = Expander::new(&defs, params);
@@ -468,8 +489,8 @@ pub(crate) fn recurrence_nodes(start: &Expr, count: &Expr, distance: &Expr, para
     }
     let last = first.checked_add(count - 1).ok_or("最後の項の添字が大きすぎます")?;
     let nodes = (first..=last).map(|k| {
-        let value = sequence_plot_value(&mut expander, name, k, "リカレンスネットワーク")?;
-        Ok([k as f64, value, 0.0])
+        let value = sequence_complex_value(&mut expander, name, k, "リカレンスネットワーク")?;
+        Ok([k as f64, value.re, value.im])
     }).collect::<Result<Vec<_>, String>>()?;
     Ok((nodes, distance))
 }

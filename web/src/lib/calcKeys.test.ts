@@ -40,6 +40,7 @@ for (const [label, args, expected] of [
   ['orbit₂', ['a_0', 'b_0', 'N'], '@orbit (a_0,b_0,N)'],
   ['orbit₃', ['a_0', 'b_0', 'c_0', 'N'], '@orbit (a_0,b_0,c_0,N)'],
   ['行列軌道', ['A', '1', '2', 'N'], '@orbit (A,(1,2),N)'],
+  ['点₁', ['a_0', 'N'], '@orbitpoints (a_0,N)'],
   ['軌道の点', ['a_0', 'b_0', 'N'], '@orbitpoints (a_0,b_0,N)'],
   ['近接網', ['a_0', '32', '0.1'], '@recurrence (a_0,32,0.1)'],
   ['分岐図', ['f', '0.2', '2.5', '4'], '@bifurcation (f,0.2,2.5,4)'],
