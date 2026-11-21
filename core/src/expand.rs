@@ -94,6 +94,7 @@ enum SequenceInverse {
     Root(f64),
     Exp,
     TenToPower,
+    Divide(Expr),
 }
 
 #[derive(Debug)]
@@ -220,6 +221,7 @@ impl Defs {
                     SequenceInverse::Root(p) => power(body, Expr::Num(1.0 / p)),
                     SequenceInverse::Exp => Expr::Call(crate::functions::Func::Exp, vec![body]),
                     SequenceInverse::TenToPower => power(Expr::Num(10.0), body),
+                    SequenceInverse::Divide(factor) => Expr::Bin(BinOp::Div, Box::new(body), Box::new(factor)),
                 };
             }
             let (recursive, has_cases) = sequence_body_features(&body, &head.name);
@@ -293,6 +295,12 @@ pub(crate) fn sequence_head(mut e: &Expr) -> Option<SequenceHead> {
                 inverses.push(if *f == Func::Ln { SequenceInverse::Exp } else { SequenceInverse::TenToPower });
                 e = arg;
             }
+            Expr::Bin(BinOp::Mul, ..) => {
+                let mut head = sequence_product_head(e)?;
+                inverses.append(&mut head.inverses);
+                head.inverses = inverses;
+                return Some(head);
+            }
             Expr::Index { name, index } => {
                 let mut vars = Vec::new();
                 index.collect_vars(&mut vars);
@@ -310,6 +318,48 @@ pub(crate) fn sequence_head(mut e: &Expr) -> Option<SequenceHead> {
             _ => return None,
         }
     }
+}
+
+fn sequence_product_head(product: &Expr) -> Option<SequenceHead> {
+    let mut pending = vec![product];
+    let mut factors = Vec::new();
+    let mut target: Option<(usize, SequenceHead)> = None;
+    let mut tied = false;
+    while let Some(factor) = pending.pop() {
+        if let Expr::Bin(BinOp::Mul, left, right) = factor {
+            pending.extend([right.as_ref(), left.as_ref()]);
+            continue;
+        }
+        if let Some(head) = sequence_head(factor) {
+            if let Some((_, best)) = &target {
+                // Parallel indices of the same sequence have a fixed order for every n.
+                if head.name != best.name || head.index.var != best.index.var || head.index.step != best.index.step {
+                    return None;
+                }
+                if head.index.shift <= best.index.shift {
+                    tied |= head.index.shift == best.index.shift;
+                    factors.push(factor);
+                    continue;
+                }
+            }
+            target = Some((factors.len(), head));
+            tied = false;
+        } else if !matches!(factor, Expr::Num(_) | Expr::Const(_) | Expr::Var(_))
+            && !matches!(factor, Expr::Index { index, .. } if matches!(**index, Expr::Num(_)))
+        {
+            return None;
+        }
+        factors.push(factor);
+    }
+    let (target, mut head) = target?;
+    if tied {
+        return None;
+    }
+    // Divide out the other factors before undoing the target's own power or log.
+    head.inverses.splice(0..0, factors.into_iter().enumerate()
+        .filter(|(i, _)| *i != target)
+        .map(|(_, factor)| SequenceInverse::Divide(factor.clone())));
+    Some(head)
 }
 
 fn sequence_body_features(body: &Expr, name: &str) -> (bool, bool) {

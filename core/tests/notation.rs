@@ -1103,6 +1103,27 @@ fn powered_sequence_terms() {
 }
 
 #[test]
+fn sequence_term_products() {
+    let recurrence = "(a_(n+1))(a_(n))=6";
+    let initial = [("a1", 2.0)];
+    assert_eq!(seq_value("a_2", recurrence, &initial).unwrap(), 3.0);
+    assert_eq!(seq_value("a_3", recurrence, &initial).unwrap(), 2.0);
+    let plotted = run(recurrence, recurrence, &initial).unwrap();
+    assert!(plotted.positions().chunks_exact(3).any(|p| p == [2.0, 3.0, 0.0]));
+    assert!(seq_value("a_2", recurrence, &[("a1", 0.0)]).is_err());
+    assert!(seq_value("a_2", "(a_(n+1))(a_(n))=0", &[("a1", 0.0)]).is_err());
+
+    let reversed = "a_(n)*a_(n+1)=6";
+    assert_eq!(seq_value("a_2", reversed, &initial).unwrap(), 3.0);
+    let sparse = "a_(2n)*a_(2n+2)^2*a_2=36";
+    assert_eq!(seq_value("a_4", sparse, &[("a2", 2.0)]).unwrap(), 3.0);
+    let derived = "a_(n)=n+1\nb_(n)=(a_(n+1))(a_(n))";
+    assert_eq!(seq_value("b_2", derived, &[]).unwrap(), 12.0);
+    let product_recurrence = "a_(n+2)=(a_(n+1))(a_(n))";
+    assert_eq!(seq_value("a_4", product_recurrence, &[("a1", 2.0), ("a2", 3.0)]).unwrap(), 18.0);
+}
+
+#[test]
 fn recurrence_operations_and_initial_values() {
     let given = [("a1", 2.0)];
     assert_eq!(seq_value("a_3", "a_(n+1) = a_(n)^2 + a_1", &given).unwrap(), 38.0);

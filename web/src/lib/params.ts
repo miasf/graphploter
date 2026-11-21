@@ -90,7 +90,10 @@ export function latexName(name: string): string {
 export function sequenceDefinitionName(source: string): string | null {
   const relation = /[=<>]/.exec(source)
   if (relation?.[0] !== '=') return null
-  let lhs = source.slice(0, relation.index).trim()
+  return sequenceHeadName(source.slice(0, relation.index).trim())
+}
+
+function sequenceHeadName(lhs: string): string | null {
   const closingParen = (text: string, open: number): number => {
     let depth = 0
     for (let i = open; i < text.length; i++) {
@@ -102,7 +105,7 @@ export function sequenceDefinitionName(source: string): string | null {
   while (lhs) {
     lhs = lhs.replace(/\s*\^\s*(?:\(\s*\d+(?:\.0*)?\s*\)|\d+(?:\.0*)?)$/, '').trimEnd()
     const log = /^(?:ln|log)\s+/.exec(lhs)
-    if (log) {
+    if (log && lhs[log[0].length] !== '(') {
       lhs = lhs.slice(log[0].length)
       continue
     }
@@ -110,6 +113,39 @@ export function sequenceDefinitionName(source: string): string | null {
     if (group && closingParen(lhs, group[0].length - 1) === lhs.length - 1) {
       lhs = lhs.slice(group[0].length, -1).trim()
       continue
+    }
+    // Look only at factor boundaries outside the parentheses of an index or power.
+    const factors: string[] = []
+    let start = 0
+    for (let i = 0; i < lhs.length; i++) {
+      if (lhs[i] === '*') {
+        factors.push(lhs.slice(start, i).trim())
+        start = i + 1
+      } else if (lhs[i] === '(') {
+        const end = closingParen(lhs, i)
+        if (end < 0) return null
+        const prefix = lhs.slice(start, i).trim()
+        if (/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(prefix)) {
+          factors.push(prefix)
+          start = i
+        }
+        if (/^\s*[(\w{]/.test(lhs.slice(end + 1))) {
+          factors.push(lhs.slice(start, end + 1).trim())
+          start = end + 1
+        }
+        i = end
+      }
+    }
+    if (factors.length) {
+      factors.push(lhs.slice(start).trim())
+      let name: string | null = null
+      for (const factor of factors) {
+        if (/^(?:\d+(?:\.\d*)?|\.\d+|[A-Za-z](?:_?(?:\d+|\(\d+\)))?|\{\w+\})$/.test(factor)) continue
+        const head = sequenceHeadName(factor)
+        if (!head || (name && name !== head)) return null
+        name = head
+      }
+      return name
     }
     const head = /^([A-Za-z]|\{\w+\})_\(/.exec(lhs)
     if (!head || closingParen(lhs, head[0].length - 1) !== lhs.length - 1) return null
