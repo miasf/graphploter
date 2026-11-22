@@ -754,7 +754,6 @@ pub fn plot(
     expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
     expand::set_reach((0..3).map(|a| domain[2 * a].abs().max(domain[2 * a + 1].abs()).powi(2)).sum::<f64>().sqrt());
     let plot = equation::compile_with(source, &consts, &space).map_err(|e| JsError::new(&e))?;
-    let excluded = expand::take_excluded();
     if flags & FLAG_SEQUENCE_TABLE != 0 {
         if let equation::Plot::Points { sequence: Some(sequence), .. } = &plot {
             LAST_SEQUENCE_TABLE.with(|p| *p.borrow_mut() = sequence.table(&consts));
@@ -816,7 +815,7 @@ pub fn plot(
             mesh::Refine::Normal
         },
         edges: flags & FLAG_EDGES != 0,
-        local: excluded.is_empty() && flags & FLAG_LOCAL != 0,
+        local: flags & FLAG_LOCAL != 0,
         range: &range,
         view: space.view(perspective),
         region_fog: !flat && hidden.first().is_some_and(|&m| m == 6.0),
@@ -853,45 +852,18 @@ pub fn plot(
     let vector_arrows = matches!(plot, equation::Plot::Arrows { .. });
     // 2D の投影で、縦に立った面の代わりに引く線（mesh::flatten）
     outline.0.append(&mut inner.edge_lines);
-    // ≠ で除いた所: 孤立点は白丸、線は点線。
-    let mut holes: Vec<f32> = Vec::new();
-    let mut fully_excluded = false;
-    if !excluded.is_empty() && coord.is_none() {
-        let (projected, direct): (Vec<_>, Vec<_>) = excluded.iter().partition(|h| {
-            flat && !ctx.flat_slice && h.uses_var_index(2)
-        });
-        let (mut h, dashed, all) = mark_excluded(&inner, curve, &direct, &plot, &ctx);
+    // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
+    let excluded = expand::take_excluded();
+    let mut holes = Vec::new();
+    // 2D の投影は縦の座標を押しつぶした後なので、≠ の式（縦の座標を使うかもしれない）では調べない
+    if !excluded.is_empty() && coord.is_none() && !(flat && !ctx.flat_slice) {
+        let (h, dashed, all) = mark_excluded(&inner, curve, &excluded);
+        holes = h;
         outline.1.extend(dashed);
-        if !all && !projected.is_empty() {
-            // 高さを含む条件は、投影前の位置で調べてから白丸だけを平面へ移す。
-            if mesh::field_mode_is_split() {
-                mesh::mark_unsplittable();
-            } else {
-                let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
-                let (raw, raw_curve) = if let Some(shape) = &built.shape {
-                    (mesh::project(shape, &ctx.view, dom), built.curve)
-                } else {
-                    let b = build(&plot, &ctx3).map_err(|e| err(&e))?;
-                    (b.shape.as_ref().map_or(b.inner, |sh| mesh::project(sh, &ctx.view, dom)), b.curve)
-                };
-                let (marks, _, _) = mark_excluded(&raw, raw_curve, &projected, &plot, &ctx3);
-                for p in marks.chunks_exact(3) {
-                    h.extend([p[0], p[1], 0.0]);
-                }
-            }
-        }
-        fully_excluded = all;
-        if fully_excluded {
+        if all {
             // 曲線全体が除かれた（y = x, z ≠ 0 の 2D の切り口 z = 0）: 何も描かない
             inner = mesh::Mesh::default();
             expand::add_note("≠ で全部除かれる");
-        } else {
-            let tol = (size * 1e-6) as f32;
-            for p in h.chunks_exact(3) {
-                if !holes.chunks_exact(3).any(|q| (0..3).all(|a| (p[a] - q[a]).abs() <= tol)) {
-                    holes.extend_from_slice(p);
-                }
-            }
         }
     }
     let limit = if let equation::Plot::Limit { report, .. } = &plot {
@@ -944,8 +916,8 @@ pub fn plot(
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
-        shape: if trimmed || !excluded.is_empty() { None } else { built.shape },
-        local: if coord.is_some() || !excluded.is_empty() { None } else { built.local },
+        shape: if trimmed { None } else { built.shape },
+        local: if coord.is_some() { None } else { built.local },
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
@@ -969,8 +941,7 @@ pub fn plot(
         used_params: {
             let mut u = plot.used_params();
             // 座標系の式が使うパラメータ（行列を座標系にしたときの、成分のスライダーなど）
-            let exclusion_params = excluded.iter().flat_map(|h| h.used_params().iter().cloned());
-            for p in expand::used_params().into_iter().chain(coord.iter().flat_map(|c| c.used_params())).chain(exclusion_params) {
+            for p in expand::used_params().into_iter().chain(coord.iter().flat_map(|c| c.used_params())) {
                 if !u.contains(&p) {
                     u.push(p);
                 }
@@ -984,9 +955,8 @@ pub fn plot(
         local_available: !flat
             && !hidden_on
             && coord.is_none()
-            && excluded.is_empty()
             && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
-        gpu2d: if coord.is_some() || fully_excluded {
+        gpu2d: if coord.is_some() {
             None
         } else {
             // uniform にしたパラメータの今の値
@@ -2265,81 +2235,37 @@ fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]
     s
 }
 
-/// ≠ で除いた孤立点と線分を求める。曲線全体が除かれるときは 3 つ目の値が true。
-fn mark_excluded(
-    mesh: &mesh::Mesh,
-    curve: bool,
-    hs: &[&eval::Program],
-    plot: &equation::Plot,
-    ctx: &Ctx<'_>,
-) -> (Vec<f32>, Vec<f32>, bool) {
-    if hs.is_empty() || mesh.positions.is_empty() {
-        return (Vec::new(), Vec::new(), false);
-    }
+/// ≠ で除いた所 h = 0（`hs` のどれか）を示す。曲線なら、線分が h = 0 を横切る点（はさみうち法で寄せる）を白丸の点にし、
+/// 面・領域なら、三角形ごとに h = 0 の線分を求めて点線にする。曲線が h = 0 の上を走っている（頂点の半分以上で h = 0）なら、
+/// 曲線全体が除かれる（3 つ目の値が true）。戻り値は（白丸の点, 点線の線分, 曲線全体が除かれるか）
+fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f32>, Vec<f32>, bool) {
     let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    let eval_at = |h: &eval::Program, q: &[[f64; 3]]| -> Vec<f64> {
+        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| q.iter().map(|p| p[c]).collect());
+        let mut out = vec![num_complex::Complex64::new(0.0, 0.0); q.len()];
+        h.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+        out.iter().map(|v| if v.im.abs() <= 1e-9 * v.re.abs().max(1.0) { v.re } else { f64::NAN }).collect()
+    };
     let lerp = |a: [f64; 3], b: [f64; 3], t: f64| [0, 1, 2].map(|c| a[c] + t * (b[c] - a[c]));
     let (mut holes, mut dashed) = (Vec::new(), Vec::new());
-    let graph = match plot {
-        equation::Plot::Explicit { axis, names, prog, rotated: false }
-            if ctx.complex_mode == mesh::ComplexMode::Off
-                && (!ctx.flat || ctx.flat_slice || (*axis != 2 && !prog.uses_var_index(1))) =>
-        {
-            Some((*axis, names, prog))
-        }
-        _ => None,
-    };
-    let explicit = graph.map(|(axis, names, prog)| prog.graph_residual(axis, names.clone()));
-    let equations: Vec<_> = match plot {
-        equation::Plot::Implicit { prog, .. } => vec![prog],
-        equation::Plot::System { eqs, .. } => eqs.iter().collect(),
-        _ => explicit.iter().collect(),
-    };
-    let equations: Vec<_> = equations.into_iter().filter(|p| !ctx.flat || ctx.flat_slice || !p.uses_var_index(2)).collect();
-    let dims = if ctx.flat { 2 } else { 3 };
-    for &h in hs {
-        let mut values_at = system::values_of(h);
-        let mut v = values_at(&pts);
-        for (p, value) in pts.iter().zip(&mut v) {
-            if p.iter().any(|x| !x.is_finite()) {
-                *value = f64::NAN;
-            }
-        }
-        if curve && v.iter().filter(|x| **x == 0.0).count() * 2 > v.iter().filter(|x| x.is_finite()).count() {
-            return (Vec::new(), Vec::new(), true);
-        }
-        let on_graph = graph.filter(|&(axis, _, _)| h.uses_var_index(axis))
-            .map(|(axis, _, prog)| h.on_explicit_graph(axis, prog));
-        if let Some(sets) = h.common_zero_sets().or_else(|| on_graph.as_ref().and_then(eval::Program::common_zero_sets)) {
-            for parts in sets {
-                let (points, lines) = system::excluded_common_zeros(
-                    &pts, &mesh.indices, curve, &parts, &equations, ctx.dom, ctx.implicit_resolution, dims,
-                );
-                holes.extend(points.into_iter().take(500).flat_map(|p| p.map(|x| x as f32)));
-                dashed.extend(lines);
-            }
-            continue;
-        }
-        // 二乗だけの条件も、二乗する前の式なら符号が変わる。
-        let base = on_graph.as_ref().unwrap_or(h).sign_definite_zero_base();
-        let factor = base.as_ref();
-        if let Some(p) = factor {
-            let f = system::values_of(p)(&pts);
-            for (value, reduced) in v.iter_mut().zip(f) {
-                if value.is_finite() {
-                    *value = reduced;
-                }
-            }
-        }
-        let mut scalar_at = system::values_of(factor.unwrap_or(h));
+    for h in hs {
+        let v = eval_at(h, &pts);
         if curve {
+            let zeros = v.iter().filter(|x| **x == 0.0).count();
+            if zeros * 2 > v.iter().filter(|x| x.is_finite()).count() {
+                return (Vec::new(), Vec::new(), true);
+            }
             // 符号が変わる線分（はさみうち法で 30 回寄せる）と、ちょうど 0 の頂点
             let mut found: Vec<[f64; 3]> = Vec::new();
             let mut segs: Vec<([f64; 3], [f64; 3], f64, f64)> = Vec::new();
             for k in 0..pts.len().saturating_sub(1) {
                 let (a, b) = (v[k], v[k + 1]);
+                if !(a.is_finite() && b.is_finite()) {
+                    continue;
+                }
                 if a == 0.0 {
                     found.push(pts[k]);
-                } else if a.is_finite() && b.is_finite() && a * b < 0.0 {
+                } else if a * b < 0.0 {
                     segs.push((pts[k], pts[k + 1], a, b));
                 }
             }
@@ -2353,12 +2279,9 @@ fn mark_excluded(
                     break;
                 }
                 let mids: Vec<[f64; 3]> = segs.iter().map(|&(a, b, fa, fb)| lerp(a, b, fa / (fa - fb))).collect();
-                let fm = scalar_at(&mids);
+                let fm = eval_at(h, &mids);
                 for (s, (m, f)) in segs.iter_mut().zip(mids.iter().zip(fm)) {
                     if !f.is_finite() || f == 0.0 {
-                        if f == 0.0 {
-                            found.push(*m);
-                        }
                         s.0 = *m;
                         s.1 = *m;
                         s.2 = 0.0;
@@ -2381,14 +2304,6 @@ fn mark_excluded(
             }
             for (a, b, fa, fb) in segs {
                 found.push(if fa == fb { a } else { lerp(a, b, fa / (fa - fb)) });
-            }
-            if let Some(p) = factor {
-                let constraints: Vec<_> = equations.iter().copied().chain([p]).collect();
-                let step = (0..dims).map(|a| ctx.dom.hi[a] - ctx.dom.lo[a]).fold(f64::INFINITY, f64::min)
-                    / ctx.implicit_resolution as f64;
-                found = system::newton_onto_in(&constraints, &found, step, dims).into_iter().flatten().collect();
-                let original = values_at(&found);
-                found = found.into_iter().zip(original).filter_map(|(p, v)| v.is_finite().then_some(p)).collect();
             }
             for p in found.into_iter().take(500) {
                 holes.extend(p.map(|x| x as f32));

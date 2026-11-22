@@ -3,69 +3,11 @@
 use graph_core::plot;
 
 fn run(src: &str, flat: bool) -> (Vec<[f32; 3]>, usize, String) {
-    run_view(src, flat, flat)
-}
-
-fn run_view(src: &str, flat: bool, slice: bool) -> (Vec<[f32; 3]>, usize, String) {
-    let mut m = plot(src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, slice, 0)
+    let mut m = plot(src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, flat, 0)
         .unwrap_or_else(|_| panic!("{src} がエラー"));
     let holes = m.take_holes().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
     let dashed = m.take_outline_dashed().chunks_exact(3).filter(|p| p[0].is_finite()).count();
     (holes, dashed, m.kind())
-}
-
-#[test]
-fn isolated_exclusions_on_surfaces_and_projections() {
-    let src = "z = x^2 + y, (x - 0.231)^2 + (y + 0.317)^2 ≠ 0";
-    let (holes, dashed, _) = run(src, false);
-    assert_eq!(holes.len(), 1, "{holes:?}");
-    assert!(has(&holes, [0.231, -0.317]));
-    assert!((holes[0][2] - (0.231_f32.powi(2) - 0.317)).abs() < 1e-5);
-    assert_eq!(dashed, 0);
-
-    let (holes, dashed, _) = run_view(src, true, false);
-    assert_eq!(holes, [[0.231, -0.317, 0.0]]);
-    assert_eq!(dashed, 0);
-
-    let (holes, dashed, _) = run_view("z = x+y, (x,y,z) ≠ (0.231,-0.317,-0.086)", true, false);
-    assert_eq!(holes, [[0.231, -0.317, 0.0]]);
-    assert_eq!(dashed, 0);
-
-    let (holes, dashed, _) = run("x^2 + y^2 + z^2 = 1, (x,y,z) ≠ (0,0,1)", false);
-    assert_eq!(holes, [[0.0, 0.0, 1.0]]);
-    assert_eq!(dashed, 0);
-}
-
-#[test]
-fn isolated_exclusions_on_2d_curves() {
-    for slice in [true, false] {
-        let (holes, dashed, _) = run_view("y = x^2, (x - 0.231)^2 + (y - 0.053361)^2 ≠ 0", true, slice);
-        assert_eq!(holes, [[0.231, 0.053361, 0.0]]);
-        assert_eq!(dashed, 0);
-        let (holes, _, _) = run_view("y = x^2, (x - 0.231)^2 + (y - 0.06)^2 ≠ 0", true, slice);
-        assert!(holes.is_empty(), "{holes:?}");
-        let (holes, _, _) = run_view("y = x, x ≠ 0.231", true, slice);
-        assert_eq!(holes, [[0.231, 0.231, 0.0]]);
-    }
-    let (holes, _, _) = run_view("z = x + y, (x,y,z) ≠ (0.231,-0.231,0)", true, true);
-    assert_eq!(holes, [[0.231, -0.231, 0.0]]);
-    let (holes, _, _) = run_view("z = x + y, (x,y,z) ≠ (0.231,-0.317,-0.086)", true, true);
-    assert!(holes.is_empty(), "{holes:?}");
-}
-
-#[test]
-fn shared_zero_line_stays_dashed() {
-    let (holes, dashed, _) = run("y = x, x^2 + y^2 ≠ 0", false);
-    assert!(holes.is_empty() && dashed > 10, "{holes:?}, {dashed}");
-}
-
-#[test]
-fn tangent_exclusions_use_the_explicit_graph() {
-    let (holes, dashed, _) = run("z = (x - 0.231)^2 + (y + 0.317)^2, z ≠ 0", false);
-    assert_eq!(holes, [[0.231, -0.317, 0.0]]);
-    assert_eq!(dashed, 0);
-    let (holes, _, _) = run_view("y = (x - 0.231)^2, y ≠ 0", true, false);
-    assert_eq!(holes, [[0.231, 0.0, 0.0]]);
 }
 
 fn has(holes: &[[f32; 3]], q: [f32; 2]) -> bool {
