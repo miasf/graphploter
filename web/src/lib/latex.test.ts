@@ -401,6 +401,8 @@ const typed: [string, string][] = [
 for (const [latex, want] of typed) check(latex, latexToText(latex), want)
 check('像集合（教科書の LaTeX）', squash(latexToText('$$ D = \\left\\{(2x,y) \\;\\middle\\vert{}\\; x^2+y^2\\leq\\dfrac{\\sqrt{3}}{2}\\right\\} $$')),
   'D=⦃(2x,y)∣x^(2)+y^(2)<=((sqrt(3))/(2))⦄')
+check('平方根を z 座標にした像集合', squash(latexToText('D=\\left\\{\\left(x,y,\\sqrt{1-x^2-y^2}\\right)\\middle|x^2+y^2\\le\\frac{\\sqrt{3}}{2}\\right\\}')),
+  'D=⦃(x,y,sqrt(1-x^(2)-y^(2)))∣x^(2)+y^(2)<=((sqrt(3))/(2))⦄')
 check('値域とサイズ付き区切り', squash(latexToText('\\bigl\\{\\sqrt{1-x^2-y^2}\\bigm|x^2+y^2\\leq1\\bigr\\}')),
   '⦃sqrt(1-x^(2)-y^(2))∣x^(2)+y^(2)<=1⦄')
 check('プレーンテキストの集合と絶対値', squash(latexToText('{|x| | |x|<2}')), '⦃abs(x)∣abs(x)<2⦄')

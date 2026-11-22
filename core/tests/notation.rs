@@ -1768,7 +1768,8 @@ fn set_images_map_the_condition_domain() {
             .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
     };
     let definition = "D = ⦃(2x,y)∣x^2+y^2<=sqrt(3)/2⦄";
-    for (source, defs) in [(definition, ""), ("D", definition)] {
+    let hemisphere = "D = ⦃(x,y,sqrt(1-x^2-y^2))∣x^2+y^2<=sqrt(3)/2⦄";
+    for (source, defs) in [(definition, ""), ("D", definition), (definition, hemisphere)] {
         for flat in [false, true] {
             let result = run_in_view(source, defs, &[], 0, flat).unwrap();
             let p = result.positions();
@@ -1780,6 +1781,14 @@ fn set_images_map_the_condition_domain() {
             assert!(p.chunks_exact(3).all(|p| p[2] == 0.0));
         }
     }
+    let dome = run(hemisphere, definition, &[]).unwrap();
+    let positions = dome.positions();
+    assert!(!dome.indices().is_empty());
+    let (lo, hi) = extrema(&positions, 2);
+    let rim = (1.0 - radius * radius).sqrt();
+    assert!((lo - rim).abs() < 0.02 && (hi - 1.0).abs() < 0.02, "{lo}, {hi}");
+    assert!(positions.chunks_exact(3).all(|p| (p[0]*p[0] + p[1]*p[1] + p[2]*p[2] - 1.0).abs() < 1e-5));
+
     let p = mesh("D = ⦃sqrt(1-x^2-y^2)∣x^2+y^2<=sqrt(3)/2⦄", "", &[]).0;
     let (lo, hi) = extrema(&p, 0);
     assert!((lo - (1.0 - radius * radius).sqrt()).abs() < 0.02 && (hi - 1.0).abs() < 0.02, "{lo}, {hi}");

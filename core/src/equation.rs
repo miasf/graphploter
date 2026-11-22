@@ -1168,30 +1168,22 @@ fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, s
 /// （重なった面を切り取らなくてよい。和集合の角は、格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
 /// ≠ は「かつ」の中では形を変えないので、除いた所（h = 0）を白丸（曲線）・点線（面・領域）で示す
 fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
-    use crate::parser::{Formula, SetE};
     let names = crate::expand::names();
-    // 集合の定義の行 `S = …` は、その集合を描く
-    let set_line = source.split_once('=').map(|(n, _)| n.trim().trim_start_matches('{').trim_end_matches('}').to_string());
-    let formula = match set_line.filter(|n| crate::expand::set_def(n).is_some()) {
-        Some(name) => {
-            crate::expand::mark_def_line(&name, Some("集合".into()));
-            Formula::Set(SetE::Named(name))
-        }
-        None => {
-            // 単独の式を検証・コンパイルする入口では、定義一覧が空のこともある。
-            if let Some((_, rhs)) = source.split_once('=').filter(|(name, _)| {
-                let name = name.trim().trim_start_matches('{').trim_end_matches('}');
-                !name.is_empty() && crate::expand::definable(name) && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-            }) {
-                if let Ok(f) = crate::parser::parse_formula(rhs, &names) {
-                    if crate::logic::as_set(&f).is_some() {
-                        return compile_formula(&f, params, space);
+    // 同じ集合名が別の行にあっても、定義の行はその行の右辺を描く。
+    if let Some((lhs, rhs)) = source.split_once('=') {
+        let name = lhs.trim().trim_start_matches('{').trim_end_matches('}');
+        if crate::expand::definable(name) && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            if let Ok(f) = crate::parser::parse_formula(rhs, &names) {
+                if crate::logic::as_set(&f).is_some() {
+                    if !params.contains_key(name) {
+                        crate::expand::mark_def_line(name, None);
                     }
+                    return compile_formula(&f, params, space);
                 }
             }
-            crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?
         }
-    };
+    }
+    let formula = crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?;
     compile_formula(&formula, params, space)
 }
 
