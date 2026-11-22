@@ -7541,7 +7541,13 @@ fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize
 /// 2D 表示の、回した `y = f(x)`（`x = f(y)`）の曲線を n 次元の点として計算する（`dom` は計算する範囲）。
 /// 回さないときと同じ [`explicit_curve_2d`] で作るので、値が飛ぶ所では線を切る
 pub fn explicit_curve_nd(prog: &Program, axis: usize, axes: [usize; 3], base: &[f64], dom: Domain, tol: f64) -> NdShape {
-    let mut mesh = explicit_curve_2d(prog, axis, dom, tol);
+    explicit_curve_nd_with_holes(prog, axis, axes, base, dom, tol, &[]).0
+}
+
+pub(crate) fn explicit_curve_nd_with_holes(
+    prog: &Program, axis: usize, axes: [usize; 3], base: &[f64], dom: Domain, tol: f64, breaks: &[crate::holes::Break],
+) -> (NdShape, Vec<f64>) {
+    let (mut mesh, holes) = explicit_curve_with_holes(prog, axis, dom, tol, breaks);
     // 極の近くのとても大きな値は、回すと横にも大きくはみ出す。計算する範囲の外は形が見えないので、
     // 範囲の何倍かの所にそろえる（f32 にしたとき無限大にならないように）
     let (lo, hi) = (dom.lo[axis], dom.hi[axis]);
@@ -7553,9 +7559,23 @@ pub fn explicit_curve_nd(prog: &Program, axis: usize, axes: [usize; 3], base: &[
     }
     let mut base = base.to_vec();
     base[axes[2]] = 0.0; // 2D 表示では縦の座標は 0
-    mesh_to_nd(&mesh, axes, &base, None)
+    let holes = holes.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]);
+    (mesh_to_nd(&mesh, axes, &base, None), points_in_axes(holes, axes, &base))
 }
 
+pub(crate) fn points_in_axes(
+    points: impl IntoIterator<Item = [f64; 3]>, axes: [usize; 3], base: &[f64],
+) -> Vec<f64> {
+    let mut out = Vec::new();
+    for q in points {
+        let start = out.len();
+        out.extend_from_slice(base);
+        for (axis, value) in axes.into_iter().zip(q) {
+            out[start + axis] = value;
+        }
+    }
+    out
+}
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
 ///
 /// 最初に `n` 等分して計算し、曲がっている所・途切れる所だけを細かく分け直す（適応サンプリング）。
@@ -8623,7 +8643,7 @@ impl View {
     }
 
     /// n 次元の点 p を画面の3次元の点にする。視点より後ろ（または近すぎる）点は NaN
-    fn apply(&self, p: &[f64]) -> [f64; 3] {
+    pub(crate) fn apply(&self, p: &[f64]) -> [f64; 3] {
         let row = |(c0, cs): &ViewRow| c0 + cs.iter().zip(p).map(|(c, x)| c * x).sum::<f64>();
         let q = self.rows.each_ref().map(row);
         if self.hidden.is_empty() {

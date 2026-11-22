@@ -7,7 +7,13 @@ fn run(src: &str, flat: bool) -> (Vec<[f32; 3]>, usize, String) {
 }
 
 fn graph(src: &str, flat: bool, slice: bool) -> graph_core::MeshResult {
-    plot(src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, slice, 0)
+    graph_rotated(src, flat, slice, &[0.0; 10])
+}
+
+const DOMAIN: [f64; 6] = [-2.0, 2.0, -2.0, 2.0, -2.0, 2.0];
+
+fn graph_rotated(src: &str, flat: bool, slice: bool, rotation: &[f64; 10]) -> graph_core::MeshResult {
+    plot(src, &DOMAIN, 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, rotation, &[0.0; 5], 0.0, 0, false, flat, 1, slice, 0)
         .unwrap_or_else(|_| panic!("{src} がエラー"))
 }
 
@@ -91,6 +97,32 @@ fn ordinary_surface_marks_only_isolated_holes_with_a_single_limit() {
     assert!(marks.is_empty(), "{marks:?}");
     let (marks, _, _) = run("z = (x+y)/(x+y)", false);
     assert!(marks.is_empty(), "{marks:?}");
+}
+
+#[test]
+fn white_marks_rotate_with_the_graph_and_survive_reprojection() {
+    for (src, flat, slice, plane, forward, backward) in [
+        ("z = (x - 0.3)^2 + (y + 0.7)^2, z ≠ 0", false, false, 1, [0.0, -0.7, 0.3], [0.0, -0.7, -0.3]),
+        ("z = (x - 0.3)^2 + (y + 0.7)^2, z ≠ 0", true, false, 1, [0.0, -0.7, 0.0], [0.0, -0.7, 0.0]),
+        ("z = (x^2+y^2)/(x^2+y^2)", false, false, 1, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("y = tan(x)/x", true, false, 0, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("y = tan(x)/x", true, true, 0, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("y = x, x ≠ 0.31", true, false, 0, [-0.31, 0.31, 0.0], [0.31, -0.31, 0.0]),
+        ("y = (x - 0.31)^2, y ≠ 0", true, false, 0, [0.0, 0.31, 0.0], [0.0, -0.31, 0.0]),
+    ] {
+        let mut rotation = [0.0; 10];
+        rotation[plane] = std::f64::consts::FRAC_PI_2;
+        let mut initial = graph_rotated(src, flat, slice, &rotation);
+        let assert_mark = |mark: Vec<f32>, expected: [f32; 3]| {
+            assert_eq!(mark.len(), 3, "{src}: {mark:?}");
+            assert!(mark.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-5), "{src}: {mark:?} != {expected:?}");
+        };
+        assert_mark(initial.take_holes(), forward);
+        let shape = initial.take_shape().unwrap_or_else(|| panic!("{src}: no shape to reproject"));
+        rotation[plane] = -rotation[plane];
+        let mut next = shape.project(&DOMAIN, 3, &[0, 1, 2], &rotation, &[0.0; 5], 0.0).ok().unwrap();
+        assert_mark(next.take_holes(), backward);
+    }
 }
 
 #[test]

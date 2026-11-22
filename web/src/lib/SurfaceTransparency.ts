@@ -176,8 +176,8 @@ export class SurfaceTransparency {
       renderer.setRenderTarget(target)
       renderer.render(scene, camera)
       this.markerDepth.uOcclusionDepth.value = target.depthTexture
-      // Allow a small difference between the exact marker and the tessellated surface.
-      this.markerDepth.uOcclusionBias.value = span * 2e-4
+      // A rotated surface can use a coarser mesh while moving.
+      this.markerDepth.uOcclusionBias.value = span * 4e-4
     } finally {
       renderer.setRenderTarget(null)
       renderer.autoClear = autoClear

@@ -1237,12 +1237,12 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
             if l.op == Op::Ne {
                 // ≠ は面積・長さの無い所を除くだけなので、形は変えずに、除いた所を白丸・点線で示す（lib.rs の mark_excluded）
                 let h = Expr::Bin(BinOp::Sub, Box::new(crate::expand::expand(&l.l, params)?), Box::new(crate::expand::expand(&l.r, params)?));
-                let h = match space.rotation_matrix() {
+                let rotated = match space.rotation_matrix() {
                     Some(m) => rotate_coords(&h, &m, space),
-                    None => h,
+                    None => h.clone(),
                 };
                 let refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
-                match Program::compile_with(&h, &refs, &space.with_hidden(params)) {
+                match Program::compile_with(&rotated, &refs, &space.with_hidden(params)) {
                     Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(h, p),
                     _ => crate::expand::add_note("≠ は描き方が変わらないので無視"),
                 }
