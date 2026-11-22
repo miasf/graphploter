@@ -6,9 +6,13 @@ fn run(src: &str, flat: bool) -> (Vec<[f32; 3]>, usize, String) {
     run_view(src, flat, flat)
 }
 
+fn graph(src: &str, flat: bool, slice: bool) -> graph_core::MeshResult {
+    plot(src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, slice, 0)
+        .unwrap_or_else(|_| panic!("{src} がエラー"))
+}
+
 fn run_view(src: &str, flat: bool, slice: bool) -> (Vec<[f32; 3]>, usize, String) {
-    let mut m = plot(src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, slice, 0)
-        .unwrap_or_else(|_| panic!("{src} がエラー"));
+    let mut m = graph(src, flat, slice);
     let holes = m.take_holes().chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
     let dashed = m.take_outline_dashed().chunks_exact(3).filter(|p| p[0].is_finite()).count();
     (holes, dashed, m.kind())
@@ -87,6 +91,50 @@ fn ordinary_surface_marks_only_isolated_holes_with_a_single_limit() {
     assert!(marks.is_empty(), "{marks:?}");
     let (marks, _, _) = run("z = (x+y)/(x+y)", false);
     assert!(marks.is_empty(), "{marks:?}");
+}
+
+#[test]
+fn extruded_finite_holes_are_dashed_along_the_free_axis() {
+    for (src, flat, free, fixed) in [
+        ("y = tan(x)/x", false, 2, [0.0, 1.0, 0.0]),
+        ("z = tan(x)/x", false, 1, [0.0, 0.0, 1.0]),
+        ("z = tan(x)/x", true, 1, [0.0, 0.0, 0.0]),
+        ("x = sin(z-0.31)/(z-0.31)", false, 1, [1.0, 0.0, 0.31]),
+        ("y = (1-cos(x))/x^2", false, 2, [0.0, 0.5, 0.0]),
+        ("y = @cases(1, x > 0.31)", false, 2, [0.31, 1.0, 0.0]),
+    ] {
+        let mut m = graph(src, flat, false);
+        let dashed = m.take_outline_dashed();
+        let Some((line, separator)) = dashed.split_last_chunk::<3>() else { panic!("{src}: no dashed line") };
+        assert!(separator.iter().all(|v| v.is_nan()), "{src}");
+        let points: Vec<_> = line.chunks_exact(3).collect();
+        assert!(points.iter().all(|p| (0..3).all(|i| i == free || (p[i] - fixed[i]).abs() < 1e-5)), "{src}");
+        assert_eq!(points.first().unwrap()[free], -2.0, "{src}");
+        assert_eq!(points.last().unwrap()[free], 2.0, "{src}");
+        assert!(m.take_holes().is_empty(), "{src}");
+    }
+}
+
+#[test]
+fn extruded_holes_separate_distinct_limits_and_skip_poles() {
+    let dashed = graph("y = abs(x)/x", false, false).take_outline_dashed();
+    let pts: Vec<_> = dashed.chunks_exact(3).collect();
+    let branches: Vec<_> = pts.split(|p| p[0].is_nan()).filter(|line| !line.is_empty()).collect();
+    assert_eq!(branches.len(), 2);
+    for (line, y) in branches.into_iter().zip([-1.0, 1.0]) {
+        assert!(line.iter().all(|p| p[0] == 0.0 && p[1] == y));
+    }
+    for src in ["y = 1/x", "y = tan(x)", "y = sin(1/x)", "y = x", "y = @cases(2, x = 0; sin(x)/x)"] {
+        assert!(graph(src, false, false).take_outline_dashed().is_empty(), "{src}");
+    }
+    let (marks, dashed, _) = run("y = tan(x)/x", true);
+    assert_eq!(marks, [[0.0, 1.0, 0.0]]);
+    assert_eq!(dashed, 0);
+
+    let dashed = graph("y = tan(x)/x, z ≥ 0.37", false, false).take_outline_dashed();
+    let segments: Vec<_> = dashed.chunks_exact(3).filter(|p| p[0].is_finite()).collect();
+    assert!((segments.first().unwrap()[2] - 0.37).abs() < 1e-4);
+    assert_eq!(segments.last().unwrap()[2], 2.0);
 }
 
 /// 2D の切り口（z = 0）で、z ≠ 0 の曲線は全部除かれる（前は y = x がそのまま描かれていた）

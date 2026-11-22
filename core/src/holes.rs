@@ -26,6 +26,48 @@ pub(crate) fn curve_samples(program: &Program, xs: &[f64]) -> Vec<f64> {
     samples(program, &[xs, &vec![0.0; xs.len()]])
 }
 
+/// Extend the finite endpoints of a one-variable graph along its unused axis.
+pub(crate) fn extruded_lines(
+    expr: &Expr, program: &Program, names: &[String; 3], axis: usize,
+    params: &Params, domain: Domain, projected: bool,
+) -> Vec<f32> {
+    let input = match [program.uses_var_index(0), program.uses_var_index(1)] {
+        [true, false] => 0,
+        [false, true] => 1,
+        _ => return Vec::new(),
+    };
+    let (a, b) = crate::equation::others(axis);
+    let [variable, free] = if input == 0 { [a, b] } else { [b, a] };
+    let section = expr.substitute(&|name| (name == names[free]).then_some(Expr::Num(0.0)));
+    let breaks = curve(&section, &names[variable], params, (domain.lo[variable], domain.hi[variable]), |xs| {
+        let zeros = vec![0.0; xs.len()];
+        let inputs = if input == 0 { [xs, zeros.as_slice()] } else { [zeros.as_slice(), xs] };
+        samples(program, &inputs)
+    });
+    let mut lines = Vec::new();
+    for hole in breaks {
+        let [left, right] = hole.sides;
+        for height in left.into_iter().chain(right.filter(|v| Some(*v as f32) != left.map(|y| y as f32))) {
+            if !(height as f32).is_finite() || !(projected || (domain.lo[axis]..=domain.hi[axis]).contains(&height)) {
+                continue;
+            }
+            // Keep intermediate points for nonlinear coordinate maps.
+            for i in 0..=32 {
+                let mut point = [0.0; 3];
+                point[axis] = height as f32;
+                point[variable] = hole.x as f32;
+                point[free] = (domain.lo[free] + (domain.hi[free] - domain.lo[free]) * (f64::from(i) / 32.0)) as f32;
+                if projected {
+                    point[2] = 0.0;
+                }
+                lines.extend(point);
+            }
+            lines.extend([f32::NAN; 3]);
+        }
+    }
+    lines
+}
+
 fn add_factors(expr: &Expr, out: &mut Vec<Expr>) {
     match expr {
         Expr::Bin(BinOp::Mul, a, b) => {

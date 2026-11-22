@@ -2730,6 +2730,15 @@ export class Viewer {
         dashSize: span * 0.02,
         gapSize: span * 0.012,
       })
+      if (dashed && !this.flat) {
+        // The exact excluded line can sit just below the tessellated surface.
+        mat.uniforms.uDashDepthBias = { value: this.sceneSize() * 2e-4 }
+        mat.vertexShader = 'uniform float uDashDepthBias;\n' + mat.vertexShader.replace('gl_Position = clip;', `
+          gl_Position = clip;
+          vec2 biased = clip.zw + projectionMatrix[2].zw * uDashDepthBias;
+          if (biased.y > 0.0) gl_Position.z = biased.x * clip.w / biased.y;
+        `)
+      }
       mat.resolution.set(this.viewW, this.viewH)
       const line = new LineSegments2(this.curveGeometry(pts), mat)
       line.frustumCulled = false // 表示範囲の中の線（視錐台の判定のための外接球を求めない）

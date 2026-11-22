@@ -1810,9 +1810,12 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             ));
             b.rotated_explicit = true;
         }
-        P::Explicit { axis, prog, .. } => {
+        P::Explicit { axis, prog, names, expr, .. } => {
             b.inner =
                 mesh::explicit_surface_opt(prog, dom, ctx.resolution, *axis, ctx.complex_mode, ctx.walls, ctx.refine);
+            if ctx.complex_mode == mesh::ComplexMode::Off {
+                b.outline.1 = holes::extruded_lines(expr, prog, names, *axis, &space.with_hidden(ctx.params), dom, false);
+            }
         }
         // 表示していない座標が絡む回転をした陽関数: 傾いた座標系の陽関数として作る。
         // 回転が変わるたびに計算し直す（点は使い回さない）。切り口のふたの元は作らない（回さない陽関数と同じ）
@@ -1942,12 +1945,16 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 for g in cuts {
                     system::trim_mesh(&mut m, &mut system::values_of(g), 8);
                 }
-                made.borrow_mut().get_or_insert(Ok((inner.curve, inner.kind)));
+                made.borrow_mut().get_or_insert(Ok((inner.curve, inner.kind, inner.outline.1)));
                 m
             };
             let m = if cuts.is_empty() { trimmed(dom) } else { fit_to_shape(dom, ctx.implicit_resolution, trimmed) };
-            let (curve, kind) = made.into_inner().unwrap_or_else(|| Err("内部エラー".into()))?;
+            let (curve, kind, mut dashed) = made.into_inner().unwrap_or_else(|| Err("内部エラー".into()))?;
+            for g in cuts {
+                system::clip_segments(&mut dashed, &mut system::values_of(g), 12);
+            }
             b.inner = m;
+            b.outline.1 = dashed;
             b.curve = curve;
             b.kind = if cuts.is_empty() { kind } else { format!("{kind}（不等式で切り取り）") };
         }
@@ -2094,6 +2101,9 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         b.fields.clear();
         if b.shape.is_none() {
             mesh::flatten(&mut b.inner, b.curve);
+            for point in b.outline.1.chunks_exact_mut(3).filter(|p| p[0].is_finite()) {
+                point[2] = 0.0;
+            }
         }
         return Ok(b);
     }
@@ -2108,9 +2118,12 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = mesh::implicit_curve_2d(prog, dom, res2);
             b.gpu2d = gpu2d::scene(Some(prog), &[], &[]).ok();
         }
-        P::Explicit { axis: 2, prog, names, .. } => {
+        P::Explicit { axis: 2, prog, names, expr, .. } => {
             b.kind = format!("{} の値で塗り分け", names[2]);
             b.inner = mesh::flat_map(prog, dom, ctx.resolution, ctx.complex_mode);
+            if ctx.complex_mode == mesh::ComplexMode::Off {
+                b.outline.1 = holes::extruded_lines(expr, prog, names, 2, &space.with_hidden(ctx.params), dom, true);
+            }
         }
         P::Explicit { axis, prog, names, expr, .. } => {
             b.curve = true;
