@@ -1,5 +1,6 @@
 //! 条件から入力側の図形を作り、その点・線分・三角形を集合の要素式で写す。
 
+use crate::coords::{evaluate_map, refine_mapped};
 use crate::equation::{self, Plot, Space};
 use crate::eval::{self, Params, Program, ProgramSet};
 use crate::interval::{Dec, Interval};
@@ -8,8 +9,6 @@ use crate::mesh::{self, Domain, Mesh};
 use crate::parser::{BinOp, Chain, Expr, Formula, Rel};
 use crate::{Built, Ctx};
 use num_complex::Complex64;
-
-mod refine;
 
 pub struct Image {
     maps: Vec<Program>,
@@ -387,15 +386,12 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
         }
         // 平面内の三角形の辺は、そのまま分割しても入力領域の近似から外れない。
         if flat && !source.curve && !inner.indices.is_empty() {
-            refine::weld(&mut inner);
+            weld_planar_vertices(&mut inner);
         }
-        let mut values = evaluate(&set, &inner.positions);
-        if ctx.refine && image.arity > 1 {
-            if source.curve && image.inputs == 1 {
-                refine::curve(&mut inner.positions, &mut values, &set, ctx.size * 1e-4);
-            } else if !source.curve && flat {
-                refine::surface(&mut inner, &mut values, &set, ctx.size * 1e-3);
-            }
+        let mut values = evaluate_map(&set, &inner.positions);
+        let can_split = if source.curve { image.inputs == 1 } else { flat };
+        if ctx.refine && image.arity > 1 && can_split && refine_mapped(&mut inner, &values, image.arity, source.curve, image.arity) {
+            values = evaluate_map(&set, &inner.positions);
         }
         let bounds = [0, 1, 2].map(|axis| Interval::new(dom.lo[axis], dom.hi[axis]));
         let guards: Vec<_> = image
@@ -414,7 +410,7 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
                     for k in 1..n {
                         let z = dom.lo[2] + (dom.hi[2] - dom.lo[2]) * k as f64 / n as f64;
                         let slice = region.cap(dom, 2, z, true, n);
-                        scalar_intervals(&slice, &evaluate(&set, &slice.positions), &guards, &mut intervals);
+                        scalar_intervals(&slice, &evaluate_map(&set, &slice.positions), &guards, &mut intervals);
                     }
                 }
             }
@@ -572,16 +568,26 @@ fn finite_triangles(positions: Vec<f32>, indices: Vec<u32>) -> Mesh {
     out
 }
 
-fn evaluate(set: &ProgramSet, positions: &[f32]) -> Vec<f64> {
-    let inputs: [Vec<f64>; 3] = [0, 1, 2].map(|a| positions.chunks_exact(3).map(|p| p[a] as f64).collect());
-    let mut values = Vec::new();
-    set.eval_points(&inputs.each_ref().map(Vec::as_slice), positions.len() / 3, &mut values);
-    for (p, mapped) in positions.chunks_exact(3).zip(values.chunks_exact_mut(set.len())) {
-        if p.iter().any(|v| !v.is_finite()) {
-            mapped.fill(f64::NAN);
-        }
+/// 平面領域の切り出しで複製された頂点をまとめる。像の法線はこの頂点を共有して計算する。
+fn weld_planar_vertices(mesh: &mut Mesh) {
+    let mut by_position = crate::adaptive::HashMap::default();
+    let mut positions = Vec::new();
+    let remap: Vec<u32> = mesh
+        .positions
+        .chunks_exact(3)
+        .map(|p| {
+            let key = [0, 1, 2].map(|i| if p[i] == 0.0 { 0 } else { p[i].to_bits() });
+            *by_position.entry(key).or_insert_with(|| {
+                let i = positions.len() as u32 / 3;
+                positions.extend_from_slice(p);
+                i
+            })
+        })
+        .collect();
+    for index in &mut mesh.indices {
+        *index = remap[*index as usize];
     }
-    values
+    mesh.positions = positions;
 }
 
 // 区間演算が飛びや極を示すとき、離れた像の点の間に辺を張らない。
