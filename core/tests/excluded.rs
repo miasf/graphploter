@@ -169,6 +169,22 @@ fn white_surface_marks_use_each_dependent_axis_in_projection_and_slice() {
 }
 
 #[test]
+fn rotated_paraboloid_keeps_the_excluded_origin_in_the_slice() {
+    let domain = [-12.0, 12.0, -12.0, 12.0, -12.0, 12.0];
+    for degrees in [47.0_f64, -71.0] {
+        let mut rotation = [0.0; 10];
+        rotation[1] = degrees.to_radians();
+        let mut g = plot(
+            "z = x^2+y^2, z ≠ 0", &domain, 150, 80, "", &[], "", &[], "", 3,
+            &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 24, &rotation, &[0.0; 5],
+            40.0, 0, false, true, 1, true, 0,
+        ).unwrap_or_else(|_| panic!("xz {degrees}°"));
+        assert!(!g.positions().is_empty(), "xz {degrees}°");
+        assert_eq!(g.take_holes(), [0.0, 0.0, 0.0], "xz {degrees}°");
+    }
+}
+
+#[test]
 fn extruded_finite_holes_are_dashed_along_the_free_axis() {
     for (src, flat, free, fixed) in [
         ("y = tan(x)/x", false, 2, [0.0, 1.0, 0.0]),
