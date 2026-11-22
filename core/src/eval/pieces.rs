@@ -56,6 +56,28 @@ impl Relaxed {
 }
 
 impl Program {
+    /// 陽関数の f を、表示座標での等式 coordinate − f = 0 にする。
+    pub(crate) fn graph_residual(&self, axis: usize, coords: [String; 3]) -> Program {
+        let mut builder = Builder::default();
+        let value = self.append_graph_value(&mut builder, axis);
+        let dependent = builder.push(Op::Var(axis));
+        let root = builder.push(Op::Bin(BinOp::Sub, dependent, value));
+        Program { code: Code::new(builder, vec![root]), vars: coords.to_vec(), used_params: self.used_params.clone() }
+    }
+
+    /// 除外条件の従属座標に陽関数の値を入れる（例: z = x² + y² 上の z ≠ 0）。
+    pub(crate) fn on_explicit_graph(&self, axis: usize, graph: &Program) -> Program {
+        let mut builder = Builder::default();
+        let value = graph.append_graph_value(&mut builder, axis);
+        let at = builder.append_mapped(&self.code.ops, |b, k| if k == axis { value } else { b.push(Op::Var(k)) });
+        Program { code: Code::new(builder, vec![at[self.code.outs[0]]]), vars: self.vars.clone(), used_params: self.used_params.clone() }
+    }
+
+    fn append_graph_value(&self, builder: &mut Builder, axis: usize) -> usize {
+        let at = builder.append(&self.code.ops, &|i| Op::Var(i + usize::from(i >= axis)));
+        at[self.code.outs[0]]
+    }
+
     /// [`Program::frozen`] と同じ枝の式を、区間演算で「その枝の中に零点があるか」を調べやすい形にしたもの
     pub fn frozen_relaxed(&self, k: &[f64]) -> Relaxed {
         let sites = self.branch_site_ops();
@@ -220,6 +242,19 @@ impl Program {
                 None => false,
             },
         }
+    }
+
+    /// 二乗や絶対値が 0 になる場所を、符号が変わる前の式で調べる。
+    pub(crate) fn sign_definite_zero_base(&self) -> Option<Program> {
+        if !self.code.real {
+            return None;
+        }
+        let mut terms = Vec::new();
+        if !self.nonneg_terms(self.code.outs[0], 1.0, &mut terms) {
+            return None;
+        }
+        let &term = terms.first()?;
+        terms.iter().all(|&t| t == term).then(|| self.sub_program(term.0))
     }
 
     /// F = 0 の解が面にならず、いくつかの式が同時に 0 になる所（線・点）だけになる形なら、因数ごとに、同時に 0 になる式の組。

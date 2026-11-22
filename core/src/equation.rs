@@ -1236,7 +1236,19 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
         for l in c {
             if l.op == Op::Ne {
                 // ≠ は面積・長さの無い所を除くだけなので、形は変えずに、除いた所を白丸・点線で示す（lib.rs の mark_excluded）
-                let h = Expr::Bin(BinOp::Sub, Box::new(crate::expand::expand(&l.l, params)?), Box::new(crate::expand::expand(&l.r, params)?));
+                let left = crate::expand::expand(&l.l, params)?;
+                let right = crate::expand::expand(&l.r, params)?;
+                let diff = |a, b| Expr::Bin(BinOp::Sub, Box::new(a), Box::new(b));
+                let h = match (left, right) {
+                    (Expr::Tuple(a), Expr::Tuple(b)) if a.len() == b.len() && !a.is_empty() => a
+                        .into_iter()
+                        .zip(b)
+                        .map(|(a, b)| Expr::Call(crate::functions::Func::Abs, vec![diff(a, b)]))
+                        .reduce(|a, b| Expr::Bin(BinOp::Add, Box::new(a), Box::new(b)))
+                        .unwrap(),
+                    (Expr::Tuple(_), _) | (_, Expr::Tuple(_)) => return Err("≠ の左右で点の成分の数が違います".into()),
+                    (a, b) => diff(a, b),
+                };
                 let h = match space.rotation_matrix() {
                     Some(m) => rotate_coords(&h, &m, space),
                     None => h,

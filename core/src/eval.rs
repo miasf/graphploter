@@ -126,11 +126,19 @@ impl Builder {
     /// 別の命令列 `ops` を足す。`var` は変数の命令の置き換え（固定する変数なら定数を返す）。
     /// 戻り値は、`ops` の各命令が、足した後の何番目になったか
     fn append(&mut self, ops: &[Op], var: &dyn Fn(usize) -> Op) -> Vec<usize> {
+        self.append_mapped(ops, |b, k| b.push(var(k)))
+    }
+
+    /// 変数を、すでに組み立てた命令にも置き換えられる版。
+    fn append_mapped(&mut self, ops: &[Op], var: impl Fn(&mut Self, usize) -> usize) -> Vec<usize> {
         let mut at: Vec<usize> = Vec::with_capacity(ops.len());
         for op in ops {
             let new = match op {
                 Op::Const(c) => Op::Const(*c),
-                Op::Var(k) => var(*k),
+                Op::Var(k) => {
+                    at.push(var(self, *k));
+                    continue;
+                }
                 Op::Neg(a) => Op::Neg(at[*a]),
                 Op::Bin(o, a, b) => Op::Bin(*o, at[*a], at[*b]),
                 Op::Call1(f, a) => Op::Call1(*f, at[*a]),
