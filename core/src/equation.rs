@@ -2589,7 +2589,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     let mut slice_source = None;
 
     // 陽関数で、回転が表示中の座標どうしだけなら、曲面をそのまま回せばよい（媒介変数表示と同じ扱い）
-    if rot.is_some() && !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
+    if let Some(rot) = rot.as_ref().filter(|_| !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n))) {
         let mut used = Vec::new();
         l.collect_vars(&mut used);
         r.collect_vars(&mut used);
@@ -2597,7 +2597,8 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
             if let Some(p) = find_explicit(&l, &r, &shown, &consts)? {
                 // 2D の切り口で縦の座標を使う陽関数は、陰関数として計算し直す（Space::flat_slice を参照）
                 let vertical = matches!(&p, Plot::Explicit { axis, prog, .. } if *axis == 2 || prog.uses_var_index(1));
-                if !(space.flat_slice && vertical) {
+                let tilted = space.axes[..2].iter().any(|&a| rot[space.axes[2]][a].abs() > 1e-12);
+                if !(space.flat_slice && (vertical || tilted)) {
                     return Ok(match p {
                         Plot::Explicit { axis, names, prog, expr, .. } => Plot::Explicit { axis, names, prog, expr, rotated: true },
                         other => other,

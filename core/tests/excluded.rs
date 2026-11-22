@@ -228,6 +228,51 @@ fn extruded_holes_separate_distinct_limits_and_skip_poles() {
     assert_eq!(segments.last().unwrap()[2], 2.0);
 }
 
+#[test]
+fn dashed_exclusion_lines_rotate_and_survive_reprojection() {
+    for (src, flat, plane, free, forwards, backwards) in [
+        ("y = tan(x)/x", false, 0, 2, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("x = tan(y)/y", false, 0, 2, [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]),
+        ("z = tan(x)/x", false, 1, 1, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("z = tan(x)/x", true, 1, 1, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("y = x, x ≠ 0.25", false, 0, 2, [-0.25, 0.25, 0.0], [0.25, -0.25, 0.0]),
+    ] {
+        let check = |dashed: Vec<f32>, expected: [f32; 3]| {
+            let points: Vec<_> = dashed.chunks_exact(3).filter(|p| p[0].is_finite()).collect();
+            assert!(points.len() >= 2, "{src}: no dashed line");
+            assert!(points.iter().all(|p| (0..3).all(|i| i == free || (p[i] - expected[i]).abs() < 1e-5)), "{src}");
+            assert!(points.iter().any(|p| (p[free] + 2.0).abs() < 1e-5), "{src}: missing lower end");
+            assert!(points.iter().any(|p| (p[free] - 2.0).abs() < 1e-5), "{src}: missing upper end");
+        };
+        let mut rotation = [0.0; 10];
+        rotation[plane] = std::f64::consts::FRAC_PI_2;
+        let mut graph = graph_rotated(src, flat, false, &rotation);
+        check(graph.take_outline_dashed(), forwards);
+        let shape = graph.take_shape().unwrap();
+        rotation[plane] *= -1.0;
+        let mut cached = shape.project(&DOMAIN, 3, &[0, 1, 2], &rotation, &[0.0; 5], 0.0).ok().unwrap();
+        check(cached.take_outline_dashed(), backwards);
+    }
+}
+
+#[test]
+fn tilted_slice_marks_the_intersection_with_an_excluded_line() {
+    let diagonal = std::f32::consts::SQRT_2;
+    for (src, plane, degrees, expected) in [
+        ("y = sin(x-0.4)/(x-0.4)", 1, 60.0_f64, [0.8, 1.0, 0.0]),
+        ("y = tan(x)/x", 4, 45.0_f64, [0.0, diagonal, 0.0]),
+        ("x = tan(y)/y", 1, 45.0_f64, [diagonal, 0.0, 0.0]),
+        ("z = tan(x)/x", 4, 45.0_f64, [0.0, -diagonal, 0.0]),
+    ] {
+        let mut rotation = [0.0; 10];
+        rotation[plane] = degrees.to_radians();
+        let mut g = graph_rotated(src, true, true, &rotation);
+        let marks = g.take_holes();
+        assert_eq!(marks.len(), 3, "{src}: {marks:?}");
+        assert!(marks.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-5), "{src}: {marks:?}");
+    }
+}
+
 /// 2D の切り口（z = 0）で、z ≠ 0 の曲線は全部除かれる（前は y = x がそのまま描かれていた）
 #[test]
 fn slice_fully_excluded() {

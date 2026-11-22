@@ -107,6 +107,7 @@ pub struct MeshResult {
     holes_target: Vec<f32>,
     /// 回転前の白丸。再射影時に図形と一緒に動かす。
     source_holes: Vec<f64>,
+    source_dashed: Vec<f64>,
     /// 極限の行の数値結果と、近づく点での定義値を示す点の座標
     limit: Option<LimitMesh>,
 }
@@ -363,6 +364,7 @@ impl MeshResult {
         Some(Shape {
             inner,
             source_holes: std::mem::take(&mut self.source_holes),
+            source_dashed: std::mem::take(&mut self.source_dashed),
             local: local.map(|l| l.0),
             flat: self.flat,
             flat_slice: self.flat_slice,
@@ -533,6 +535,7 @@ pub fn coord_grid(
         holes: Vec::new(),
         holes_target: Vec::new(),
         source_holes: Vec::new(),
+        source_dashed: Vec::new(),
         limit: None,
     })
 }
@@ -867,21 +870,41 @@ pub fn plot(
     let excluded = expand::take_excluded();
     let mut holes = built.holes;
     let mut source_holes = built.source_holes;
+    let mut source_dashed = built.source_dashed;
+    let explicit_surface = match (&plot, &built.shape) {
+        (equation::Plot::Explicit { names, rotated: true, .. }, Some(shape)) if !curve => Some((names, shape)),
+        _ => None,
+    };
     let mut fully_excluded = false;
     if !excluded.is_empty() && coord.is_none() {
-        // 投影後の点に、投影前の高さを使う条件は適用しない。
-        let direct = excluded.iter().map(|(_, p)| p).filter(|p| {
-            !flat || ctx.flat_slice || (curve && !p.uses_var_index(2))
-        });
-        let (h, dashed, all) = mark_excluded(&inner, curve, direct);
-        holes.extend(h);
-        outline.1.extend(dashed);
-        if all {
-            // 曲線全体が除かれた（y = x, z ≠ 0 の 2D の切り口 z = 0）: 何も描かない
-            inner = mesh::Mesh::default();
-            holes.clear();
-            fully_excluded = true;
-            expand::add_note("≠ で全部除かれる");
+        if let Some((names, shape)) = explicit_surface {
+            // 回転前の曲面で除外線を求め、再射影でも同じ線を使う。
+            let params = space.with_hidden(&consts);
+            let names = names.each_ref().map(String::as_str);
+            let guards: Vec<_> = excluded.iter()
+                .filter_map(|(expr, _)| eval::Program::compile_with(expr, &names, &params).ok()).collect();
+            let local = mesh::Mesh {
+                positions: shape.points.chunks_exact(n).flat_map(|p| space.axes.map(|a| p[a] as f32)).collect(),
+                indices: shape.tris.as_ref().map_or_else(Vec::new, |(_, tris)| tris.clone()),
+                ..Default::default()
+            };
+            let (_, dashed, _) = mark_excluded(&local, false, guards.iter());
+            source_dashed.extend(line_in_axes(&dashed, &space));
+        } else {
+            // 投影後の点に、投影前の高さを使う条件は適用しない。
+            let direct = excluded.iter().map(|(_, p)| p).filter(|p| {
+                !flat || ctx.flat_slice || (curve && !p.uses_var_index(2))
+            });
+            let (h, dashed, all) = mark_excluded(&inner, curve, direct);
+            holes.extend(h);
+            outline.1.extend(dashed);
+            if all {
+                // 曲線全体が除かれた（y = x, z ≠ 0 の 2D の切り口 z = 0）: 何も描かない
+                inner = mesh::Mesh::default();
+                holes.clear();
+                fully_excluded = true;
+                expand::add_note("≠ で全部除かれる");
+            }
         }
     }
     if let equation::Plot::Explicit { axis, names, prog, expr, rotated } = &plot {
@@ -908,10 +931,28 @@ pub fn plot(
     } else if let equation::Plot::Implicit { slice_source: Some(source), .. } = &plot {
         if let equation::Plot::Explicit { axis, names, prog, expr, .. } = source.as_ref() {
             let params = space.with_hidden(&consts);
-            let marks = holes::surface(expr, prog, names, *axis, &params, rotated_domain(&space, dom), &excluded);
+            let ext = rotated_domain(&space, dom);
+            let marks = holes::surface(expr, prog, names, *axis, &params, ext, &excluded);
             let local = mesh::points_in_axes(marks, space.axes, &space.slice);
             let mut exact = Vec::new();
             append_visible_holes(&mut exact, local.chunks_exact(n).map(|p| ctx.view.apply(p)), dom, flat, true, ctx.size);
+            if ctx.complex_mode == mesh::ComplexMode::Off {
+                let lines = holes::extruded_lines(expr, prog, names, *axis, &params, ext, false);
+                let positions = line_in_axes(&lines, &space);
+                let projected: Vec<_> = positions.chunks_exact(n).map(|p| ctx.view.apply(p)).collect();
+                let intersections = projected.windows(2).filter_map(|p| {
+                    let [a, b] = [p[0], p[1]];
+                    if !a.iter().chain(&b).all(|v| v.is_finite())
+                        || a[2].abs().max(b[2].abs()) <= ctx.size * 1e-9
+                        || (a[2] < 0.0 && b[2] < 0.0) || (a[2] > 0.0 && b[2] > 0.0)
+                    {
+                        return None;
+                    }
+                    let t = a[2] / (a[2] - b[2]);
+                    Some([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), 0.0])
+                });
+                append_visible_holes(&mut exact, intersections, dom, flat, true, ctx.size);
+            }
             if !exact.is_empty() {
                 // A tessellated slice can have crossings on both sides of the same tangent point.
                 let tolerance = (ctx.size * 1e-6) as f32;
@@ -927,6 +968,9 @@ pub fn plot(
     if !fully_excluded {
         let marks = source_holes.chunks_exact(n).map(|p| ctx.view.apply(p));
         append_visible_holes(&mut holes, marks, dom, flat, ctx.flat_slice && !built.curve, ctx.size);
+        if !curve {
+            outline.1.extend(project_dashed(&source_dashed, n, &ctx.view, dom, flat));
+        }
     }
     let limit = if let equation::Plot::Limit { report, .. } = &plot {
         let (open, mut point) = report.marks();
@@ -964,6 +1008,9 @@ pub fn plot(
     record_stats(&mut inner, start, lod_start, timing::now_ms());
     // 回転した陽関数は、表示する軸・断面・中心が変わると形が変わる。回転がその条件を満たすかも確かめる
     let explicit_used = (built.shape.is_some() && built.rotated_explicit).then(|| plot.used_params());
+    // 表示中の形だけから求めた除外印は、元の形を使い回すときも計算し直す。
+    let uncached_exclusion = coord.is_none() && !excluded.is_empty()
+        && !matches!(plot, equation::Plot::Explicit { rotated: true, .. });
     Ok(MeshResult {
         inner,
         flat,
@@ -977,12 +1024,12 @@ pub fn plot(
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
-        shape: if trimmed || (curve && !excluded.is_empty() && (!matches!(plot, equation::Plot::Explicit { rotated: true, .. }) || fully_excluded)) {
+        shape: if trimmed || uncached_exclusion || fully_excluded {
             None
         } else {
             built.shape
         },
-        local: if coord.is_some() { None } else { built.local },
+        local: if coord.is_some() || uncached_exclusion { None } else { built.local },
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
@@ -1020,6 +1067,7 @@ pub fn plot(
         },
         local_available: !flat
             && !hidden_on
+            && !uncached_exclusion
             && coord.is_none()
             && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
         gpu2d: if coord.is_some() || fully_excluded {
@@ -1039,6 +1087,7 @@ pub fn plot(
         holes,
         holes_target,
         source_holes,
+        source_dashed,
         limit,
     })
 }
@@ -1673,6 +1722,29 @@ fn append_visible_holes(
     }
 }
 
+fn line_in_axes(positions: &[f32], space: &equation::Space) -> Vec<f64> {
+    let points = positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]);
+    mesh::points_in_axes(points, space.axes, &space.slice)
+}
+
+fn project_dashed(
+    positions: &[f64], dims: usize, view: &mesh::View, dom: mesh::Domain, flat: bool,
+) -> Vec<f32> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    let points = positions.chunks_exact(dims).flat_map(|p| {
+        let mut q = view.apply(p).map(|v| v as f32);
+        if flat && q.iter().all(|v| v.is_finite()) {
+            q[2] = 0.0;
+        }
+        q
+    }).collect();
+    let mut line = mesh::Mesh { positions: points, ..Default::default() };
+    coords::trim_to_domain(&mut line, dom, true, flat);
+    line.positions
+}
+
 fn explicit_curve_breaks(
     expr: &parser::Expr, prog: &eval::Program, names: &[String; 3], axis: usize, params: &eval::Params, dom: mesh::Domain,
 ) -> Vec<holes::Break> {
@@ -1744,6 +1816,7 @@ struct Built {
     inner: mesh::Mesh,
     holes: Vec<f32>,
     source_holes: Vec<f64>,
+    source_dashed: Vec<f64>,
     /// 極限値から独立して表示する、元の曲線・数列の点。
     limit_source: Vec<f32>,
     shape: Option<mesh::NdShape>,
@@ -1805,13 +1878,14 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         );
         let mut holes = parts.iter().flat_map(|b| b.holes.iter().copied()).collect();
         let source_holes: Vec<_> = parts.iter().flat_map(|b| b.source_holes.iter().copied()).collect();
+        let source_dashed: Vec<_> = parts.iter().flat_map(|b| b.source_dashed.iter().copied()).collect();
         // 全部が n 次元の点なら、点のままつなげる（回転だけ変わったとき使い回せる）
         if parts.iter().all(|b| b.shape.is_some()) {
             let shapes: Vec<mesh::NdShape> = parts.into_iter().filter_map(|b| b.shape).collect();
             if let Some(shape) = mesh::merge_shapes(shapes.clone()) {
                 // 切り口の線にするのは射影した後（plot・Shape::project）なので、ここでは元の種類のままにする
                 let curve = parts_curve_raw;
-                return Ok(Built { shape: Some(shape), source_holes, fields, curve, kind, rotated_explicit, outline, ..Default::default() });
+                return Ok(Built { shape: Some(shape), source_holes, source_dashed, fields, curve, kind, rotated_explicit, outline, ..Default::default() });
             }
             // つなげられない（点の並べ方が違う）ときは、射影してからつなげる
             let meshes = shapes
@@ -1827,7 +1901,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 .collect();
             let marks = source_holes.chunks_exact(ctx.space.dims).map(|p| ctx.view.apply(p));
             append_visible_holes(&mut holes, marks, ctx.dom, ctx.flat, ctx.flat_slice && !parts_curve_raw, ctx.size);
-            return Ok(Built { inner: mesh::merge(meshes, curve), holes, fields, curve, kind, outline, ..Default::default() });
+            return Ok(Built { inner: mesh::merge(meshes, curve), holes, source_dashed, fields, curve, kind, outline, ..Default::default() });
         }
         let meshes = parts
             .into_iter()
@@ -1845,7 +1919,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             .collect();
         let marks = source_holes.chunks_exact(ctx.space.dims).map(|p| ctx.view.apply(p));
         append_visible_holes(&mut holes, marks, ctx.dom, ctx.flat, ctx.flat_slice && !parts_curve_raw, ctx.size);
-        return Ok(Built { inner: mesh::merge(meshes, curve), holes, fields, curve, kind, outline, ..Default::default() });
+        return Ok(Built { inner: mesh::merge(meshes, curve), holes, source_dashed, fields, curve, kind, outline, ..Default::default() });
     }
     if let Some(mut b) = field_built(plot, ctx) {
         if let P::Limit { report, .. } = plot {
@@ -1874,7 +1948,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // 回転した陽関数: 回転の中心から表示範囲の角までの距離 ρ の範囲で計算しておく。
         // こうすると、どの角度に回しても表示範囲が欠けない（角度が変わっても計算し直さなくてよい）。
         // 複素数の色分けをするときは、高さを |f|・Re f・Im f にして回す（色は偏角）
-        P::Explicit { axis, prog, rotated: true, .. } => {
+        P::Explicit { axis, prog, names, expr, rotated: true } => {
             let ext = rotated_domain(space, dom);
             // 広げた範囲でも、表示範囲と同じくらいの格子の間隔にする（同じ分割数のままだと粗くなり、段差の縁が崩れる）。
             // 重くなりすぎないよう、2 倍までにする
@@ -1893,6 +1967,10 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 ctx.refine,
                 dom.hi[*axis] - dom.lo[*axis],
             ));
+            if ctx.complex_mode == mesh::ComplexMode::Off {
+                let dashed = holes::extruded_lines(expr, prog, names, *axis, &space.with_hidden(ctx.params), ext, false);
+                b.source_dashed = line_in_axes(&dashed, space);
+            }
             b.rotated_explicit = true;
         }
         P::Explicit { axis, prog, names, expr, .. } => {
@@ -2030,7 +2108,12 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 for g in cuts {
                     system::trim_mesh(&mut m, &mut system::values_of(g), 8);
                 }
-                made.borrow_mut().get_or_insert(Ok((inner.curve, inner.kind, inner.outline.1)));
+                let mut first = made.borrow_mut();
+                if first.is_none() {
+                    let mut dashed = inner.outline.1;
+                    dashed.extend(project_dashed(&inner.source_dashed, ctx.space.dims, &ctx.view, d, false));
+                    *first = Some(Ok((inner.curve, inner.kind, dashed)));
+                }
                 m
             };
             let m = if cuts.is_empty() { trimmed(dom) } else { fit_to_shape(dom, ctx.implicit_resolution, trimmed) };
@@ -2556,6 +2639,7 @@ pub struct Shape {
     /// n 次元の点（媒介変数表示・回した陽関数）。回す前の形で作った陰関数なら None で、`local` を使う
     inner: Option<mesh::NdShape>,
     source_holes: Vec<f64>,
+    source_dashed: Vec<f64>,
     local: Option<mesh::LocalMesh>,
     /// 2D 表示（射影した後で縦の座標を 0 にする）
     flat: bool,
@@ -2633,8 +2717,12 @@ impl Shape {
         let marks = self.source_holes.chunks_exact(dims as usize).map(|p| view.apply(p));
         let size = (0..3).map(|a| (dom.hi[a] - dom.lo[a]).powi(2)).sum::<f64>().sqrt();
         append_visible_holes(&mut result.holes, marks, dom, self.flat, self.flat_slice && !self.curve, size);
+        if !curve {
+            result.outline.1 = project_dashed(&self.source_dashed, dims as usize, &view, dom, self.flat);
+        }
         if let Some(c) = &self.coord {
             result.holes_target = c.apply_line(&mut result.holes, self.flat);
+            result.outline_target.1 = c.apply_line(&mut result.outline.1, self.flat);
         }
         Ok(result)
     }
@@ -2713,6 +2801,7 @@ impl Shape {
             holes: Vec::new(),
             holes_target: Vec::new(),
             source_holes: Vec::new(),
+            source_dashed: Vec::new(),
             limit: None,
         }
     }
@@ -2819,6 +2908,7 @@ impl CapSource {
             holes: Vec::new(),
             holes_target: Vec::new(),
             source_holes: Vec::new(),
+            source_dashed: Vec::new(),
             limit: None,
         })
     }
