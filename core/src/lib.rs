@@ -2595,10 +2595,12 @@ fn fit_to_shape(dom: mesh::Domain, n: usize, make: impl Fn(mesh::Domain) -> mesh
         }
         let mut fit = dom;
         for a in 0..3 {
-            let s = ext.min(dom.hi[a] - dom.lo[a]);
-            let l = (0.5 * (lo[a] + hi[a]) - 0.5 * s).clamp(dom.lo[a], dom.hi[a] - s);
-            fit.lo[a] = l;
-            fit.hi[a] = l + s;
+            if ext < dom.hi[a] - dom.lo[a] {
+                let upper = (dom.hi[a] - ext).max(dom.lo[a]);
+                let l = (0.5 * (lo[a] + hi[a]) - 0.5 * ext).clamp(dom.lo[a], upper);
+                fit.lo[a] = l;
+                fit.hi[a] = l + ext;
+            }
         }
         let next = make(fit);
         let Some((lo2, hi2)) = bounds(&next.positions) else { break };

@@ -9,6 +9,8 @@ use crate::parser::{BinOp, Chain, Expr, Formula, Rel};
 use crate::{Built, Ctx};
 use num_complex::Complex64;
 
+mod refine;
+
 pub struct Image {
     maps: Vec<Program>,
     parts: Vec<Part>,
@@ -359,6 +361,16 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
             ..ctx.clone()
         };
         let source = match &part.source {
+            Some(Plot::System { base: None, eqs, cuts, .. }) if flat && eqs.is_empty() && !cuts.is_empty() => {
+                let field = mesh::Field::region(cuts);
+                let n = (ctx.implicit_resolution * 4).clamp(8, 1200) / 2;
+                let make = |d| field.cap(d, 2, 0.0, true, n);
+                let inner = if ctx.refine { crate::fit_to_shape(dom, n, make) } else { make(dom) };
+                Built {
+                    inner,
+                    ..Default::default()
+                }
+            }
             Some(plot) => crate::build(plot, &source_ctx)?,
             None => Built {
                 inner: crate::system::points_mesh(&[[0.0; 3]]),
@@ -366,14 +378,25 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
                 ..Default::default()
             },
         };
-        let inner = match &source.shape {
+        let mut inner = match &source.shape {
             Some(sh) => mesh::project(sh, &source_ctx.view, dom),
             None => source.inner,
         };
         if inner.positions.is_empty() {
             continue;
         }
-        let values = evaluate(&set, &inner.positions);
+        // 平面内の三角形の辺は、そのまま分割しても入力領域の近似から外れない。
+        if flat && !source.curve && !inner.indices.is_empty() {
+            refine::weld(&mut inner);
+        }
+        let mut values = evaluate(&set, &inner.positions);
+        if ctx.refine && image.arity > 1 {
+            if source.curve && image.inputs == 1 {
+                refine::curve(&mut inner.positions, &mut values, &set, ctx.size * 1e-4);
+            } else if !source.curve && flat {
+                refine::surface(&mut inner, &mut values, &set, ctx.size * 1e-3);
+            }
+        }
         let bounds = [0, 1, 2].map(|axis| Interval::new(dom.lo[axis], dom.hi[axis]));
         let guards: Vec<_> = image
             .maps

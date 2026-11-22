@@ -1876,6 +1876,43 @@ fn image_sets_offer_sliders_for_free_parameters() {
 }
 
 #[test]
+fn image_sets_keep_smooth_boundaries_and_normals() {
+    let dome = "⦃(x,y,sqrt(1-x^2-y^2))∣x^2+y^2<=0.8⦄";
+    let boundary_error = |m: &MeshResult| {
+        let mut edges = std::collections::HashMap::<(usize, usize), usize>::new();
+        for t in m.indices().chunks_exact(3) {
+            for i in 0..3 {
+                let (a, b) = (t[i] as usize, t[(i + 1) % 3] as usize);
+                *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let p = m.positions();
+        edges.into_iter().filter(|(_, count)| *count == 1).map(|((a, b), _)| {
+            let x = 0.5 * (p[3*a] + p[3*b]);
+            let y = 0.5 * (p[3*a+1] + p[3*b+1]);
+            (x*x + y*y - 0.8).abs()
+        }).fold(0.0, f32::max)
+    };
+    let fine = run(dome, "", &[]).unwrap();
+    let coarse = run_flags(dome, "", &[], 1).unwrap();
+    assert!(boundary_error(&fine) < 0.0015, "{}", boundary_error(&fine));
+    assert!(boundary_error(&fine) < 0.4 * boundary_error(&coarse));
+    assert!(2 * fine.indices().len() > 3 * fine.positions().len());
+    for (p, n) in fine.positions().chunks_exact(3).zip(fine.normals().chunks_exact(3)) {
+        assert!(p.iter().zip(n).map(|(a, b)| a * b).sum::<f32>() > 0.98, "{p:?}, {n:?}");
+    }
+
+    let surface = "⦃(x,y,sin(30x) cos(20y))∣-1<=x<=1,-1<=y<=1⦄";
+    let fine = run(surface, "", &[]).unwrap();
+    let coarse = run_flags(surface, "", &[], 1).unwrap();
+    assert!(fine.indices().len() > coarse.indices().len() * 2);
+    let curve = "⦃(t,sin(25t))∣-1<=t<=1⦄";
+    let fine = run(curve, "", &[]).unwrap();
+    let coarse = run_flags(curve, "", &[], 1).unwrap();
+    assert!(fine.positions().len() > coarse.positions().len());
+}
+
+#[test]
 fn integrals_over_unions_and_set_operations() {
     let pi = std::f64::consts::PI;
     // 点が同じ変数の組の集合どうしの ∩・∖・∪ は、条件の (x, y) ∈ A ∩ B
