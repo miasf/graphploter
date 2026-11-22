@@ -7898,8 +7898,8 @@ fn grid_tris(m: usize, count: usize) -> Vec<u32> {
 /// 縦の座標を 0 にして平らにする（2D 表示）。曲面の法線はすべて +縦 の向きにする
 pub fn flatten(mesh: &mut Mesh, curve: bool) {
     mesh.lod_mesh = None; // 平らにした後の粗い版は作らない（2D 表示は軽い）
-    // 縦に立った面（y = x, x² + y² = 1 など）は、押しつぶすと三角形の面積が無くなって見えなくなる。
-    // 真上から見た面積が 3 次元の面積の 5% 以下の三角形は、押しつぶした後のいちばん長い辺を線として残す
+    // 縦に立った面（y = x, x² + y² = 1 など）は、投影で面積が無くなるので線として残す。
+    // 投影後の辺だけで共線かどうかを判定し、面積のある曲面の縁に線が重なるのを防ぐ。
     if !curve {
         let p = &mesh.positions;
         let at = |k: u32| [0, 1, 2].map(|c| p[3 * k as usize + c] as f64);
@@ -7907,8 +7907,15 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
             let (a, b, c) = (at(t[0]), at(t[1]), at(t[2]));
             let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
             let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            if !(len > 0.0) || n[2].abs() > 0.05 * len {
+            let scale = u[0] * u[0] + u[1] * u[1] + v[0] * v[0] + v[1] * v[1];
+            // f32 に丸めた頂点では、同一直線上の点にも小さな誤差がある。
+            if !(scale > 0.0 && n[2].abs() <= 1e-6 * scale) {
+                continue;
+            }
+            // もとの三角形自体がほぼつぶれている場合は、補助線に変えない。
+            let scale3 = scale + u[2] * u[2] + v[2] * v[2];
+            let area2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+            if !(area2 > (1e-8 * scale3).powi(2)) {
                 continue;
             }
             let d2 = |x: [f64; 3], y: [f64; 3]| (x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2);
