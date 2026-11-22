@@ -440,14 +440,14 @@ export interface MeshData {
   outlineValues?: Float32Array
   /** 列ベクトル・固有ベクトルの矢印。実線は軸、メッシュは矢じり */
   vectorArrows?: boolean
-  /** ≠ で除いた点（点ごとに 3 つ）。白丸を描く */
+  /** 白丸を描く位置（点ごとに 3 つ） */
   holes?: Float32Array
   /** 極限の近づく点での定義値（座標 3 つ）。塗りつぶした点で描く。 */
   limitPoint?: Float32Array
   limitSource?: Float32Array
   limitSourceTarget?: Float32Array
-  /** 極限の丸印を座標系で移した先 */
-  limitHolesTarget?: Float32Array
+  /** 白丸を座標系で移した先 */
+  holesTarget?: Float32Array
   limitPointTarget?: Float32Array
   /** ベクトル場なら true（矢印・流線を、鮮やかな色の対応表 vivid で塗る） */
   vivid?: boolean

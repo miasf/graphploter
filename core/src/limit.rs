@@ -168,6 +168,16 @@ fn finite_estimate(a: &[f64], b: &[f64]) -> Option<f64> {
     stable
 }
 
+/// Finite limit along a ray starting at an undefined point. A ray with no
+/// defined samples close to its start contributes no marker.
+pub(crate) fn finite_ray(radius: f64, sample: impl Fn(&[f64]) -> Vec<f64>) -> Option<f64> {
+    let estimates = [1.0, std::f64::consts::SQRT_2].map(|scale| {
+        let distances = std::array::from_fn::<_, STEPS, _>(|k| radius * scale * 0.5_f64.powi(k as i32));
+        sample(&distances)
+    });
+    finite_estimate(&estimates[0], &estimates[1])
+}
+
 fn growing(samples: &[f64], growth: f64) -> Option<f64> {
     // オーバーフローの前までに、同じ符号で大きさが増え続けているか確かめる。
     let end = samples.iter().rposition(|x| x.is_finite())? + 1;

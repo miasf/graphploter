@@ -1916,7 +1916,7 @@ export class Viewer {
       lod,
       outline: mix(mesh.outline, mesh.outlineTarget),
       outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
-      holes: mix(mesh.holes, mesh.limitHolesTarget),
+      holes: mix(mesh.holes, mesh.holesTarget),
       limitPoint: mix(mesh.limitPoint, mesh.limitPointTarget),
       limitSource: mix(mesh.limitSource, mesh.limitSourceTarget),
     }

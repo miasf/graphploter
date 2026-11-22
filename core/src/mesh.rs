@@ -7616,6 +7616,7 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
 
     let n = n.max(2);
     let mut ts: Vec<f64> = (0..=n).map(|k| t.0 + (t.1 - t.0) * k as f64 / n as f64).collect();
+    ts[n] = t.1;
     let mut ps = split(eval(&ts));
     // 区間 [ts[k], ts[k+1]] をまだ分け直す必要があるか
     let mut todo = vec![true; ts.len() - 1];
@@ -8065,25 +8066,55 @@ pub fn flat_map(prog: &Program, dom: Domain, n: usize, mode: ComplexMode) -> Mes
 /// 2D 表示の陽関数の曲線 `y = f(x)`（`axis` = 1）や `x = f(y)`（`axis` = 0）。
 /// `prog` の変数は残り2つの表示中の座標（2つ目は縦の座標で、0 にする）。曲がっている所を細かく計算する
 pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> Mesh {
+    explicit_curve_with_holes(prog, axis, dom, tol, &[]).0
+}
+
+pub(crate) fn explicit_curve_with_holes(
+    prog: &Program, axis: usize, dom: Domain, tol: f64, breaks: &[crate::holes::Break],
+) -> (Mesh, Vec<f32>) {
     let free = if axis == 0 { 1 } else { 0 };
-    let eval = |ts: &[f64]| -> Vec<f64> {
-        let zeros = vec![0.0; ts.len()];
-        let mut out = vec![C::new(0.0, 0.0); ts.len()];
-        prog.eval_batch(&[ts, &zeros], &mut out);
-        let mut pts = Vec::with_capacity(ts.len() * 3);
-        for (t, v) in ts.iter().zip(&out) {
-            let mut p = [0.0; 3];
-            p[free] = *t;
-            p[axis] = as_real(*v);
-            if !p[axis].is_finite() {
-                p = [f64::NAN; 3];
-            }
-            pts.extend_from_slice(&p);
+    let point = |x, y: f64| {
+        if !y.is_finite() {
+            return [f64::NAN; 3];
         }
-        pts
+        let mut p = [0.0; 3];
+        p[free] = x;
+        p[axis] = y;
+        p
     };
-    let points = curve_nd(&eval, 3, (dom.lo[free], dom.hi[free]), 400, tol);
-    Mesh { positions: points.iter().map(|&v| v as f32).collect(), ..Default::default() }
+    let (lo, hi) = (dom.lo[free], dom.hi[free]);
+    let mut positions = Vec::new();
+    let mut marks = Vec::new();
+    let mut left = (lo, None);
+    for (right, next) in breaks.iter().map(|b| ((b.x, b.sides[0]), Some((b.x, b.sides[1]))))
+        .chain(std::iter::once(((hi, None), None)))
+    {
+        if right.0 > left.0 || breaks.is_empty() {
+            let eval = |xs: &[f64]| {
+                xs.iter().copied().zip(crate::holes::curve_samples(prog, xs)).flat_map(|(x, y)| {
+                    let y = if x == left.0 { left.1.unwrap_or(y) }
+                        else if x == right.0 { right.1.unwrap_or(y) }
+                        else { y };
+                    point(x, y)
+                }).collect()
+            };
+            if !positions.is_empty() {
+                positions.extend([f32::NAN; 3]);
+            }
+            let n = (400.0 * ((right.0 - left.0) / (hi - lo))).ceil() as usize;
+            positions.extend(curve_nd(&eval, 3, (left.0, right.0), n, tol).into_iter().map(|v| v as f32));
+        }
+        if let Some(next) = next {
+            for y in [right.1, next.1].into_iter().flatten() {
+                let p = point(right.0, y).map(|v| v as f32);
+                if p.iter().all(|v| v.is_finite()) && marks.last_chunk::<3>() != Some(&p) {
+                    marks.extend(p);
+                }
+            }
+            left = next;
+        }
+    }
+    (Mesh { positions, ..Default::default() }, marks)
 }
 
 /// 極限の近づく点で曲線を切る。左右の枝はそれぞれの極限値に向かい、点での定義値とは結ばない。

@@ -31,6 +31,7 @@ pub mod pixel;
 pub mod groebner;
 pub mod quad;
 pub mod series;
+mod holes;
 mod limit;
 pub mod solve;
 mod region;
@@ -101,8 +102,9 @@ pub struct MeshResult {
     gpu_reason: String,
     /// 常微分方程式なら、状態の成分の名前（`x`・`y'`。初期値の欄の見出し）
     ode_states: Vec<String>,
-    /// ≠ で除いた点（曲線が h = 0 を横切る所。点ごとに 3 つ）。描画側で白丸を描く
+    /// 除外点と有限の極限の位置（点ごとに 3 つ）。描画側で白丸を描く。
     holes: Vec<f32>,
+    holes_target: Vec<f32>,
     /// 極限の行の数値結果と、近づく点での定義値を示す点の座標
     limit: Option<LimitMesh>,
 }
@@ -112,7 +114,6 @@ struct LimitMesh {
     source: Vec<f32>,
     source_target: Vec<f32>,
     point: Vec<f32>,
-    holes_target: Vec<f32>,
     point_target: Vec<f32>,
 }
 
@@ -254,8 +255,12 @@ impl MeshResult {
         self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.source_target))
     }
 
+    pub fn take_holes_target(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.holes_target)
+    }
+
     pub fn take_limit_holes_target(&mut self) -> Vec<f32> {
-        self.limit.as_mut().map_or_else(Vec::new, |m| std::mem::take(&mut m.holes_target))
+        if self.limit.is_some() { self.take_holes_target() } else { Vec::new() }
     }
 
     pub fn take_limit_point_target(&mut self) -> Vec<f32> {
@@ -523,6 +528,7 @@ pub fn coord_grid(
         gpu_reason: String::new(),
         ode_states: Vec::new(),
         holes: Vec::new(),
+        holes_target: Vec::new(),
         limit: None,
     })
 }
@@ -796,6 +802,7 @@ pub fn plot(
             .unwrap_or((0.0, std::f64::consts::TAU))
     };
     let ctx = Ctx {
+        params: &consts,
         space: &space,
         dom,
         size,
@@ -854,28 +861,57 @@ pub fn plot(
     outline.0.append(&mut inner.edge_lines);
     // ≠ で除いた所: 曲線なら白丸の点、面・領域なら点線（mark_excluded）
     let excluded = expand::take_excluded();
-    let mut holes = Vec::new();
-    // 2D の投影は縦の座標を押しつぶした後なので、≠ の式（縦の座標を使うかもしれない）では調べない
-    if !excluded.is_empty() && coord.is_none() && !(flat && !ctx.flat_slice) {
-        let (h, dashed, all) = mark_excluded(&inner, curve, &excluded);
-        holes = h;
+    let mut holes = built.holes;
+    let mut fully_excluded = false;
+    if !excluded.is_empty() && coord.is_none() {
+        // 投影後の点に、投影前の高さを使う条件は適用しない。
+        let direct = excluded.iter().map(|(_, p)| p).filter(|p| {
+            !flat || ctx.flat_slice || (curve && !p.uses_var_index(2))
+        });
+        let (h, dashed, all) = mark_excluded(&inner, curve, direct);
+        holes.extend(h);
         outline.1.extend(dashed);
         if all {
             // 曲線全体が除かれた（y = x, z ≠ 0 の 2D の切り口 z = 0）: 何も描かない
             inner = mesh::Mesh::default();
+            holes.clear();
+            fully_excluded = true;
             expand::add_note("≠ で全部除かれる");
         }
     }
+    if let equation::Plot::Explicit { axis, names, prog, expr, rotated: false } = &plot {
+        if !hidden_on {
+            let params = space.with_hidden(&consts);
+            let marks = if !flat || *axis == 2 {
+                holes::surface(expr, prog, names, *axis, &params, dom, &excluded)
+            } else if !fully_excluded && (ctx.flat_slice || !prog.uses_var_index(1)) {
+                holes::curve_exclusions(expr, prog, names, *axis, &params, dom, &excluded, ctx.flat_slice)
+            } else {
+                Vec::new()
+            };
+            for mut p in marks {
+                if ctx.flat_slice && p[2].abs() > ctx.size * 1e-9 {
+                    continue;
+                }
+                if flat {
+                    p[2] = 0.0;
+                }
+                if p.iter().enumerate().all(|(i, &v)| flat && i == 2 || (dom.lo[i]..=dom.hi[i]).contains(&v)) {
+                    let p = p.map(|v| v as f32);
+                    if !holes.chunks_exact(3).any(|q| (0..3).all(|i| (p[i] - q[i]).abs() <= (ctx.size * 1e-7) as f32)) {
+                        holes.extend(p);
+                    }
+                }
+            }
+        }
+    }
     let limit = if let equation::Plot::Limit { report, .. } = &plot {
-        let (mut open, mut point) = report.marks();
+        let (open, mut point) = report.marks();
         let mut source = built.limit_source;
         let source_target = coord.as_ref().map_or_else(Vec::new, |c| c.apply_line(&mut source, flat));
-        let (holes_target, point_target) = coord.as_ref().map_or_else(
-            || (Vec::new(), Vec::new()),
-            |c| (c.apply_line(&mut open, flat), c.apply_line(&mut point, flat)),
-        );
+        let point_target = coord.as_ref().map_or_else(Vec::new, |c| c.apply_line(&mut point, flat));
         holes.extend(open);
-        Some(LimitMesh { report: report.clone(), source, source_target, point, holes_target, point_target })
+        Some(LimitMesh { report: report.clone(), source, source_target, point, point_target })
     } else {
         None
     };
@@ -885,6 +921,7 @@ pub fn plot(
         outline.0.extend(mesh::box_edge_lines(&inner, dom));
     }
     let mut outline_target = (Vec::new(), Vec::new());
+    let mut holes_target = Vec::new();
     if let Some(c) = &coord {
         // 作る範囲からはみ出した所を落とす（媒介変数表示は、範囲が媒介変数で決まるので切らない）
         let parametric = built.shape.is_some() && !built.rotated_explicit;
@@ -893,6 +930,7 @@ pub fn plot(
         }
         c.apply(&mut inner, curve, flat);
         outline_target = (c.apply_line(&mut outline.0, flat), c.apply_line(&mut outline.1, flat));
+        holes_target = c.apply_line(&mut holes, flat);
     }
     // 3D の陰関数（回した陽関数を陰関数にしたものも）を光線で描くための GLSL と、使えないならその理由
     let gpu3d = gpu3d_of(&plot, &consts, &space, flat, hidden_on, coord.is_some(), built.gpu2d.is_some());
@@ -941,7 +979,8 @@ pub fn plot(
         used_params: {
             let mut u = plot.used_params();
             // 座標系の式が使うパラメータ（行列を座標系にしたときの、成分のスライダーなど）
-            for p in expand::used_params().into_iter().chain(coord.iter().flat_map(|c| c.used_params())) {
+            let exclusion_params = excluded.iter().flat_map(|(_, p)| p.used_params().iter().cloned());
+            for p in expand::used_params().into_iter().chain(coord.iter().flat_map(|c| c.used_params())).chain(exclusion_params) {
                 if !u.contains(&p) {
                     u.push(p);
                 }
@@ -956,7 +995,7 @@ pub fn plot(
             && !hidden_on
             && coord.is_none()
             && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
-        gpu2d: if coord.is_some() {
+        gpu2d: if coord.is_some() || fully_excluded {
             None
         } else {
             // uniform にしたパラメータの今の値
@@ -971,6 +1010,7 @@ pub fn plot(
         defs: (expand::used(), expand::def_line()),
         ode_states: expand::ode_states(),
         holes,
+        holes_target,
         limit,
     })
 }
@@ -1588,6 +1628,7 @@ fn flat_finish(mut m: mesh::Mesh, curve: bool, slice: bool) -> mesh::Mesh {
 /// 図形を作るのに使う設定
 #[derive(Clone)]
 struct Ctx<'a> {
+    params: &'a eval::Params,
     space: &'a equation::Space,
     dom: mesh::Domain,
     /// 表示範囲の対角線の長さ
@@ -1622,6 +1663,7 @@ struct Ctx<'a> {
 #[derive(Default)]
 struct Built {
     inner: mesh::Mesh,
+    holes: Vec<f32>,
     /// 極限値から独立して表示する、元の曲線・数列の点。
     limit_source: Vec<f32>,
     shape: Option<mesh::NdShape>,
@@ -1681,6 +1723,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             parts.iter().flat_map(|b| b.outline.0.iter().copied()).collect(),
             parts.iter().flat_map(|b| b.outline.1.iter().copied()).collect(),
         );
+        let holes = parts.iter().flat_map(|b| b.holes.iter().copied()).collect();
         // 全部が n 次元の点なら、点のままつなげる（回転だけ変わったとき使い回せる）
         if parts.iter().all(|b| b.shape.is_some()) {
             let shapes: Vec<mesh::NdShape> = parts.into_iter().filter_map(|b| b.shape).collect();
@@ -1717,7 +1760,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 None => b.inner,
             })
             .collect();
-        return Ok(Built { inner: mesh::merge(meshes, curve), fields, curve, kind, outline, ..Default::default() });
+        return Ok(Built { inner: mesh::merge(meshes, curve), holes, fields, curve, kind, outline, ..Default::default() });
     }
     if let Some(mut b) = field_built(plot, ctx) {
         if let P::Limit { report, .. } = plot {
@@ -2011,7 +2054,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         _ => false,
     };
     // 回した陽関数: 回す前の形を n 次元の点で作り、回して射影してから平面に描く（plot・Shape::project）
-    if let P::Explicit { axis, prog, names, rotated: true } = plot {
+    if let P::Explicit { axis, prog, names, rotated: true, .. } = plot {
         if *axis == 2 || uses_vertical {
             // 曲面を作り、射影した後で切り口の線か、押しつぶした形にする。
             // z = f(x, y) を押しつぶした形は、回した後の高さで塗り分ける（格子線用の座標の3つ目が回した後の縦の座標）
@@ -2069,11 +2112,17 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind = format!("{} の値で塗り分け", names[2]);
             b.inner = mesh::flat_map(prog, dom, ctx.resolution, ctx.complex_mode);
         }
-        P::Explicit { axis, prog, names, .. } => {
+        P::Explicit { axis, prog, names, expr, .. } => {
             b.curve = true;
             let other = if *axis == 0 { &names[1] } else { &names[0] };
             b.kind = format!("{} = f({})", names[*axis], other);
-            b.inner = mesh::explicit_curve_2d(prog, *axis, dom, ctx.size * 1e-4);
+            let free = usize::from(*axis == 0);
+            let params = space.with_hidden(ctx.params);
+            let section = expr.substitute(&|name| (name == names[2]).then_some(parser::Expr::Num(0.0)));
+            let breaks = holes::curve(&section, &names[free], &params, (dom.lo[free], dom.hi[free]), |xs| {
+                holes::curve_samples(prog, xs)
+            });
+            (b.inner, b.holes) = mesh::explicit_curve_with_holes(prog, *axis, dom, ctx.size * 1e-4, &breaks);
         }
         // 複素数の陰関数の 2D 表示: Re F = Im F = 0 の交点
         P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
@@ -2238,7 +2287,11 @@ fn with_affine(mut s: gpu2d::Scene2d, space: &equation::Space, params: &[String]
 /// ≠ で除いた所 h = 0（`hs` のどれか）を示す。曲線なら、線分が h = 0 を横切る点（はさみうち法で寄せる）を白丸の点にし、
 /// 面・領域なら、三角形ごとに h = 0 の線分を求めて点線にする。曲線が h = 0 の上を走っている（頂点の半分以上で h = 0）なら、
 /// 曲線全体が除かれる（3 つ目の値が true）。戻り値は（白丸の点, 点線の線分, 曲線全体が除かれるか）
-fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f32>, Vec<f32>, bool) {
+fn mark_excluded<'a>(mesh: &mesh::Mesh, curve: bool, hs: impl Iterator<Item = &'a eval::Program>) -> (Vec<f32>, Vec<f32>, bool) {
+    let mut hs = hs.peekable();
+    if hs.peek().is_none() {
+        return (Vec::new(), Vec::new(), false);
+    }
     let pts: Vec<[f64; 3]> = mesh.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
     let eval_at = |h: &eval::Program, q: &[[f64; 3]]| -> Vec<f64> {
         let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| q.iter().map(|p| p[c]).collect());
@@ -2282,6 +2335,9 @@ fn mark_excluded(mesh: &mesh::Mesh, curve: bool, hs: &[eval::Program]) -> (Vec<f
                 let fm = eval_at(h, &mids);
                 for (s, (m, f)) in segs.iter_mut().zip(mids.iter().zip(fm)) {
                     if !f.is_finite() || f == 0.0 {
+                        if f == 0.0 {
+                            found.push(*m);
+                        }
                         s.0 = *m;
                         s.1 = *m;
                         s.2 = 0.0;
@@ -2550,6 +2606,7 @@ impl Shape {
             gpu_reason: String::new(),
             ode_states: Vec::new(),
             holes: Vec::new(),
+            holes_target: Vec::new(),
             limit: None,
         }
     }
@@ -2654,6 +2711,7 @@ impl CapSource {
             gpu_reason: String::new(),
             ode_states: Vec::new(),
             holes: Vec::new(),
+            holes_target: Vec::new(),
             limit: None,
         })
     }

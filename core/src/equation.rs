@@ -223,7 +223,7 @@ impl Space {
 
     /// 表示していない座標を、断面の値の定数としてパラメータに足す（範囲で重ねるものは除く）。
     /// 次元より先の、回転のときだけ使う座標（3次元のときの w, w₂ など）の値は 0
-    fn with_hidden(&self, params: &Params) -> Params {
+    pub(crate) fn with_hidden(&self, params: &Params) -> Params {
         let mut ps = params.clone();
         for k in self.dims..rot_dims(self.dims) {
             ps.insert(coord_name(k), C::new(0.0, 0.0));
@@ -282,7 +282,7 @@ pub enum Plot {
     /// `prog` の変数は、残り2つの表示中の座標（軸の順）。
     /// `rotated` が true なら、表示中の座標どうしの回転だけをしているので、
     /// 媒介変数表示 (u, v, f(u, v)) と同じように点を計算してから回転・射影する（[`Space::view_rows`]）。
-    Explicit { axis: usize, names: [String; 3], prog: Program, rotated: bool },
+    Explicit { axis: usize, names: [String; 3], prog: Program, expr: Box<Expr>, rotated: bool },
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
     /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
     /// `local` は、回転が表示中の座標どうしだけのときの、回す前の F（変数は表示中の 3 つの座標）。
@@ -1243,7 +1243,7 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
                 };
                 let refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
                 match Program::compile_with(&h, &refs, &space.with_hidden(params)) {
-                    Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(p),
+                    Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(h, p),
                     _ => crate::expand::add_note("≠ は描き方が変わらないので無視"),
                 }
                 continue;
@@ -2594,7 +2594,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
                 let vertical = matches!(&p, Plot::Explicit { axis, prog, .. } if *axis == 2 || prog.uses_var_index(1));
                 if !(space.flat_slice && vertical) {
                     return Ok(match p {
-                        Plot::Explicit { axis, names, prog, .. } => Plot::Explicit { axis, names, prog, rotated: true },
+                        Plot::Explicit { axis, names, prog, expr, .. } => Plot::Explicit { axis, names, prog, expr, rotated: true },
                         other => other,
                     });
                 }
@@ -3226,7 +3226,7 @@ fn explicit(axis: usize, e: &Expr, shown: &[String; 3], consts: &Params) -> Resu
     let (a, b) = others(axis);
     LAST_EXPLICIT.with(|l| *l.borrow_mut() = Some((axis, e.clone(), shown.clone())));
     let prog = Program::compile_with(e, &[&shown[a], &shown[b]], consts)?;
-    Ok(Plot::Explicit { axis, names: shown.clone(), prog, rotated: false })
+    Ok(Plot::Explicit { axis, names: shown.clone(), prog, expr: Box::new(e.clone()), rotated: false })
 }
 
 /// 片方が表示中の座標1つだけで、もう片方にその座標が無ければ陽関数。左辺を優先して調べる（z = x なら「z = f(x, y)」）
