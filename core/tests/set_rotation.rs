@@ -62,6 +62,22 @@ fn area(m: &Mesh) -> f64 {
         .sum()
 }
 
+#[test]
+fn two_component_sets_rotate_as_flat_regions() {
+    let mut rot = [0.0; 10];
+    rot[1] = 0.55;
+    let rotation = matrix(&rot);
+    for (source, expected_area) in [
+        ("⦃(x,y)∣x^2+y^2<=1⦄", std::f64::consts::PI),
+        ("⦃(2x,y)∣x^2+y^2<=1⦄", 2.0 * std::f64::consts::PI),
+    ] {
+        let m = mesh(source, 3.0, &rot);
+        assert!((area(&m) - expected_area).abs() < 0.02, "{source}");
+        assert!(m.p.iter().any(|p| p[2].abs() > 0.4), "{source}");
+        assert!(m.p.iter().all(|p| (0..3).map(|i| rotation[i][2] * p[i]).sum::<f64>().abs() < 1e-5), "{source}");
+    }
+}
+
 /// 1 つの三角形にしか使われていない辺の数（位置で頂点をまとめる）。閉じた立体なら 0
 fn open(m: &Mesh) -> usize {
     use std::collections::HashMap;

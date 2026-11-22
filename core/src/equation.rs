@@ -1245,30 +1245,54 @@ fn flatten_or(f: &crate::parser::Formula, out: &mut Vec<crate::parser::Formula>,
     }
 }
 
+/// 二成分の集合を、座標条件から xy 平面上の像として描く。
+fn planar_set(set: &crate::parser::SetE, params: &Params, space: &Space) -> Result<Plot, String> {
+    let names = [" set planar first", " set planar second"];
+    let at = Expr::Tuple(names.iter().map(|n| Expr::Var((*n).into())).collect());
+    let condition = crate::logic::member(&at, set, &crate::expand::set_def)?;
+    // 二成分目までの束縛名を置換してから、条件に残った高さなどを平面の値にする。
+    // 例えば元の要素が (z,x) でも、束縛された z と外側の高さを混同しない。
+    let condition = crate::logic::substitute(&condition, &|name| {
+        if let Some(i) = names.iter().position(|n| *n == name) {
+            Some(Expr::Var(coord_name(i)))
+        } else {
+            coord_index(name).filter(|&i| i >= 2).map(|_| Expr::Num(0.0))
+        }
+    });
+    let point = Expr::Tuple((0..2).map(|i| Expr::Var(coord_name(i))).collect());
+    crate::set_image::compile(&point, &condition, params, space)
+}
+
 /// 論理式・集合を描く（[`compile_logic`] の本体）
 fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
     use crate::logic::{Lit, Op};
-    use crate::parser::Chain;
+    use crate::parser::{Chain, Formula};
+    let lookup = crate::expand::set_def;
+    // ⋃・⋂ の各項にも、通常の集合と同じ次元の扱いを適用する。
+    let formula = crate::expand::expand_big(formula, params)?;
     // 和と集合名を開き、像集合を含むときは枝ごとに描く。
     let mut parts = Vec::new();
-    flatten_or(formula, &mut parts, &mut Vec::new())?;
+    flatten_or(&formula, &mut parts, &mut Vec::new())?;
     if let [single] = parts.as_slice() {
         if let Some((point, cond)) = image_builder(single, params) {
             return crate::set_image::compile(point, cond, params, space);
         }
     }
-    if parts.iter().any(|p| image_builder(p, params).is_some()) {
-        let plots = parts.iter().map(|part| match image_builder(part, params) {
-            Some((point, cond)) => crate::set_image::compile(point, cond, params, space),
-            None => compile_formula(part, params, space),
-        }).collect::<Result<_, _>>()?;
+    let images = parts.iter().any(|p| image_builder(p, params).is_some());
+    let arities: Vec<_> = parts.iter().map(|p| {
+        crate::logic::as_set(p).and_then(|s| crate::logic::arity(&s, &lookup).ok())
+    }).collect();
+    let has_plane = arities.contains(&Some(2));
+    if !images && has_plane && arities.iter().all(|a| matches!(a, Some(0 | 2))) {
+        if let Some(set) = crate::logic::as_set(&Formula::Or(parts.clone())) {
+            return planar_set(&set, params, space);
+        }
+    }
+    if parts.len() > 1 && (images || has_plane) {
+        let plots = parts.iter().map(|part| compile_formula(part, params, space)).collect::<Result<_, _>>()?;
         return Ok(Plot::Multi(plots));
     }
-    let formula = formula.clone();
     let shown: Vec<String> = space.shown().to_vec();
-    let lookup = |n: &str| crate::expand::set_def(n);
-    // ⋃・⋂ を、添字ごとの「または」「かつ」にする
-    let formula = crate::expand::expand_big(&formula, params)?;
     let clauses = crate::logic::clauses(&formula, &shown, &lookup)?;
     // 原子の式を展開する（関数・Σ など）
     let mut expanded: Vec<Vec<Lit>> = Vec::with_capacity(clauses.len());

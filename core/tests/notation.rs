@@ -772,6 +772,34 @@ fn named_sets_and_difference() {
 }
 
 #[test]
+fn two_component_sets_live_in_the_plane() {
+    let defs = "D = ⦃(x,y)∣x^2+y^2<=1⦄\nE = ⦃(s,t)∣0<=s<=1,-1<=t<=1⦄";
+    for (source, defs) in [
+        ("D", defs),
+        ("D ∖ E", defs),
+        ("∅ ∪ D", defs),
+        ("Eᶜ", defs),
+        ("⦃(a,b)∣a^2+b^2<=1⦄", ""),
+        ("⦃(z,x)∣z^2+x^2<=1⦄", ""),
+        ("⦃(x,y)∣x^2+y^2<=1,z=0⦄", ""),
+        ("@bigcup(k; 1<=k<=2) ⦃(x,y)∣(x-k)^2+y^2<=0.2⦄", ""),
+    ] {
+        for flat in [false, true] {
+            let result = run_in_view(source, defs, &[], 0, flat).unwrap();
+            assert!(!result.indices().is_empty(), "{source}");
+            assert!(result.positions().chunks_exact(3).all(|p| p[2] == 0.0), "{source}");
+        }
+    }
+    let disk = "⦃(x,y)∣x^2+y^2<=1⦄";
+    let volume = "⦃(x,y,z)∣x^2+y^2<=1⦄";
+    for source in [volume.to_string(), format!("{disk} ∪ {volume}")] {
+        let result = run(&source, "", &[]).unwrap();
+        assert!(result.positions().chunks_exact(3).any(|p| p[2].abs() > 2.5), "{source}");
+    }
+    assert!(run("⦃(x,y)∣x^2+y^2<=1,z>0⦄", "", &[]).unwrap().indices().is_empty());
+}
+
+#[test]
 fn unions_of_regions() {
     // 2 つの球の和集合: 面の頂点は、もう一方の球の内側（中心から 1 − 2h より内）に無い
     let m = run("x^2+y^2+z^2 ≤ 1 ∨ (x-1)^2+y^2+z^2 ≤ 1", "", &[]).unwrap();
