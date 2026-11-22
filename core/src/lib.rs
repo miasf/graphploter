@@ -1870,6 +1870,9 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         let line = |b: &Built| b.curve || (ctx.flat_slice && b.shape.is_some());
         let curve = parts.first().is_some_and(line);
         if parts.iter().any(|b| line(b) != curve) {
+            if ps.iter().any(|p| matches!(p, P::SetImage(_))) {
+                return Ok(set_image::merge_union(parts, ctx));
+            }
             return Err("曲線と曲面（領域）が混ざる式は、1 つの行ではまとめて描けません（リスト・∪ の部分ごとに行を分けてください）".into());
         }
         let kind = format!("{} × {}", parts.first().map_or(String::new(), |b| b.kind.clone()), parts.len());

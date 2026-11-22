@@ -814,7 +814,9 @@ fn not_equal_empty_and_parametric_sets() {
             assert!(v[1] >= -1e-6, "{v:?}");
         }
     }
-    assert!(error_of("⦃(cos(t), sin(t), 0) ∣ 0 ≤ t⦄", "").contains("上の端"));
+    let (p, _) = mesh("⦃(t, t^2)∣t>=0⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|v| v[0] > 1.0));
+    assert!(p.chunks_exact(3).filter(|v| v[0].is_finite()).all(|v| v[0] >= -1e-5));
     assert!(error_of("x ∈ ℚ", "").contains("有理数"));
 }
 
@@ -1647,8 +1649,8 @@ fn parametric_sets_with_any_parameter_name() {
     same("⦃(x,x^(2))∣0<=x<=1⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
     same("⦃(s, sin(s))∣0<=s<=6⦄", "⦃(t, sin(t))∣0<=t<=6⦄", "");
     same("⦃(x,y,x^(2)+y^(2))∣-1<=x<=1,-1<=y<=1⦄", "⦃(u,v,u^(2)+v^(2))∣-1<=u<=1,-1<=v<=1⦄", "");
-    // 範囲の無い t・u・v を、付け替えた名前と混ぜない
-    assert!(error_of("⦃(s, t, s)∣0<=s<=1⦄", "").contains("t の範囲"));
+    // 条件のない変数も、表示範囲に応じて動かせる。
+    same("⦃(s, t, s)∣0<=s<=1⦄", "⦃(a, b, a)∣0<=a<=1⦄", "");
 }
 
 #[test]
@@ -1748,9 +1750,11 @@ fn coordinate_and_parameter_differentials() {
 
 #[test]
 fn parametric_set_conditions() {
-    // t ∈ [0, 1] は 0 ≤ t ≤ 1、≠ は描き方が変わらない
+    // t ∈ [0, 1] は 0 ≤ t ≤ 1。≠ で切った枝も描ける。
     same("⦃(t,t^(2))∣t∈[0,1]⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
-    same("⦃(cos(t),sin(t))∣0<=t<=2pi,t≠pi⦄", "⦃(cos(t),sin(t))∣0<=t<=2pi⦄", "");
+    let (p, _) = mesh("⦃(t,t^(2))∣-1<=t<=1,t≠0⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|v| v[0] < -0.5));
+    assert!(p.chunks_exact(3).any(|v| v[0] > 0.5));
     // 端がほかの媒介変数の式（扇形の三角形 0 ≤ t ≤ s）も描ける
     let (p, _) = mesh("⦃(s cos(t),s sin(t))∣0<=s<=1,0<=t<=s⦄", "", &[]);
     assert!(!p.is_empty());
@@ -1810,6 +1814,46 @@ fn set_images_map_the_condition_domain() {
     let p = run_in_view(member, "", &[], 0, true).unwrap().positions();
     let (lo, hi) = extrema(&p, 0);
     assert!((lo + 1.0).abs() < 0.03 && (hi - 3.0).abs() < 0.03, "{lo}, {hi}");
+}
+
+#[test]
+fn image_sets_share_one_path_for_ranges_logic_and_discontinuities() {
+    let (p, _) = mesh("⦃(s,t,s-t)∣0<=s<=60,0<=2t<=s⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|q| q[1] > 29.0));
+
+    let collapsed = run("⦃(s,s,2s)∣s^2+t^2<=1⦄", "", &[]).unwrap();
+    let p = collapsed.positions();
+    assert!(collapsed.indices().is_empty());
+    assert!(p.chunks_exact(3).any(|q| q[2] > 1.9));
+    assert!(p.chunks_exact(3).any(|q| q[2] < -1.9));
+
+    let (p, _) = mesh("⦃(s, abs(s), s^3)∣s∈[-2,2], s^2>=1, s<1.8⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|q| q[0] < -1.5));
+    assert!(p.chunks_exact(3).any(|q| q[0] > 1.5));
+    assert!(p.chunks_exact(3).filter(|q| q[0].is_finite()).all(|q| {
+        q[0].abs() >= 0.998 && q[0] <= 1.801
+            && (q[1] - q[0].abs()).abs() < 1e-5 && (q[2] - q[0].powi(3)).abs() < 1e-5
+    }));
+
+    for (source, gap) in [("⦃1/s∣-1<=s<=1⦄", 0.99), ("⦃floor(s)∣-1.5<=s<=1.5⦄", 0.0)] {
+        let (p, _) = mesh(source, "", &[]);
+        assert!(p.chunks_exact(3).any(|q| q[0] < -gap));
+        assert!(p.chunks_exact(3).any(|q| q[0] > gap));
+        for segment in p.chunks_exact(3).collect::<Vec<_>>().windows(2) {
+            let (a, b) = (segment[0][0], segment[1][0]);
+            if a.is_finite() && b.is_finite() {
+                if gap > 0.0 {
+                    assert!(a * b > 0.0 && a.abs() >= gap && b.abs() >= gap, "{source}: {a}, {b}");
+                } else {
+                    assert_eq!(a, b, "{source}: two isolated values are joined");
+                }
+            }
+        }
+    }
+
+    let mut both = run("⦃(s,s^2,0)∣-1<=s<=1⦄ ∪ ⦃(u,v,2+u^2-v^2)∣u^2+v^2<=1⦄", "", &[]).unwrap();
+    assert!(!both.indices().is_empty());
+    assert!(both.take_outline().chunks_exact(3).any(|q| q[0].is_finite() && q[2] == 0.0));
 }
 
 #[test]

@@ -87,6 +87,31 @@ fn tri_normal(p: &[f32], t: [u32; 3]) -> [f64; 3] {
     [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
 }
 
+/// 写像で全部の三角形が退化した場合、それぞれの像を線分または点として残す。
+pub(crate) fn collapsed_triangles(mesh: &Mesh) -> Option<Mesh> {
+    if mesh.indices.is_empty() || mesh.indices.chunks_exact(3).any(|t| {
+        tri_normal(&mesh.positions, [t[0], t[1], t[2]]) != [0.0; 3]
+    }) {
+        return None;
+    }
+    let vertex = |i: u32| &mesh.positions[i as usize * 3..i as usize * 3 + 3];
+    let length = |a: u32, b: u32| vertex(a).iter().zip(vertex(b)).map(|(&a, &b)| (a as f64 - b as f64).powi(2)).sum::<f64>();
+    let mut positions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for t in mesh.indices.chunks_exact(3) {
+        let (a, b) = [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])].into_iter()
+            .max_by(|&(a, b), &(c, d)| length(a, b).total_cmp(&length(c, d))).unwrap();
+        let [a, b] = [a, b].map(|i| [0, 1, 2].map(|axis| vertex(i)[axis].to_bits()));
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if seen.insert(key) {
+            positions.extend(a.map(f32::from_bits));
+            positions.extend(b.map(f32::from_bits));
+            positions.extend([f32::NAN; 3]);
+        }
+    }
+    Some(Mesh { positions, ..Default::default() })
+}
+
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }

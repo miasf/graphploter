@@ -2,9 +2,10 @@
 
 use crate::equation::{self, Plot, Space};
 use crate::eval::{self, Params, Program, ProgramSet};
+use crate::interval::{Dec, Interval};
 use crate::logic::Op;
 use crate::mesh::{self, Domain, Mesh};
-use crate::parser::{Chain, Expr, Formula, Rel};
+use crate::parser::{BinOp, Chain, Expr, Formula, Rel};
 use crate::{Built, Ctx};
 use num_complex::Complex64;
 
@@ -99,7 +100,6 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
     maps.iter().flat_map(Program::used_params).for_each(|n| record(n));
     let mut parts = Vec::new();
     'clause: for clause in clauses {
-        let mut bounds = [(None, None); 3];
         let mut chains = Vec::new();
         let mut excluded = Vec::new();
         for lit in clause {
@@ -127,22 +127,6 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
                 excluded.push((l, r));
                 continue;
             }
-            if let (Expr::Var(n), Some(c)) = (&l, &rc) {
-                if let Some(i) = coords.iter().position(|x| x == n) {
-                    bound(&mut bounds[i].1, constant(c), f64::min);
-                    if lit.op == Op::Eq {
-                        bound(&mut bounds[i].0, constant(c), f64::max);
-                    }
-                }
-            }
-            if let (Some(c), Expr::Var(n)) = (&lc, &r) {
-                if let Some(i) = coords.iter().position(|x| x == n) {
-                    bound(&mut bounds[i].0, constant(c), f64::max);
-                    if lit.op == Op::Eq {
-                        bound(&mut bounds[i].1, constant(c), f64::min);
-                    }
-                }
-            }
             let rel = match lit.op {
                 Op::Eq => Rel::Eq,
                 Op::Lt => Rel::Lt,
@@ -151,7 +135,10 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
             chains.push(chain(l, rel, r));
         }
         if names.is_empty() {
-            parts.push(Part { source: None, bounds });
+            parts.push(Part {
+                source: None,
+                bounds: [(None, None); 3],
+            });
             break;
         }
         if names.len() == 1 {
@@ -172,6 +159,7 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
             branches.extend(reverse);
         }
         for chains in branches {
+            let bounds = linear_bounds(&chains, &coords, &consts);
             let source = equation::compile_chains(chains, &consts, &input_space)?;
             for n in source.used_params() {
                 record(&n);
@@ -190,6 +178,88 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
         inputs: names.len(),
         uses,
     })))
+}
+
+// [x, y, z, 1] の係数。疎な単項の展開をせず、一次であることを式の構造から確かめる。
+fn affine(e: &Expr, coords: &[String; 3], params: &Params) -> Option<[f64; 4]> {
+    let value = |e| {
+        Program::compile_with(e, &[], params)
+            .ok()
+            .map(|p| constant(&p))
+            .filter(|v| v.is_finite())
+    };
+    let coefs = |e| affine(e, coords, params);
+    Some(match e {
+        Expr::Var(name) if coords.contains(name) => [
+            f64::from(name == &coords[0]),
+            f64::from(name == &coords[1]),
+            f64::from(name == &coords[2]),
+            0.0,
+        ],
+        Expr::Neg(inner) => coefs(inner)?.map(|v| -v),
+        Expr::Bin(BinOp::Add | BinOp::Sub, l, r) => {
+            let a = coefs(l)?;
+            let b = coefs(r)?;
+            let sign = if matches!(e, Expr::Bin(BinOp::Add, ..)) { 1.0 } else { -1.0 };
+            [0, 1, 2, 3].map(|i| a[i] + sign * b[i])
+        }
+        Expr::Bin(BinOp::Mul, l, r) => {
+            if let Some(k) = value(l) {
+                coefs(r)?.map(|v| k * v)
+            } else {
+                let k = value(r)?;
+                coefs(l)?.map(|v| k * v)
+            }
+        }
+        Expr::Bin(BinOp::Div, l, r) => {
+            let k = value(r).filter(|&k| k != 0.0)?;
+            coefs(l)?.map(|v| v / k)
+        }
+        _ => [0.0, 0.0, 0.0, value(e)?],
+    })
+}
+
+type Bounds = [(Option<f64>, Option<f64>); 3];
+
+// u ≤ v, v ≤ 50 などでは、v の上限を u の探索範囲にも反映する。
+fn linear_bounds(chains: &[Chain], coords: &[String; 3], params: &Params) -> Bounds {
+    let mut rows = Vec::new();
+    for chain in chains {
+        let [l, r] = chain.exprs.as_slice() else { continue };
+        if let (Some(l), Some(r)) = (affine(l, coords, params), affine(r, coords, params)) {
+            let row = [0, 1, 2, 3].map(|i| l[i] - r[i]);
+            if row.iter().all(|v| v.is_finite()) {
+                rows.push(row);
+                if chain.rels == [Rel::Eq] {
+                    rows.push(row.map(|v| -v));
+                }
+            }
+        }
+    }
+    let mut bounds: Bounds = [(None, None); 3];
+    for _ in 0..6 {
+        let previous = bounds;
+        for row in &rows {
+            for axis in (0..3).filter(|&i| row[i] != 0.0) {
+                let rest = (0..3).filter(|&i| i != axis && row[i] != 0.0).try_fold(row[3], |sum, i| {
+                    let (lo, hi) = bounds[i];
+                    let end = if row[i] > 0.0 { lo } else { hi };
+                    end.map(|v| sum + row[i] * v)
+                });
+                if let Some(end) = rest.map(|v| -v / row[axis]) {
+                    if row[axis] > 0.0 {
+                        bound(&mut bounds[axis].1, end, f64::min);
+                    } else {
+                        bound(&mut bounds[axis].0, end, f64::max);
+                    }
+                }
+            }
+        }
+        if bounds == previous {
+            break;
+        }
+    }
+    bounds
 }
 
 fn bound(end: &mut Option<f64>, value: f64, combine: fn(f64, f64) -> f64) {
@@ -263,8 +333,15 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
             continue;
         }
         let values = evaluate(&set, &inner.positions);
+        let bounds = [0, 1, 2].map(|axis| Interval::new(dom.lo[axis], dom.hi[axis]));
+        let guards: Vec<_> = image
+            .maps
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.supports_interval() && p.eval_interval_dec(&bounds).dec < Dec::Dac)
+            .collect();
         if image.arity == 1 {
-            scalar_intervals(&inner, &values, &mut intervals);
+            scalar_intervals(&inner, &values, &guards, &mut intervals);
             // 立体の場合は境界の像だけでなく、内部の断面の像も採る。
             if let Some(Plot::System { eqs, cuts, .. }) = &part.source {
                 if image.inputs == 3 && eqs.is_empty() {
@@ -273,7 +350,7 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
                     for k in 1..n {
                         let z = dom.lo[2] + (dom.hi[2] - dom.lo[2]) * k as f64 / n as f64;
                         let slice = region.cap(dom, 2, z, true, n);
-                        scalar_intervals(&slice, &evaluate(&set, &slice.positions), &mut intervals);
+                        scalar_intervals(&slice, &evaluate(&set, &slice.positions), &guards, &mut intervals);
                     }
                 }
             }
@@ -281,13 +358,34 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
             let mapped = project(&values, image.arity, ctx);
             if source.curve {
                 outline.push(Mesh {
-                    positions: mapped,
+                    positions: mapped_curve(mapped, &inner.positions, &values, image.arity, &guards),
                     ..Default::default()
                 });
             } else {
-                let mut mapped = finite_triangles(mapped, inner.indices);
-                mesh::compute_normals(&mut mapped);
-                meshes.push(mapped);
+                let mut indices = inner.indices;
+                if !guards.is_empty() {
+                    indices = indices
+                        .chunks_exact(3)
+                        .filter(|tri| {
+                            join_vertices(
+                                &[tri[0] as usize, tri[1] as usize, tri[2] as usize],
+                                &inner.positions,
+                                &values,
+                                image.arity,
+                                &guards,
+                            )
+                        })
+                        .flatten()
+                        .copied()
+                        .collect();
+                }
+                let mut mapped = finite_triangles(mapped, indices);
+                if let Some(curves) = mesh::collapsed_triangles(&mapped) {
+                    outline.push(curves);
+                } else {
+                    mesh::compute_normals(&mut mapped);
+                    meshes.push(mapped);
+                }
             }
         }
     }
@@ -330,6 +428,60 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
     })
 }
 
+pub(super) fn merge_union(parts: Vec<Built>, ctx: &Ctx) -> Built {
+    let mut out = Built {
+        kind: "集合の和".into(),
+        ..Default::default()
+    };
+    let mut surfaces = Vec::new();
+    let mut curves = Vec::new();
+    for mut part in parts {
+        let mut line = part.curve;
+        let inner = if let Some(shape) = &part.shape {
+            let projected = mesh::project(shape, &ctx.view, ctx.dom);
+            let result = if ctx.flat {
+                crate::flat_finish(projected, line, ctx.flat_slice)
+            } else {
+                projected
+            };
+            line |= ctx.flat_slice;
+            result
+        } else {
+            part.inner
+        };
+        if !inner.positions.is_empty() {
+            if line {
+                curves.push(inner);
+            } else {
+                surfaces.push(inner);
+            }
+        }
+        out.outline.0.append(&mut part.outline.0);
+        out.outline.1.append(&mut part.outline.1);
+        out.holes.append(&mut part.holes);
+        out.source_holes.append(&mut part.source_holes);
+        out.source_dashed.append(&mut part.source_dashed);
+        out.fields.append(&mut part.fields);
+    }
+    out.curve = surfaces.is_empty();
+    if out.curve {
+        out.inner = mesh::merge(curves, true);
+    } else {
+        out.inner = mesh::merge(surfaces, false);
+        out.outline.0 = mesh::merge(
+            std::iter::once(Mesh {
+                positions: out.outline.0,
+                ..Default::default()
+            })
+            .chain(curves)
+            .collect(),
+            true,
+        )
+        .positions;
+    }
+    out
+}
+
 fn finite_triangles(positions: Vec<f32>, indices: Vec<u32>) -> Mesh {
     if positions.iter().all(|v| v.is_finite()) {
         return Mesh {
@@ -368,26 +520,91 @@ fn evaluate(set: &ProgramSet, positions: &[f32]) -> Vec<f64> {
     values
 }
 
-fn scalar_intervals(mesh: &Mesh, values: &[f64], out: &mut Vec<(f64, f64)>) {
+// 区間演算が飛びや極を示すとき、離れた像の点の間に辺を張らない。
+fn join_vertices(indices: &[usize], positions: &[f32], values: &[f64], arity: usize, guards: &[(usize, &Program)]) -> bool {
+    if guards.is_empty() {
+        return true;
+    }
+    let point = |i: usize| [0, 1, 2].map(|a| positions[3 * i + a] as f64);
+    let points = indices.iter().map(|&i| point(i));
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        if p.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+    }
+    let bounds = [0, 1, 2].map(|a| Interval::new(lo[a], hi[a]));
+    guards.iter().all(|&(component, program)| {
+        let first = values[arity * indices[0] + component];
+        if indices.iter().all(|&i| values[arity * i + component] == first) {
+            return true;
+        }
+        let range = program.eval_interval_dec(&bounds);
+        match range.dec {
+            Dec::Def => false,
+            Dec::Trv if !range.bounded() => !indices.iter().any(|&i| {
+                let sample = point(i).map(|x| Interval::new(x, x));
+                program.eval_interval_dec(&sample).dec >= Dec::Dac
+            }),
+            _ => true,
+        }
+    })
+}
+
+fn mapped_curve(mapped: Vec<f32>, source: &[f32], values: &[f64], arity: usize, guards: &[(usize, &Program)]) -> Vec<f32> {
+    if guards.is_empty() {
+        return mapped;
+    }
+    let mut out = Vec::with_capacity(mapped.len());
+    let mut connected = false;
+    for (i, p) in mapped.chunks_exact(3).enumerate() {
+        if connected && p[0].is_finite() && !join_vertices(&[i - 1, i], source, values, arity, guards) {
+            out.extend([f32::NAN; 3]);
+        }
+        out.extend_from_slice(p);
+        connected = p[0].is_finite();
+    }
+    out
+}
+
+fn scalar_intervals(mesh: &Mesh, values: &[f64], guards: &[(usize, &Program)], out: &mut Vec<(f64, f64)>) {
     // 連結でない入力の像を、ひとつの最小値・最大値でつながない。
     let mut add = |values: &[f64]| {
-        let lo = values.iter().copied().fold(f64::INFINITY, f64::min);
-        let hi = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let finite = values.iter().copied().filter(|v| v.is_finite());
+        let lo = finite.clone().fold(f64::INFINITY, f64::min);
+        let hi = finite.fold(f64::NEG_INFINITY, f64::max);
         if lo <= hi {
             out.push((lo, hi));
         }
     };
     if mesh.indices.is_empty() {
         let mut previous = f64::NAN;
-        for &v in values {
+        for (i, &v) in values.iter().enumerate() {
             if v.is_finite() {
-                add(&[previous, v]);
+                if previous.is_finite() && join_vertices(&[i - 1, i], &mesh.positions, values, 1, guards) {
+                    add(&[previous, v]);
+                } else {
+                    add(&[v]);
+                }
             }
             previous = v;
         }
     } else {
         for tri in mesh.indices.chunks_exact(3) {
-            add(&[values[tri[0] as usize], values[tri[1] as usize], values[tri[2] as usize]]);
+            let indices = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            let vals = indices.map(|i| values[i]);
+            if join_vertices(&indices, &mesh.positions, values, 1, guards) {
+                add(&vals);
+            } else {
+                for value in vals {
+                    add(&[value]);
+                }
+            }
         }
     }
 }
