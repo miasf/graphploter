@@ -217,7 +217,7 @@ impl Space {
     }
 
     /// 表示中の座標の名前（横・奥・縦の順）
-    fn shown(&self) -> [String; 3] {
+    pub(crate) fn shown(&self) -> [String; 3] {
         self.axes.map(coord_name)
     }
 
@@ -329,6 +329,8 @@ pub enum Plot {
     Param { name: String, value: C, uses: Vec<String> },
     /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
     Multi(Vec<Plot>),
+    /// 条件を満たす入力点に式を適用した像集合。
+    SetImage(Box<crate::set_image::Image>),
     /// 複素平面の図形（[`complex_plane`]）。中身は媒介変数表示 (Re f, Im f, 縦の値) で、`label` は画面に出す説明
     ComplexPlane { inner: Box<Plot>, label: String },
     /// 連立方程式・不等式（[`system`]）: 等式 F_i = 0 と不等式 G_j ≤ 0 を全部満たす所。
@@ -412,6 +414,7 @@ impl Plot {
             Plot::Points { .. } => "数列の点".into(),
             Plot::Limit { .. } => "極限".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
+            Plot::SetImage(image) => image.label().into(),
             Plot::ComplexPlane { label, .. } => label.clone(),
             Plot::System { base, eqs, cuts, .. } => {
                 let cut = if cuts.is_empty() { "" } else { "（不等式で切り取り）" };
@@ -474,6 +477,7 @@ impl Plot {
             }
             Plot::Arrows { .. } | Plot::Points { .. } => return Vec::new(),
             Plot::ComplexPlane { inner, .. } => return inner.used_params(),
+            Plot::SetImage(image) => return image.used_params(),
             Plot::System { base, eqs, cuts, .. } => {
                 let mut out: Vec<String> = base.as_ref().map_or(Vec::new(), |b| b.used_params());
                 for n in eqs.iter().chain(cuts).flat_map(|p| p.used_params()) {
@@ -615,6 +619,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
+    }
+    let name = source.trim().trim_start_matches('{').trim_end_matches('}');
+    if let Some(set) = crate::expand::set_def(name) {
+        return compile_formula(&crate::parser::Formula::Set(set), params, space);
     }
     // ∃・∀（計画 M12）
     if let Some(p) = quantified(source, params, space)? {
@@ -1169,7 +1177,20 @@ fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, S
             crate::expand::mark_def_line(&name, Some("集合".into()));
             Formula::Set(SetE::Named(name))
         }
-        None => crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?,
+        None => {
+            // 単独の式を検証・コンパイルする入口では、定義一覧が空のこともある。
+            if let Some((_, rhs)) = source.split_once('=').filter(|(name, _)| {
+                let name = name.trim().trim_start_matches('{').trim_end_matches('}');
+                !name.is_empty() && crate::expand::definable(name) && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            }) {
+                if let Ok(f) = crate::parser::parse_formula(rhs, &names) {
+                    if crate::logic::as_set(&f).is_some() {
+                        return compile_formula(&f, params, space);
+                    }
+                }
+            }
+            crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?
+        }
     };
     compile_formula(&formula, params, space)
 }
@@ -1194,38 +1215,59 @@ fn parametric_builder(f: &crate::parser::Formula) -> Option<(&Expr, &crate::pars
 }
 
 /// 「または」（∪）を平らに並べる
-fn flatten_or(f: &crate::parser::Formula, out: &mut Vec<crate::parser::Formula>) {
+fn flatten_or(f: &crate::parser::Formula, out: &mut Vec<crate::parser::Formula>, active: &mut Vec<String>) -> Result<(), String> {
+    use crate::parser::{Formula, SetE};
     match f {
-        crate::parser::Formula::Or(v) => v.iter().for_each(|g| flatten_or(g, out)),
-        g => out.push(g.clone()),
+        Formula::Or(v) => v.iter().try_for_each(|g| flatten_or(g, out, active)),
+        Formula::Set(SetE::Union(a, b)) => {
+            flatten_or(&Formula::Set((**a).clone()), out, active)?;
+            flatten_or(&Formula::Set((**b).clone()), out, active)
+        }
+        Formula::Set(SetE::Named(name)) => {
+            if active.contains(name) {
+                return Err(format!("集合 {name} の定義が循環しています"));
+            }
+            if let Some(set) = crate::expand::set_def(name) {
+                active.push(name.clone());
+                flatten_or(&Formula::Set(set), out, active)?;
+                active.pop();
+            } else {
+                out.push(f.clone());
+            }
+            Ok(())
+        }
+        g => {
+            out.push(g.clone());
+            Ok(())
+        }
     }
 }
 
 /// 論理式・集合を描く（[`compile_logic`] の本体）
 fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
     use crate::logic::{Lit, Op};
-    use crate::parser::{Chain, Formula};
-    // 点を媒介変数の式で書いた集合 {(cos t, sin t) | 0 ≤ t ≤ π} は、媒介変数表示
-    if let Some((point, cond)) = parametric_builder(formula) {
-        return parametric_set(point, cond, params, space);
-    }
-    // 媒介変数の式で書いた集合どうしの和 {(t, t²) | …} ∪ {(t, 1) | …}（折れ線の経路など）は、それぞれ描いて重ねる
-    if matches!(formula, Formula::Or(_)) {
-        let mut parts = Vec::new();
-        flatten_or(formula, &mut parts);
-        if parts.iter().any(|p| parametric_builder(p).is_some()) {
-            let (curves, rest): (Vec<Formula>, Vec<Formula>) = parts.into_iter().partition(|p| parametric_builder(p).is_some());
-            let mut plots = Vec::new();
-            for c in &curves {
-                if let Some((point, cond)) = parametric_builder(c) {
-                    plots.push(parametric_set(point, cond, params, space)?);
+    use crate::parser::Chain;
+    // 和と集合名を開き、像集合を含むときは枝ごとに描く。
+    let mut parts = Vec::new();
+    flatten_or(formula, &mut parts, &mut Vec::new())?;
+    if let [single] = parts.as_slice() {
+        if let Some((point, cond)) = parametric_builder(single) {
+            if matches!(point, Expr::Tuple(_)) {
+                match parametric_set(point, cond, params, space) {
+                    Ok(plot) => return Ok(plot),
+                    Err(e) if e.ends_with("端を書いてください") || e.starts_with("媒介変数 ") && e.contains(" の範囲も、") => return Err(e),
+                    Err(_) => {}
                 }
             }
-            if !rest.is_empty() {
-                plots.push(compile_formula(&Formula::Or(rest), params, space)?);
-            }
-            return Ok(Plot::Multi(plots));
+            return crate::set_image::compile(point, cond, params, space);
         }
+    }
+    if parts.iter().any(|p| parametric_builder(p).is_some()) {
+        let plots = parts.iter().map(|part| match parametric_builder(part) {
+            Some((point, cond)) => crate::set_image::compile(point, cond, params, space),
+            None => compile_formula(part, params, space),
+        }).collect::<Result<_, _>>()?;
+        return Ok(Plot::Multi(plots));
     }
     let formula = formula.clone();
     let shown: Vec<String> = space.shown().to_vec();
@@ -1425,6 +1467,7 @@ fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, 
     };
     // 端が数の媒介変数は、その範囲。端がほかの媒介変数の式（0 ≤ t ≤ s）なら、t = 下の端 + (上の端 − 下の端) w（w は 0 〜 1）と置き換える
     let mut reparam: Vec<(String, Expr)> = Vec::new();
+    let mut ranges = Vec::new();
     for n in &new_names {
         let ls: Vec<&Expr> = lo.iter().filter(|(v, _)| v == n).map(|(_, e)| e).collect();
         let hs: Vec<&Expr> = hi.iter().filter(|(v, _)| v == n).map(|(_, e)| e).collect();
@@ -1441,7 +1484,10 @@ fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, 
         if ls.iter().chain(&hs).all(|e| !uses_param(e)) {
             let a = ls.iter().map(|e| value(e)).collect::<Result<Vec<_>, _>>()?.into_iter().fold(f64::NEG_INFINITY, f64::max);
             let b = hs.iter().map(|e| value(e)).collect::<Result<Vec<_>, _>>()?.into_iter().fold(f64::INFINITY, f64::min);
-            crate::expand::set_param_range(n, a, b);
+            if !a.is_finite() || !b.is_finite() || a >= b {
+                return Err("媒介変数の範囲が空、または有限ではありません".into());
+            }
+            ranges.push((n.clone(), a, b));
             continue;
         }
         if ls.len() != 1 || hs.len() != 1 {
@@ -1450,7 +1496,7 @@ fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, 
         let (l, h) = (ls[0].clone(), hs[0].clone());
         let span = Expr::Bin(BinOp::Sub, Box::new(h), Box::new(l.clone()));
         reparam.push((n.clone(), Expr::Bin(BinOp::Add, Box::new(l), Box::new(Expr::Bin(BinOp::Mul, Box::new(span), Box::new(Expr::Var(n.clone())))))));
-        crate::expand::set_param_range(n, 0.0, 1.0);
+        ranges.push((n.clone(), 0.0, 1.0));
     }
     // 置き換える媒介変数の端は、端が数の媒介変数だけで書く（2 段の入れ子は扱わない）
     for (n, e) in &reparam {
@@ -1463,7 +1509,11 @@ fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, 
         Expr::Tuple(items) => items,
         e => return Err(format!("媒介変数で書いた集合の点は、(x(t), y(t)) のように組で書いてください（{e:?}）")),
     };
-    parametric(items, params, space)
+    let plot = parametric(items, params, space)?;
+    for (name, lo, hi) in ranges {
+        crate::expand::set_param_range(&name, lo, hi);
+    }
+    Ok(plot)
 }
 
 /// 付け替えた媒介変数の、元の名前（誤りの文に使う）
@@ -1472,7 +1522,7 @@ fn old_name(rename: &[(String, String)], new: &str) -> String {
 }
 
 /// 解析・展開した式（[`compile_with`]）をコンパイルする
-fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
+pub(crate) fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
     for chain in &mut chains {
         for e in &mut chain.exprs {

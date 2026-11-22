@@ -8891,7 +8891,7 @@ fn identity_rows(d: usize) -> [ViewRow; 3] {
 // ---------------------------------------------------------------------------
 
 /// 周りの三角形の向き（面積で重み付け）を平均して、頂点の法線を求める。
-fn compute_normals(mesh: &mut Mesh) {
+pub(crate) fn compute_normals(mesh: &mut Mesh) {
     let p = &mesh.positions;
     let mut nrm = vec![0.0f64; p.len()];
     for t in mesh.indices.chunks_exact(3) {

@@ -399,6 +399,15 @@ const typed: [string, string][] = [
   ['\\int_{\\left\\lbrace\\left(\\cos t,\\sin t\\right)\\,\\middle\\vert\\,0\\le t\\le2\\pi\\right\\rbrace}x^2\\,ds', '@intset(( cos t, sin t),0<=t<=2 pi; {d_s})(x^(2))'],
 ]
 for (const [latex, want] of typed) check(latex, latexToText(latex), want)
+check('像集合（教科書の LaTeX）', squash(latexToText('$$ D = \\left\\{(2x,y) \\;\\middle\\vert{}\\; x^2+y^2\\leq\\dfrac{\\sqrt{3}}{2}\\right\\} $$')),
+  'D=⦃(2x,y)∣x^(2)+y^(2)<=((sqrt(3))/(2))⦄')
+check('値域とサイズ付き区切り', squash(latexToText('\\bigl\\{\\sqrt{1-x^2-y^2}\\bigm|x^2+y^2\\leq1\\bigr\\}')),
+  '⦃sqrt(1-x^(2)-y^(2))∣x^(2)+y^(2)<=1⦄')
+check('プレーンテキストの集合と絶対値', squash(latexToText('{|x| | |x|<2}')), '⦃abs(x)∣abs(x)<2⦄')
+check('文章の区切り', squash(latexToText('\\{(x^2,y)\\text{ such that }x>0\\text{ and }y<1\\}')),
+  '⦃(x^(2),y)∣x>0∧y<1⦄')
+check('所属付きの集合', squash(latexToText('\\{(x,y)\\in[0,1]^2:x<y\\}')),
+  '⦃(x,y)∣((x,y)∈[0,1]×[0,1])∧(x<y)⦄')
 check('添字と上付きの入力順', latexToText('a^{2}_{n+1}=a_n+1'), latexToText('a_{n+1}^{2}=a_n+1'))
 check('数列の項のべき乗', latexToText('a_{n+1}^{2}=a_n+1'), 'a_(n+1)^(2)=a_(n)+1')
 check('括弧を並べた数列の積', latexToText('\\left(a_{n+1}\\right)\\left(a_n\\right)=6'), '(a_(n+1))(a_(n))=6')

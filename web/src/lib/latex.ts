@@ -274,6 +274,7 @@ const isSpaceTok = (t: Token | undefined) => t === '\\,' || t === '\\;' || t ===
  */
 function normalizeSetTokens(toks: Token[]): Token[] {
   const out: Token[] = []
+  const bar = (t: Token | undefined) => t === '|' || t === '∣' || t === '│' || t === '\\vert' || t === '\\mid' || t === '\\lvert' || t === '\\rvert'
   for (let k = 0; k < toks.length; k++) {
     const t = toks[k]
     // 区間・実数全体の累乗 [0,1]^2・\mathbb{R}^3 は直積 [0,1]×[0,1]（∈ の右・× の隣・積分記号の下の先頭だけ。リストの累乗と取り違えない）
@@ -291,8 +292,17 @@ function normalizeSetTokens(toks: Token[]): Token[] {
       out.push('\\}')
       continue
     }
+    if (/^\\(?:big|Big|bigg|Bigg)[lrm]?$/.test(t)) {
+      const next = toks[k + 1]
+      if (t.endsWith('l') && (next === '\\{' || next === '\\lbrace')) out.push('\\left')
+      else if (t.endsWith('r') && (next === '\\}' || next === '\\rbrace')) out.push('\\right')
+      else if (t.endsWith('m') && bar(next)) {
+        out.push('\\mid')
+        k++
+      }
+      continue
+    }
     if (t === '\\middle') {
-      const bar = (u: Token | undefined) => u === '|' || u === '\\vert' || u === '\\mid' || u === '\\lvert' || u === '\\rvert'
       if (bar(toks[k + 1])) {
         k += 1
       } else if (toks[k + 1] === '{' && bar(toks[k + 2]) && toks[k + 3] === '}') {
@@ -302,8 +312,21 @@ function normalizeSetTokens(toks: Token[]): Token[] {
       }
       while (isSpaceTok(out[out.length - 1])) out.pop()
       out.push('\\mid')
-      while (isSpaceTok(toks[k + 1])) k++
+      while (isSpaceTok(toks[k + 1]) || (toks[k + 1] === '{' && toks[k + 2] === '}')) {
+        k += toks[k + 1] === '{' ? 2 : 1
+      }
       continue
+    }
+    if (t === '\\text' && toks[k + 1] === '{') {
+      const end = toks.indexOf('}', k + 2)
+      const words = end < 0 ? '' : toks.slice(k + 2, end).join('').toLowerCase()
+      const phrases: Record<string, Token> = { suchthat: '\\mid', 'ただし': '\\mid', and: '\\land', or: '\\lor', 'かつ': '\\land', 'または': '\\lor' }
+      const word = Object.hasOwn(phrases, words) ? phrases[words] : undefined
+      if (word) {
+        out.push(word)
+        k = end
+        continue
+      }
     }
     if (t === '\\mid') {
       while (isSpaceTok(out[out.length - 1])) out.pop()
@@ -319,7 +342,7 @@ function normalizeSetTokens(toks: Token[]): Token[] {
 /** toks[k] から始まる「区間^n」「\\mathbb{R}^n」を直積に開いたトークンと、読み終わった位置。当てはまらなければ null */
 function boxPower(toks: Token[], k: number, before: Token[]): { toks: Token[]; next: number } | null {
   const prev = before[before.length - 1]
-  const atSetPlace = prev === '\\in' || prev === '\\times' || prev === '_' || (prev === '{' && before[before.length - 2] === '_')
+  const atSetPlace = prev === '\\in' || prev === '∈' || prev === '\\times' || prev === '_' || (prev === '{' && before[before.length - 2] === '_')
   if (!atSetPlace) return null
   let box: Token[]
   let j: number
@@ -337,6 +360,21 @@ function boxPower(toks: Token[], k: number, before: Token[]): { toks: Token[]; n
     j += 2
     box = toks.slice(k, j)
     if (!box.includes(',')) return null
+  } else if (toks[k] === '[' || toks[k] === '(') {
+    let depth = 1
+    let comma = false
+    j = k + 1
+    for (; j < toks.length && depth > 0; j++) {
+      const t = toks[j]
+      if (t === '\\left' || t === '\\right') {
+        depth += t === '\\left' ? 1 : -1
+        j++ // 括弧そのものも読み飛ばす
+      } else if (t === '(' || t === '[' || t === '{') depth++
+      else if (t === ')' || t === ']' || t === '}') depth--
+      else if (depth === 1 && t === ',') comma = true
+    }
+    if (depth !== 0 || !comma || ![')', ']'].includes(toks[j - 1])) return null
+    box = toks.slice(k, j)
   } else return null
   if (toks[j] !== '^') return null
   const braced = toks[j + 1] === '{' && toks[j + 3] === '}'
@@ -469,6 +507,7 @@ class Converter {
   private token(t: Token) {
     // ---- 1文字のもの ----
     if (t === '{') {
+      if (this.setBuilder('}')) return
       this.out += '(' + this.argFromOpenBrace() + ')'
       return
     }
@@ -1058,7 +1097,7 @@ class Converter {
    * 集合の括弧の中身（`{` の後）が「点 \mid 条件」なら、⦃点∣条件⦄ を出力して true。区切り（\mid・:・\colon）が無ければ、何もせず false。
    * `end` が '\right' なら \right\} まで、null なら \} か \rbrace まで
    */
-  private setBuilder(end: '\\right' | null): boolean {
+  private setBuilder(end: '\\right' | '}' | null): boolean {
     let depth = 0
     let sep = -1
     let close = -1
@@ -1066,28 +1105,41 @@ class Converter {
     const bars: number[] = []
     for (let k = this.i; k < this.toks.length; k++) {
       const t = this.toks[k]
-      if (t === '{' || t === '\\{') depth++
+      if (t === '{' || t === '\\{' || t === '(' || t === '[' || t === '\\lbrack') depth++
       else if (t === '\\left') {
         depth++
         k++ // 括弧の形（\\left| の | など）は区切りに数えない
-      } else if (t === '}' || t === '\\right' || t === '\\}') {
+      } else if (t === '}' || t === '\\right' || t === '\\}' || t === ')' || t === ']' || t === '\\rbrack') {
         if (depth === 0 && (t === end || (end === null && t === '\\}'))) {
           close = k
           break
         }
         depth--
         if (t === '\\right') k++
-      } else if (depth === 0 && sep < 0 && (t === '\\mid' || t === ':' || t === '\\colon')) sep = k
+      } else if (depth === 0 && sep < 0 && (t === '\\mid' || t === '∣' || t === '│' || t === ':' || t === '\\colon')) sep = k
       else if (depth === 0 && (t === '|' || t === '\\vert')) bars.push(k)
     }
-    // 裸の縦線が 1 本だけ（絶対値の組になっていない）なら、それを区切りとして読む
-    if (sep < 0 && bars.length === 1) sep = bars[0]
+    // 裸の縦線が奇数本なら、奇数番目のうち要素と条件を区切れるものを探す。
+    if (sep < 0 && bars.length % 2 === 1) {
+      sep = bars.find((at, k) => {
+        if (k % 2 !== 0 || at <= this.i || at >= close - 1) return false
+        const prev = this.toks.slice(this.i, at).findLast((t) => !isSpaceTok(t))
+        return prev !== undefined && !['+', '-', '*', '/', '^', '_', ',', '='].includes(prev)
+      }) ?? -1
+    }
     if (sep < 0 || close < 0) return false
-    const point = new Converter(this.toks.slice(this.i, sep)).run()
+    const head = this.toks.slice(this.i, sep)
+    // 教科書の {x ∈ A | P(x)} は、所属を条件の一部にする。
+    const domain = splitTop(head, (t) => t === '\\in' || t === '∈')
+    const point = new Converter(domain[0]).run()
     const condToks = this.toks.slice(sep + 1, close)
     const cond = condToks.length === 0 ? '' : new Converter(expandListedRanges(condToks)).run()
     if (point === '' || cond === '') throw new LatexError('集合は {(x, y) | 条件} の形で、点と条件を書いてください')
-    this.out += ` ⦃${point}∣${cond}⦄`
+    if (domain.length > 2 || (domain.length === 2 && domain[1].length === 0)) {
+      throw new LatexError('所属付きの集合は {x∈A | 条件} の形で書いてください')
+    }
+    const predicate = domain.length === 1 ? cond : `(${point}∈${new Converter(domain[1]).run()})∧(${cond})`
+    this.out += ` ⦃${point}∣${predicate}⦄`
     this.i = close + (end === '\\right' ? 2 : 1)
     // 補集合 {…}^{c}・{…}^{\complement}
     if (this.toks[this.i] === '^') {
@@ -2762,6 +2814,13 @@ export function latexToText(latex: string): string {
 }
 
 function convertLatex(latex: string): string {
+  latex = latex.trim()
+  for (const [open, close] of [['$$', '$$'], ['\\[', '\\]'], ['\\(', '\\)'], ['$', '$']]) {
+    if (latex.startsWith(open) && latex.endsWith(close) && latex.length >= open.length + close.length) {
+      latex = latex.slice(open.length, -close.length).trim()
+      break
+    }
+  }
   // a ≡ b \pmod{n} は、mod(a − b, n) = 0（計画 M13）
   const pm = latex.match(/^(.*?)\\equiv(.*?)\\pmod\s*\{(.*)\}\s*$/s) ?? latex.match(/^(.*?)\\equiv(.*?)\\pmod\s*(\S)\s*$/s)
   if (pm) {

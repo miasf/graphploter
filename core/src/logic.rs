@@ -87,18 +87,21 @@ pub fn member(p: &Expr, s: &SetE, sets: SetLookup) -> Result<Formula, String> {
     let chain = |exprs: Vec<Expr>, rels: Vec<Rel>| Formula::Chain(crate::parser::Chain { pos: vec![0; exprs.len()], exprs, rels });
     Ok(match s {
         SetE::Builder { point, cond } => {
-            let names: Vec<String> = comps(point)
-                .iter()
-                .map(|q| match q {
-                    Expr::Var(v) => Ok(v.clone()),
-                    _ => Err("媒介変数の式で書いた集合 {(x(t), y(t)) | …} には、∈ を使えません".to_string()),
-                })
-                .collect::<Result<_, _>>()?;
+            let qs = comps(point);
             let ps = comps(p);
-            if ps.len() != names.len() {
-                return Err(format!("点の成分の数（{}）が、集合の点の成分の数（{}）と違います", ps.len(), names.len()));
+            if ps.len() != qs.len() {
+                return Err(format!("点の成分の数（{}）が、集合の点の成分の数（{}）と違います", ps.len(), qs.len()));
             }
-            substitute(cond, &|v: &str| names.iter().position(|n| n == v).map(|k| ps[k].clone()))
+            let mut names = Vec::new();
+            qs.iter().for_each(|q| q.collect_vars(&mut names));
+            let values = if qs.iter().zip(&names).all(|(q, n)| matches!(q, Expr::Var(v) if v == n)) && qs.len() == names.len() {
+                ps
+            } else {
+                inverse_affine(&qs, &names, &ps).ok_or_else(|| {
+                    "式で書いた像集合の ∈・∩・差集合には、逆変換できる同じ次元の一次・アフィン変換が必要です".to_string()
+                })?
+            };
+            substitute(cond, &|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone()))
         }
         SetE::Named(n) => member(p, &sets(n).ok_or_else(|| undefined_set(n))?, sets)?,
         // 有限集合: どれかの要素と等しい
@@ -172,6 +175,39 @@ pub fn member(p: &Expr, s: &SetE, sets: SetLookup) -> Result<Formula, String> {
         SetE::Complement(a) => Formula::Not(Box::new(member(p, a, sets)?)),
         SetE::Empty => Formula::False,
     })
+}
+
+/// 成分が同じ次元の可逆なアフィン変換なら、像の点から入力の点を求める。
+fn inverse_affine(items: &[Expr], names: &[String], target: &[Expr]) -> Option<Vec<Expr>> {
+    use crate::parser::BinOp;
+    let n = names.len();
+    if n == 0 || items.len() != n {
+        return None;
+    }
+    let number = |e: &Expr| {
+        crate::expand::numbers(std::slice::from_ref(e), &crate::eval::Params::new())
+            .and_then(|values| values.first().copied().filter(|v| v.is_finite()))
+    };
+    let mut rows = Vec::new();
+    let mut shifted = Vec::new();
+    for (i, (expr, output)) in items.iter().zip(target).enumerate() {
+        for name in names {
+            rows.push(number(&crate::diff::diff(expr, name).ok()?)?);
+        }
+        rows.extend((0..n).map(|j| f64::from(i == j)));
+        let origin = number(&expr.substitute(&|_| Some(Expr::Num(0.0))))?;
+        shifted.push(Expr::Bin(BinOp::Sub, Box::new(output.clone()), Box::new(Expr::Num(origin))));
+    }
+    let reduced = crate::linalg::Matrix::new(n, 2 * n, rows).reduce(n);
+    if reduced.pivots.len() != n {
+        return None;
+    }
+    Some((0..n).map(|i| {
+        (0..n).filter_map(|j| {
+            let coefficient = reduced.rref.at(i, n + j);
+            (coefficient != 0.0).then(|| Expr::Bin(BinOp::Mul, Box::new(Expr::Num(coefficient)), Box::new(shifted[j].clone())))
+        }).reduce(|a, b| Expr::Bin(BinOp::Add, Box::new(a), Box::new(b))).unwrap_or(Expr::Num(0.0))
+    }).collect())
 }
 
 /// 論理式の式に変数の置き換えをする（{点 | 条件} の点の変数は、中で外の同じ名前を隠す）

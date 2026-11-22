@@ -1761,6 +1761,49 @@ fn parametric_set_conditions() {
 }
 
 #[test]
+fn set_images_map_the_condition_domain() {
+    let radius = (3.0_f64.sqrt() / 2.0).sqrt() as f32;
+    let extrema = |positions: &[f32], axis: usize| {
+        positions.chunks_exact(3).map(|p| p[axis]).filter(|v| v.is_finite())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
+    };
+    let definition = "D = ⦃(2x,y)∣x^2+y^2<=sqrt(3)/2⦄";
+    for (source, defs) in [(definition, ""), ("D", definition)] {
+        for flat in [false, true] {
+            let result = run_in_view(source, defs, &[], 0, flat).unwrap();
+            let p = result.positions();
+            assert!(!result.indices().is_empty());
+            let (x_min, x_max) = extrema(&p, 0);
+            let (y_min, y_max) = extrema(&p, 1);
+            assert!((x_min + 2.0 * radius).abs() < 0.03 && (x_max - 2.0 * radius).abs() < 0.03, "{x_min}, {x_max}");
+            assert!((y_min + radius).abs() < 0.03 && (y_max - radius).abs() < 0.03, "{y_min}, {y_max}");
+            assert!(p.chunks_exact(3).all(|p| p[2] == 0.0));
+        }
+    }
+    let p = mesh("D = ⦃sqrt(1-x^2-y^2)∣x^2+y^2<=sqrt(3)/2⦄", "", &[]).0;
+    let (lo, hi) = extrema(&p, 0);
+    assert!((lo - (1.0 - radius * radius).sqrt()).abs() < 0.02 && (hi - 1.0).abs() < 0.02, "{lo}, {hi}");
+    assert!(p.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| p[1] == 0.0 && p[2] == 0.0));
+
+    let p = mesh("⦃2s∣s∈[-2,-1]∨s∈[1,2]⦄", "", &[]).0;
+    assert!(p.iter().any(|v| v.is_nan()) && p[0] < -3.9);
+    assert!(p.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| p[0].abs() >= 1.99));
+    assert!(p.chunks_exact(3).any(|p| p[0] > 3.9));
+
+    let p = mesh("⦃(x,y,x^2-y^2)∣x^2+y^2=1,y>=0⦄", "", &[]).0;
+    assert!(p.len() > 30);
+    assert!(p.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| {
+        p[1] >= -0.01 && (p[0]*p[0] + p[1]*p[1] - 1.0).abs() < 0.01
+            && (p[2] - p[0]*p[0] + p[1]*p[1]).abs() < 1e-5
+    }));
+
+    let member = "(x,y)∈⦃(2s+1,t)∣s^2+t^2<=1⦄";
+    let p = run_in_view(member, "", &[], 0, true).unwrap().positions();
+    let (lo, hi) = extrema(&p, 0);
+    assert!((lo + 1.0).abs() < 0.03 && (hi - 3.0).abs() < 0.03, "{lo}, {hi}");
+}
+
+#[test]
 fn integrals_over_unions_and_set_operations() {
     let pi = std::f64::consts::PI;
     // 点が同じ変数の組の集合どうしの ∩・∖・∪ は、条件の (x, y) ∈ A ∩ B

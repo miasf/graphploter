@@ -39,6 +39,7 @@ pub mod implicit;
 pub mod parser;
 pub mod special;
 pub mod system;
+mod set_image;
 pub mod timing;
 
 use wasm_bindgen::prelude::*;
@@ -1853,6 +1854,9 @@ impl Built {
 /// 式の種類ごとに図形を作る。リストで複数の図形になったもの（[`equation::Plot::Multi`]）は、まとめて1つにする
 fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
     use equation::Plot as P;
+    if let P::SetImage(image) = plot {
+        return set_image::build(image, ctx);
+    }
     // 複素平面の図形は、中身の媒介変数表示として作る（説明だけ差し替える）
     if let P::ComplexPlane { inner, label } = plot {
         let mut b = build(inner, ctx)?;
@@ -2200,6 +2204,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| system::region_faces(cuts, faces, d, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine));
             b.fields.push(mesh::Field::region(cuts));
         }
+        P::SetImage(_) => unreachable!("set images are built before the 2D/3D split"),
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
     }
     Ok(b)
@@ -2352,7 +2357,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.shape = Some(mesh::parametric_curve_nd(sets, (ctx.range)(&vars[0]), 400, ctx.size * 1e-4));
         }
         // 傾いた座標系の陽関数は、上の投影の道で作る
-        P::Param { .. } | P::Multi(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } | P::Limit { .. } => {}
+        P::Param { .. } | P::Multi(_) | P::SetImage(_) | P::ComplexPlane { .. } | P::Tilted { .. } | P::Field { .. } | P::Arrows { .. } | P::Ode(_) | P::Points { .. } | P::Limit { .. } => {}
         // 媒介変数表示を切り取ったもの: 3D で作ってから、切り口の線か、押しつぶした形にする
         P::System { base: Some(base), eqs, .. } if eqs.is_empty() && !base.param_vars().is_empty() => {
             let ctx3 = Ctx { flat: false, flat_slice: false, ..ctx.clone() };
