@@ -105,8 +105,12 @@ fn white_marks_rotate_with_the_graph_and_survive_reprojection() {
         ("z = (x - 0.3)^2 + (y + 0.7)^2, z ≠ 0", false, false, 1, [0.0, -0.7, 0.3], [0.0, -0.7, -0.3]),
         ("z = (x - 0.3)^2 + (y + 0.7)^2, z ≠ 0", true, false, 1, [0.0, -0.7, 0.0], [0.0, -0.7, 0.0]),
         ("z = (x^2+y^2)/(x^2+y^2)", false, false, 1, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("x = (y^2+z^2)/(y^2+z^2)", false, false, 0, [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]),
+        ("y = (x^2+z^2)/(x^2+z^2)", false, false, 0, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
         ("y = tan(x)/x", true, false, 0, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
         ("y = tan(x)/x", true, true, 0, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ("x = tan(y)/y", true, false, 0, [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]),
+        ("x = tan(y)/y", true, true, 0, [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]),
         ("y = x, x ≠ 0.31", true, false, 0, [-0.31, 0.31, 0.0], [0.31, -0.31, 0.0]),
         ("y = (x - 0.31)^2, y ≠ 0", true, false, 0, [0.0, 0.31, 0.0], [0.0, -0.31, 0.0]),
     ] {
@@ -123,6 +127,45 @@ fn white_marks_rotate_with_the_graph_and_survive_reprojection() {
         let mut next = shape.project(&DOMAIN, 3, &[0, 1, 2], &rotation, &[0.0; 5], 0.0).ok().unwrap();
         assert_mark(next.take_holes(), backward);
     }
+}
+
+#[test]
+fn white_surface_marks_use_each_dependent_axis_in_projection_and_slice() {
+    for (src, expected) in [
+        ("x = (y-0.3)^2+z^2, x ≠ 0", [0.0, 0.3, 0.0]),
+        ("y = (x-0.3)^2+z^2, y ≠ 0", [0.3, 0.0, 0.0]),
+        ("z = (x-0.3)^2+y^2, z ≠ 0", [0.3, 0.0, 0.0]),
+    ] {
+        for slice in [false, true] {
+            let mut g = graph(src, true, slice);
+            assert_eq!(g.take_holes(), expected, "{src}: slice={slice}");
+
+            let mut rotation = [0.0; 10];
+            rotation[0] = std::f64::consts::FRAC_PI_6;
+            let [x, y, _] = expected;
+            let (sin, cos) = (rotation[0] as f32).sin_cos();
+            let moved = [x * cos - y * sin, x * sin + y * cos, 0.0];
+            let mut g = graph_rotated(src, true, slice, &rotation);
+            let marks = g.take_holes();
+            assert_eq!(marks.len(), 3, "{src}: slice={slice}, {marks:?}");
+            assert!(marks.iter().zip(moved).all(|(a, b)| (a - b).abs() < 1e-5), "{src}: {marks:?}");
+            if !slice {
+                let shape = g.take_shape().unwrap();
+                rotation[0] *= -1.0;
+                let mut reprojection = shape.project(&DOMAIN, 3, &[0, 1, 2], &rotation, &[0.0; 5], 0.0).ok().unwrap();
+                let marks = reprojection.take_holes();
+                let back = [x * cos + y * sin, -x * sin + y * cos, 0.0];
+                assert_eq!(marks.len(), 3, "{src}: {marks:?}");
+                assert!(marks.iter().zip(back).all(|(a, b)| (a - b).abs() < 1e-5), "{src}: {marks:?}");
+            }
+        }
+    }
+
+    // Rotating the excluded point out of the slice removes it from that view.
+    let mut rotation = [0.0; 10];
+    rotation[1] = std::f64::consts::FRAC_PI_6;
+    let mut g = graph_rotated("y = (x-0.3)^2+z^2, y ≠ 0", true, true, &rotation);
+    assert!(g.take_holes().is_empty());
 }
 
 #[test]

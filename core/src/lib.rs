@@ -892,7 +892,7 @@ pub fn plot(
                 rotated_curve_exclusions(expr, prog, names, *axis, &params, ext, &excluded, built.shape.as_ref(), &space, ctx.flat_slice)
             } else if *rotated {
                 holes::surface(expr, prog, names, *axis, &params, rotated_domain(&space, dom), &excluded)
-            } else if !flat || *axis == 2 {
+            } else if !built.curve || *axis == 2 {
                 holes::surface(expr, prog, names, *axis, &params, dom, &excluded)
             } else if !fully_excluded && (ctx.flat_slice || !prog.uses_var_index(1)) {
                 holes::curve_exclusions(expr, prog, names, *axis, &params, dom, &excluded, ctx.flat_slice)
@@ -903,6 +903,24 @@ pub fn plot(
                 source_holes.extend(mesh::points_in_axes(marks, space.axes, &space.slice));
             } else {
                 append_visible_holes(&mut holes, marks, dom, flat, ctx.flat_slice, ctx.size);
+            }
+        }
+    } else if let equation::Plot::Implicit { slice_source: Some(source), .. } = &plot {
+        if let equation::Plot::Explicit { axis, names, prog, expr, .. } = source.as_ref() {
+            let params = space.with_hidden(&consts);
+            let marks = holes::surface(expr, prog, names, *axis, &params, rotated_domain(&space, dom), &excluded);
+            let local = mesh::points_in_axes(marks, space.axes, &space.slice);
+            let mut exact = Vec::new();
+            append_visible_holes(&mut exact, local.chunks_exact(n).map(|p| ctx.view.apply(p)), dom, flat, true, ctx.size);
+            if !exact.is_empty() {
+                // A tessellated slice can have crossings on both sides of the same tangent point.
+                let tolerance = (ctx.size * 1e-6) as f32;
+                for p in holes.chunks_exact(3) {
+                    if !exact.chunks_exact(3).any(|q| (0..3).all(|i| (p[i] - q[i]).abs() <= tolerance)) {
+                        exact.extend_from_slice(p);
+                    }
+                }
+                holes = exact;
             }
         }
     }

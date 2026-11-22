@@ -288,7 +288,11 @@ pub enum Plot {
     /// `local` は、回転が表示中の座標どうしだけのときの、回す前の F（変数は表示中の 3 つの座標）。
     /// これでメッシュを作って回せば、角度が変わっても計算し直さずに済む（lib.rs の build）
     /// `gpu` は、GPU の光線の描き方（計画 12 章の G5・G7）に渡す F（[`GpuImplicit`]）
-    Implicit { prog: Program, from: Option<String>, local: Option<Program>, gpu: Option<Box<GpuImplicit>> },
+    Implicit {
+        prog: Program, from: Option<String>, local: Option<Program>, gpu: Option<Box<GpuImplicit>>,
+        /// 回転した 2D 断面の白丸を、断面に切る前の陽関数から求める。
+        slice_source: Option<Box<Plot>>,
+    },
     /// 表示していない座標が絡む回転をした陽関数を、傾いた直交座標系 (u, v, t) の陽関数 t = g(u, v) として描くもの（[`tilted`]）。
     /// 表示中の点は q = u e₁ + v e₂ + t e₃（`frame` = [e₁, e₂, e₃]。正規直交・右手系）。
     /// `prog` の変数は (u, v)（利用者が打てない名前 [`TILT_U`]・[`TILT_V`]）。
@@ -2489,7 +2493,7 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     let base = match eq_rows.as_slice() {
         // 回す前の形（Plot::Implicit の local）は使わない（切り取った面は、回転が変わるたびに作り直す）
         [(l, r)] => Some(Box::new(match compile_pair(l.clone(), r.clone(), params, space)? {
-            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None, gpu: None },
+            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None, gpu: None, slice_source: None },
             p => p,
         })),
         _ => None,
@@ -2582,6 +2586,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
     let consts = space.with_hidden(params);
     let rot = space.rotation_matrix();
+    let mut slice_source = None;
 
     // 陽関数で、回転が表示中の座標どうしだけなら、曲面をそのまま回せばよい（媒介変数表示と同じ扱い）
     if rot.is_some() && !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
@@ -2598,6 +2603,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
                         other => other,
                     });
                 }
+                slice_source = Some(Box::new(p));
             }
         }
     }
@@ -2702,7 +2708,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         vars.extend(names.iter().map(String::as_str));
         Program::compile_with(&unrotated, &vars, &cs).ok().map(|p| Box::new(GpuImplicit { prog: p, params: names, dims: space.dims }))
     };
-    Ok(Plot::Implicit { prog, from, local, gpu })
+    Ok(Plot::Implicit { prog, from, local, gpu, slice_source })
 }
 
 /// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）
