@@ -1649,8 +1649,8 @@ fn parametric_sets_with_any_parameter_name() {
     same("⦃(x,x^(2))∣0<=x<=1⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
     same("⦃(s, sin(s))∣0<=s<=6⦄", "⦃(t, sin(t))∣0<=t<=6⦄", "");
     same("⦃(x,y,x^(2)+y^(2))∣-1<=x<=1,-1<=y<=1⦄", "⦃(u,v,u^(2)+v^(2))∣-1<=u<=1,-1<=v<=1⦄", "");
-    // 条件のない変数も、表示範囲に応じて動かせる。
-    same("⦃(s, t, s)∣0<=s<=1⦄", "⦃(a, b, a)∣0<=a<=1⦄", "");
+    // この名前を明示的に入力変数として宣言すれば、表示範囲に応じて動かせる。
+    same("⦃(s, t, s)∣0<=s<=1⦄", "⦃(a, b, a)∣0<=a<=1,b∈ℝ⦄", "");
 }
 
 #[test]
@@ -1821,7 +1821,7 @@ fn image_sets_share_one_path_for_ranges_logic_and_discontinuities() {
     let (p, _) = mesh("⦃(s,t,s-t)∣0<=s<=60,0<=2t<=s⦄", "", &[]);
     assert!(p.chunks_exact(3).any(|q| q[1] > 29.0));
 
-    let collapsed = run("⦃(s,s,2s)∣s^2+t^2<=1⦄", "", &[]).unwrap();
+    let collapsed = run("⦃(s,s,2s)∣s∈ℝ,s^2+t^2<=1⦄", "", &[]).unwrap();
     let p = collapsed.positions();
     assert!(collapsed.indices().is_empty());
     assert!(p.chunks_exact(3).any(|q| q[2] > 1.9));
@@ -1854,6 +1854,25 @@ fn image_sets_share_one_path_for_ranges_logic_and_discontinuities() {
     let mut both = run("⦃(s,s^2,0)∣-1<=s<=1⦄ ∪ ⦃(u,v,2+u^2-v^2)∣u^2+v^2<=1⦄", "", &[]).unwrap();
     assert!(!both.indices().is_empty());
     assert!(both.take_outline().chunks_exact(3).any(|q| q[0].is_finite() && q[2] == 0.0));
+}
+
+#[test]
+fn image_sets_offer_sliders_for_free_parameters() {
+    for (source, name) in [
+        ("D=⦃(ax,y)∣x^2+y^2<=1⦄", "a"),
+        ("D=⦃(2x,y)∣x^2+y^2<=a⦄", "a"),
+        ("D=⦃(x,a)∣-1<=x<=1⦄", "a"),
+        ("D=⦃(s,a)∣s∈[-1,1]⦄", "a"),
+        ("D=⦃(s,a s^2)∣0<=s<=1,a>0⦄", "a"),
+        ("D=⦃(s,s^2)∣0<=s<={alpha}⦄", "alpha"),
+    ] {
+        assert!(error_of(source, "").starts_with(&format!("変数 '{name}' はここでは使えません")), "{source}");
+        let result = run(source, "", &[(name, 2.0)]).unwrap();
+        assert!(result.used_params().split(',').any(|n| n == name), "{source}");
+    }
+    let (p, _) = mesh("D=⦃(x,a)∣-1<=x<=1⦄", "", &[("a", 2.0)]);
+    assert!(p.chunks_exact(3).any(|q| q[0].is_finite()));
+    assert!(p.chunks_exact(3).filter(|q| q[0].is_finite()).all(|q| q[1] == 2.0));
 }
 
 #[test]

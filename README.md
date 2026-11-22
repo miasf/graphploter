@@ -1011,7 +1011,9 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
   `x \le y, z \le 1` は $x \le y$ と $z \le 1$ のまま）。片側だけの `x, y, z \ge 0`・`0 \le x, y` も、並べた文字のどれもがその条件
   （「$-1 \le x$ かつ $y \le 1$」は `-1 \le x \land y \le 1` と書く）。区間・実数全体の累乗 `[0,1]^2`・`\mathbb{R}^3` は直積（$\in$ の右・積分記号の下）、
   集合の補集合 `\{\dots\}^{c}`。要素が式の集合でも `t \in [0, 1]`・`t \ne \pi`・`0 \le t \le s` をほかの条件と組み合わせられる。
-  片側だけの不等式や条件に出てこない入力変数も書ける。有限な端がない方向は表示範囲に応じて計算する。
+  片側だけの不等式も書ける。有限な端がない入力変数の方向は表示範囲に応じて計算する。
+  通常の座標・媒介変数以外の文字も、`s \in \mathbb{R}`・`0 \le s \le 1` のように条件で指定すれば入力変数になる。
+  `\{(ax,y)\mid x^2+y^2\leq b\}` の $a$・$b$ はスライダーにできる。
   論理 `\land`・`\lor`・`\neg`・`\Rightarrow`・`\Leftarrow`・`\Leftrightarrow`、排他的論理和（XOR）`\oplus`・`\veebar`・`\nleftrightarrow`、
   否定論理積（NAND）`\barwedge`・`\uparrow`、否定論理和（NOR）`\downarrow`・`\nor`、集合 `\cap`・`\cup`・`\setminus`・対称差 `\triangle`・`\ominus`・
   補集合 `A^{c}`・`A^{\complement}`・`\complement A`、`\in`・`\notin`・`\ni`、区間 `[0,1)`・`(0,1]`・`[0,\infty)` とその直積 `[0,1]\times[0,2]`、

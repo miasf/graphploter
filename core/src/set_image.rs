@@ -42,6 +42,35 @@ fn constant(p: &Program) -> f64 {
     eval::as_real(out[0])
 }
 
+// 普通の座標名以外は、所属や範囲の連鎖で明示した名前を入力にできる。
+pub(super) fn declared_inputs(formula: &Formula, params: &Params, inputs: &mut Vec<String>) {
+    match formula {
+        Formula::In(point @ Expr::Var(_), _) => point.collect_vars(inputs),
+        Formula::In(Expr::Tuple(items), _) if items.iter().all(|e| matches!(e, Expr::Var(_))) => {
+            items.iter().for_each(|e| e.collect_vars(inputs));
+        }
+        Formula::Chain(chain) => {
+            for (terms, rels) in chain.exprs.windows(3).zip(chain.rels.windows(2)) {
+                let ascending = |&r| matches!(r, Rel::Lt | Rel::Le);
+                let descending = |&r| matches!(r, Rel::Gt | Rel::Ge);
+                if (rels.iter().all(ascending) || rels.iter().all(descending))
+                    && matches!(terms[1], Expr::Var(_))
+                    && [&terms[0], &terms[2]].iter().any(|e| Program::compile_with(e, &[], params).is_ok())
+                {
+                    terms[1].collect_vars(inputs);
+                }
+            }
+        }
+        Formula::And(parts) | Formula::Or(parts) => parts.iter().for_each(|p| declared_inputs(p, params, inputs)),
+        Formula::Xor(a, b) | Formula::Iff(a, b) | Formula::Implies(a, b) | Formula::Nand(a, b) | Formula::Nor(a, b) => {
+            declared_inputs(a, params, inputs);
+            declared_inputs(b, params, inputs);
+        }
+        Formula::Not(inner) => declared_inputs(inner, params, inputs),
+        _ => {}
+    }
+}
+
 pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> Result<Plot, String> {
     let point = crate::expand::expand(point, params)?;
     let items = match point {
@@ -64,6 +93,18 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
         expr.collect_vars(&mut names);
     }
     names.retain(|n| !params.contains_key(n));
+    let mut declared = Vec::new();
+    declared_inputs(&cond, params, &mut declared);
+    if let Some(name) = names.iter().find(|n| {
+        equation::coord_index(n).is_none()
+            && !equation::is_param_var(n)
+            && !space.coord_names.as_ref().is_some_and(|names| names.contains(n))
+            && !declared.contains(n)
+    }) {
+        return Err(format!(
+            "変数 '{name}' はここでは使えません（パラメータとして定義するか、条件で入力変数の範囲を指定してください）"
+        ));
+    }
     if names.len() > coords.len() {
         return Err("像集合の入力変数は 3 つまでです".into());
     }

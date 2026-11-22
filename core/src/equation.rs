@@ -271,7 +271,7 @@ pub fn coord_index(name: &str) -> Option<usize> {
 pub const MAX_PARAM_VARS: usize = 8;
 
 /// 媒介変数として使える名前か（t, u, v, t1, t2, …）
-fn is_param_var(name: &str) -> bool {
+pub(crate) fn is_param_var(name: &str) -> bool {
     matches!(name, "t" | "u" | "v")
         || name.strip_prefix('t').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -1188,7 +1188,7 @@ fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, S
 }
 
 /// 像として描く集合の要素式と条件。座標名だけの組は通常の座標条件として扱う。
-fn image_builder(f: &crate::parser::Formula) -> Option<(&Expr, &crate::parser::Formula)> {
+fn image_builder<'a>(f: &'a crate::parser::Formula, params: &Params) -> Option<(&'a Expr, &'a crate::parser::Formula)> {
     use crate::parser::{Formula, SetE};
     let Formula::Set(SetE::Builder { point, cond }) = f else { return None };
     let Expr::Tuple(comps) = point else { return Some((point, cond)); };
@@ -1200,7 +1200,20 @@ fn image_builder(f: &crate::parser::Formula) -> Option<(&Expr, &crate::parser::F
         }
         _ => false,
     });
-    (!plain).then_some((point, cond))
+    let has_slider = seen.iter().any(|n| params.contains_key(*n));
+    let standard = seen.iter().filter(|n| coord_index(n).is_some() || is_param_var(n)).count();
+    if !plain || has_slider || (standard > 0 && standard < seen.len()) {
+        return Some((point, cond));
+    }
+    if standard == 0 {
+        let mut declared = Vec::new();
+        crate::set_image::declared_inputs(cond, params, &mut declared);
+        let explicit = seen.iter().filter(|n| declared.iter().any(|name| name == **n)).count();
+        if explicit > 0 && explicit < seen.len() {
+            return Some((point, cond));
+        }
+    }
+    None
 }
 
 /// 「または」（∪）を平らに並べる
@@ -1240,12 +1253,12 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
     let mut parts = Vec::new();
     flatten_or(formula, &mut parts, &mut Vec::new())?;
     if let [single] = parts.as_slice() {
-        if let Some((point, cond)) = image_builder(single) {
+        if let Some((point, cond)) = image_builder(single, params) {
             return crate::set_image::compile(point, cond, params, space);
         }
     }
-    if parts.iter().any(|p| image_builder(p).is_some()) {
-        let plots = parts.iter().map(|part| match image_builder(part) {
+    if parts.iter().any(|p| image_builder(p, params).is_some()) {
+        let plots = parts.iter().map(|part| match image_builder(part, params) {
             Some((point, cond)) => crate::set_image::compile(point, cond, params, space),
             None => compile_formula(part, params, space),
         }).collect::<Result<_, _>>()?;
