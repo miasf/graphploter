@@ -7,9 +7,8 @@
 //! 座標系の空間では「作る範囲」と「画面の箱」が別になるので、作る範囲からはみ出した所（陰関数は範囲の 1 マス外まで作る、など）は
 //! 画面の箱の平面では切り落とせない。[`trim_to_domain`] で、メッシュの側を作る範囲の箱で切る。
 
-use crate::eval::{as_real, Program};
+use crate::eval::{Program, ProgramSet};
 use crate::mesh::{Domain, Mesh};
-use num_complex::Complex64 as C;
 
 /// 座標系の写像 T（3 つの成分。変数は表示中の 3 つの座標）
 #[derive(Debug, Clone)]
@@ -37,27 +36,7 @@ impl CoordMap {
 
     /// 点の列（3 つずつ）を T で移す。有限でない点・移した先が有限でない（実数でない）点は、3 つとも NaN
     pub fn map_points(&self, pts: &[f32]) -> Vec<f32> {
-        let n = pts.len() / 3;
-        let mut out = vec![f32::NAN; 3 * n];
-        if n == 0 {
-            return out;
-        }
-        let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| (0..n).map(|i| pts[3 * i + c] as f64).collect());
-        let inputs: Vec<&[f64]> = cols.iter().map(Vec::as_slice).collect();
-        let mut buf = vec![C::new(0.0, 0.0); n];
-        for (c, p) in self.progs.iter().enumerate() {
-            p.eval_batch(&inputs, &mut buf);
-            for (i, v) in buf.iter().enumerate() {
-                out[3 * i + c] = as_real(*v) as f32;
-            }
-        }
-        for i in 0..n {
-            let ok = (0..3).all(|c| pts[3 * i + c].is_finite() && out[3 * i + c].is_finite());
-            if !ok {
-                out[3 * i..3 * i + 3].fill(f32::NAN);
-            }
-        }
-        out
+        as_display_points(evaluate_map(&ProgramSet::new(&self.progs), pts))
     }
 
     /// メッシュの全部の頂点（陰関数の粗い版 `lod_mesh` も）で T(q) を計算して [`Mesh::target`] に入れる。
@@ -67,8 +46,12 @@ impl CoordMap {
         if let Some(l) = m.lod_mesh.as_deref_mut() {
             self.apply(l, curve, flat);
         }
-        self.refine(m, curve, flat);
-        let mut t = self.map_points(&m.positions);
+        let set = ProgramSet::new(&self.progs);
+        let mut mapped = evaluate_map(&set, &m.positions);
+        if refine_mapped(m, &mapped, 3, curve, if flat { 2 } else { 3 }) {
+            mapped = evaluate_map(&set, &m.positions);
+        }
+        let mut t = as_display_points(mapped);
         if flat {
             for v in t.iter_mut().skip(2).step_by(3) {
                 if v.is_finite() {
@@ -99,92 +82,6 @@ impl CoordMap {
         m.target = t;
     }
 
-    /// 移した先で長くなる線分・三角形を、座標の値の空間で等分して細かくする（頂点を足す）。
-    /// 図形は座標の値の空間で一様な格子で作るので、極座標の r が大きい所（らせんの外側）などでは、移した先の線分が長く角ばる。
-    /// 座標の値の空間では格子の間は 1 次式で近いので、間の点を 1 次式で足してから T で移せば、移した先はなめらかになる。
-    /// 線は線分ごとに分割数を決める。面は継ぎ目にひびができないよう、全部の三角形を同じ数 k で k² 個に分ける（三角形の数の上限で k を抑える）
-    fn refine(&self, m: &mut Mesh, curve: bool, flat: bool) {
-        let t = self.map_points(&m.positions);
-        let n = t.len() / 3;
-        let len = |a: usize, b: usize| -> f64 {
-            let axes = if flat { 2 } else { 3 };
-            let d2: f64 = (0..axes).map(|c| ((t[3 * a + c] - t[3 * b + c]) as f64).powi(2)).sum();
-            d2.sqrt()
-        };
-        // 移した先の大きさ（有限な点を囲む箱の対角線）
-        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        for i in 0..n {
-            if !t[3 * i].is_finite() {
-                continue;
-            }
-            for c in 0..3 {
-                lo[c] = lo[c].min(t[3 * i + c] as f64);
-                hi[c] = hi[c].max(t[3 * i + c] as f64);
-            }
-        }
-        let diag = (0..3).map(|c| (hi[c] - lo[c]).max(0.0).powi(2)).sum::<f64>().sqrt();
-        if !(diag > 0.0 && diag.is_finite()) {
-            return;
-        }
-        let ok = |i: usize| t[3 * i].is_finite();
-        // 頂点ごとの値（法線・格子線の座標・複素数の色）も、位置と同じく 1 次式で足す
-        let np = m.positions.len();
-        let attr_on = [m.normals.len() == np, m.grid_coords.len() == np, m.complex.len() == np];
-        if curve || m.indices.is_empty() {
-            const MAX_POINTS: usize = 120_000;
-            let limit = diag / 800.0;
-            let splits: Vec<usize> = (1..n)
-                .map(|i| if ok(i - 1) && ok(i) { ((len(i - 1, i) / limit).ceil() as usize).clamp(1, 64) } else { 1 })
-                .collect();
-            let total: usize = n + splits.iter().map(|s| s - 1).sum::<usize>();
-            if total == n || total > MAX_POINTS {
-                return;
-            }
-            let lerp_all = |v: &[f32]| -> Vec<f32> {
-                let mut out = Vec::with_capacity(3 * total);
-                out.extend_from_slice(&v[0..3]);
-                for i in 1..n {
-                    let s = splits[i - 1];
-                    for j in 1..s {
-                        let f = j as f32 / s as f32;
-                        for c in 0..3 {
-                            out.push(v[3 * (i - 1) + c] + f * (v[3 * i + c] - v[3 * (i - 1) + c]));
-                        }
-                    }
-                    out.extend_from_slice(&v[3 * i..3 * i + 3]);
-                }
-                out
-            };
-            m.positions = lerp_all(&m.positions);
-            if attr_on[0] {
-                m.normals = lerp_all(&m.normals);
-            }
-            if attr_on[1] {
-                m.grid_coords = lerp_all(&m.grid_coords);
-            }
-            if attr_on[2] {
-                m.complex = lerp_all(&m.complex);
-            }
-            return;
-        }
-        const MAX_TRIANGLES: usize = 160_000;
-        let tris = m.indices.len() / 3;
-        let limit = diag / 150.0;
-        let mut longest: f64 = 0.0;
-        for tri in m.indices.chunks_exact(3) {
-            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-            if ok(a) && ok(b) && ok(c) {
-                longest = longest.max(len(a, b)).max(len(b, c)).max(len(c, a));
-            }
-        }
-        let budget = ((MAX_TRIANGLES as f64 / tris.max(1) as f64).sqrt().floor() as usize).max(1);
-        let k = ((longest / limit).ceil() as usize).clamp(1, 8).min(budget);
-        if k <= 1 {
-            return;
-        }
-        subdivide(m, k, attr_on);
-    }
-
     /// 点の列（線。NaN で切れ目）を移した先。移せない点は、位置も NaN にする（線を切る）
     pub fn apply_line(&self, positions: &mut [f32], flat: bool) -> Vec<f32> {
         let mut t = self.map_points(positions);
@@ -199,6 +96,126 @@ impl CoordMap {
     }
 }
 
+/// 3 座標の入力点に写像を適用する。線の切れ目は定数写像でも切れ目のままにする。
+pub(crate) fn evaluate_map(set: &ProgramSet, positions: &[f32]) -> Vec<f64> {
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| positions.chunks_exact(3).map(|p| p[c] as f64).collect());
+    let mut values = Vec::new();
+    set.eval_points(&cols.each_ref().map(Vec::as_slice), positions.len() / 3, &mut values);
+    for (p, mapped) in positions.chunks_exact(3).zip(values.chunks_exact_mut(set.len())) {
+        if p.iter().any(|v| !v.is_finite()) {
+            mapped.fill(f64::NAN);
+        }
+    }
+    values
+}
+
+fn as_display_points(mapped: Vec<f64>) -> Vec<f32> {
+    mapped
+        .chunks_exact(3)
+        .flat_map(|p| {
+            let q = [p[0] as f32, p[1] as f32, p[2] as f32];
+            if q.iter().all(|v| v.is_finite()) {
+                q
+            } else {
+                [f32::NAN; 3]
+            }
+        })
+        .collect()
+}
+
+/// 写像の先で辺が長くなるメッシュを、元の座標で細分化する。呼び出し側は追加した頂点にも写像を適用する。
+/// 線は線分ごとに、面は共有する辺が同じ分割になるよう一律に分割する。
+pub(crate) fn refine_mapped(m: &mut Mesh, t: &[f64], arity: usize, curve: bool, length_axes: usize) -> bool {
+    let n = t.len() / arity;
+    let len = |a: usize, b: usize| -> f64 {
+        let d2: f64 = (0..length_axes).map(|c| (t[arity * a + c] - t[arity * b + c]).powi(2)).sum();
+        d2.sqrt()
+    };
+    // 移した先の大きさ（有限な点を囲む箱の対角線）
+    let (mut lo, mut hi) = (vec![f64::INFINITY; arity], vec![f64::NEG_INFINITY; arity]);
+    let ok = |i: usize| {
+        t[arity * i..arity * (i + 1)]
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
+    };
+    for (i, p) in t.chunks_exact(arity).enumerate() {
+        if !ok(i) {
+            continue;
+        }
+        for c in 0..arity {
+            lo[c] = lo[c].min(p[c]);
+            hi[c] = hi[c].max(p[c]);
+        }
+    }
+    let diag = (0..arity).map(|c| (hi[c] - lo[c]).max(0.0).powi(2)).sum::<f64>().sqrt();
+    if !(diag > 0.0 && diag.is_finite()) {
+        return false;
+    }
+    // 頂点ごとの値（法線・格子線の座標・複素数の色）も、位置と同じく 1 次式で足す
+    let np = m.positions.len();
+    let attr_on = [m.normals.len() == np, m.grid_coords.len() == np, m.complex.len() == np];
+    if curve || m.indices.is_empty() {
+        const MAX_POINTS: usize = 120_000;
+        let limit = diag / 800.0;
+        let splits: Vec<usize> = (1..n)
+            .map(|i| {
+                if ok(i - 1) && ok(i) {
+                    ((len(i - 1, i) / limit).ceil() as usize).clamp(1, 64)
+                } else {
+                    1
+                }
+            })
+            .collect();
+        let total: usize = n + splits.iter().map(|s| s - 1).sum::<usize>();
+        if total == n || total > MAX_POINTS {
+            return false;
+        }
+        let lerp_all = |v: &[f32]| -> Vec<f32> {
+            let mut out = Vec::with_capacity(3 * total);
+            out.extend_from_slice(&v[0..3]);
+            for i in 1..n {
+                let s = splits[i - 1];
+                for j in 1..s {
+                    let f = j as f32 / s as f32;
+                    for c in 0..3 {
+                        out.push(v[3 * (i - 1) + c] + f * (v[3 * i + c] - v[3 * (i - 1) + c]));
+                    }
+                }
+                out.extend_from_slice(&v[3 * i..3 * i + 3]);
+            }
+            out
+        };
+        m.positions = lerp_all(&m.positions);
+        if attr_on[0] {
+            m.normals = lerp_all(&m.normals);
+        }
+        if attr_on[1] {
+            m.grid_coords = lerp_all(&m.grid_coords);
+        }
+        if attr_on[2] {
+            m.complex = lerp_all(&m.complex);
+        }
+        return true;
+    }
+    const MAX_TRIANGLES: usize = 160_000;
+    let tris = m.indices.len() / 3;
+    let limit = diag / 150.0;
+    let mut longest: f64 = 0.0;
+    for tri in m.indices.chunks_exact(3) {
+        let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+        if ok(a) && ok(b) && ok(c) {
+            longest = longest.max(len(a, b)).max(len(b, c)).max(len(c, a));
+        }
+    }
+    let budget = ((MAX_TRIANGLES as f64 / tris.max(1) as f64).sqrt().floor() as usize).max(1);
+    let k = ((longest / limit).ceil() as usize).clamp(1, 8).min(budget);
+    if k <= 1 {
+        return false;
+    }
+    subdivide(m, k, attr_on);
+    true
+}
+
 /// メッシュを、作る範囲の箱 `dom` の中だけにする（座標系を使うとき。範囲からはみ出して作った所を落とす）。
 /// 面は [`crate::system::trim_mesh`]、線は [`crate::system::clip_segments`] で、箱の面との境目を辺の上で求めて切る。
 /// 2D 表示（`flat`）では、縦の座標では切らない（図形は縦の座標 0 の平面にある）。
@@ -208,7 +225,9 @@ pub fn trim_to_domain(m: &mut Mesh, dom: Domain, curve: bool, flat: bool) {
     // 範囲ちょうどの所にある頂点（範囲の端の格子点）を外と見ないように、ほんの少し広げる
     let pad: [f64; 3] = [0, 1, 2].map(|a| 1e-9 * (dom.hi[a] - dom.lo[a]).abs().max(1.0));
     let outside = move |p: &[f64; 3]| -> f64 {
-        (0..axes).map(|a| (dom.lo[a] - pad[a] - p[a]).max(p[a] - dom.hi[a] - pad[a])).fold(f64::NEG_INFINITY, f64::max)
+        (0..axes)
+            .map(|a| (dom.lo[a] - pad[a] - p[a]).max(p[a] - dom.hi[a] - pad[a]))
+            .fold(f64::NEG_INFINITY, f64::max)
     };
     let mut value = |pts: &[[f64; 3]]| -> Vec<f64> { pts.iter().map(outside).collect() };
     if !curve && !m.indices.is_empty() {

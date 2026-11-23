@@ -1163,7 +1163,10 @@ export class Viewer {
 
   private renderScene() {
     if (this.flat) this.renderer.render(this.scene, this.camera)
-    else this.transparency.render(this.scene, this.camera, this.camera.position.distanceTo(this.controls.target), this.sceneSize())
+    else {
+      const markers = Array.from(this.holeMarks.values()).filter((points) => points.visible)
+      this.transparency.render(this.scene, this.camera, this.camera.position.distanceTo(this.controls.target), this.sceneSize(), markers)
+    }
   }
 
   // ---- ベンチマーク（?bench=1）用。ふつうに開いたときは使わない ----
@@ -1502,6 +1505,10 @@ export class Viewer {
   setFlat(on: boolean) {
     if (this.flat === on) return
     this.flat = on
+    for (const points of this.holeMarks.values()) {
+      points.material.uniforms.uFlat.value = on
+      points.material.depthTest = on
+    }
     this.updateProjection()
     this.updateBoxUniforms()
     this.controls.enableRotate = !on
@@ -1916,7 +1923,7 @@ export class Viewer {
       lod,
       outline: mix(mesh.outline, mesh.outlineTarget),
       outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
-      holes: mix(mesh.holes, mesh.limitHolesTarget),
+      holes: mix(mesh.holes, mesh.holesTarget),
       limitPoint: mix(mesh.limitPoint, mesh.limitPointTarget),
       limitSource: mix(mesh.limitSource, mesh.limitSourceTarget),
     }
@@ -2723,6 +2730,15 @@ export class Viewer {
         dashSize: span * 0.02,
         gapSize: span * 0.012,
       })
+      if (dashed && !this.flat) {
+        // The exact excluded line can sit just below the tessellated surface.
+        mat.uniforms.uDashDepthBias = { value: this.sceneSize() * 2e-4 }
+        mat.vertexShader = 'uniform float uDashDepthBias;\n' + mat.vertexShader.replace('gl_Position = clip;', `
+          gl_Position = clip;
+          vec2 biased = clip.zw + projectionMatrix[2].zw * uDashDepthBias;
+          if (biased.y > 0.0) gl_Position.z = biased.x * clip.w / biased.y;
+        `)
+      }
       mat.resolution.set(this.viewW, this.viewH)
       const line = new LineSegments2(this.curveGeometry(pts), mat)
       line.frustumCulled = false // 表示範囲の中の線（視錐台の判定のための外接球を求めない）
@@ -2907,7 +2923,7 @@ export class Viewer {
   }
 
   /** 穴と定義値の丸印（式ごと）。曲線を GPU で描くときも見えるよう、図形とは別に置く */
-  private holeMarks = new Map<number, THREE.Points>()
+  private holeMarks = new Map<number, THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>>()
 
   /** 穴には白丸、極限の近づく点での定義値には塗りつぶした丸を置く（画面の上の大きさは一定） */
   private setHoles(id: number, mesh: MeshData) {
@@ -2937,17 +2953,36 @@ export class Viewer {
         uBg: { value: new THREE.Color(this.theme.background) },
         uInk: { value: new THREE.Color(this.theme.text) },
         uSize: { value: 11 * this.renderer.getPixelRatio() },
+        uFlat: { value: this.flat },
+        ...this.transparency.markerDepth,
       },
       vertexShader: `
         uniform float uSize;
+        uniform bool uFlat;
+        uniform sampler2D uOcclusionDepth;
+        uniform float uOcclusionBias;
         attribute float aFilled;
         varying float vFilled;
         void main() {
           vFilled = aFilled;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          // 線・面と同じ深さで重なってちらつかないよう、少し手前に出す
-          gl_Position.z -= 2e-3 * gl_Position.w;
+          vec4 viewPoint = modelViewMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * viewPoint;
           gl_PointSize = uSize;
+          if (uFlat) {
+            // 2D では、同じ平面上の線よりも手前に描く。
+            gl_Position.z -= 2e-3 * gl_Position.w;
+          } else if (uOcclusionBias > 0.0 && gl_Position.w > 0.0) {
+            vec2 uv = gl_Position.xy / gl_Position.w * 0.5 + 0.5;
+            ivec2 size = textureSize(uOcclusionDepth, 0);
+            ivec2 pixel = ivec2(floor(uv * vec2(size)));
+            if (all(greaterThanEqual(pixel, ivec2(0))) && all(lessThan(pixel, size))) {
+              float surface = texelFetch(uOcclusionDepth, pixel, 0).r;
+              viewPoint.z += uOcclusionBias;
+              vec4 biased = projectionMatrix * viewPoint;
+              float marker = biased.z / biased.w * 0.5 + 0.5;
+              if (biased.w > 0.0 && surface < marker) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            }
+          }
         }`,
       fragmentShader: `
         uniform vec3 uColor;
@@ -2964,6 +2999,8 @@ export class Viewer {
           #include <colorspace_fragment>
         }`,
       transparent: true,
+      depthTest: this.flat,
+      depthWrite: false,
     })
     const pts = new THREE.Points(geo, mat)
     pts.frustumCulled = false

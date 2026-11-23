@@ -12,8 +12,14 @@ export class SurfaceTransparency {
   private readonly depth = { value: null as THREE.DepthTexture | null }
   private readonly depthScale = { value: new THREE.Vector4() }
   private readonly size = new THREE.Vector2()
+  private readonly markerProjection = new THREE.Vector3()
   private readonly clearColor = new THREE.Color()
   private buffers: { base: THREE.WebGLRenderTarget; layers: THREE.WebGLRenderTarget } | null = null
+  private markerTarget: THREE.WebGLRenderTarget | null = null
+  readonly markerDepth = {
+    uOcclusionDepth: { value: null as THREE.DepthTexture | null },
+    uOcclusionBias: { value: 0 },
+  }
   private readonly screen = new THREE.Scene()
   private readonly camera = new THREE.Camera()
   private readonly quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2))
@@ -60,7 +66,8 @@ export class SurfaceTransparency {
     const compile = material.onBeforeCompile
     // The default key reads onBeforeCompile dynamically, so capture it before wrapping.
     const standardKey = material.customProgramCacheKey()
-    material.customProgramCacheKey = () => `${standardKey}:surface-transparency:${raycast}`
+    const writesColor = material.colorWrite
+    material.customProgramCacheKey = () => `${standardKey}:surface-transparency:${raycast}:${writesColor}`
     material.onBeforeCompile = (shader, renderer) => {
       compile.call(material, shader, renderer)
       Object.assign(shader.uniforms, { uCollectSurface: this.pass, uOpaqueDepth: this.depth, uSurfaceDepthScale: this.depthScale })
@@ -73,7 +80,7 @@ export class SurfaceTransparency {
         `)
         .replace(/}\s*$/, `
           surfaceDensity = vec4(0.0);
-          if (uCollectSurface && ${material.colorWrite ? 'true' : 'false'}) {
+          if (uCollectSurface && ${writesColor ? 'true' : 'false'}) {
             float depth = ${raycast ? 'gl_FragDepth' : 'gl_FragCoord.z'};
             if (depth > texelFetch(uOpaqueDepth, ivec2(gl_FragCoord.xy), 0).r) discard;
             float alpha = clamp(gl_FragColor.a, 0.0, 1.0);
@@ -116,9 +123,80 @@ export class SurfaceTransparency {
     return this.buffers
   }
 
-  render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, distance: number, span: number) {
+  /** Record the nearest visible surface at each marker's center, including translucent faces. */
+  private captureMarkerDepth(scene: THREE.Scene, camera: THREE.PerspectiveCamera, span: number,
+    surfaces: DrawObject[], other: DrawObject[], markers: readonly THREE.Points[]) {
+    if (!surfaces.length) return
     const renderer = this.renderer
-    if (!renderer.extensions.has('EXT_color_buffer_float') && !renderer.extensions.has('EXT_color_buffer_half_float')) {
+    const { x: width, y: height } = renderer.getDrawingBufferSize(this.size)
+    let left = width, bottom = height, right = 0, top = 0
+    camera.updateMatrixWorld()
+    for (const marker of markers) {
+      const positions = marker.geometry.getAttribute('position')
+      marker.updateWorldMatrix(true, false)
+      for (let i = 0; i < positions.count; i++) {
+        const p = this.markerProjection.fromBufferAttribute(positions, i).applyMatrix4(marker.matrixWorld).project(camera)
+        const x = Math.floor((p.x + 1) * width / 2), y = Math.floor((p.y + 1) * height / 2)
+        if (!(x >= 0 && x < width && y >= 0 && y < height && p.z >= -1 && p.z <= 1)) continue
+        left = Math.min(left, x)
+        bottom = Math.min(bottom, y)
+        right = Math.max(right, x + 1)
+        top = Math.max(top, y + 1)
+      }
+    }
+    if (left >= right || bottom >= top) return
+    if (!this.markerTarget) {
+      const depth = new THREE.DepthTexture(width, height, THREE.UnsignedInt248Type)
+      depth.format = THREE.DepthStencilFormat
+      this.markerTarget = new THREE.WebGLRenderTarget(width, height, {
+        colorSpace: THREE.SRGBColorSpace, depthTexture: depth, stencilBuffer: true,
+      })
+    }
+    const target = this.markerTarget
+    target.setSize(width, height)
+    // Keep the main viewport and allow for CPU/GPU rounding at pixel edges.
+    const x = Math.max(0, left - 1), y = Math.max(0, bottom - 1)
+    target.scissor.set(x, y, Math.min(width, right + 1) - x, Math.min(height, top + 1) - y)
+    target.scissorTest = true
+    const materials = new Set(surfaces.map(({ material }) => material))
+    const saved = Array.from(materials, (m) => ({
+      m, depthWrite: m.depthWrite, forceSinglePass: m.forceSinglePass,
+    }))
+    const autoClear = renderer.autoClear
+    const background = scene.background
+    try {
+      for (const object of other) object.visible = false
+      for (const { m } of saved) {
+        m.colorWrite = false
+        m.depthWrite = true
+        m.forceSinglePass = true
+      }
+      scene.background = null
+      renderer.autoClear = true
+      renderer.setRenderTarget(target)
+      renderer.render(scene, camera)
+      this.markerDepth.uOcclusionDepth.value = target.depthTexture
+      // A rotated surface can use a coarser mesh while moving.
+      this.markerDepth.uOcclusionBias.value = span * 4e-4
+    } finally {
+      renderer.setRenderTarget(null)
+      renderer.autoClear = autoClear
+      scene.background = background
+      for (const object of other) object.visible = true
+      for (const { m, depthWrite, forceSinglePass } of saved) {
+        m.colorWrite = true
+        m.depthWrite = depthWrite
+        m.forceSinglePass = forceSinglePass
+      }
+    }
+  }
+
+  render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, distance: number, span: number, markers: readonly THREE.Points[]) {
+    const renderer = this.renderer
+    const hasMarkers = markers.length > 0
+    this.markerDepth.uOcclusionBias.value = 0
+    const blended = renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float')
+    if (!blended && !hasMarkers) {
       renderer.render(scene, camera)
       return
     }
@@ -126,17 +204,25 @@ export class SurfaceTransparency {
     const surfaceObjects: DrawObject[] = []
     const stencilObjects: DrawObject[] = []
     const overlays: DrawObject[] = []
+    const occluders: DrawObject[] = []
+    const outsideDepthPass: DrawObject[] = []
     scene.traverseVisible((object) => {
       const draw = object as DrawObject
       const m = draw.material
       if (!m) return
+      if (hasMarkers) {
+        if (this.materials.has(m)) {
+          if (m.colorWrite) occluders.push(draw)
+        } else outsideDepthPass.push(draw)
+      }
       if (m.transparent && this.materials.has(m)) {
         if (m.colorWrite) surfaceObjects.push(draw)
         else stencilObjects.push(draw)
       } else if (m.transparent && (draw.renderOrder > 0 || !m.depthTest)) overlays.push(draw)
       else baseObjects.push(draw)
     })
-    if (!surfaceObjects.length) {
+    if (hasMarkers) this.captureMarkerDepth(scene, camera, span, occluders, outsideDepthPass, markers)
+    if (!blended || !surfaceObjects.length) {
       renderer.render(scene, camera)
       return
     }
@@ -218,6 +304,7 @@ export class SurfaceTransparency {
   dispose() {
     this.buffers?.base.dispose()
     this.buffers?.layers.dispose()
+    this.markerTarget?.dispose()
     this.quad.geometry.dispose()
     this.composite.dispose()
     this.present.dispose()

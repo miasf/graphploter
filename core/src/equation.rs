@@ -217,13 +217,13 @@ impl Space {
     }
 
     /// 表示中の座標の名前（横・奥・縦の順）
-    fn shown(&self) -> [String; 3] {
+    pub(crate) fn shown(&self) -> [String; 3] {
         self.axes.map(coord_name)
     }
 
     /// 表示していない座標を、断面の値の定数としてパラメータに足す（範囲で重ねるものは除く）。
     /// 次元より先の、回転のときだけ使う座標（3次元のときの w, w₂ など）の値は 0
-    fn with_hidden(&self, params: &Params) -> Params {
+    pub(crate) fn with_hidden(&self, params: &Params) -> Params {
         let mut ps = params.clone();
         for k in self.dims..rot_dims(self.dims) {
             ps.insert(coord_name(k), C::new(0.0, 0.0));
@@ -271,7 +271,7 @@ pub fn coord_index(name: &str) -> Option<usize> {
 pub const MAX_PARAM_VARS: usize = 8;
 
 /// 媒介変数として使える名前か（t, u, v, t1, t2, …）
-fn is_param_var(name: &str) -> bool {
+pub(crate) fn is_param_var(name: &str) -> bool {
     matches!(name, "t" | "u" | "v")
         || name.strip_prefix('t').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -282,13 +282,17 @@ pub enum Plot {
     /// `prog` の変数は、残り2つの表示中の座標（軸の順）。
     /// `rotated` が true なら、表示中の座標どうしの回転だけをしているので、
     /// 媒介変数表示 (u, v, f(u, v)) と同じように点を計算してから回転・射影する（[`Space::view_rows`]）。
-    Explicit { axis: usize, names: [String; 3], prog: Program, rotated: bool },
+    Explicit { axis: usize, names: [String; 3], prog: Program, expr: Box<Expr>, rotated: bool },
     /// 陰関数 F = 0。`prog` の変数は表示中の3つの座標。
     /// `from` は、陽関数（z = f(x, y) など）を回して陰関数として計算し直したときの、元の陽関数の形
     /// `local` は、回転が表示中の座標どうしだけのときの、回す前の F（変数は表示中の 3 つの座標）。
     /// これでメッシュを作って回せば、角度が変わっても計算し直さずに済む（lib.rs の build）
     /// `gpu` は、GPU の光線の描き方（計画 12 章の G5・G7）に渡す F（[`GpuImplicit`]）
-    Implicit { prog: Program, from: Option<String>, local: Option<Program>, gpu: Option<Box<GpuImplicit>> },
+    Implicit {
+        prog: Program, from: Option<String>, local: Option<Program>, gpu: Option<Box<GpuImplicit>>,
+        /// 回転した 2D 断面の白丸を、断面に切る前の陽関数から求める。
+        slice_source: Option<Box<Plot>>,
+    },
     /// 表示していない座標が絡む回転をした陽関数を、傾いた直交座標系 (u, v, t) の陽関数 t = g(u, v) として描くもの（[`tilted`]）。
     /// 表示中の点は q = u e₁ + v e₂ + t e₃（`frame` = [e₁, e₂, e₃]。正規直交・右手系）。
     /// `prog` の変数は (u, v)（利用者が打てない名前 [`TILT_U`]・[`TILT_V`]）。
@@ -325,6 +329,8 @@ pub enum Plot {
     Param { name: String, value: C, uses: Vec<String> },
     /// リストを含む陽関数・陰関数（例: `z = [1, 2, 3] x`）。リストの要素ごとの図形（組み合わせの数だけ）
     Multi(Vec<Plot>),
+    /// 条件を満たす入力点に式を適用した像集合。
+    SetImage(Box<crate::set_image::Image>),
     /// 複素平面の図形（[`complex_plane`]）。中身は媒介変数表示 (Re f, Im f, 縦の値) で、`label` は画面に出す説明
     ComplexPlane { inner: Box<Plot>, label: String },
     /// 連立方程式・不等式（[`system`]）: 等式 F_i = 0 と不等式 G_j ≤ 0 を全部満たす所。
@@ -408,6 +414,7 @@ impl Plot {
             Plot::Points { .. } => "数列の点".into(),
             Plot::Limit { .. } => "極限".into(),
             Plot::Multi(ps) => format!("{} × {}", ps.first().map_or(String::new(), |p| p.kind_label()), ps.len()),
+            Plot::SetImage(image) => image.label().into(),
             Plot::ComplexPlane { label, .. } => label.clone(),
             Plot::System { base, eqs, cuts, .. } => {
                 let cut = if cuts.is_empty() { "" } else { "（不等式で切り取り）" };
@@ -470,6 +477,7 @@ impl Plot {
             }
             Plot::Arrows { .. } | Plot::Points { .. } => return Vec::new(),
             Plot::ComplexPlane { inner, .. } => return inner.used_params(),
+            Plot::SetImage(image) => return image.used_params(),
             Plot::System { base, eqs, cuts, .. } => {
                 let mut out: Vec<String> = base.as_ref().map_or(Vec::new(), |b| b.used_params());
                 for n in eqs.iter().chain(cuts).flat_map(|p| p.used_params()) {
@@ -611,6 +619,10 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     // 論理・集合の記号があれば、論理式として描く（計画 M11）
     if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
         return compile_logic(source, params, space);
+    }
+    let name = source.trim().trim_start_matches('{').trim_end_matches('}');
+    if let Some(set) = crate::expand::set_def(name) {
+        return compile_formula(&crate::parser::Formula::Set(set), params, space);
     }
     // ∃・∀（計画 M12）
     if let Some(p) = quantified(source, params, space)? {
@@ -1156,28 +1168,30 @@ fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, s
 /// （重なった面を切り取らなくてよい。和集合の角は、格子の細かさの分だけ丸まる）。等式のあるかたまりは、それぞれ描いて重ねる。
 /// ≠ は「かつ」の中では形を変えないので、除いた所（h = 0）を白丸（曲線）・点線（面・領域）で示す
 fn compile_logic(source: &str, params: &Params, space: &Space) -> Result<Plot, String> {
-    use crate::parser::{Formula, SetE};
     let names = crate::expand::names();
-    // 集合の定義の行 `S = …` は、その集合を描く
-    let set_line = source.split_once('=').map(|(n, _)| n.trim().trim_start_matches('{').trim_end_matches('}').to_string());
-    let formula = match set_line.filter(|n| crate::expand::set_def(n).is_some()) {
-        Some(name) => {
-            crate::expand::mark_def_line(&name, Some("集合".into()));
-            Formula::Set(SetE::Named(name))
+    // 同じ集合名が別の行にあっても、定義の行はその行の右辺を描く。
+    if let Some((lhs, rhs)) = source.split_once('=') {
+        let name = lhs.trim().trim_start_matches('{').trim_end_matches('}');
+        if crate::expand::definable(name) && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            if let Ok(f) = crate::parser::parse_formula(rhs, &names) {
+                if crate::logic::as_set(&f).is_some() {
+                    if !params.contains_key(name) {
+                        crate::expand::mark_def_line(name, None);
+                    }
+                    return compile_formula(&f, params, space);
+                }
+            }
         }
-        None => crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?,
-    };
+    }
+    let formula = crate::parser::parse_formula(source, &names).map_err(|e| e.to_string())?;
     compile_formula(&formula, params, space)
 }
 
-/// 点を媒介変数の式で書いた集合 {(cos t, sin t) | …} なら、その点と条件
-fn parametric_builder(f: &crate::parser::Formula) -> Option<(&Expr, &crate::parser::Formula)> {
+/// 像として描く集合の要素式と条件。座標名だけの組は通常の座標条件として扱う。
+fn image_builder<'a>(f: &'a crate::parser::Formula, params: &Params) -> Option<(&'a Expr, &'a crate::parser::Formula)> {
     use crate::parser::{Formula, SetE};
     let Formula::Set(SetE::Builder { point, cond }) = f else { return None };
-    let comps: Vec<&Expr> = match point {
-        Expr::Tuple(items) => items.iter().collect(),
-        e => vec![e],
-    };
+    let Expr::Tuple(comps) = point else { return Some((point, cond)); };
     let mut seen: Vec<&str> = Vec::new();
     let plain = comps.iter().all(|c| match c {
         Expr::Var(v) if !seen.contains(&v.as_str()) => {
@@ -1186,48 +1200,99 @@ fn parametric_builder(f: &crate::parser::Formula) -> Option<(&Expr, &crate::pars
         }
         _ => false,
     });
-    (!plain).then_some((point, cond))
+    let has_slider = seen.iter().any(|n| params.contains_key(*n));
+    let standard = seen.iter().filter(|n| coord_index(n).is_some() || is_param_var(n)).count();
+    if !plain || has_slider || (standard > 0 && standard < seen.len()) {
+        return Some((point, cond));
+    }
+    if standard == 0 {
+        let mut declared = Vec::new();
+        crate::set_image::declared_inputs(cond, params, &mut declared);
+        let explicit = seen.iter().filter(|n| declared.iter().any(|name| name == **n)).count();
+        if explicit > 0 && explicit < seen.len() {
+            return Some((point, cond));
+        }
+    }
+    None
 }
 
 /// 「または」（∪）を平らに並べる
-fn flatten_or(f: &crate::parser::Formula, out: &mut Vec<crate::parser::Formula>) {
+fn flatten_or(f: &crate::parser::Formula, out: &mut Vec<crate::parser::Formula>, active: &mut Vec<String>) -> Result<(), String> {
+    use crate::parser::{Formula, SetE};
     match f {
-        crate::parser::Formula::Or(v) => v.iter().for_each(|g| flatten_or(g, out)),
-        g => out.push(g.clone()),
+        Formula::Or(v) => v.iter().try_for_each(|g| flatten_or(g, out, active)),
+        Formula::Set(SetE::Union(a, b)) => {
+            flatten_or(&Formula::Set((**a).clone()), out, active)?;
+            flatten_or(&Formula::Set((**b).clone()), out, active)
+        }
+        Formula::Set(SetE::Named(name)) => {
+            if active.contains(name) {
+                return Err(format!("集合 {name} の定義が循環しています"));
+            }
+            if let Some(set) = crate::expand::set_def(name) {
+                active.push(name.clone());
+                flatten_or(&Formula::Set(set), out, active)?;
+                active.pop();
+            } else {
+                out.push(f.clone());
+            }
+            Ok(())
+        }
+        g => {
+            out.push(g.clone());
+            Ok(())
+        }
     }
+}
+
+/// 二成分の集合を、座標条件から xy 平面上の像として描く。
+fn planar_set(set: &crate::parser::SetE, params: &Params, space: &Space) -> Result<Plot, String> {
+    let names = [" set planar first", " set planar second"];
+    let at = Expr::Tuple(names.iter().map(|n| Expr::Var((*n).into())).collect());
+    let condition = crate::logic::member(&at, set, &crate::expand::set_def)?;
+    // 二成分目までの束縛名を置換してから、条件に残った高さなどを平面の値にする。
+    // 例えば元の要素が (z,x) でも、束縛された z と外側の高さを混同しない。
+    let condition = crate::logic::substitute(&condition, &|name| {
+        if let Some(i) = names.iter().position(|n| *n == name) {
+            Some(Expr::Var(coord_name(i)))
+        } else {
+            coord_index(name).filter(|&i| i >= 2).map(|_| Expr::Num(0.0))
+        }
+    });
+    let point = Expr::Tuple((0..2).map(|i| Expr::Var(coord_name(i))).collect());
+    crate::set_image::compile(&point, &condition, params, space)
 }
 
 /// 論理式・集合を描く（[`compile_logic`] の本体）
 fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
     use crate::logic::{Lit, Op};
     use crate::parser::{Chain, Formula};
-    // 点を媒介変数の式で書いた集合 {(cos t, sin t) | 0 ≤ t ≤ π} は、媒介変数表示
-    if let Some((point, cond)) = parametric_builder(formula) {
-        return parametric_set(point, cond, params, space);
-    }
-    // 媒介変数の式で書いた集合どうしの和 {(t, t²) | …} ∪ {(t, 1) | …}（折れ線の経路など）は、それぞれ描いて重ねる
-    if matches!(formula, Formula::Or(_)) {
-        let mut parts = Vec::new();
-        flatten_or(formula, &mut parts);
-        if parts.iter().any(|p| parametric_builder(p).is_some()) {
-            let (curves, rest): (Vec<Formula>, Vec<Formula>) = parts.into_iter().partition(|p| parametric_builder(p).is_some());
-            let mut plots = Vec::new();
-            for c in &curves {
-                if let Some((point, cond)) = parametric_builder(c) {
-                    plots.push(parametric_set(point, cond, params, space)?);
-                }
-            }
-            if !rest.is_empty() {
-                plots.push(compile_formula(&Formula::Or(rest), params, space)?);
-            }
-            return Ok(Plot::Multi(plots));
+    let lookup = crate::expand::set_def;
+    // ⋃・⋂ の各項にも、通常の集合と同じ次元の扱いを適用する。
+    let formula = crate::expand::expand_big(formula, params)?;
+    // 和と集合名を開き、像集合を含むときは枝ごとに描く。
+    let mut parts = Vec::new();
+    flatten_or(&formula, &mut parts, &mut Vec::new())?;
+    if let [single] = parts.as_slice() {
+        if let Some((point, cond)) = image_builder(single, params) {
+            return crate::set_image::compile(point, cond, params, space);
         }
     }
-    let formula = formula.clone();
+    let images = parts.iter().any(|p| image_builder(p, params).is_some());
+    let arities: Vec<_> = parts.iter().map(|p| {
+        crate::logic::as_set(p).and_then(|s| crate::logic::arity(&s, &lookup).ok())
+    }).collect();
+    let has_plane = arities.contains(&Some(2));
+    if !images && has_plane && arities.iter().all(|a| matches!(a, Some(0 | 2))) {
+        if let Some(set) = crate::logic::as_set(&Formula::Or(parts.clone())) {
+            return planar_set(&set, params, space);
+        }
+    }
+    if parts.len() > 1 && (images || has_plane) {
+        let plots = parts.iter().map(|part| compile_formula(part, params, space)).collect::<Result<_, _>>()?;
+        return Ok(Plot::Multi(plots));
+    }
     let shown: Vec<String> = space.shown().to_vec();
-    let lookup = |n: &str| crate::expand::set_def(n);
-    // ⋃・⋂ を、添字ごとの「または」「かつ」にする
-    let formula = crate::expand::expand_big(&formula, params)?;
     let clauses = crate::logic::clauses(&formula, &shown, &lookup)?;
     // 原子の式を展開する（関数・Σ など）
     let mut expanded: Vec<Vec<Lit>> = Vec::with_capacity(clauses.len());
@@ -1237,13 +1302,13 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
             if l.op == Op::Ne {
                 // ≠ は面積・長さの無い所を除くだけなので、形は変えずに、除いた所を白丸・点線で示す（lib.rs の mark_excluded）
                 let h = Expr::Bin(BinOp::Sub, Box::new(crate::expand::expand(&l.l, params)?), Box::new(crate::expand::expand(&l.r, params)?));
-                let h = match space.rotation_matrix() {
+                let rotated = match space.rotation_matrix() {
                     Some(m) => rotate_coords(&h, &m, space),
-                    None => h,
+                    None => h.clone(),
                 };
                 let refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
-                match Program::compile_with(&h, &refs, &space.with_hidden(params)) {
-                    Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(p),
+                match Program::compile_with(&rotated, &refs, &space.with_hidden(params)) {
+                    Ok(p) if p.vars().len() == 3 => crate::expand::add_excluded(h, p),
                     _ => crate::expand::add_note("≠ は描き方が変わらないので無視"),
                 }
                 continue;
@@ -1295,180 +1360,8 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
     Ok(if plots.len() == 1 { plots.pop().unwrap_or(Plot::Multi(Vec::new())) } else { Plot::Multi(plots) })
 }
 
-/// 点を媒介変数の式で書いた集合 {(cos t, sin t, 0) | 0 ≤ t ≤ π} を、媒介変数表示にする。
-/// 条件は媒介変数の範囲（a ≤ t ≤ b、t ≤ b など）だけ。範囲は画面の範囲の欄より優先する（[`crate::expand::param_range`]）。
-/// 媒介変数は、条件で範囲を書いた名前のうち点の式に出てくるもの（パラメータ・定義の名前は除く）で、t・u・v でなくてもよい
-/// （{(x, x²) | 0 ≤ x ≤ 1}・{(s, sin s) | …}・{(r cos θ, r sin θ) | …}）。t・u・v 以外の名前は、出てくる順に
-/// t（1 つ）・u, v（2 つ）・u, v, t（3 つ）に付け替えて描く
-fn parametric_set(point: &Expr, cond: &crate::parser::Formula, params: &Params, space: &Space) -> Result<Plot, String> {
-    use crate::parser::{Chain, Formula, SetE};
-    // 条件を、関係の連鎖の並びにする。t ∈ [a, b] は a ≤ t ≤ b、≠ は描き方が変わらないので落とす
-    let mut chains: Vec<Chain> = Vec::new();
-    fn flatten(f: &Formula, out: &mut Vec<Chain>) -> Result<(), String> {
-        match f {
-            Formula::And(v) => v.iter().try_for_each(|g| flatten(g, out)),
-            Formula::Chain(c) => {
-                out.push(c.clone());
-                Ok(())
-            }
-            Formula::In(e @ Expr::Var(_), SetE::Interval { lo, hi, lo_open, hi_open }) => {
-                let rel = |open: bool| if open { Rel::Lt } else { Rel::Le };
-                out.push(Chain { exprs: vec![lo.clone(), e.clone(), hi.clone()], rels: vec![rel(*lo_open), rel(*hi_open)], pos: vec![0; 3] });
-                Ok(())
-            }
-            Formula::Ne(..) => {
-                crate::expand::add_note("≠ は描き方が変わらないので無視");
-                Ok(())
-            }
-            Formula::True => Ok(()),
-            _ => Err("媒介変数で書いた集合の条件には、0 ≤ t ≤ 2π・t ∈ [0, 1] のような媒介変数の範囲だけを書けます".into()),
-        }
-    }
-    flatten(cond, &mut chains)?;
-    // 媒介変数: 条件の両端に名前だけで出てくるもののうち、点の式に出てくるもの（点の式に出てくる順）
-    let defined = crate::expand::names();
-    let mut bounded: Vec<String> = Vec::new();
-    for c in &chains {
-        for e in &c.exprs {
-            if let Expr::Var(v) = e {
-                if !params.contains_key(v) && !defined.contains(v) && !bounded.contains(v) {
-                    bounded.push(v.clone());
-                }
-            }
-        }
-    }
-    let mut in_point = Vec::new();
-    point.collect_vars(&mut in_point);
-    let found: Vec<String> = in_point.iter().filter(|v| bounded.contains(v)).fold(Vec::new(), |mut acc, v| {
-        if !acc.contains(v) {
-            acc.push(v.clone());
-        }
-        acc
-    });
-    if found.len() > 3 {
-        return Err("媒介変数は 3 つまでにしてください".into());
-    }
-    // t・u・v 以外の名前があれば、全部を t・u・v に付け替える
-    let rename: Vec<(String, String)> = if found.iter().all(|v| is_param_var(v)) {
-        found.iter().map(|v| (v.clone(), v.clone())).collect()
-    } else {
-        if let Some(v) = in_point.iter().find(|v| is_param_var(v) && !found.contains(v)) {
-            return Err(format!("媒介変数 {v} の範囲も、0 ≤ {v} ≤ 1 のように書いてください"));
-        }
-        let targets: &[&str] = match found.len() {
-            1 => &["t"],
-            2 => &["u", "v"],
-            _ => &["u", "v", "t"],
-        };
-        found.iter().zip(targets).map(|(v, t)| (v.clone(), t.to_string())).collect()
-    };
-    let new_name = |v: &str| rename.iter().find(|(a, _)| a == v).map(|(_, b)| b.clone());
-    let to_new = |e: &Expr| e.substitute(&|v: &str| new_name(v).map(Expr::Var));
-    // 媒介変数ごとの下の端・上の端（付け替えた名前の式）
-    let mut lo: Vec<(String, Expr)> = Vec::new();
-    let mut hi: Vec<(String, Expr)> = Vec::new();
-    let names = found.join(", ");
-    let is_param = |e: &Expr| matches!(e, Expr::Var(v) if new_name(v).is_some());
-    let param_of = |e: &Expr| match e {
-        Expr::Var(v) => new_name(v).unwrap_or_default(),
-        _ => String::new(),
-    };
-    // 両側が媒介変数の「s ≤ t」は、端が足りない方の端にする（0 ≤ t ≤ s の t のように、連鎖の真ん中の媒介変数があれば、その端）
-    let mut both: Vec<(Expr, Expr)> = Vec::new();
-    for c in &chains {
-        let subject = (c.exprs.len() == 3 && is_param(&c.exprs[1])).then(|| param_of(&c.exprs[1]));
-        for (k, rel) in c.rels.iter().enumerate() {
-            let (a, b) = (&c.exprs[k], &c.exprs[k + 1]);
-            let (small, big) = match rel {
-                Rel::Lt | Rel::Le => (a, b),
-                Rel::Gt | Rel::Ge => (b, a),
-                Rel::Eq => {
-                    return Err("媒介変数で書いた集合の条件に = は使えません（座標の等式なら {(x, y) | y = x², 0 ≤ x ≤ 1} のように、点を (x, y) と書いてください）".into())
-                }
-            };
-            match (is_param(small), is_param(big)) {
-                (true, true) => match &subject {
-                    Some(s) if *s == param_of(big) => lo.push((s.clone(), to_new(small))),
-                    Some(s) if *s == param_of(small) => hi.push((s.clone(), to_new(big))),
-                    _ => both.push((small.clone(), big.clone())),
-                },
-                (false, true) => lo.push((param_of(big), to_new(small))),
-                (true, false) => hi.push((param_of(small), to_new(big))),
-                _ if found.is_empty() => {
-                    return Err("媒介変数で書いた集合の条件には、0 ≤ t ≤ 2π のような、点の式に出てくる媒介変数の範囲を書いてください".into())
-                }
-                _ => return Err(format!("媒介変数で書いた集合の条件には、媒介変数（{names}）の範囲だけを、0 ≤ {} ≤ 1 のように書けます", found[0])),
-            }
-        }
-    }
-    for (small, big) in both {
-        let (a, b) = (param_of(&small), param_of(&big));
-        if !hi.iter().any(|(v, _)| *v == a) {
-            hi.push((a, to_new(&big)));
-        } else if !lo.iter().any(|(v, _)| *v == b) {
-            lo.push((b, to_new(&small)));
-        } else {
-            return Err("媒介変数どうしの不等式が多すぎます（それぞれの媒介変数の下の端と上の端を 1 つずつ書いてください）".into());
-        }
-    }
-    let new_names: Vec<String> = rename.iter().map(|(_, b)| b.clone()).collect();
-    let uses_param = |e: &Expr| new_names.iter().any(|n| e.uses_var(n));
-    let value = |e: &Expr| -> Result<f64, String> {
-        let p = Program::compile_with(e, &[], params).map_err(|_| "媒介変数の範囲は、数とパラメータで書いてください".to_string())?;
-        let mut out = [C::new(0.0, 0.0)];
-        p.eval_batch(&[], &mut out);
-        Ok(crate::eval::as_real(out[0]))
-    };
-    // 端が数の媒介変数は、その範囲。端がほかの媒介変数の式（0 ≤ t ≤ s）なら、t = 下の端 + (上の端 − 下の端) w（w は 0 〜 1）と置き換える
-    let mut reparam: Vec<(String, Expr)> = Vec::new();
-    for n in &new_names {
-        let ls: Vec<&Expr> = lo.iter().filter(|(v, _)| v == n).map(|(_, e)| e).collect();
-        let hs: Vec<&Expr> = hi.iter().filter(|(v, _)| v == n).map(|(_, e)| e).collect();
-        if ls.is_empty() && hs.is_empty() {
-            continue;
-        }
-        let old = old_name(&rename, n);
-        if ls.is_empty() {
-            return Err(format!("{old} の下の端を書いてください"));
-        }
-        if hs.is_empty() {
-            return Err(format!("{old} の上の端を書いてください"));
-        }
-        if ls.iter().chain(&hs).all(|e| !uses_param(e)) {
-            let a = ls.iter().map(|e| value(e)).collect::<Result<Vec<_>, _>>()?.into_iter().fold(f64::NEG_INFINITY, f64::max);
-            let b = hs.iter().map(|e| value(e)).collect::<Result<Vec<_>, _>>()?.into_iter().fold(f64::INFINITY, f64::min);
-            crate::expand::set_param_range(n, a, b);
-            continue;
-        }
-        if ls.len() != 1 || hs.len() != 1 {
-            return Err(format!("{old} の範囲は、下の端と上の端を 1 つずつ書いてください（ほかの媒介変数を使う端のとき）"));
-        }
-        let (l, h) = (ls[0].clone(), hs[0].clone());
-        let span = Expr::Bin(BinOp::Sub, Box::new(h), Box::new(l.clone()));
-        reparam.push((n.clone(), Expr::Bin(BinOp::Add, Box::new(l), Box::new(Expr::Bin(BinOp::Mul, Box::new(span), Box::new(Expr::Var(n.clone())))))));
-        crate::expand::set_param_range(n, 0.0, 1.0);
-    }
-    // 置き換える媒介変数の端は、端が数の媒介変数だけで書く（2 段の入れ子は扱わない）
-    for (n, e) in &reparam {
-        if reparam.iter().any(|(m, _)| m != n && e.uses_var(m)) {
-            return Err("媒介変数の範囲に、範囲が別の媒介変数で決まる媒介変数は使えません（端は数か、範囲が数の媒介変数で書いてください）".into());
-        }
-    }
-    let point = to_new(point).substitute(&|v: &str| reparam.iter().find(|(n, _)| n == v).map(|(_, e)| e.clone()));
-    let items = match crate::expand::expand(&point, params)? {
-        Expr::Tuple(items) => items,
-        e => return Err(format!("媒介変数で書いた集合の点は、(x(t), y(t)) のように組で書いてください（{e:?}）")),
-    };
-    parametric(items, params, space)
-}
-
-/// 付け替えた媒介変数の、元の名前（誤りの文に使う）
-fn old_name(rename: &[(String, String)], new: &str) -> String {
-    rename.iter().find(|(_, b)| b == new).map(|(a, _)| a.clone()).unwrap_or_else(|| new.to_string())
-}
-
 /// 解析・展開した式（[`compile_with`]）をコンパイルする
-fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
+pub(crate) fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
     for chain in &mut chains {
         for e in &mut chain.exprs {
@@ -2489,7 +2382,7 @@ fn system_of(rels: Vec<(Expr, Rel, Expr)>, params: &Params, space: &Space) -> Re
     let base = match eq_rows.as_slice() {
         // 回す前の形（Plot::Implicit の local）は使わない（切り取った面は、回転が変わるたびに作り直す）
         [(l, r)] => Some(Box::new(match compile_pair(l.clone(), r.clone(), params, space)? {
-            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None, gpu: None },
+            Plot::Implicit { prog, from, .. } => Plot::Implicit { prog, from, local: None, gpu: None, slice_source: None },
             p => p,
         })),
         _ => None,
@@ -2582,9 +2475,10 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     let shown_refs: [&str; 3] = [&shown[0], &shown[1], &shown[2]];
     let consts = space.with_hidden(params);
     let rot = space.rotation_matrix();
+    let mut slice_source = None;
 
     // 陽関数で、回転が表示中の座標どうしだけなら、曲面をそのまま回せばよい（媒介変数表示と同じ扱い）
-    if rot.is_some() && !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n)) {
+    if let Some(rot) = rot.as_ref().filter(|_| !space.ranged().iter().any(|(n, _, _)| l.uses_var(n) || r.uses_var(n))) {
         let mut used = Vec::new();
         l.collect_vars(&mut used);
         r.collect_vars(&mut used);
@@ -2592,12 +2486,14 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
             if let Some(p) = find_explicit(&l, &r, &shown, &consts)? {
                 // 2D の切り口で縦の座標を使う陽関数は、陰関数として計算し直す（Space::flat_slice を参照）
                 let vertical = matches!(&p, Plot::Explicit { axis, prog, .. } if *axis == 2 || prog.uses_var_index(1));
-                if !(space.flat_slice && vertical) {
+                let tilted = space.axes[..2].iter().any(|&a| rot[space.axes[2]][a].abs() > 1e-12);
+                if !(space.flat_slice && (vertical || tilted)) {
                     return Ok(match p {
-                        Plot::Explicit { axis, names, prog, .. } => Plot::Explicit { axis, names, prog, rotated: true },
+                        Plot::Explicit { axis, names, prog, expr, .. } => Plot::Explicit { axis, names, prog, expr, rotated: true },
                         other => other,
                     });
                 }
+                slice_source = Some(Box::new(p));
             }
         }
     }
@@ -2702,7 +2598,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
         vars.extend(names.iter().map(String::as_str));
         Program::compile_with(&unrotated, &vars, &cs).ok().map(|p| Box::new(GpuImplicit { prog: p, params: names, dims: space.dims }))
     };
-    Ok(Plot::Implicit { prog, from, local, gpu })
+    Ok(Plot::Implicit { prog, from, local, gpu, slice_source })
 }
 
 /// 傾いた座標系の陽関数の変数 u, v の名前（利用者が打てない名前にして、パラメータ u・v と衝突しないようにする）
@@ -3226,7 +3122,7 @@ fn explicit(axis: usize, e: &Expr, shown: &[String; 3], consts: &Params) -> Resu
     let (a, b) = others(axis);
     LAST_EXPLICIT.with(|l| *l.borrow_mut() = Some((axis, e.clone(), shown.clone())));
     let prog = Program::compile_with(e, &[&shown[a], &shown[b]], consts)?;
-    Ok(Plot::Explicit { axis, names: shown.clone(), prog, rotated: false })
+    Ok(Plot::Explicit { axis, names: shown.clone(), prog, expr: Box::new(e.clone()), rotated: false })
 }
 
 /// 片方が表示中の座標1つだけで、もう片方にその座標が無ければ陽関数。左辺を優先して調べる（z = x なら「z = f(x, y)」）

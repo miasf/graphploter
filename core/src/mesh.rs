@@ -87,6 +87,31 @@ fn tri_normal(p: &[f32], t: [u32; 3]) -> [f64; 3] {
     [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
 }
 
+/// 写像で全部の三角形が退化した場合、それぞれの像を線分または点として残す。
+pub(crate) fn collapsed_triangles(mesh: &Mesh) -> Option<Mesh> {
+    if mesh.indices.is_empty() || mesh.indices.chunks_exact(3).any(|t| {
+        tri_normal(&mesh.positions, [t[0], t[1], t[2]]) != [0.0; 3]
+    }) {
+        return None;
+    }
+    let vertex = |i: u32| &mesh.positions[i as usize * 3..i as usize * 3 + 3];
+    let length = |a: u32, b: u32| vertex(a).iter().zip(vertex(b)).map(|(&a, &b)| (a as f64 - b as f64).powi(2)).sum::<f64>();
+    let mut positions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for t in mesh.indices.chunks_exact(3) {
+        let (a, b) = [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])].into_iter()
+            .max_by(|&(a, b), &(c, d)| length(a, b).total_cmp(&length(c, d))).unwrap();
+        let [a, b] = [a, b].map(|i| [0, 1, 2].map(|axis| vertex(i)[axis].to_bits()));
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if seen.insert(key) {
+            positions.extend(a.map(f32::from_bits));
+            positions.extend(b.map(f32::from_bits));
+            positions.extend([f32::NAN; 3]);
+        }
+    }
+    Some(Mesh { positions, ..Default::default() })
+}
+
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -7541,7 +7566,13 @@ fn mesh_to_nd(mesh: &Mesh, axes: [usize; 3], base: &[f64], surface: Option<usize
 /// 2D 表示の、回した `y = f(x)`（`x = f(y)`）の曲線を n 次元の点として計算する（`dom` は計算する範囲）。
 /// 回さないときと同じ [`explicit_curve_2d`] で作るので、値が飛ぶ所では線を切る
 pub fn explicit_curve_nd(prog: &Program, axis: usize, axes: [usize; 3], base: &[f64], dom: Domain, tol: f64) -> NdShape {
-    let mut mesh = explicit_curve_2d(prog, axis, dom, tol);
+    explicit_curve_nd_with_holes(prog, axis, axes, base, dom, tol, &[]).0
+}
+
+pub(crate) fn explicit_curve_nd_with_holes(
+    prog: &Program, axis: usize, axes: [usize; 3], base: &[f64], dom: Domain, tol: f64, breaks: &[crate::holes::Break],
+) -> (NdShape, Vec<f64>) {
+    let (mut mesh, holes) = explicit_curve_with_holes(prog, axis, dom, tol, breaks);
     // 極の近くのとても大きな値は、回すと横にも大きくはみ出す。計算する範囲の外は形が見えないので、
     // 範囲の何倍かの所にそろえる（f32 にしたとき無限大にならないように）
     let (lo, hi) = (dom.lo[axis], dom.hi[axis]);
@@ -7553,9 +7584,23 @@ pub fn explicit_curve_nd(prog: &Program, axis: usize, axes: [usize; 3], base: &[
     }
     let mut base = base.to_vec();
     base[axes[2]] = 0.0; // 2D 表示では縦の座標は 0
-    mesh_to_nd(&mesh, axes, &base, None)
+    let holes = holes.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]);
+    (mesh_to_nd(&mesh, axes, &base, None), points_in_axes(holes, axes, &base))
 }
 
+pub(crate) fn points_in_axes(
+    points: impl IntoIterator<Item = [f64; 3]>, axes: [usize; 3], base: &[f64],
+) -> Vec<f64> {
+    let mut out = Vec::new();
+    for q in points {
+        let start = out.len();
+        out.extend_from_slice(base);
+        for (axis, value) in axes.into_iter().zip(q) {
+            out[start + axis] = value;
+        }
+    }
+    out
+}
 /// 媒介変数表示の曲線（成分は `progs`、n 次元）。
 ///
 /// 最初に `n` 等分して計算し、曲がっている所・途切れる所だけを細かく分け直す（適応サンプリング）。
@@ -7616,6 +7661,7 @@ fn curve_nd(eval: &dyn Fn(&[f64]) -> Vec<f64>, d: usize, t: (f64, f64), n: usize
 
     let n = n.max(2);
     let mut ts: Vec<f64> = (0..=n).map(|k| t.0 + (t.1 - t.0) * k as f64 / n as f64).collect();
+    ts[n] = t.1;
     let mut ps = split(eval(&ts));
     // 区間 [ts[k], ts[k+1]] をまだ分け直す必要があるか
     let mut todo = vec![true; ts.len() - 1];
@@ -7877,8 +7923,8 @@ fn grid_tris(m: usize, count: usize) -> Vec<u32> {
 /// 縦の座標を 0 にして平らにする（2D 表示）。曲面の法線はすべて +縦 の向きにする
 pub fn flatten(mesh: &mut Mesh, curve: bool) {
     mesh.lod_mesh = None; // 平らにした後の粗い版は作らない（2D 表示は軽い）
-    // 縦に立った面（y = x, x² + y² = 1 など）は、押しつぶすと三角形の面積が無くなって見えなくなる。
-    // 真上から見た面積が 3 次元の面積の 5% 以下の三角形は、押しつぶした後のいちばん長い辺を線として残す
+    // 縦に立った面（y = x, x² + y² = 1 など）は、投影で面積が無くなるので線として残す。
+    // 投影後の辺だけで共線かどうかを判定し、面積のある曲面の縁に線が重なるのを防ぐ。
     if !curve {
         let p = &mesh.positions;
         let at = |k: u32| [0, 1, 2].map(|c| p[3 * k as usize + c] as f64);
@@ -7886,8 +7932,15 @@ pub fn flatten(mesh: &mut Mesh, curve: bool) {
             let (a, b, c) = (at(t[0]), at(t[1]), at(t[2]));
             let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
             let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            if !(len > 0.0) || n[2].abs() > 0.05 * len {
+            let scale = u[0] * u[0] + u[1] * u[1] + v[0] * v[0] + v[1] * v[1];
+            // f32 に丸めた頂点では、同一直線上の点にも小さな誤差がある。
+            if !(scale > 0.0 && n[2].abs() <= 1e-6 * scale) {
+                continue;
+            }
+            // もとの三角形自体がほぼつぶれている場合は、補助線に変えない。
+            let scale3 = scale + u[2] * u[2] + v[2] * v[2];
+            let area2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+            if !(area2 > (1e-8 * scale3).powi(2)) {
                 continue;
             }
             let d2 = |x: [f64; 3], y: [f64; 3]| (x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2);
@@ -8065,25 +8118,55 @@ pub fn flat_map(prog: &Program, dom: Domain, n: usize, mode: ComplexMode) -> Mes
 /// 2D 表示の陽関数の曲線 `y = f(x)`（`axis` = 1）や `x = f(y)`（`axis` = 0）。
 /// `prog` の変数は残り2つの表示中の座標（2つ目は縦の座標で、0 にする）。曲がっている所を細かく計算する
 pub fn explicit_curve_2d(prog: &Program, axis: usize, dom: Domain, tol: f64) -> Mesh {
+    explicit_curve_with_holes(prog, axis, dom, tol, &[]).0
+}
+
+pub(crate) fn explicit_curve_with_holes(
+    prog: &Program, axis: usize, dom: Domain, tol: f64, breaks: &[crate::holes::Break],
+) -> (Mesh, Vec<f32>) {
     let free = if axis == 0 { 1 } else { 0 };
-    let eval = |ts: &[f64]| -> Vec<f64> {
-        let zeros = vec![0.0; ts.len()];
-        let mut out = vec![C::new(0.0, 0.0); ts.len()];
-        prog.eval_batch(&[ts, &zeros], &mut out);
-        let mut pts = Vec::with_capacity(ts.len() * 3);
-        for (t, v) in ts.iter().zip(&out) {
-            let mut p = [0.0; 3];
-            p[free] = *t;
-            p[axis] = as_real(*v);
-            if !p[axis].is_finite() {
-                p = [f64::NAN; 3];
-            }
-            pts.extend_from_slice(&p);
+    let point = |x, y: f64| {
+        if !y.is_finite() {
+            return [f64::NAN; 3];
         }
-        pts
+        let mut p = [0.0; 3];
+        p[free] = x;
+        p[axis] = y;
+        p
     };
-    let points = curve_nd(&eval, 3, (dom.lo[free], dom.hi[free]), 400, tol);
-    Mesh { positions: points.iter().map(|&v| v as f32).collect(), ..Default::default() }
+    let (lo, hi) = (dom.lo[free], dom.hi[free]);
+    let mut positions = Vec::new();
+    let mut marks = Vec::new();
+    let mut left = (lo, None);
+    for (right, next) in breaks.iter().map(|b| ((b.x, b.sides[0]), Some((b.x, b.sides[1]))))
+        .chain(std::iter::once(((hi, None), None)))
+    {
+        if right.0 > left.0 || breaks.is_empty() {
+            let eval = |xs: &[f64]| {
+                xs.iter().copied().zip(crate::holes::curve_samples(prog, xs)).flat_map(|(x, y)| {
+                    let y = if x == left.0 { left.1.unwrap_or(y) }
+                        else if x == right.0 { right.1.unwrap_or(y) }
+                        else { y };
+                    point(x, y)
+                }).collect()
+            };
+            if !positions.is_empty() {
+                positions.extend([f32::NAN; 3]);
+            }
+            let n = (400.0 * ((right.0 - left.0) / (hi - lo))).ceil() as usize;
+            positions.extend(curve_nd(&eval, 3, (left.0, right.0), n, tol).into_iter().map(|v| v as f32));
+        }
+        if let Some(next) = next {
+            for y in [right.1, next.1].into_iter().flatten() {
+                let p = point(right.0, y).map(|v| v as f32);
+                if p.iter().all(|v| v.is_finite()) && marks.last_chunk::<3>() != Some(&p) {
+                    marks.extend(p);
+                }
+            }
+            left = next;
+        }
+    }
+    (Mesh { positions, ..Default::default() }, marks)
 }
 
 /// 極限の近づく点で曲線を切る。左右の枝はそれぞれの極限値に向かい、点での定義値とは結ばない。
@@ -8592,7 +8675,7 @@ impl View {
     }
 
     /// n 次元の点 p を画面の3次元の点にする。視点より後ろ（または近すぎる）点は NaN
-    fn apply(&self, p: &[f64]) -> [f64; 3] {
+    pub(crate) fn apply(&self, p: &[f64]) -> [f64; 3] {
         let row = |(c0, cs): &ViewRow| c0 + cs.iter().zip(p).map(|(c, x)| c * x).sum::<f64>();
         let q = self.rows.each_ref().map(row);
         if self.hidden.is_empty() {
@@ -8833,7 +8916,7 @@ fn identity_rows(d: usize) -> [ViewRow; 3] {
 // ---------------------------------------------------------------------------
 
 /// 周りの三角形の向き（面積で重み付け）を平均して、頂点の法線を求める。
-fn compute_normals(mesh: &mut Mesh) {
+pub(crate) fn compute_normals(mesh: &mut Mesh) {
     let p = &mesh.positions;
     let mut nrm = vec![0.0f64; p.len()];
     for t in mesh.indices.chunks_exact(3) {

@@ -772,6 +772,34 @@ fn named_sets_and_difference() {
 }
 
 #[test]
+fn two_component_sets_live_in_the_plane() {
+    let defs = "D = ⦃(x,y)∣x^2+y^2<=1⦄\nE = ⦃(s,t)∣0<=s<=1,-1<=t<=1⦄";
+    for (source, defs) in [
+        ("D", defs),
+        ("D ∖ E", defs),
+        ("∅ ∪ D", defs),
+        ("Eᶜ", defs),
+        ("⦃(a,b)∣a^2+b^2<=1⦄", ""),
+        ("⦃(z,x)∣z^2+x^2<=1⦄", ""),
+        ("⦃(x,y)∣x^2+y^2<=1,z=0⦄", ""),
+        ("@bigcup(k; 1<=k<=2) ⦃(x,y)∣(x-k)^2+y^2<=0.2⦄", ""),
+    ] {
+        for flat in [false, true] {
+            let result = run_in_view(source, defs, &[], 0, flat).unwrap();
+            assert!(!result.indices().is_empty(), "{source}");
+            assert!(result.positions().chunks_exact(3).all(|p| p[2] == 0.0), "{source}");
+        }
+    }
+    let disk = "⦃(x,y)∣x^2+y^2<=1⦄";
+    let volume = "⦃(x,y,z)∣x^2+y^2<=1⦄";
+    for source in [volume.to_string(), format!("{disk} ∪ {volume}")] {
+        let result = run(&source, "", &[]).unwrap();
+        assert!(result.positions().chunks_exact(3).any(|p| p[2].abs() > 2.5), "{source}");
+    }
+    assert!(run("⦃(x,y)∣x^2+y^2<=1,z>0⦄", "", &[]).unwrap().indices().is_empty());
+}
+
+#[test]
 fn unions_of_regions() {
     // 2 つの球の和集合: 面の頂点は、もう一方の球の内側（中心から 1 − 2h より内）に無い
     let m = run("x^2+y^2+z^2 ≤ 1 ∨ (x-1)^2+y^2+z^2 ≤ 1", "", &[]).unwrap();
@@ -814,7 +842,9 @@ fn not_equal_empty_and_parametric_sets() {
             assert!(v[1] >= -1e-6, "{v:?}");
         }
     }
-    assert!(error_of("⦃(cos(t), sin(t), 0) ∣ 0 ≤ t⦄", "").contains("上の端"));
+    let (p, _) = mesh("⦃(t, t^2)∣t>=0⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|v| v[0] > 1.0));
+    assert!(p.chunks_exact(3).filter(|v| v[0].is_finite()).all(|v| v[0] >= -1e-5));
     assert!(error_of("x ∈ ℚ", "").contains("有理数"));
 }
 
@@ -1647,8 +1677,8 @@ fn parametric_sets_with_any_parameter_name() {
     same("⦃(x,x^(2))∣0<=x<=1⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
     same("⦃(s, sin(s))∣0<=s<=6⦄", "⦃(t, sin(t))∣0<=t<=6⦄", "");
     same("⦃(x,y,x^(2)+y^(2))∣-1<=x<=1,-1<=y<=1⦄", "⦃(u,v,u^(2)+v^(2))∣-1<=u<=1,-1<=v<=1⦄", "");
-    // 範囲の無い t・u・v を、付け替えた名前と混ぜない
-    assert!(error_of("⦃(s, t, s)∣0<=s<=1⦄", "").contains("t の範囲"));
+    // この名前を明示的に入力変数として宣言すれば、表示範囲に応じて動かせる。
+    same("⦃(s, t, s)∣0<=s<=1⦄", "⦃(a, b, a)∣0<=a<=1,b∈ℝ⦄", "");
 }
 
 #[test]
@@ -1748,9 +1778,11 @@ fn coordinate_and_parameter_differentials() {
 
 #[test]
 fn parametric_set_conditions() {
-    // t ∈ [0, 1] は 0 ≤ t ≤ 1、≠ は描き方が変わらない
+    // t ∈ [0, 1] は 0 ≤ t ≤ 1。≠ で切った枝も描ける。
     same("⦃(t,t^(2))∣t∈[0,1]⦄", "⦃(t,t^(2))∣0<=t<=1⦄", "");
-    same("⦃(cos(t),sin(t))∣0<=t<=2pi,t≠pi⦄", "⦃(cos(t),sin(t))∣0<=t<=2pi⦄", "");
+    let (p, _) = mesh("⦃(t,t^(2))∣-1<=t<=1,t≠0⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|v| v[0] < -0.5));
+    assert!(p.chunks_exact(3).any(|v| v[0] > 0.5));
     // 端がほかの媒介変数の式（扇形の三角形 0 ≤ t ≤ s）も描ける
     let (p, _) = mesh("⦃(s cos(t),s sin(t))∣0<=s<=1,0<=t<=s⦄", "", &[]);
     assert!(!p.is_empty());
@@ -1758,6 +1790,154 @@ fn parametric_set_conditions() {
     let (p1, _) = mesh("⦃(t,t^(2))∣-1<=t<=1⦄", "", &[]);
     let (p2, _) = mesh("⦃(t,t^(2))∣-1<=t<=1⦄ ∪ ⦃(t,1)∣-1<=t<=1⦄", "", &[]);
     assert!(p2.len() > p1.len());
+}
+
+#[test]
+fn set_images_map_the_condition_domain() {
+    let radius = (3.0_f64.sqrt() / 2.0).sqrt() as f32;
+    let extrema = |positions: &[f32], axis: usize| {
+        positions.chunks_exact(3).map(|p| p[axis]).filter(|v| v.is_finite())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
+    };
+    let definition = "D = ⦃(2x,y)∣x^2+y^2<=sqrt(3)/2⦄";
+    let hemisphere = "D = ⦃(x,y,sqrt(1-x^2-y^2))∣x^2+y^2<=sqrt(3)/2⦄";
+    for (source, defs) in [(definition, ""), ("D", definition), (definition, hemisphere)] {
+        for flat in [false, true] {
+            let result = run_in_view(source, defs, &[], 0, flat).unwrap();
+            let p = result.positions();
+            assert!(!result.indices().is_empty());
+            let (x_min, x_max) = extrema(&p, 0);
+            let (y_min, y_max) = extrema(&p, 1);
+            assert!((x_min + 2.0 * radius).abs() < 0.03 && (x_max - 2.0 * radius).abs() < 0.03, "{x_min}, {x_max}");
+            assert!((y_min + radius).abs() < 0.03 && (y_max - radius).abs() < 0.03, "{y_min}, {y_max}");
+            assert!(p.chunks_exact(3).all(|p| p[2] == 0.0));
+        }
+    }
+    let dome = run(hemisphere, definition, &[]).unwrap();
+    let positions = dome.positions();
+    assert!(!dome.indices().is_empty());
+    let (lo, hi) = extrema(&positions, 2);
+    let rim = (1.0 - radius * radius).sqrt();
+    assert!((lo - rim).abs() < 0.02 && (hi - 1.0).abs() < 0.02, "{lo}, {hi}");
+    assert!(positions.chunks_exact(3).all(|p| (p[0]*p[0] + p[1]*p[1] + p[2]*p[2] - 1.0).abs() < 1e-5));
+
+    let p = mesh("D = ⦃sqrt(1-x^2-y^2)∣x^2+y^2<=sqrt(3)/2⦄", "", &[]).0;
+    let (lo, hi) = extrema(&p, 0);
+    assert!((lo - (1.0 - radius * radius).sqrt()).abs() < 0.02 && (hi - 1.0).abs() < 0.02, "{lo}, {hi}");
+    assert!(p.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| p[1] == 0.0 && p[2] == 0.0));
+
+    let p = mesh("⦃2s∣s∈[-2,-1]∨s∈[1,2]⦄", "", &[]).0;
+    assert!(p.iter().any(|v| v.is_nan()) && p[0] < -3.9);
+    assert!(p.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| p[0].abs() >= 1.99));
+    assert!(p.chunks_exact(3).any(|p| p[0] > 3.9));
+
+    let p = mesh("⦃(x,y,x^2-y^2)∣x^2+y^2=1,y>=0⦄", "", &[]).0;
+    assert!(p.len() > 30);
+    assert!(p.chunks_exact(3).filter(|p| p[0].is_finite()).all(|p| {
+        p[1] >= -0.01 && (p[0]*p[0] + p[1]*p[1] - 1.0).abs() < 0.01
+            && (p[2] - p[0]*p[0] + p[1]*p[1]).abs() < 1e-5
+    }));
+
+    let member = "(x,y)∈⦃(2s+1,t)∣s^2+t^2<=1⦄";
+    let p = run_in_view(member, "", &[], 0, true).unwrap().positions();
+    let (lo, hi) = extrema(&p, 0);
+    assert!((lo + 1.0).abs() < 0.03 && (hi - 3.0).abs() < 0.03, "{lo}, {hi}");
+}
+
+#[test]
+fn image_sets_share_one_path_for_ranges_logic_and_discontinuities() {
+    let (p, _) = mesh("⦃(s,t,s-t)∣0<=s<=60,0<=2t<=s⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|q| q[1] > 29.0));
+
+    let collapsed = run("⦃(s,s,2s)∣s∈ℝ,s^2+t^2<=1⦄", "", &[]).unwrap();
+    let p = collapsed.positions();
+    assert!(collapsed.indices().is_empty());
+    assert!(p.chunks_exact(3).any(|q| q[2] > 1.9));
+    assert!(p.chunks_exact(3).any(|q| q[2] < -1.9));
+
+    let (p, _) = mesh("⦃(s, abs(s), s^3)∣s∈[-2,2], s^2>=1, s<1.8⦄", "", &[]);
+    assert!(p.chunks_exact(3).any(|q| q[0] < -1.5));
+    assert!(p.chunks_exact(3).any(|q| q[0] > 1.5));
+    assert!(p.chunks_exact(3).filter(|q| q[0].is_finite()).all(|q| {
+        q[0].abs() >= 0.998 && q[0] <= 1.801
+            && (q[1] - q[0].abs()).abs() < 1e-5 && (q[2] - q[0].powi(3)).abs() < 1e-5
+    }));
+
+    for (source, gap) in [("⦃1/s∣-1<=s<=1⦄", 0.99), ("⦃floor(s)∣-1.5<=s<=1.5⦄", 0.0)] {
+        let (p, _) = mesh(source, "", &[]);
+        assert!(p.chunks_exact(3).any(|q| q[0] < -gap));
+        assert!(p.chunks_exact(3).any(|q| q[0] > gap));
+        for segment in p.chunks_exact(3).collect::<Vec<_>>().windows(2) {
+            let (a, b) = (segment[0][0], segment[1][0]);
+            if a.is_finite() && b.is_finite() {
+                if gap > 0.0 {
+                    assert!(a * b > 0.0 && a.abs() >= gap && b.abs() >= gap, "{source}: {a}, {b}");
+                } else {
+                    assert_eq!(a, b, "{source}: two isolated values are joined");
+                }
+            }
+        }
+    }
+
+    let mut both = run("⦃(s,s^2,0)∣-1<=s<=1⦄ ∪ ⦃(u,v,2+u^2-v^2)∣u^2+v^2<=1⦄", "", &[]).unwrap();
+    assert!(!both.indices().is_empty());
+    assert!(both.take_outline().chunks_exact(3).any(|q| q[0].is_finite() && q[2] == 0.0));
+}
+
+#[test]
+fn image_sets_offer_sliders_for_free_parameters() {
+    for (source, name) in [
+        ("D=⦃(ax,y)∣x^2+y^2<=1⦄", "a"),
+        ("D=⦃(2x,y)∣x^2+y^2<=a⦄", "a"),
+        ("D=⦃(x,a)∣-1<=x<=1⦄", "a"),
+        ("D=⦃(s,a)∣s∈[-1,1]⦄", "a"),
+        ("D=⦃(s,a s^2)∣0<=s<=1,a>0⦄", "a"),
+        ("D=⦃(s,s^2)∣0<=s<={alpha}⦄", "alpha"),
+    ] {
+        assert!(error_of(source, "").starts_with(&format!("変数 '{name}' はここでは使えません")), "{source}");
+        let result = run(source, "", &[(name, 2.0)]).unwrap();
+        assert!(result.used_params().split(',').any(|n| n == name), "{source}");
+    }
+    let (p, _) = mesh("D=⦃(x,a)∣-1<=x<=1⦄", "", &[("a", 2.0)]);
+    assert!(p.chunks_exact(3).any(|q| q[0].is_finite()));
+    assert!(p.chunks_exact(3).filter(|q| q[0].is_finite()).all(|q| q[1] == 2.0));
+}
+
+#[test]
+fn image_sets_keep_smooth_boundaries_and_normals() {
+    let dome = "⦃(x,y,sqrt(1-x^2-y^2))∣x^2+y^2<=0.8⦄";
+    let boundary_error = |m: &MeshResult| {
+        let mut edges = std::collections::HashMap::<(usize, usize), usize>::new();
+        for t in m.indices().chunks_exact(3) {
+            for i in 0..3 {
+                let (a, b) = (t[i] as usize, t[(i + 1) % 3] as usize);
+                *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let p = m.positions();
+        edges.into_iter().filter(|(_, count)| *count == 1).map(|((a, b), _)| {
+            let x = 0.5 * (p[3*a] + p[3*b]);
+            let y = 0.5 * (p[3*a+1] + p[3*b+1]);
+            (x*x + y*y - 0.8).abs()
+        }).fold(0.0, f32::max)
+    };
+    let fine = run(dome, "", &[]).unwrap();
+    let coarse = run_flags(dome, "", &[], 1).unwrap();
+    assert!(boundary_error(&fine) < 0.0015, "{}", boundary_error(&fine));
+    assert!(boundary_error(&fine) < 0.4 * boundary_error(&coarse));
+    assert!(2 * fine.indices().len() > 3 * fine.positions().len());
+    for (p, n) in fine.positions().chunks_exact(3).zip(fine.normals().chunks_exact(3)) {
+        assert!(p.iter().zip(n).map(|(a, b)| a * b).sum::<f32>() > 0.98, "{p:?}, {n:?}");
+    }
+
+    let surface = "⦃(x,y,sin(30x) cos(20y))∣-1<=x<=1,-1<=y<=1⦄";
+    let fine = run(surface, "", &[]).unwrap();
+    let coarse = run_flags(surface, "", &[], 1).unwrap();
+    assert!(fine.indices().len() > coarse.indices().len() * 2);
+    let curve = "⦃(t,sin(25t))∣-1<=t<=1⦄";
+    let fine = run(curve, "", &[]).unwrap();
+    let coarse = run_flags(curve, "", &[], 1).unwrap();
+    assert!(fine.positions().len() > coarse.positions().len());
 }
 
 #[test]
