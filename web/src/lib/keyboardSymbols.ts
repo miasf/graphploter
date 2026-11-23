@@ -5,6 +5,7 @@
 // キーボードに出さない（M14）。決まった形でだけ意味を持つ記号（∃・∀・↦）は、その形の例で確かめて残す。
 
 import { latexToText } from './latex.ts'
+import { LIMIT_TEMPLATE } from './calcKeys.ts'
 
 /** キー 1 つ。文字列なら LaTeX（表示も入力も同じ） */
 export type SymbolKey = string | { latex: string; label?: string; insert?: string; tooltip?: string }
@@ -248,7 +249,7 @@ const SYMBOL_GROUPS: { title: string; section: string; keys: SymbolKey[] }[] = [
       tpl('\\bigotimes_{#?}#?', 'テンソル積（大） \\bigotimes', '⨂'),
       tpl('\\bigodot_{#?}#?', '\\bigodot', '⨀'),
       tpl('\\biguplus_{#?}#?', '\\biguplus', '⨄'),
-      tpl('\\lim_{#?\\to#?}#?', '極限（片側極限は近づく先に上付きの + または −）', 'lim'),
+      tpl(LIMIT_TEMPLATE, '極限（片側極限は近づく先に上付きの + または −）', 'lim'),
       tpl('\\limsup_{#?}#?', '上極限 \\limsup', 'lim sup'),
       tpl('\\liminf_{#?}#?', '下極限 \\liminf', 'lim inf'),
       tpl('\\sup_{#?}#?', '上限 \\sup', 'sup'),

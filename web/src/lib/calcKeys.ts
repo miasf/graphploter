@@ -1,6 +1,8 @@
 // 数式キーボードの「∑∫∈」のタブのキー（微積・ベクトル・集合と論理の雛形）。
 // MathLive を読み込まない（テスト calcKeys.test.ts から、全部のキーが変換できることを確かめるため）。
 
+export const LIMIT_TEMPLATE = '\\lim_{#?\\to#?}#?'
+
 /** キー 1 つ（MathLive の VirtualKeyboardKeycap の一部） */
 export interface CalcKey {
   label: string
@@ -49,6 +51,7 @@ export const CALC_PAGES: { title: string; rows: CalcKey[][] }[] = [
         key("f′", "#@^{\\prime}", '導関数 f′（定義した関数の後ろに）'),
       ],
       [
+        key('lim', LIMIT_TEMPLATE, '極限（片側極限は近づく先に上付きの + または −）'),
         key('Δₓ', '\\Delta_{x}#?', '前進差分 f(x+h) − f(x)（幅は Δ_{x, h}）'),
         key('∇ₓ', '\\nabla_{x}#?', '後退差分 f(x) − f(x−h)'),
         key('δₓ', '\\delta_{x}#?', '中心差分 f(x+h/2) − f(x−h/2)'),

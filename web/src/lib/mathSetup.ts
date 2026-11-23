@@ -3,7 +3,7 @@
 import { MathfieldElement, type VirtualKeyboardKeycap } from 'mathlive'
 import { coordName, latexName, prettyName } from './params'
 import { COMMON_SYMBOLS, SYMBOL_PAGES, type SymbolKey } from './keyboardSymbols'
-import { CALC_PAGES, MATRIX_ROWS } from './calcKeys'
+import { CALC_PAGES, LIMIT_TEMPLATE, MATRIX_ROWS } from './calcKeys'
 import { FUNCTION_SHORTCUTS } from './autoNames'
 
 // フォントは public/mathlive-fonts に置いてある（npm run fonts でコピーされる）
@@ -32,6 +32,7 @@ export const SHORTCUTS: Record<string, string> = {
   '=>': '\\Rightarrow',
   sum: '\\sum_{n=1}^{#?}',
   prod: '\\prod_{n=1}^{#?}',
+  lim: LIMIT_TEMPLATE,
   nabla: '\\nabla',
   xor: '\\oplus',
   infty: '\\infty',

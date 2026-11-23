@@ -33,6 +33,15 @@ for (const page of [...CALC_PAGES, { title: '行列', rows: MATRIX_ROWS }]) {
 }
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 
+const limitKey = CALC_PAGES.find((page) => page.title === '微積')?.rows.flat().find((key) => key.label === 'lim')
+const limitArgs = ['x', '0', '\\frac{\\sin x}{x}']
+if (!limitKey || limitKey.insert.match(/#\?/g)?.length !== limitArgs.length) {
+  throw new Error('微積の lim に変数・近づく先・式の入力欄が必要です')
+}
+let limitArg = 0
+const limit = latexToText(limitKey.insert.replace(/#\?/g, () => limitArgs[limitArg++]))
+if (limit !== '@lim(x,0) ((sin x)/(x))') throw new Error('lim: ' + limit)
+
 const recurrenceKeys = CALC_PAGES.find((page) => page.title === '漸化式')?.rows.flat() ?? []
 for (const [label, args, expected] of [
   ['cobweb', ['a_0', '12'], '@cobweb (a_0,12)'],
