@@ -31,6 +31,8 @@ interface TextLabel {
   h: number
   priority: number
   nudgeX: number
+  /** 前回の配置候補。-1 は非表示、null は配置前。 */
+  placement: number | null
   x: number
   y: number
 }
@@ -57,8 +59,11 @@ function makeLabel(text: string, font: string, color: string, pos: THREE.Vector3
   const sprite = new THREE.Sprite(mat)
   sprite.position.copy(pos)
   sprite.renderOrder = 10 // いつも手前に描く
-  return { sprite, anchor: pos, w, h, priority: 0, nudgeX: 0, x: 0, y: 0 }
+  return { sprite, anchor: pos, w, h, priority: 0, nudgeX: 0, placement: null, x: 0, y: 0 }
 }
+
+/** 数字を再表示する、または元の位置に戻すまでの余裕（CSS px）。 */
+const LABEL_RESTORE_GAP = 5
 
 interface Theme {
   background: number
@@ -1360,6 +1365,8 @@ export class Viewer {
 
     // 端の値を先に置く。狭い画面や斜めから見たときは、重なる途中の数字を間引く。
     for (const label of this.labels) {
+      const previous = label.placement
+      label.placement = -1
       label.sprite.visible = false
       p.copy(label.anchor).applyMatrix4(view)
       if (!Number.isFinite(p.z) || p.z < -1 || p.z > 1) continue
@@ -1368,10 +1375,13 @@ export class Viewer {
       const halfW = label.w / 2 + 2
       const halfH = label.h / 2 + 2
       const margin = label.priority ? Math.max(halfW, halfH) : 0
-      if (halfW * 2 > width || halfH * 2 > height || x < -margin || x > width + margin || y < -margin || y > height + margin) continue
+      // 少し動くたびに表示と非表示を繰り返さないよう、画面に戻るときは境界から少し離れてから表示する。
+      const inset = previous === -1 ? LABEL_RESTORE_GAP : 0
+      const borderX = label.priority ? inset - margin : halfW + inset
+      const borderY = label.priority ? inset - margin : halfH + inset
+      if (halfW * 2 > width || halfH * 2 > height || x < borderX || x > width - borderX || y < borderY || y > height - borderY) continue
       const baseX = Math.min(width - halfW, Math.max(halfW, x))
       const baseY = Math.min(height - halfH, Math.max(halfH, y))
-      if (!label.priority && (baseX !== x || baseY !== y)) continue
 
       const attempts = label.priority ? 5 : 1
       for (let i = 0; i < attempts; i++) {
@@ -1383,9 +1393,14 @@ export class Viewer {
           if ((i <= 2) === (label.nudgeX !== 0)) px += direction * (label.nudgeX || -1) * (label.w + 4)
           else py += direction * (label.h + 4)
         }
-        if (px < halfW || px > width - halfW || py < halfH || py > height - halfH) continue
-        if (placed.some((other) => Math.abs(other.x - px) < (other.w + label.w) / 2 + 4 && Math.abs(other.y - py) < (other.h + label.h) / 2 + 3)) continue
+        // 前回の位置は重ならない間は使える。再表示や、ずらす前の位置に戻すときには余裕を待つ。
+        const gap = previous === -1 || (previous !== null && i < previous) ? LABEL_RESTORE_GAP : 0
+        const candidateHalfW = halfW + (px !== baseX ? gap : 0)
+        const candidateHalfH = halfH + (py !== baseY ? gap : 0)
+        if (px < candidateHalfW || px > width - candidateHalfW || py < candidateHalfH || py > height - candidateHalfH) continue
+        if (placed.some((other) => Math.abs(other.x - px) < (other.w + label.w) / 2 + 4 + gap && Math.abs(other.y - py) < (other.h + label.h) / 2 + 3 + gap)) continue
 
+        label.placement = i
         label.x = px
         label.y = py
         label.sprite.position.copy(px === x && py === y ? label.anchor : p.set(px * 2 / width - 1, 1 - py * 2 / height, p.z).unproject(camera))
