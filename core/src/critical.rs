@@ -43,6 +43,8 @@ pub struct Found {
 }
 
 const MAX_POINTS: usize = 100;
+/// 1 変数の高階導関数の式の節の上限（[`find`]）
+const HIGHER_NODES: usize = 50_000;
 
 fn real(prog: &Program, xs: &[Vec<f64>]) -> Vec<f64> {
     let n = xs.first().map_or(0, |x| x.len());
@@ -277,12 +279,16 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
     }
     let fv = real(&fp, &pts);
     let hv: Vec<Vec<f64>> = hp.iter().map(|p| real(p, &pts)).collect();
-    // 1 変数の 3〜8 階の導関数（f'' = 0 のとき）
+    // 1 変数の 3〜8 階の導関数（f'' = 0 のとき）。記号微分の式は階ごとに何倍にもなる（√x/√x の 8 階は 8 千万個の節で、
+    // 40 秒かかりメモリも尽きた。#160）ので、節が HIGHER_NODES 個を超えたらそこまでにする
     let mut higher: Vec<Program> = Vec::new();
-    if k == 1 {
+    if k == 1 && found.iter().enumerate().any(|(i, _)| hv[0][i].abs() <= 1e-7 * fv[i].abs().max(gscale * diag).max(1e-300) / (diag * diag)) {
         let mut d = hess_e[0].clone();
         for _ in 3..=8 {
             d = crate::diff::diff(&d, &vars[0])?;
+            if d.node_count() > HIGHER_NODES {
+                break;
+            }
             higher.push(compile(&d)?);
         }
     }
@@ -451,6 +457,10 @@ fn classify_one(fp1: &Program, derivs: &[&Program], p: f64, fscale: f64, diag: f
             };
         }
         zeros.push(names[j]);
+    }
+    if derivs.len() < names.len() {
+        // 式が大きすぎて、次の階の導関数を作らなかった
+        return done(x, Class::Degenerate, format!("{}{} の式が大きすぎるので、判定できない", prefix(&zeros), names[derivs.len()]));
     }
     done(x, Class::Degenerate, "f″ = 0 で、8 階までの導関数も 0".to_string())
 }
