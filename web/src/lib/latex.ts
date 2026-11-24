@@ -1191,31 +1191,7 @@ class Converter {
    * 括弧の外に d の文字があれば（∫ (x + 1) dx）、何もしない
    */
   private unwrapForm(multi: number) {
-    if (this.peek() !== '\\left' || this.toks[this.i + 1] !== '(') return
-    try {
-      integrandSpan(this.toks, this.i, multi)
-      return
-    } catch {
-      // 括弧の外に d が無い
-    }
-    let depth = 0
-    let r = this.i
-    for (; r < this.toks.length; r++) {
-      if (this.toks[r] === '\\left') depth++
-      else if (this.toks[r] === '\\right' && --depth === 0) break
-    }
-    if (r >= this.toks.length) return
-    const inner = this.toks.slice(this.i + 2, r)
-    let span
-    try {
-      span = integrandSpan(inner, 0, multi)
-    } catch {
-      return
-    }
-    let end = span.vars.length === 1 && COORD_LETTERS.has(span.vars[0]) ? formTerms(inner, span.next, span.vars[0]).next : span.next
-    while (SPACES.has(inner[end] ?? '')) end++
-    if (end !== inner.length) return
-    this.toks = [...this.toks.slice(0, this.i), ...inner, ...this.toks.slice(r + 2)]
+    this.toks = unwrapFormTokens(this.toks, this.i, multi)
   }
 
   /**
@@ -2322,6 +2298,108 @@ export function integralDisplay(latex: string, progress = 1, scale = 1, flat = t
   }
 }
 
+/** 1 変数の積分の記号（\int と、同じ意味の \intop・\smallint） */
+const SINGLE_INTEGRALS = new Set(['\\int', '\\intop', '\\smallint'])
+
+/**
+ * 1 文字の名前として使っている文字（x_1・t_{2} の x・t、a_x の x のような添字の一部は除く）。
+ * 積分の変数でない座標 x, y, z が残っているかを調べるのに使う（x_1 は座標の x ではない。#199）
+ */
+function bareLetters(ts: Token[]): Set<string> {
+  const inSub = new Array<boolean>(ts.length).fill(false)
+  for (let k = 0; k < ts.length; k++) {
+    if (ts[k] !== '_') continue
+    if (k > 0) inSub[k - 1] = true // 添字の付いた名前の本体（x_1 の x）
+    if (ts[k + 1] !== '{') {
+      inSub[k + 1] = true
+      continue
+    }
+    let depth = 0
+    for (let j = k + 1; j < ts.length; j++) {
+      if (ts[j] === '{') depth++
+      else if (ts[j] === '}' && --depth === 0) break
+      inSub[j] = true
+    }
+  }
+  return new Set(ts.filter((t, k) => !inSub[k] && /^[A-Za-z]$/.test(t)))
+}
+
+/** 1 文字の名前 from を to に付け替える（添字の一部・添字の付いた名前は変えない） */
+function renameLetter(ts: Token[], from: string, to: string): Token[] {
+  return ts.map((t, k) => (t === from && ts[k + 1] !== '_' && ts[k - 1] !== '_' && !(ts[k - 1] === '{' && ts[k - 2] === '_') ? to : t))
+}
+
+/** 式に使っていない 1 文字の名前（積分の変数を付け替えるとき） */
+function freshLetter(ts: Token[], avoid: string[] = []): string {
+  const used = new Set([...ts, ...avoid])
+  return ['t', 's', 'u', 'w', 'r', 'q', 'p', 'v', 'm', 'n'].find((c) => !used.has(c)) ?? 'τ'
+}
+
+/**
+ * 式全体が 1 組の括弧 ( … )・\left( … \right) で囲まれていれば、その中身。そうでなければ null
+ * （累次積分の内側を括弧で囲んだ形 ∫_0^1 (∫_0^x y dy) dx。#197）
+ */
+function unwrapWhole(ts: Token[]): Token[] | null {
+  const n = ts.length
+  if (n >= 4 && ts[0] === '\\left' && ts[1] === '(' && ts[n - 2] === '\\right' && ts[n - 1] === ')') {
+    let depth = 0
+    for (let k = 0; k < n; k++) {
+      if (ts[k] === '\\left') depth++
+      else if (ts[k] === '\\right' && --depth === 0 && k !== n - 2) return null
+    }
+    return ts.slice(2, n - 2)
+  }
+  if (n >= 2 && ts[0] === '(' && ts[n - 1] === ')') {
+    let depth = 0
+    for (let k = 0; k < n; k++) {
+      if (ts[k] === '(' || ts[k] === '{' || ts[k] === '\\left') depth++
+      else if ((ts[k] === ')' || ts[k] === '}' || ts[k] === '\\right') && --depth === 0 && k !== n - 1) return null
+    }
+    return ts.slice(1, n - 1)
+  }
+  return null
+}
+
+/**
+ * 積分の中身が、括弧で囲んだ微分形式（(−y dx + x dy)・\left( … \right)）なら、括弧を外した字句の並び。
+ * 括弧の外に d が無く、中身が「P dx ± Q dy …」で終わるときだけ（(x + 1) dx は外さない。#130・#207）
+ */
+export function unwrapFormTokens(toks: Token[], i: number, multi: number): Token[] {
+  const plain = toks[i] === '('
+  if (!plain && (toks[i] !== '\\left' || toks[i + 1] !== '(')) return toks
+  // 対応する閉じ括弧
+  let depth = 0
+  let r = i
+  for (; r < toks.length; r++) {
+    const t = toks[r]
+    if (plain) {
+      if (t === '(' || t === '{' || t === '\\left') depth++
+      else if ((t === ')' || t === '}' || t === '\\right') && --depth === 0) break
+    } else if (t === '\\left') depth++
+    else if (t === '\\right' && --depth === 0) break
+  }
+  if (r >= toks.length) return toks
+  const after = plain ? r + 1 : r + 2
+  // 括弧の外（後ろ）に d があれば、括弧はふつうの括弧（(x + 1) dx）
+  try {
+    const outer = integrandSpan(toks, i, multi)
+    if (outer.end >= after) return toks
+  } catch {
+    // 括弧の外に d が無い
+  }
+  const inner = toks.slice(i + (plain ? 1 : 2), r)
+  let span
+  try {
+    span = integrandSpan(inner, 0, multi)
+  } catch {
+    return toks
+  }
+  let end = span.vars.length === 1 && COORD_LETTERS.has(span.vars[0]) ? formTerms(inner, span.next, span.vars[0]).next : span.next
+  while (SPACES.has(inner[end] ?? '')) end++
+  if (end !== inner.length) return toks
+  return [...toks.slice(0, i), ...inner, ...toks.slice(after)]
+}
+
 /** 定積分の近似の方法（左端・右端・中点のリーマン和、台形則、シンプソン則） */
 export type RiemannMethod = 'left' | 'right' | 'mid' | 'trap' | 'simpson'
 
@@ -2356,29 +2434,41 @@ export function riemannDisplay(latex: string, method: RiemannMethod, nIn: number
     const toks = tokenize(latex)
     const i = toks.findIndex((t) => INTEGRALS.has(t))
     if (i < 0) return null
-    if (toks[i] !== '\\int') throw new LatexError('近似は、1 変数の定積分 ∫_a^b f dx で描けます')
+    // \intop・\smallint も \int と同じ（#195）
+    if (!SINGLE_INTEGRALS.has(toks[i])) throw new LatexError('近似は、1 変数の定積分 ∫_a^b f dx で描けます')
     const head = limitsAt(toks, i)
     if (head.sub === null || head.sup === null || head.sub.length === 0 || head.sup.length === 0) throw new LatexError('近似は、上下の端のある定積分で描けます')
     const span = integrandSpan(toks, head.k, 1)
     if (span.vector) throw new LatexError('近似は、値が数になる被積分関数で描けます')
-    const body = toks.slice(head.k, span.end)
+    let body = toks.slice(head.k, span.end)
     if (body.length === 0) throw new LatexError('積分する式を書いてください')
     if (INTEGRALS.has(body[0])) throw new LatexError('近似は、1 変数の定積分（入れ子でないもの）で描けます')
-    const v = span.vars[0]
-    const used = new Set([...body, ...head.sub, ...head.sup].filter((t) => /^[A-Za-z]$/.test(t)))
-    const free = ['x', 'y', 'z'].find((c) => used.has(c) && c !== v)
+    let v = span.vars[0]
+    // 端に積分の変数と同じ名前があれば（∫_0^x x² dx）、中身の変数を付け替える（端の x は別のもの。積分の図と同じ。#194）
+    if (bareLetters([...head.sub, ...head.sup]).has(v)) {
+      const to = freshLetter(toks)
+      body = renameLetter(body, v, to)
+      v = to
+    }
+    const free = ['x', 'y', 'z'].find((c) => c !== v && (bareLetters(body).has(c) || bareLetters(head.sub!).has(c) || bareLetters(head.sup!).has(c)))
     if (free) throw new LatexError(`範囲か中身に、積分の変数でない ${free} があるので描けません`)
-    if ([...head.sub, ...head.sup].includes(v)) throw new LatexError('積分の端に、積分の変数は使えません')
+    /** 式に出てくる 1 文字（添字の付いた名前の文字も）。足す名前（Σ の添字など）と重ねない */
+    const used = new Set([...body, ...head.sub, ...head.sup].filter((t) => /^[A-Za-z]$/.test(t)))
     let n = Math.max(1, Math.min(400, Math.round(nIn)))
     if (method === 'simpson' && n % 2 === 1) n += 1
     const paren = (x: string) => `\\left(${x}\\right)`
     const a = paren(joinToks(head.sub))
     const b = paren(joinToks(head.sup))
     const D = `\\frac{${b}-${a}}{${n}}`
-    /** 被積分関数の、点 p での値 */
-    const f = (p: string) => paren(joinToks(body.flatMap((t) => (t === v ? tokenize(paren(p)) : [t]))))
-    const idx = ['k', 'j', 'm', 'p', 'q'].find((c) => !used.has(c) && c !== v) ?? 'k'
-    const [h, kk] = ['y', 'z', 'w', 'h', 'q', 'p'].filter((c) => c !== v && !used.has(c) && c !== idx)
+    /**
+     * 被積分関数の、点 p での値。字句を置き換えず、点での値 \left. f \right|_{t = p} にする
+     * （中の Σ_{t=1}^3 の添字 t・添字の付いた名前 t_1 は、積分の変数ではないので変えない。#178・#207）
+     */
+    const f = (p: string) => `\\left.${paren(joinToks(body))}\\right|_{${v}=${p}}`
+    // Σ の添字・図の座標の名前は、式に出てこない名前にする（利用者の k・j … を使っていても重ねない。#178）
+    const spare = ['k', 'j', 'm', 'n', 'p', 'q', 'r', 's', 'l', 'g', 'h', 'w', 'y', 'z', 'a', 'b', 'c', 'u'].filter((c) => !used.has(c) && c !== v)
+    const idx = spare[0] ?? 'k'
+    const [h, kk] = ['y', 'z', 'w', 'h', 'q', 'p', ...spare].filter((c) => c !== v && !used.has(c) && c !== idx)
     const X = (c: string) => `${a}+${paren(c)}${D}`
     const K = `\\min\\left(\\left\\lfloor\\frac{${v}-${a}}{${D}}\\right\\rfloor,${n - 1}\\right)`
     let F: string
@@ -2398,10 +2488,18 @@ export function riemannDisplay(latex: string, method: RiemannMethod, nIn: number
       F = `\\frac{${f(x0)}${d(x1, x2)}-2${f(x1)}${d(x0, x2)}+${f(x2)}${d(x0, x1)}}{2${paren(D)}^{2}}`
       sum = `\\frac{${D}}{3}\\left(${f(a)}+${f(b)}+4\\sum_{${idx}=1}^{${n / 2}}${f(X(`2${idx}-1`))}+2\\sum_{${idx}=1}^{${n / 2 - 1}}${f(X(`2${idx}`))}\\right)`
     }
-    const set = `\\left\\{\\left(${v},${h},${kk}\\right)\\mid ${a}\\le ${v}\\le ${b},\\min\\left(0,${F}\\right)\\le ${h}\\le\\max\\left(0,${F}\\right),${kk}=0\\right\\}`
+    // 上の端 < 下の端（∫_1^0）でも、図は小さいほうから大きいほうまで（値は向きの分だけ符号が逆。#179）
+    const [na, nb] = [plainNumber(joinToks(head.sub)), plainNumber(joinToks(head.sup))]
+    const same = joinToks(head.sub).replace(/\s+/g, '') === joinToks(head.sup).replace(/\s+/g, '') || (na !== null && na === nb)
+    const reversed = na !== null && nb !== null && na > nb
+    const range = na !== null && nb !== null ? (reversed ? `${b}\\le ${v}\\le ${a}` : `${a}\\le ${v}\\le ${b}`) : `\\min\\left(${a},${b}\\right)\\le ${v}\\le\\max\\left(${a},${b}\\right)`
+    const set = `\\left\\{\\left(${v},${h},${kk}\\right)\\mid ${range},\\min\\left(0,${F}\\right)\\le ${h}\\le\\max\\left(0,${F}\\right),${kk}=0\\right\\}`
     const exact = `\\int_{${joinToks(head.sub)}}^{${joinToks(head.sup)}}${joinToks(body)}\\,d${v}`
     const name = RIEMANN_METHODS.find((m) => m.id === method)!.label
-    const label = method === 'trap' ? `台形則（n = ${n}）` : method === 'simpson' ? `シンプソン則（n = ${n}）` : `${name}のリーマン和（n = ${n}）`
+    const base = method === 'trap' ? `台形則（n = ${n}）` : method === 'simpson' ? `シンプソン則（n = ${n}）` : `${name}のリーマン和（n = ${n}）`
+    // 上下の端が同じなら、積分も近似も 0（つぶれた図は出さない）
+    if (same) return { latex: '', sum: '0', exact: '0', label: `${base}: 上下の端が同じなので 0`, n }
+    const label = reversed ? `${base}: 上の端が下の端より小さいので、値は面積の符号を逆にしたもの（左端・右端は積分の向きで、下の端の側が左端）` : base
     return { latex: set, sum, exact, label, n }
   } catch (e) {
     if (e instanceof LatexError) return { error: e.message }
@@ -2409,9 +2507,19 @@ export function riemannDisplay(latex: string, method: RiemannMethod, nIn: number
   }
 }
 
-/** 数を LaTeX に書く（短く） */
+/**
+ * 数を LaTeX に書く（有効数字 12 桁。小さい区間の途中 0.0000002 を 0 に丸めない。#193）。
+ * 指数表記 2e-7 は e がネイピア数と読まれるので、小数で書く
+ */
 const numTex = (v: number) => {
-  const r = String(Math.round(v * 1e6) / 1e6)
+  const x = Number(v.toPrecision(12))
+  let r = String(x)
+  const m = /^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(r)
+  if (m) {
+    const digits = m[2] + (m[3] ?? '')
+    const point = m[2].length + Number(m[4])
+    r = point <= 0 ? `${m[1]}0.${'0'.repeat(-point)}${digits}` : point >= digits.length ? m[1] + digits + '0'.repeat(point - digits.length) : `${m[1]}${digits.slice(0, point)}.${digits.slice(point)}`
+  }
   return r.startsWith('-') ? `\\left(${r}\\right)` : r
 }
 
@@ -2419,18 +2527,48 @@ const numTex = (v: number) => {
  * 条件の中の「下の端 ≤ 変数 ≤ 上の端」を探す（names の順に、端にほかの変数を含まないものを優先）。
  * 見つかれば、その変数・条件の位置・両端
  */
-function findSweep(cond: Token[], names: string[]): { name: string; part: number; parts: Token[][]; lo: Token[]; hi: Token[] }[] {
+type Sweep = { name: string; lo: Token[]; hi: Token[]; with: (hi: Token[]) => Token[] }
+
+function findSweep(cond: Token[], names: string[]): Sweep[] {
   const parts = splitTop(cond, (t) => t === ',')
-  const found: { name: string; part: number; parts: Token[][]; lo: Token[]; hi: Token[] }[] = []
+  const found: Sweep[] = []
+  const LESS = ['<', '\\lt', '\\le', '\\leq', '\\leqslant', '\\leqq']
+  const MORE = ['>', '\\gt', '\\ge', '\\geq', '\\geqslant', '\\geqq']
+  const join = (ps: Token[][]) => ps.flatMap((p, k) => (k === 0 ? p : [',', ...p]))
+  /** 片側だけの条件（0 ≤ x・x ≤ 1・x ≥ 0・1 ≥ x）: 変数ごとの下の端・上の端と、その条件の位置 */
+  const lower = new Map<string, { part: number; lo: Token[] }>()
+  const upper = new Map<string, { part: number; hi: Token[] }>()
   parts.forEach((p, k) => {
     const pieces = splitTop(p, (t) => RELATIONS.has(t))
-    if (pieces.length !== 3) return
     const rels = p.filter((t) => RELATIONS.has(t))
-    if (!rels.every((r) => ['<', '\\lt', '\\le', '\\leq', '\\leqslant', '\\leqq'].includes(r))) return
-    if (pieces[1].length !== 1 || !names.includes(pieces[1][0])) return
-    found.push({ name: pieces[1][0], part: k, parts, lo: pieces[0], hi: pieces[2] })
+    const less = rels.every((r) => LESS.includes(r))
+    const more = rels.every((r) => MORE.includes(r))
+    if (pieces.length === 3 && (less || more) && pieces[1].length === 1 && names.includes(pieces[1][0])) {
+      // 下 ≤ 変数 ≤ 上（上 ≥ 変数 ≥ 下 も同じ）
+      const [lo, hi] = less ? [pieces[0], pieces[2]] : [pieces[2], pieces[0]]
+      const name = pieces[1][0]
+      found.push({ name, lo, hi, with: (h) => join(parts.map((q, j) => (j === k ? [...lo, '\\le', name, '\\le', ...h] : q))) })
+      return
+    }
+    if (pieces.length !== 2 || !(less || more)) return
+    const [a, b] = pieces
+    const one = (ts: Token[]) => ts.length === 1 && names.includes(ts[0])
+    // a < 変数 なら下の端 a、変数 < b なら上の端 b（> なら逆）
+    if (one(b) && !one(a)) {
+      if (less) lower.set(b[0], { part: k, lo: a })
+      else upper.set(b[0], { part: k, hi: a })
+    } else if (one(a) && !one(b)) {
+      if (less) upper.set(a[0], { part: k, hi: b })
+      else lower.set(a[0], { part: k, lo: b })
+    }
   })
-  const free = (f: (typeof found)[number]) => ![...f.lo, ...f.hi].some((t) => names.includes(t))
+  for (const [name, l] of lower) {
+    const u = upper.get(name)
+    if (!u || found.some((f) => f.name === name)) continue
+    // 上の端の条件だけを「変数 ≤ 途中」に書き換える
+    found.push({ name, lo: l.lo, hi: u.hi, with: (h) => join(parts.map((q, j) => (j === u.part ? [name, '\\le', ...h] : q))) })
+  }
+  const free = (f: Sweep) => ![...f.lo, ...f.hi].some((t) => names.includes(t))
   return names.flatMap((n) => found.filter((f) => f.name === n)).sort((a, b) => Number(free(b)) - Number(free(a)))
 }
 
@@ -2468,6 +2606,9 @@ function fieldOf(body: Token[], vector: boolean): Token[] | null {
 
 function integralView(toks: Token[], i: number, progress: number, scale: number, flat = true): IntegralView {
   const multi = toks[i] === '\\iint' || toks[i] === '\\oiint' ? 2 : toks[i] === '\\iiint' ? 3 : 1
+  const head0 = limitsAt(toks, i)
+  // 曲線の上の (P dx + Q dy) の括弧は、計算と同じく外す（#207）
+  if (head0.sub !== null && head0.sup === null) toks = unwrapFormTokens(toks, head0.k, multi)
   const head = limitsAt(toks, i)
   let span = integrandSpan(toks, head.k, multi)
   let body = toks.slice(head.k, span.end)
@@ -2480,24 +2621,33 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
     for (;;) {
       if (span.vector || lim.sub === null || lim.sup === null || lim.sub.length === 0 || lim.sup.length === 0) throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
       if (names.length > 0) cond.push(',')
-      names.push(span.vars[0])
-      cond.push(...lim.sub, '\\le', span.vars[0], '\\le', ...lim.sup)
-      // 中身が丸ごと、上下の端のある積分なら、その中へ進む
-      if (!INTEGRALS.has(body[0]) || body[0] !== '\\int') break
-      const inner = limitsAt(body, 0)
+      let v = span.vars[0]
+      // 積分の変数（ダミー）と同じ名前が、端か外側の積分の変数にもあるなら、中身の変数を付け替える
+      // （∫_0^x x² dx の上の端の x・∫_0^1 ∫_0^x x dx dx の外側の x は、中身の x とは別のもの。#194・#207）
+      if (names.includes(v) || bareLetters([...lim.sub, ...lim.sup]).has(v)) {
+        const to = freshLetter(toks, names)
+        body = renameLetter(body, v, to)
+        v = to
+      }
+      names.push(v)
+      cond.push(...lim.sub, '\\le', v, '\\le', ...lim.sup)
+      // 中身が丸ごと、上下の端のある積分なら、その中へ進む（括弧で囲んだ内側 (∫_0^x y dy) も。#197）
+      const whole = unwrapWhole(body) ?? body
+      if (!SINGLE_INTEGRALS.has(whole[0] ?? '')) break
+      const inner = limitsAt(whole, 0)
       if (inner.sub === null || inner.sup === null) break
       let innerSpan
       try {
-        innerSpan = integrandSpan(body, inner.k, 1)
+        innerSpan = integrandSpan(whole, inner.k, 1)
       } catch {
         break
       }
       let rest = innerSpan.next
-      while (SPACES.has(body[rest] ?? '')) rest++
-      if (rest < body.length || innerSpan.vector) break
+      while (SPACES.has(whole[rest] ?? '')) rest++
+      if (rest < whole.length || innerSpan.vector) break
       lim = inner
       span = innerSpan
-      body = body.slice(inner.k, innerSpan.end)
+      body = whole.slice(inner.k, innerSpan.end)
     }
     region = { names, cond }
   } else if (head.sub !== null) {
@@ -2549,17 +2699,17 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
     const sw = findSweep(region.cond, names)[0]
     let cond = region.cond
     if (sw && progress < 1) {
-      const parts = sw.parts.map((p) => [...p])
-      parts[sw.part] = [...sw.lo, '\\le', sw.name, '\\le', ...tokenize(between(sw.lo, sw.hi, progress))]
-      cond = parts.flatMap((p, k) => (k === 0 ? p : [',', ...p]))
+      cond = sw.with(tokenize(between(sw.lo, sw.hi, progress)))
     }
     const sym = ['\\int', '\\iint', '\\iiint'][names.length - 1] ?? '\\int'
     const partial = sw ? `${sym}_{${set(paren(names.join(',')), joinToks(cond))}}${joinToks(body)}\\,${names.map((n) => `d${n}`).join('\\,')}` : undefined
     const swept = { sweep: sw?.name, partial, extras: fieldExtra() }
     // 積分の変数でない座標 x, y, z が残っていると、1 つの図形にならない（∫_0^x … dt は x ごとに違う図形）
-    const used = new Set([...body, ...cond].filter((t) => /^[A-Za-z]$/.test(t)))
+    const used = new Set([...bareLetters(body), ...bareLetters(cond)])
     const free = ['x', 'y', 'z'].find((n) => used.has(n) && !names.includes(n))
     if (free) throw new LatexError(`範囲か中身に、積分の変数でない ${free} があるので描けません（${free} が数なら描けます）`)
+    // 足す座標の名前は、添字の付いた名前（x_1）の文字とも重ねない
+    for (const t of [...body, ...cond]) if (/^[A-Za-z]$/.test(t)) used.add(t)
     /** 積分の変数でも式の中の文字でもない、足す座標の名前 */
     const extra = ['z', 'y', 'x', 'w', 'h', 'k', 'q', 'p'].filter((n) => !names.includes(n) && !used.has(n))
     const f = joinToks(body)
@@ -2618,9 +2768,7 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
   const sw = sweeps.find((f) => f.name === params[0]) ?? sweeps[0]
   let cond = region.cond
   if (sw && progress < 1) {
-    const parts = sw.parts.map((p) => [...p])
-    parts[sw.part] = [...sw.lo, '\\le', sw.name, '\\le', ...tokenize(between(sw.lo, sw.hi, progress))]
-    cond = parts.flatMap((p, k) => (k === 0 ? p : [',', ...p]))
+    cond = sw.with(tokenize(between(sw.lo, sw.hi, progress)))
   }
   // 曲線の上の P dx + Q dy は、続く項も同じ曲線の上の積分にして足す
   const tail = span.vars.length === 1 && COORD_LETTERS.has(span.vars[0]) && params.length === 1 ? formTerms(toks, span.next, span.vars[0]) : { terms: [], next: span.next }
@@ -2715,7 +2863,10 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
     }
     // 空間の曲線: 曲線に垂直で、できるだけ上を向いた向き N = (e_z − (e_z · T) T) / |…| に、高さの分だけ広げた帯
     // （N ⊥ r′ なので、帯の面積がちょうど積分の値）
-    const ez = '\\left(0,0,1\\right)'
+    // 基準の向き: ふつうは上向き e_z。曲線が z 軸に平行な直線（x, y の成分が媒介変数によらない (0, 0, t)）なら、
+    // 接線が e_z と平行で垂直な向きが決まらないので e_x にする（#207）
+    const vertical = comps.slice(0, 2).every((c) => !c.some((t) => params.includes(t)))
+    const ez = vertical ? '\\left(1,0,0\\right)' : '\\left(0,0,1\\right)'
     const perp = `\\left(${ez}-\\frac{${d}\\cdot ${ez}}{${d}\\cdot ${d}}${d}\\right)`
     const N = `\\frac{${perp}}{\\left|${perp}\\right|}`
     return {
@@ -2758,9 +2909,9 @@ function implicitView(region: { names: string[]; eqs: Token[][]; cond: Token[] }
   const { names, eqs, cond } = region
   const k = names.length - eqs.length
   if (k < 1) throw new LatexError('等式で範囲が点になります（積分は 0）')
-  const used = new Set(body.filter((t) => /^[A-Za-z]$/.test(t)))
-  const free = ['x', 'y', 'z'].find((n) => used.has(n) && !names.includes(n))
+  const free = ['x', 'y', 'z'].find((n) => bareLetters(body).has(n) && !names.includes(n))
   if (free) throw new LatexError(`中身に、範囲の変数でない ${free} があるので描けません`)
+  const used = new Set(body.filter((t) => /^[A-Za-z]$/.test(t)))
   const paren = (ts: string) => `\\left(${ts}\\right)`
   const set = (point: string, c: string) => `\\left\\{${paren(point)}\\mid ${c}\\right\\}`
   const field = fieldOf(body, vector)

@@ -358,9 +358,9 @@ check('積分を描く式（ベクトル場の面積分）', drawn('\\iint_{S}\\
   const v = integralDisplay('\\oint_{H}\\vec{F}\\cdot d\\mathbf{r}', 0.5, 2)
   const ok = v !== null && !('error' in v) ? v : null
   check('進み具合の変数', ok?.sweep, 't')
-  check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.141593; {vec},{d_r})({vec_F})')
+  check('途中までの積分', ok && latexToText(ok.partial!), '@intset(( cos t, sin t,t),0<=t<=3.14159265359; {vec},{d_r})({vec_F})')
   check('添えるもの', ok?.extras?.map((e) => e.role), ['path', 'point', 'tangent', 'vector', 'component'])
-  check('今の点', ok && latexToText(ok.extras![1].latex), '( cos (3.141593), sin (3.141593),(3.141593))')
+  check('今の点', ok && latexToText(ok.extras![1].latex), '( cos (3.14159265359), sin (3.14159265359),(3.14159265359))')
   // 被積分関数が媒介変数そのもの（(t + 1, t²)）: 場の矢印は添えず、F の矢印には今の t を入れる
   setRegions({ C: '\\left\\{\\left(\\cos t,\\sin t\\right)\\mid0\\le t\\le2\\pi\\right\\}' })
   const q = integralDisplay('\\oint_{C}\\left(t+1,t^2\\right)\\cdot d\\mathbf{r}', 0.25, 2)
@@ -521,7 +521,7 @@ check(
     if (!r || 'error' in r) throw new Error(`近似が作れない: ${m}`)
     return r
   }
-  check('左端の和', latexToText(ok('left', 4).sum), '(((2)-(0))/(4)) @sum(k,0,3) (((0)+(k+0)(((2)-(0))/(4)))^(2))')
+  check('左端の和', latexToText(ok('left', 4).sum), '(((2)-(0))/(4)) @sum(k,0,3) @at((x^(2)),x,(0)+(k+0)(((2)-(0))/(4)))')
   check('左端の説明', ok('left', 4).label, '左端のリーマン和（n = 4）')
   check('シンプソンは偶数', ok('simpson', 5).n, 6)
   check('近似の図は集合', latexToText(ok('mid', 3).latex).startsWith('⦃(x,y,z)∣(0)<=x<=(2),'), true)
@@ -591,6 +591,77 @@ check(
   check('境目（<）', conditionHolds(['<'], [1, 1]), false)
   check('境目（≤）', conditionHolds(['<='], [1, 1]), true)
   check('値が無い', conditionHolds(['>'], [NaN, 1]), false)
+}
+
+// 第2段階: 積分の図と近似（#193 #195 #197 #179 #196 #199 #130 #178 #194 #207）
+{
+  const view = (latex: string, progress = 1, flat = true) => integralDisplay(latex, progress, 1, flat)
+  const err = (v: ReturnType<typeof integralDisplay> | ReturnType<typeof riemannDisplay>) => (v && 'error' in v ? v.error : null)
+  // #193: 微小区間の途中を 0 に丸めない
+  const tiny = view('\\int_0^{0.0000004}1\\,dt', 0.5)
+  check('#193 微小区間の途中', tiny && !('error' in tiny) && latexToText(tiny.partial!), latexToText('\\int_{\\left\\{\\left(t\\right)\\mid 0\\le t\\le 0.0000002\\right\\}}1\\,dt'))
+  const far = view('\\int_{1000}^{1000.000004}1\\,dt', 0.5)
+  check('#193 大きい基準値の近く', far && !('error' in far) && far.partial!.includes('1000.000002'), true)
+  // #195: \intop・\smallint でも近似を作れる
+  for (const sym of ['\\intop', '\\smallint']) {
+    const r = riemannDisplay(`${sym}_0^1 t^2\\,dt`, 'simpson', 8)
+    check(`#195 ${sym} の近似`, r && !('error' in r) && latexToText(r.sum), latexToText((riemannDisplay('\\int_0^1 t^2\\,dt', 'simpson', 8) as { sum: string }).sum))
+  }
+  // #197: 括弧で囲んだ内側の積分も、同じ領域
+  const plain = view('\\int_0^1\\int_0^x y\\,dy\\,dx')
+  for (const wrapped of ['\\int_0^1\\left(\\int_0^x y\\,dy\\right)dx', '\\int_0^1(\\int_0^x y\\,dy)dx']) {
+    const w = view(wrapped)
+    check(`#197 ${wrapped}`, w && !('error' in w) && w.latex, plain && !('error' in plain) && plain.latex)
+  }
+  // #196: 逆向きの不等号・片側ずつの条件でも、進み具合を動かせる
+  const sq = (c: string) => view(`\\iint_{\\left\\{\\left(x,y\\right)\\mid ${c}\\right\\}}1\\,dA`, 0.5)
+  const base = sq('0\\le x\\le1,0\\le y\\le1')
+  for (const c of ['1\\ge x\\ge0,1\\ge y\\ge0', '0\\le x,x\\le1,0\\le y,y\\le1', 'x\\ge0,1\\ge x,y\\ge0,y\\le1']) {
+    const v = sq(c)
+    check(`#196 ${c}: 掃く変数`, v && !('error' in v) && v.sweep, 'x')
+    check(`#196 ${c}: 途中の図`, v && !('error' in v) && latexToText(v.latex).includes('x<=0.5'), true)
+  }
+  check('#196 ふつうの書き方は今までどおり', base && !('error' in base) && base.sweep, 'x')
+  // #199: 添字の付いた x_1 は座標の x ではない
+  check('#199 積分の図', err(view('\\int_0^{x_1}t^2\\,dt')), null)
+  check('#199 近似', err(riemannDisplay('\\int_0^{x_1}t^2\\,dt', 'simpson', 8)), null)
+  check('#199 本当の座標 x は今までどおり描けない', err(view('\\int_0^{x}t^2\\,dt'))?.includes('積分の変数でない x'), true)
+  // #194: 上の端と中身が同じ名前でも、上の端の x は座標（どちらの書き方も同じ扱い）
+  check('#194 ∫_0^x x² dx', err(view('\\int_0^x x^2\\,dx')), err(view('\\int_0^x t^2\\,dt')))
+  check('#194 近似も同じ', err(riemannDisplay('\\int_0^x x^2\\,dx', 'left', 4)), err(riemannDisplay('\\int_0^x t^2\\,dt', 'left', 4)))
+  // #207: 内側と外側が同じ名前の累次積分は、内側を付け替えて三角形の領域
+  const same = view('\\int_0^1\\int_0^x x\\,dx\\,dx')
+  check('#207 同じ名前の累次積分', err(same), null)
+  check('#207 同じ名前の累次積分: 2 重', same && !('error' in same) && /<=x<=1/.test(latexToText(same.latex)), true)
+  // #207・#130: 括弧で囲んだ P dx + Q dy は、括弧なしと同じ
+  const circle = '\\{(\\cos t,\\sin t)\\mid 0\\le t\\le2\\pi\\}'
+  const bare = latexToText(`\\oint_{${circle}}-y\\,dx+x\\,dy`)
+  for (const form of [`(-y\\,dx+x\\,dy)`, `\\left(-y\\,dx+x\\,dy\\right)`]) {
+    check(`#130 ${form} の計算`, latexToText(`\\oint_{${circle}}${form}`), bare)
+    const v = view(`\\oint_{${circle}}${form}`)
+    check(`#207 ${form} の図`, err(v), null)
+  }
+  check('#130 ふつうの括弧の被積分関数は外さない', latexToText('\\int_0^1(x+1)\\,dx'), '@int(x,0,1)((x+1))')
+  // #207: z 軸に平行な線でも帯を作る（基準を e_x にする）
+  check('#207 縦の線の帯', view('\\int_{\\{(0,0,t)\\mid 0\\le t\\le1\\}}1\\,ds', 1, false) && latexToText((view('\\int_{\\{(0,0,t)\\mid 0\\le t\\le1\\}}1\\,ds', 1, false) as { latex: string }).latex).includes('(1,0,0)'), true)
+  check('#207 ふつうの曲線は上向きのまま', latexToText((view('\\int_{\\{(\\cos t,\\sin t,t)\\mid 0\\le t\\le1\\}}1\\,ds', 1, false) as { latex: string }).latex).includes('(0,0,1)'), true)
+  // #178: 近似の Σ の添字は、利用者の k, j, m, p, q と重ねない。中身の Σ_{t=1}^3 の t は置き換えない
+  const used = riemannDisplay('\\int_0^1(k+j+m+p+q+t)\\,dt', 'simpson', 8)
+  const idx = used && !('error' in used) ? /\\sum_\{(\w)=/.exec(used.sum)?.[1] : null
+  check('#178 添字は使っていない名前', idx !== null && !'kjmpqt'.includes(idx!), true)
+  const inner = riemannDisplay('\\int_0^1\\sum_{t=1}^3 t\\,dt', 'simpson', 8)
+  check('#178 中の Σ をこわさない', inner && !('error' in inner) && latexToText(inner.sum).includes('@at('), true)
+  // #207: 添字の付いた t_1 は、積分の変数 t として置き換えない
+  const sub = riemannDisplay('\\int_0^1 t_1 t\\,dt', 'simpson', 8)
+  check('#207 t_1 を残す', sub && !('error' in sub) && latexToText(sub.sum).includes('t_1'), true)
+  // #179: 上下の端が逆でも、図は小さいほうから大きいほう。等しければ図なし
+  const rev = riemannDisplay('\\int_1^0 t^2\\,dt', 'simpson', 8)
+  check('#179 逆向きの図の区間', rev && !('error' in rev) && latexToText(rev.latex).includes('(0)<=t<=(1)'), true)
+  check('#179 逆向きの説明', rev && !('error' in rev) && rev.label.includes('符号を逆'), true)
+  const eq = riemannDisplay('\\int_1^1 t^2\\,dt', 'left', 4)
+  check('#179 等しい端', eq && !('error' in eq) && [eq.latex, eq.sum, eq.exact], ['', '0', '0'])
+  const sym = riemannDisplay('\\int_a^b t^2\\,dt', 'left', 4)
+  check('#179 文字の端は min・max', sym && !('error' in sym) && latexToText(sym.latex).includes('min'), true)
 }
 
 if (failures > 0) throw new Error(`${failures} 件失敗`)

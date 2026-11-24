@@ -976,7 +976,10 @@
   function defsChanged(names: string[], except?: PlotItem) {
     for (const it of items) {
       if (it === except) continue
-      if (it.usedDefs?.some((n) => names.includes(n)) || it.error || running.has(it.id)) schedule(it, 0)
+      const uses = it.usedDefs?.some((n) => names.includes(n))
+      if (uses || it.error || running.has(it.id)) schedule(it, 0)
+      // 積分の図: 途中までの値・近似の値は画面側で計算しているので、定義が変わったら計算し直す（パラメータと同じ。#190）
+      if (uses && !isAux(it) && integralItem(it)) updateIntegral(it, 60)
     }
   }
 
@@ -1913,7 +1916,8 @@
     // 添えて描くもの（定積分の近似の図も、ここに足す）
     const want = [...(ok?.extras ?? [])]
     const rv = ok && item.riemann ? riemannDisplay(item.latex, item.riemann.method, item.riemann.n) : null
-    if (rv && !('error' in rv)) want.push({ role: 'riemann', latex: rv.latex, label: rv.label })
+    // 上下の端が同じ（値は 0）なら、近似の図は出さない
+    if (rv && !('error' in rv) && rv.latex) want.push({ role: 'riemann', latex: rv.latex, label: rv.label })
     updateRiemannValues(item, rv)
     for (const old of integralExtras(item)) {
       if (!want.some((e) => e.role === old.integralRole)) removeItem(old)
