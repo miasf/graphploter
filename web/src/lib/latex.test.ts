@@ -697,5 +697,38 @@ check('#200 連鎖はそのまま', paramConditions('0<a<3')?.map((c) => c.rels)
 check('#200 場合分けと連鎖', paramConditions('\\begin{cases}1&a<0\\\\2&a\\ge0\\end{cases}<b<3')?.map((c) => c.rels), [['<', '<']])
 check('#200 括弧の中の不等号も数えない', paramConditions('\\left(a+1\\right)<2')?.map((c) => c.rels), [['<']])
 
+// 第4段階 4a: 教科書・貼り付けた LaTeX の書き方
+// #187 数式スタイルの指定は読み飛ばす
+for (const style of ['\\displaystyle', '\\textstyle', '\\scriptstyle', '\\scriptscriptstyle']) {
+  check(`#187 ${style}`, latexToText(`y=${style} \\frac{1}{2}x`), latexToText('y=\\frac{1}{2}x'))
+}
+// #181 直立体の微分記号
+for (const d of ['\\mathrm{d}t', '\\operatorname{d}t', '\\mathrm{dt}', '\\text{d}t', '\\operatorname{dt}', '\\mathit{d}t']) {
+  check(`#181 ${d}`, latexToText(`\\int_0^1 t^2\\,${d}`), '@int(t,0,1)(t^(2))')
+}
+check('#181 重積分', latexToText('\\int_0^1\\int_0^1 xy\\,\\mathrm{dx}\\,\\mathrm{dy}'), latexToText('\\int_0^1\\int_0^1 xy\\,dx\\,dy'))
+check('#181 名前の中の d', latexToText('\\int_0^1 d^2\\,\\mathrm{dd}'), '@int(d,0,1)(d^(2))')
+check('#181 d で始まる名前は変えない', latexToText('\\mathrm{dim}'), '@dim')
+// #163 添字・積分の変数の i（計算エンジンが中身の i を変数にする）
+check('#163 Σ の i', latexToText('a=\\sum_{i=1}^5 i'), 'a= @sum(i,1,5) i')
+check('#163 ∫ di', latexToText('a=\\int_0^1 i\\,di'), 'a= @int(i,0,1)(i)')
+// #164 逆三角関数・底のある対数
+check('#164 sin⁻¹', latexToText('a=\\sin^{-1}\\left(\\frac{1}{2}\\right)'), 'a= arcsin (((1)/(2)))')
+check('#164 cos⁻¹', latexToText('a=\\cos^{-1}(1/2)'), 'a= arccos (1/2)')
+check('#164 tan^-1', latexToText('y=\\tan^-1x'), 'y= arctan x')
+check('#164 tanh⁻¹', latexToText('y=\\tanh^{-1}x'), 'y= arctanh x')
+check('#164 sin² は 2 乗のまま', latexToText('y=\\sin^2 x'), 'y= sin ^(2)x')
+check('#164 逆数は括弧で', latexToText('a=\\left(\\sin x\\right)^{-1}'), 'a=( sin x)^(-1)')
+check('#164 log₂', latexToText('a=\\log_{2}8'), 'a= @logbase(2) 8')
+check('#164 log₂(1/8)', latexToText('a=\\log_2\\left(\\frac{1}{8}\\right)'), 'a= @logbase(2) (((1)/(8)))')
+check('#164 底のない log は常用対数のまま', latexToText('y=\\log x'), 'y= log x')
+let secError = ''
+try {
+  latexToText('a=\\sec^{-1}2')
+} catch (e) {
+  secError = (e as Error).message
+}
+check('#164 sec⁻¹ は書き方を案内', secError.includes('\\arccos\\left(\\frac{1}{x}\\right)'), true)
+
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')

@@ -646,6 +646,19 @@
    *   カーソルも動かない（何回押しても消せない）。例: mod(□, b) の最初の引数を消した後。
    *   そのときは、その箱の手前に出てから、その前を消す
    */
+  /**
+   * カーソルが、中身が数字・文字・符号だけの指数（x² ・x^{-1}・e^{x}）の直後にあれば、指数の中身の数。そうでなければ 0。
+   * MathLive の Backspace はまず指数の中に入るだけなので、1 回で数字が消えなかった（#188）
+   */
+  function simpleSuperscriptBefore(pos: number): number {
+    if (pos < 3 || atomAt(pos) !== '') return 0
+    let k = pos - 1
+    while (k >= 1 && /^[0-9a-zA-Z.\-]$/.test(atomAt(k))) k--
+    const count = pos - 1 - k
+    if (count === 0 || k < 1 || atomAt(k) !== '') return 0
+    return /\^\{?[0-9a-zA-Z.\-]+\}?$/.test(el.getValue(Math.max(k - 2, 0), pos, 'latex')) ? count : 0
+  }
+
   function deleteBackward(pos: number, depth = 0) {
     const digits = digitSubscriptBefore(pos)
     if (digits > 0) {
@@ -653,6 +666,14 @@
       el.executeCommand('deleteBackward')
       if (digits > 1) el.executeCommand('moveAfterParent')
       else el.executeCommand('deleteBackward') // 空になった添字を消す
+      return
+    }
+    // 指数は、空になったら消さずにカーソルを中に置く（続けて打てば指数を直せる。消すと、次の数字が添字になる）
+    const sup = simpleSuperscriptBefore(pos)
+    if (sup > 0) {
+      el.position = pos - 1
+      el.executeCommand('deleteBackward')
+      if (sup > 1) el.executeCommand('moveAfterParent')
       return
     }
     const before = el.value
