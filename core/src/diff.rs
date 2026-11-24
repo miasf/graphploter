@@ -247,6 +247,8 @@ pub fn diff(e: &Expr, var: &str) -> Result<Expr, String> {
                 }
             }
         }
+        // 描かない点の印 Guard(v, m) は、v だけを微分する
+        Expr::Call(Func::Guard, args) if args.len() == 2 => call(Func::Guard, vec![diff(&args[0], var)?, args[1].clone()]),
         // 場合分けは、値だけを微分する（条件はそのまま）
         Expr::Call(Func::Piece, args) => {
             let mut out = args.clone();

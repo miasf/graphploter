@@ -42,11 +42,15 @@ pub struct Budget {
     left: Cell<u64>,
     /// 誤差の見積もりが目標に届かなかった区間があったか
     pub rough: Cell<bool>,
+    /// ∞ までの積分で、振動が小さくならなかった（零点の間の積分が 0 に近づかない。$\int_0^\infty \sin t\,dt$）
+    pub nondecay: Cell<bool>,
+    /// ∞ までの積分で、振動は小さくなっていくが遅すぎて、収束を確かめられない（$\int_0^\infty \sin t / t^{0.1}\,dt$）
+    pub slowdecay: Cell<bool>,
 }
 
 impl Budget {
     pub fn new(evals: u64) -> Budget {
-        Budget { left: Cell::new(evals), rough: Cell::new(false) }
+        Budget { left: Cell::new(evals), rough: Cell::new(false), nondecay: Cell::new(false), slowdecay: Cell::new(false) }
     }
 
     /// n 回分を使う。足りなければ false
@@ -337,6 +341,273 @@ pub fn integrate(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol
     }
 }
 
+/// 端の近くを調べた結果、値を出せないとき（計画 `docs/plan-stage2b-integrals.md` の 2.2）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trouble {
+    /// 端 `at` の近くで |f| が |t − at|^power（power ≤ −1）のように大きくなり、積分が発散する
+    Diverges { at: f64, power: f64 },
+    /// 端 `at` の近くで、収束が遅すぎる（−1 < power ≤ −0.956）・きれいな累乗にならない・振動しながら大きくなる
+    /// ので、収束するかを確かめられない
+    Unsure { at: f64, power: f64, oscillating: bool },
+    /// 発散しうる点（分母が 0 になる所など）が多すぎて、区間を分けきれない
+    TooManyPoints,
+}
+
+/// 端 `a` から内側へ、幅 h の区間（dir > 0 なら [a, a + h]、dir < 0 なら [a − h, a]）の、ふつうの向きの積分。端に向かって幅を半分ずつにした区間
+/// $[a + h 2^{-k-1}, a + h 2^{-k}]$ に分けて積分し、区間ごとの |f| の最大 $M_k$ の増え方から、端での f の振る舞い
+/// $f \approx C (t - a)^p$ の p を見積もる（$M_k \propto 2^{-kp}$）。
+/// - p ≤ −1（振動していない）: 発散する
+/// - −1 < p ≤ −0.956、または p < −0.5 で見積もりが区間ごとにそろわない（$1/(t \ln^2 t)$）: 確かめられない
+/// - それ以外: 収束する。最後の区間から先の分は、公比 $r = 2^{-(p+1)}$ の等比級数で足す
+fn toward_end(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, tol: Tol, budget: &Budget) -> Result<f64, Trouble> {
+    toward_end_until(f, a, dir, h, tol, budget, 1e-12 * a.abs())
+}
+
+/// [`toward_end`] で、端からの距離が `min_width` より細かい所は計算しない（主値の両側の和は、端の数の桁の 10⁻⁶ まで）
+fn toward_end_until(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, tol: Tol, budget: &Budget, min_width: f64) -> Result<f64, Trouble> {
+    const SHELLS: usize = 60;
+    // 区間ごとの (積分, 幅, |f| の最大)
+    let mut shells: Vec<(f64, f64, f64)> = Vec::with_capacity(SHELLS);
+    let mut sum = 0.0;
+    // 端の近くの区間で、誤差が目標に届かなかったか（激しく振動して区間の数の上限に届いた）
+    let was_rough = budget.rough.replace(false);
+    let reciprocal = |f: &mut dyn FnMut(&[f64], &mut [f64]), budget: &Budget| -> Option<f64> {
+        // t = a ± 1/u と置き換えて、u の ∞ までの積分にする（∫_a^{a+h} f dt = ∫_{1/h}^∞ f(a + 1/u) / u² du。
+        // sin(1/t) のように端の近くで激しく振動する関数も、振動の加速 [`oscillatory`] で求まる）
+        let was = budget.rough.replace(false);
+        let mut ts = [0.0; 15];
+        let mut g = |us: &[f64], out: &mut [f64]| {
+            let n = us.len();
+            for (t, &u) in ts[..n].iter_mut().zip(us) {
+                *t = a + dir / u;
+            }
+            f(&ts[..n], out);
+            for (o, &u) in out.iter_mut().zip(us) {
+                *o = if *o == 0.0 { 0.0 } else { *o / (u * u) };
+            }
+        };
+        let v = integrate(&mut g, 1.0 / h, f64::INFINITY, tol, budget);
+        let rough = budget.rough.replace(was);
+        (v.is_finite() && !rough && !budget.exhausted()).then_some(v)
+    };
+    let unresolved = |budget: &Budget| budget.rough.get();
+    for k in 0..SHELLS {
+        let outer = h * 0.5f64.powi(k as i32);
+        let inner = 0.5 * outer;
+        // 端の数の桁より細かい所は計算しない（a + δ が a と区別できない）
+        if inner < min_width || inner < f64::MIN_POSITIVE * 1e10 {
+            break;
+        }
+        // 区間の数の上限: 端から遠い区間（幅が広く、振動の回数が多いかもしれない）ほど多く、端に近づくほど少なく
+        // （sin(1/t) のように端の近くで激しく振動する関数で、細い区間に計算を使い切らない。値は幅 × 最大 で抑えられる）
+        let shell_tol = Tol { rel: tol.rel, panels: (tol.panels >> k.min(20)).max(200), ends: false };
+        let (lo, hi) = if dir > 0.0 { (a + inner, a + outer) } else { (a - outer, a - inner) };
+        let mut big = 0.0f64;
+        let mut g = |ts: &[f64], out: &mut [f64]| {
+            f(ts, out);
+            for v in out.iter() {
+                if v.is_finite() {
+                    big = big.max(v.abs());
+                }
+            }
+        };
+        let c = finite(&mut g, lo, hi, shell_tol, budget);
+        if !c.is_finite() {
+            return Ok(f64::NAN);
+        }
+        sum += c;
+        shells.push((c, outer - inner, big));
+        if budget.exhausted() {
+            return Ok(f64::NAN);
+        }
+        // 端の近くで f が大きくならず、残りの区間の分（幅 × 最大 の和は、この区間の分の 2 倍まで）が無視できるなら、先へ進まない
+        if k >= 8 && big <= 2.0 * shells[k - 4].2 && 2.0 * (outer - inner) * big <= 1e-4 * tol.rel * sum.abs() {
+            break;
+        }
+    }
+    if unresolved(budget) {
+        if let Some(v) = reciprocal(f, budget) {
+            budget.rough.set(was_rough);
+            return Ok(v);
+        }
+    }
+    budget.rough.set(was_rough || budget.rough.get());
+    // 打ち切った先の分: 最後の 2 区間の比を公比とする等比級数（端で f が有限なら、公比はほぼ 1/2）
+    let geometric_tail = |shells: &[(f64, f64, f64)]| -> f64 {
+        let n = shells.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let r = shells[n - 1].0 / shells[n - 2].0;
+        if r.is_finite() && r > 0.0 && r < 0.9 { shells[n - 1].0 * r / (1.0 - r) } else { 0.0 }
+    };
+    if 2.0 * shells.last().map_or(0.0, |s| s.1 * s.2) <= 1e-4 * tol.rel * sum.abs() && shells.len() < SHELLS {
+        return Ok(sum + geometric_tail(&shells));
+    }
+    let n = shells.len();
+    if n < 8 {
+        return Ok(sum + geometric_tail(&shells));
+    }
+    // 区間の番号 k に対する log₂ M_k の傾き = −p（最小二乗）
+    let slope = |from: usize, to: usize| -> Option<f64> {
+        let pts: Vec<(f64, f64)> = (from..to).filter(|&k| shells[k].2 > 0.0).map(|k| (k as f64, shells[k].2.log2())).collect();
+        if pts.len() < 3 {
+            return None;
+        }
+        let m = pts.len() as f64;
+        let (sx, sy) = pts.iter().fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+        let (mx, my) = (sx / m, sy / m);
+        let (num, den) = pts.iter().fold((0.0, 0.0), |(a, b), (x, y)| (a + (x - mx) * (y - my), b + (x - mx) * (x - mx)));
+        Some(num / den)
+    };
+    // 最後の 8 区間の傾き（端のすぐ近くの p）と、真ん中の 8 区間の傾き。きれいな累乗 (t − a)^p ならそろう。
+    // 1/(t ln² t) のように累乗からずれる関数は、端に近づくほど傾きが −1 に寄っていくのでそろわない
+    let last = n.saturating_sub(16);
+    let mid = (n / 2).saturating_sub(4);
+    let (Some(all), Some(middle), Some(second)) = (slope(last, n), slope(mid, (mid + 8).min(n)), slope(n - 8, n)) else {
+        // 端の近くで f が 0（区間の外を 0 にした場合分けなど）
+        return Ok(sum + geometric_tail(&shells));
+    };
+    let (p, p_first) = (-second, -middle);
+    // 振動して打ち消し合っているか（積分が、幅 × 最大 よりずっと小さい）
+    let cancel = shells[last..].iter().filter(|(c, w, m)| c.abs() < 0.1 * w * m).count();
+    let oscillating = cancel * 2 > n - last;
+    let at = a;
+    if oscillating {
+        if let Some(v) = reciprocal(f, budget) {
+            return Ok(v);
+        }
+    }
+    if p <= -0.999 || -all <= -0.999 {
+        return Err(if oscillating { Trouble::Unsure { at, power: p, oscillating } } else { Trouble::Diverges { at, power: p.min(-all) } });
+    }
+    if p < -0.956 || (p < -0.5 && (p - p_first).abs() > 0.01) {
+        return Err(Trouble::Unsure { at, power: p, oscillating });
+    }
+    // 先の分: 公比 r の等比級数（振動していて区間ごとの値がそろわなければ、足さずに誤差として見る）
+    let r = 2f64.powf(-(p + 1.0));
+    let (c_last, w_last, m_last) = shells[n - 1];
+    let tail = if oscillating { 0.0 } else { c_last * r / (1.0 - r) };
+    let bound = w_last * m_last * r / (1.0 - r);
+    if bound > 1e3 * tol.rel * sum.abs().max(f64::MIN_POSITIVE) && oscillating {
+        budget.rough.set(true);
+    }
+    Ok(sum + tail)
+}
+
+/// 端 `a` の近く（dir の向きに幅 h）で、積分が発散しないか・収束を確かめられるか（変数上限の積分 $\int_a^x$ の端を先に調べる）
+pub fn end_check(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64) -> Option<Trouble> {
+    let budget = Budget::new(600_000);
+    toward_end(f, a, dir, h, Tol { rel: 1e-10, panels: 2000, ends: false }, &budget).err()
+}
+
+/// 区間 [a, b]（端は ±∞ でもよい。a > b なら符号を変える）の f の積分を、点 `cuts` で分けて求める。
+/// 有限の端（分けた点も、小区間の端になる）ごとに [`toward_end`] で発散しないかを確かめる。
+/// `pv` なら、区間の中の点 c では、c から等しい距離の両側をまとめて積分する（コーシーの主値。$\frac1t$ の打ち消し合いを使う）
+pub fn integrate_split(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, cuts: &[f64], pv: bool, tol: Tol, budget: &Budget) -> Result<f64, Trouble> {
+    if a.is_nan() || b.is_nan() {
+        return Ok(f64::NAN);
+    }
+    if a > b {
+        return integrate_split(f, b, a, cuts, pv, tol, budget).map(|v| -v);
+    }
+    if a == b {
+        return Ok(0.0);
+    }
+    let mut inner: Vec<f64> = cuts.iter().copied().filter(|c| *c > a && *c < b && c.is_finite()).collect();
+    inner.sort_by(f64::total_cmp);
+    inner.dedup();
+    // 無限の端は、最後の点から先を今までの無限区間の積分にする（振動の加速も含む）。その前の 1 区間は有限の端の扱い
+    let mut total = 0.0;
+    let (mut lo, mut hi) = (a, b);
+    if !a.is_finite() || !b.is_finite() {
+        let mut fin: Vec<f64> = inner.clone();
+        if fin.is_empty() {
+            fin.push(if a.is_finite() { a } else if b.is_finite() { b } else { 0.0 });
+        }
+        let first = if a.is_finite() { a } else { fin[0] };
+        let last = if b.is_finite() { b } else { *fin.last().unwrap() };
+        if !b.is_finite() {
+            let start = last + last.abs().max(1.0);
+            total += integrate(f, start, f64::INFINITY, tol, budget);
+            hi = start;
+        }
+        if !a.is_finite() {
+            let end = first - first.abs().max(1.0);
+            total += integrate(f, f64::NEG_INFINITY, end, tol, budget);
+            lo = end;
+        }
+        if !total.is_finite() {
+            return Ok(f64::NAN);
+        }
+        inner.retain(|c| *c > lo && *c < hi);
+    }
+    let mut points = vec![lo];
+    points.extend(&inner);
+    points.push(hi);
+    // 主値: 区間の中の点ごとに、両側の等しい距離 hs の所までをまとめて積分する
+    let mut sym: Vec<(f64, f64)> = Vec::new();
+    if pv {
+        // 両側の幅 hs: 隣が区間の端ならその端まで、隣も分ける点なら、その点との中点まで（両側の対称な所どうしが重ならない）
+        let last = points.len() - 1;
+        for k in 1..last {
+            let c = points[k];
+            let left = if k - 1 == 0 { points[0] } else { 0.5 * (points[k - 1] + c) };
+            let right = if k + 1 == last { points[last] } else { 0.5 * (c + points[k + 1]) };
+            sym.push((c, (c - left).min(right - c)));
+        }
+    }
+    // 端から端までの小区間。主値なら、点の周りの対称な所を除いた残り
+    let mut pieces: Vec<(f64, f64)> = Vec::new();
+    for k in 0..points.len() - 1 {
+        let (mut x0, mut x1) = (points[k], points[k + 1]);
+        if pv {
+            if k > 0 {
+                x0 = sym[k - 1].0 + sym[k - 1].1;
+            }
+            if k + 1 < points.len() - 1 {
+                x1 = sym[k].0 - sym[k].1;
+            }
+        }
+        if x1 > x0 {
+            pieces.push((x0, x1));
+        }
+    }
+    for (x0, x1) in pieces {
+        let h = 0.5 * (x1 - x0);
+        total += toward_end(f, x0, 1.0, h, tol, budget)?;
+        total += toward_end(f, x1, -1.0, h, tol, budget)?;
+        if !total.is_finite() {
+            return Ok(f64::NAN);
+        }
+    }
+    for (c, hs) in sym {
+        // g(u) = f(c + u) + f(c − u)（u ∈ (0, hs]）。c + u の丸め（絶対で ε|c|）で f は相対 ε|c|/u ずれるので、
+        // 打ち消し合って丸めの大きさ以下になった g は 0 とみなす（1/(t − 1) の両側は、ちょうど打ち消し合う）
+        let mut buf = Vec::new();
+        let mut g = |us: &[f64], out: &mut [f64]| {
+            let n = us.len();
+            buf.clear();
+            buf.extend(us.iter().map(|u| c + u));
+            buf.extend(us.iter().map(|u| c - u));
+            let mut both = vec![0.0; 2 * n];
+            f(&buf, &mut both);
+            for k in 0..n {
+                let (l, r) = (both[k], both[n + k]);
+                let noise = 64.0 * f64::EPSILON * (c.abs() + us[k]) * (l.abs() + r.abs()) / us[k];
+                let v = l + r;
+                out[k] = if v.abs() <= noise { 0.0 } else { v };
+            }
+        };
+        total += toward_end_until(&mut g, 0.0, 1.0, hs, tol, budget, 1e-6 * c.abs()).map_err(|e| match e {
+            Trouble::Diverges { power, .. } => Trouble::Diverges { at: c, power },
+            Trouble::Unsure { power, oscillating, .. } => Trouble::Unsure { at: c, power, oscillating },
+            t => t,
+        })?;
+    }
+    Ok(total)
+}
+
 /// 極限の標本では、長い区間の端や、原点へ近づく端の寄与を拾えるように分割する。
 pub(crate) fn integrate_wide(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol, budget: &Budget) -> f64 {
     if !a.is_finite() || !b.is_finite() {
@@ -428,7 +699,14 @@ fn oscillatory(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: 
     const ZEROS: usize = 49;
     let mut zeros: Vec<f64> = Vec::with_capacity(ZEROS);
     let mut step = 0.1f64;
-    let (mut x, mut fx) = (base, at(base)?);
+    // 端で値が数でない（sin t / t の t = 0 の 0/0）なら、少し内側から探し始める。端から最初の零点までは適応型で積分するので、値は変わらない
+    let (mut x, mut fx) = match at(base) {
+        Some(v) => (base, v),
+        None => {
+            let x = base + dir * 1e-9 * (1.0 + base.abs());
+            (x, at(x)?)
+        }
+    };
     let limit = 1e4 * (1.0 + base.abs());
     while zeros.len() < ZEROS {
         let nx = x + dir * step;
@@ -469,6 +747,31 @@ fn oscillatory(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: 
         acc += if dir > 0.0 { piece } else { -piece };
         sums.push(acc);
         from = z;
+    }
+    // 零点の間の積分 p_k が 0 に近づいていくか（計画 stage2b の 2.3）。加速は、収束しない振動（sin t の部分和 0, 2, 0, 2, …）にも
+    // 平均の値を返してしまうので、元の積分が収束することを先に確かめる
+    let pieces: Vec<f64> = sums.iter().scan(0.0, |prev, &s| {
+        let p = s - *prev;
+        *prev = s;
+        Some(p.abs())
+    }).collect();
+    // 大きさが t の何乗で小さくなるか（p_k ∝ |t|^(−q)）で決める。始まりが遠い（Σ の残りの ∫_1024^∞ sin x / x² dx）と、
+    // 零点 48 個の間では比が 1 に近いが、q は場所によらない。q ≤ 0.05: 小さくならない（sin t・t sin t）、
+    // q < 0.3: 小さくなり方が遅すぎて確かめられない（sin t / t^0.1）
+    let mean = |r: std::ops::Range<usize>| r.clone().map(|k| pieces[k]).sum::<f64>() / r.len() as f64;
+    let at = |r: std::ops::Range<usize>| r.clone().map(|k| zeros[k].abs()).sum::<f64>() / r.len() as f64;
+    let (early, late) = (mean(8..16), mean(ZEROS - 8..ZEROS));
+    let (x_early, x_late) = (at(8..16), at(ZEROS - 8..ZEROS));
+    if early > 0.0 && x_late > x_early {
+        let q = (early / late.max(f64::MIN_POSITIVE)).ln() / (x_late / x_early).ln();
+        if q <= 0.05 {
+            budget.nondecay.set(true);
+            return None;
+        }
+        if q < 0.3 {
+            budget.slowdecay.set(true);
+            return None;
+        }
     }
     let (e1, e2) = (wynn(&sums[..33]), wynn(&sums));
     ((e1 - e2).abs() <= 1e-10 * e2.abs().max(1e-300) || (e1 - e2).abs() <= 1e-14).then_some(e2)

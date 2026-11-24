@@ -122,6 +122,10 @@ pub enum Func {
     /// 引数は、場合ごとに [条件の数 k, 厳密な条件の印（ビット）, 余裕 m₁, …, m_k, 値] を並べたもの。
     /// 余裕 m は 0 以上（厳密な条件は 0 より大きい）なら成り立つ。条件が全部成り立つ最初の場合の値を返す（[`piece_index`]）
     Piece,
+    /// 値 v と余裕 m の 2 つの引数で、m ≥ 0 なら v、そうでなければ NaN（利用者は名前で呼べない）。
+    /// 変数の端の積分の、誤差の見積もりが大きい点を描かないのに使う（計画 stage2b の 2.5）。
+    /// 場合分けと違って、値が飛ぶ所としては扱わない（描く途中で段差を探さない）。微分は v だけを微分する
+    Guard,
 }
 
 /// 場合分け [`Func::Piece`] の引数（`n` 個。`get(i)` は i 番目の引数の実部）のうち、選ばれた値の番号。どの場合も成り立たなければ None
@@ -242,6 +246,7 @@ const TABLE: &[(Func, &[&str], &[usize])] = &[
     (Func::JacobiDN, &["jacobiDN"], &[2]),
     (Func::LambertW, &["lambertW", "productLog"], &[1, 2]),
     (Func::Piece, &[], &[]),
+    (Func::Guard, &[], &[2]),
 ];
 
 impl Func {
@@ -447,6 +452,7 @@ impl Func {
             (Func::JacobiCN, 2) => sp::jacobi_elliptic(x[0], x[1]).1,
             (Func::JacobiDN, 2) => sp::jacobi_elliptic(x[0], x[1]).2,
             (Func::LambertW, 1) => sp::lambert_w(0.0, x[0]),
+            (Func::Guard, 2) => if x[1].re >= 0.0 { x[0] } else { nan },
             (Func::Piece, n) => match piece_index(n, |i| x[i].re) {
                 Some(i) => x[i],
                 None => nan,

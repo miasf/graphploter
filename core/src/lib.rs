@@ -30,6 +30,7 @@ pub mod ode;
 pub mod pixel;
 pub mod groebner;
 pub mod quad;
+pub mod breakpoints;
 pub mod series;
 mod holes;
 mod limit;
