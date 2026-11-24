@@ -15,11 +15,11 @@ use crate::eval::Params;
 use crate::parser::{BinOp, Expr};
 use std::cmp::Ordering;
 
-/// 有理数（分母は正、約分済み）
+/// 有理数（分母は正、約分済み）。行列の階数の正確な計算（`linalg.rs`）でも使う
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Rat {
-    n: i128,
-    d: i128,
+pub(crate) struct Rat {
+    pub(crate) n: i128,
+    pub(crate) d: i128,
 }
 
 fn gcd(mut a: i128, mut b: i128) -> i128 {
@@ -32,9 +32,9 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
 }
 
 impl Rat {
-    const ONE: Rat = Rat { n: 1, d: 1 };
+    pub(crate) const ONE: Rat = Rat { n: 1, d: 1 };
 
-    fn new(n: i128, d: i128) -> Option<Rat> {
+    pub(crate) fn new(n: i128, d: i128) -> Option<Rat> {
         if d == 0 {
             return None;
         }
@@ -42,30 +42,30 @@ impl Rat {
         let s = if d < 0 { -1 } else { 1 };
         Some(Rat { n: s * n / g, d: s * d / g })
     }
-    fn add(self, o: Rat) -> Option<Rat> {
+    pub(crate) fn add(self, o: Rat) -> Option<Rat> {
         let g = gcd(self.d, o.d).max(1);
         let (a, b) = (self.d / g, o.d / g);
         Rat::new(self.n.checked_mul(b)?.checked_add(o.n.checked_mul(a)?)?, self.d.checked_mul(b)?)
     }
-    fn neg(self) -> Rat {
+    pub(crate) fn neg(self) -> Rat {
         Rat { n: -self.n, d: self.d }
     }
-    fn mul(self, o: Rat) -> Option<Rat> {
+    pub(crate) fn mul(self, o: Rat) -> Option<Rat> {
         let (g1, g2) = (gcd(self.n, o.d).max(1), gcd(o.n, self.d).max(1));
         Rat::new((self.n / g1).checked_mul(o.n / g2)?, (self.d / g2).checked_mul(o.d / g1)?)
     }
-    fn div(self, o: Rat) -> Option<Rat> {
+    pub(crate) fn div(self, o: Rat) -> Option<Rat> {
         if o.n == 0 {
             return None;
         }
         self.mul(Rat { n: o.d * o.n.signum(), d: o.n.abs() })
     }
-    fn f(self) -> f64 {
+    pub(crate) fn f(self) -> f64 {
         self.n as f64 / self.d as f64
     }
-    /// 浮動小数点数をぴったり表す分数。有限桁の小数（打った数・刻みのスライダー。小数点以下 15 桁まで）は n / 10ᵈ
+    /// 浮動小数点数をぴったり表す分数。有限桁の小数（打った数・刻みのスライダー。小数点以下 22 桁まで、n は 2⁵³ まで）は n / 10ᵈ
     /// （0.9999999 = 9999999 / 10⁷。#141）、ほかは分母が 10⁶ 以下の分数（連分数。1/3 など）。無ければ None（π などは多項式の係数にしない）
-    fn from_f64(v: f64) -> Option<Rat> {
+    pub(crate) fn from_f64(v: f64) -> Option<Rat> {
         if !v.is_finite() || v.abs() > 1e15 {
             return None;
         }
@@ -74,7 +74,7 @@ impl Rat {
             let d = frac.len() as i32;
             let scale = 10f64.powi(d);
             let n = (v * scale).round();
-            if d <= 15 && !text.contains('e') && n.abs() <= 9_007_199_254_740_992.0 && n / scale == v {
+            if d <= 22 && !text.contains('e') && n.abs() <= 9_007_199_254_740_992.0 && n / scale == v {
                 return Rat::new(n as i128, 10i128.pow(d as u32));
             }
         }

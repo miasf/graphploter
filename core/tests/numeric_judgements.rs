@@ -329,3 +329,41 @@ fn close_intersections_stay_apart() {
         }
     }
 }
+
+/// ほぼ特異な行列の階数・零空間（#124。計画 `docs/plan-stage3b-kernel.md` の 3 章）。
+/// 成分が有限桁の小数なら正確に、そうでなければ特異値の比 10⁻⁹ で、丸め誤差より大きい特異値を 0 とみなしたら「≈」と判定基準
+#[test]
+fn nearly_singular_kernels() {
+    let point = "ker A = {0}（0 次元。原点）";
+    let line = "ker A = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）";
+    // 1 + 10⁻¹² は直線と出ていた。行列全体を 10⁶ 倍・10⁻⁶ 倍しても、スライダーの値でも同じ
+    for src in [
+        "@ker(⟦1,1;1,1.00000001⟧)",
+        "@ker(⟦1,1;1,1.000000000001⟧)",
+        "@ker(⟦1000000,1000000;1000000,1000000.000001⟧)",
+        "@ker(⟦0.000001,0.000001;0.000001,0.000001000000000001⟧)",
+        "@ker(⟦1,2,3;4,5,6;7,8,9.000000001⟧)",
+    ] {
+        assert_eq!(kind_with(src, &[]), point, "{src}");
+    }
+    assert_eq!(kind_with("@ker(⟦1,1;1,1+k⟧)", &[("k", 1e-12)]), point);
+    assert_eq!(kind_with("@ker(⟦1,1;1,1+k⟧)", &[("k", 0.0)]), line);
+    assert_eq!(kind_with("@ker(⟦1,1;1,1⟧)", &[]), line);
+    assert_eq!(kind_with("@rank(⟦1,1;1,1.000000000001⟧)", &[]), "rank = 2（高さがこの値の平面）");
+    assert!(kind_with("@ker(⟦1,2,3;4,5,6;7,8,9⟧)", &[]).starts_with("ker A = span{(1, −2, 1)}"));
+    // √2 のちょうど特異な行列: 0 とみなした特異値は丸め誤差の程度なので「≈」を付けない
+    let k = kind_with("@ker(⟦sqrt(2),1;2,sqrt(2)⟧)", &[]);
+    assert!(k.starts_with("ker A = span{(0.707107, −1)}") && !k.contains("数値の階数"), "{k}");
+    // 丸め誤差より大きい特異値（4.7×10⁻¹³）を 0 とみなしたら「≈」と判定基準
+    let note = "数値の階数。特異値 4.7×10⁻¹³ が最大（3）の 10⁻⁹ 倍以下なので 0 とみなした";
+    let k = kind_with("@ker(⟦sqrt(2),1;2,sqrt(2)+10^(-12)⟧)", &[]);
+    assert!(k.starts_with("ker A ≈ span{(0.707107, −1)}") && k.contains(&format!("（1 次元。直線。{note}）")), "{k}");
+    let k = kind_with("Im(⟦sqrt(2),1;2,sqrt(2)+10^(-12)⟧)", &[]);
+    assert!(k.starts_with("Im A ≈ span{") && k.contains(note), "{k}");
+    assert_eq!(kind_with("@rank(⟦sqrt(2),1;2,sqrt(2)+10^(-12)⟧)", &[]), format!("rank ≈ 1（{note}。高さがこの値の平面）"));
+    assert_eq!(kind_with("@dim(@ker(⟦sqrt(2),1;2,sqrt(2)+10^(-12)⟧))", &[]), format!("dim ≈ 1（{note}。高さがこの値の平面）"));
+    // 値（dim ker・rank）も同じ判定
+    assert_eq!(eval_constant("@dim(@ker(⟦1,1;1,1.000000000001⟧))"), Ok(0.0));
+    assert_eq!(eval_constant("@rank(⟦1,1;1,1.000000000001⟧)"), Ok(2.0));
+    assert_eq!(eval_constant("@rank(⟦sqrt(2),1;2,sqrt(2)⟧)"), Ok(1.0));
+}
