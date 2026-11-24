@@ -144,8 +144,16 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
     'clause: for clause in clauses {
         let mut chains = Vec::new();
         let mut excluded = Vec::new();
+        // x ∈ ℤ（logic.rs が sin(π x) = 0 に書き直したもの）の x の番号と、元の式
+        let mut integers: Vec<(usize, Chain)> = Vec::new();
         for lit in clause {
             let (l, r) = (prepare(&lit.l), prepare(&lit.r));
+            if lit.op == Op::Eq && matches!(r, Expr::Num(v) if v == 0.0) {
+                if let Some(i) = integer_coord(&l, &coords) {
+                    integers.push((i, chain(l.clone(), Rel::Eq, r.clone())));
+                    continue;
+                }
+            }
             let value = |e: &Expr| Program::compile_with(e, &[], &consts);
             let (lc, rc) = (value(&l).ok(), value(&r).ok());
             if let (Some(a), Some(b)) = (&lc, &rc) {
@@ -191,6 +199,17 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
             chains.push(chain(x.clone(), Rel::Le, x));
         }
         let mut branches = vec![chains];
+        if !integers.is_empty() {
+            // 整数の座標は、範囲の中の整数 k ごとの x = k の枝にする（#146 #147）。sin(π x) = 0 の曲線の交わりでは、
+            // 開区間の端の整数が切り取られず、格子に乗る y = 0 との交点が消えた。範囲が分からなければ、今までの sin(π x) = 0 のまま
+            match integer_branches(&branches[0], &integers, &coords, &consts) {
+                Some(b) => branches = b,
+                None => branches[0].extend(integers.into_iter().map(|(_, c)| c)),
+            }
+            if branches.is_empty() {
+                continue 'clause;
+            }
+        }
         for (l, r) in excluded {
             if branches.len() * 2 + parts.len() > crate::logic::MAX_CLAUSES {
                 return Err("像集合の条件の分岐が多すぎます".into());
@@ -220,6 +239,71 @@ pub fn compile(point: &Expr, cond: &Formula, params: &Params, space: &Space) -> 
         inputs: names.len(),
         uses,
     })))
+}
+
+/// sin(π x)（x ∈ ℤ を書き直した式の左辺）の x が座標なら、その番号
+fn integer_coord(e: &Expr, coords: &[String; 3]) -> Option<usize> {
+    use crate::functions::Func;
+    use crate::parser::Constant;
+    let Expr::Call(Func::Sin, args) = e else { return None };
+    let [Expr::Bin(BinOp::Mul, a, b)] = args.as_slice() else { return None };
+    let v = match (&**a, &**b) {
+        (Expr::Const(Constant::Pi), Expr::Var(v)) | (Expr::Var(v), Expr::Const(Constant::Pi)) => v,
+        _ => return None,
+    };
+    coords.iter().position(|c| c == v)
+}
+
+/// 整数の座標ごとに、範囲（ほかの 1 次の条件）の中の整数 k の枝 {x = k, 残りの条件に x = k を入れたもの} を作る。
+/// 数だけになった条件はその場で確かめる（−3 < x の x = −3 は捨てる）。範囲が分からない・枝が 2,000 を超えるなら None
+fn integer_branches(chains: &[Chain], integers: &[(usize, Chain)], coords: &[String; 3], consts: &Params) -> Option<Vec<Vec<Chain>>> {
+    const MAX_BRANCHES: usize = 2000;
+    let mut branches = vec![chains.to_vec()];
+    let mut done: Vec<usize> = Vec::new();
+    for &(i, _) in integers {
+        if done.contains(&i) {
+            continue;
+        }
+        done.push(i);
+        let mut next = Vec::new();
+        for chains in &branches {
+            let (Some(lo), Some(hi)) = linear_bounds(chains, coords, consts)[i] else { return None };
+            let (from, to) = ((lo - 1e-9 * lo.abs().max(1.0)).ceil(), (hi + 1e-9 * hi.abs().max(1.0)).floor());
+            if to - from + 1.0 > MAX_BRANCHES as f64 {
+                return None;
+            }
+            let mut k = from;
+            'k: while k <= to {
+                let put = |e: &Expr| e.substitute(&|n| (n == coords[i]).then_some(Expr::Num(k)));
+                let mut out = vec![chain(Expr::Var(coords[i].clone()), Rel::Eq, Expr::Num(k))];
+                for c in chains {
+                    let (l, r) = (put(&c.exprs[0]), put(&c.exprs[1]));
+                    let value = |e: &Expr| Program::compile_with(e, &[], consts).ok().map(|p| constant(&p));
+                    match (value(&l), value(&r)) {
+                        (Some(a), Some(b)) => {
+                            let holds = match c.rels[0] {
+                                Rel::Eq => a == b,
+                                Rel::Lt => a < b,
+                                _ => a <= b,
+                            };
+                            if !holds {
+                                k += 1.0;
+                                continue 'k;
+                            }
+                        }
+                        _ => out.push(chain(l, c.rels[0], r)),
+                    }
+                }
+                next.push(out);
+                if next.len() > MAX_BRANCHES {
+                    return None;
+                }
+                k += 1.0;
+            }
+        }
+        branches = next;
+    }
+    Some(branches)
 }
 
 // [x, y, z, 1] の係数。疎な単項の展開をせず、一次であることを式の構造から確かめる。

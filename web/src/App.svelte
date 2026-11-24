@@ -1618,16 +1618,18 @@
   }
 
   /**
-   * 条件の並びの成り立ち（params の値で）。true / false、計算できない（座標を使う・準備中など）なら null
+   * 条件の並びの成り立ち（params の値で）。true / false。計算エンジンの準備中なら null、
+   * 値が計算できない（座標を使う・0 で割る・√ の中が負など）なら 'error'（#192: 準備中と、定義されない値を分ける）
    */
-  function conditionValue(conds: ParamCondition[], params: Record<string, ParamValue>, item?: PlotItem, onReady: () => void = () => {}): boolean | null {
+  function conditionValue(conds: ParamCondition[], params: Record<string, ParamValue>, item?: PlotItem, onReady: () => void = () => {}): boolean | null | 'error' {
     const defs = item ? currentDefinitions(item) : ''
     let all = true
     for (const c of conds) {
       const vals: number[] = []
       for (const part of c.parts) {
         const v = evalValue(part, params, onReady, defs)
-        if (!v || !('value' in v)) return null
+        if (v === null) return null
+        if (!('value' in v)) return 'error'
         vals.push(v.value)
       }
       if (!conditionHolds(c.rels, vals)) all = false
@@ -1635,17 +1637,26 @@
     return all
   }
 
+  /** 条件の値で、その値に動かしてよいか（成り立つか、準備中） */
+  const conditionAllows = (v: boolean | null | 'error') => v === true || v === null
+
   /** 条件の行か（不等式だけで、今のパラメータで値が計算できる） */
   function isCondition(item: PlotItem): boolean {
     if (item.param || isAux(item)) return false
     const conds = parsedConditions(item.latex)
     // 計算エンジンの準備がまだなら、準備ができてから読み直す
-    return conds !== null && conditionValue(conds, currentParams(), item, () => schedule(item, 0)) !== null
+    if (conds === null) return false
+    const v = conditionValue(conds, currentParams(), item, () => schedule(item, 0))
+    return v === true || v === false
   }
 
   /** 使う条件の行（表示中のもの）と、その条件 */
   function activeConditions(): { item: PlotItem; conds: ParamCondition[] }[] {
-    return items.flatMap((it) => (it.visible && it.condition ? [{ item: it, conds: parsedConditions(it.latex)! }] : []))
+    // 書き換えている途中で条件として読めない行（a < まで消した所）は、読み直されるまで使わない（#201）
+    return items.flatMap((it) => {
+      const conds = it.visible && it.condition ? parsedConditions(it.latex) : null
+      return conds ? [{ item: it, conds }] : []
+    })
   }
 
   /**
@@ -1662,7 +1673,8 @@
     const at = (v: number) => ({ ...base, [name]: { re: v, im: 0, complex: false } })
     const holding = conds.filter((c) => conditionValue(c.conds, base, c.item) === true)
     if (holding.length === 0) return free
-    const ok = (v: number) => holding.every((c) => conditionValue(c.conds, at(v), c.item) !== false)
+    // 成り立たない値と、条件の値が計算できない値（0 で割るなど）へは動かさない。準備中（null）は止めない
+    const ok = (v: number) => holding.every((c) => conditionAllows(conditionValue(c.conds, at(v), c.item)))
     if (ok(re)) return free
     // 前の値（成り立つ）と新しい値の間を詰める
     let good = item.param!.re
@@ -1693,8 +1705,10 @@
     const ps = currentParams()
     for (const it of items) {
       if (!it.condition) continue
-      const v = conditionValue(parsedConditions(it.latex)!, ps, it)
-      it.kind = v === false ? '条件（今の値では成り立っていません。動かしても止めません）' : '条件（スライダーの値を、この不等式が成り立つ範囲に制限）'
+      const conds = parsedConditions(it.latex)
+      if (!conds) continue
+      const v = conditionValue(conds, ps, it)
+      it.kind = v === 'error' ? '条件（今の値では計算できません。動かしても止めません）' : v === false ? '条件（今の値では成り立っていません。動かしても止めません）' : '条件（スライダーの値を、この不等式が成り立つ範囲に制限）'
       it.info = it.kind
     }
   }
@@ -1713,7 +1727,7 @@
     return Array.from({ length: n }, (_, k) => {
       const v = min + ((k + 0.5) / n) * (max - min)
       const ps = { ...base, [name]: { re: v, im: 0, complex: false } }
-      return holding.every((c) => conditionValue(c.conds, ps, c.item) !== false)
+      return holding.every((c) => conditionAllows(conditionValue(c.conds, ps, c.item)))
     })
   }
 

@@ -1399,6 +1399,68 @@ fn compile_formula(formula: &crate::parser::Formula, params: &Params, space: &Sp
 }
 
 /// 解析・展開した式（[`compile_with`]）をコンパイルする
+/// 2D の切り口で、関係だけの行（媒介変数表示などでない）が縦の座標を使うとき、縦の座標に 0 を入れた行。
+/// 数だけになった行は、成り立てば除き、成り立たなければ空（x < x）。全部が除かれたら平面全体（x² + 1 > 0）。
+/// 数だけになる行が無い・当てはまらなければ None
+fn slice_into_plane(chains: &[crate::parser::Chain], params: &Params, space: &Space) -> Option<Vec<crate::parser::Chain>> {
+    use crate::parser::Chain;
+    if !space.flat_slice || space.dims != 3 || space.rotation_matrix().is_some() || !space.ranged().is_empty() {
+        return None;
+    }
+    let shown = space.shown();
+    let vertical = &shown[2];
+    let relation_only = chains.iter().all(|c| c.exprs.len() >= 2 && !c.rels.is_empty() && c.exprs.iter().all(|e| !matches!(e, Expr::Tuple(_) | Expr::List(_))));
+    if !relation_only || !chains.iter().any(|c| c.exprs.iter().any(|e| e.uses_var(vertical))) {
+        return None;
+    }
+    let consts = space.with_hidden(params);
+    let value = |e: &Expr| Program::compile_with(e, &[], &consts).ok().map(|p| {
+        let mut out = [C::new(0.0, 0.0)];
+        p.eval_batch(&[], &mut out);
+        crate::eval::as_real(out[0])
+    });
+    let x = Expr::Var(shown[0].clone());
+    // 空は x < x、平面全体は x² + 1 > 0（x ≤ x は値がどこでも 0 で、領域の境目が無く描かれない）
+    let all = |rel: Rel| match rel {
+        Rel::Lt => Chain { exprs: vec![x.clone(), x.clone()], rels: vec![Rel::Lt], pos: vec![0; 2] },
+        _ => Chain { exprs: vec![Expr::Bin(BinOp::Add, Box::new(Expr::Bin(BinOp::Pow, Box::new(x.clone()), Box::new(Expr::Num(2.0)))), Box::new(Expr::Num(1.0))), Expr::Num(0.0)], rels: vec![Rel::Gt], pos: vec![0; 2] },
+    };
+    let mut out = Vec::new();
+    let mut constant = false;
+    for c in chains {
+        let exprs: Vec<Expr> = c.exprs.iter().map(|e| e.substitute(&|v: &str| (v == vertical).then_some(Expr::Num(0.0)))).collect();
+        let values: Option<Vec<f64>> = exprs.iter().map(value).collect();
+        match values {
+            Some(vs) => {
+                constant = true;
+                let holds = c.rels.iter().enumerate().all(|(k, r)| {
+                    let (a, b) = (vs[k], vs[k + 1]);
+                    let close = (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0);
+                    match r {
+                        Rel::Eq => close,
+                        Rel::Lt => a < b,
+                        Rel::Le => a <= b || close,
+                        Rel::Gt => a > b,
+                        Rel::Ge => a >= b || close,
+                    }
+                });
+                if !holds {
+                    return Some(vec![all(Rel::Lt)]);
+                }
+            }
+            None => out.push(Chain { exprs, rels: c.rels.clone(), pos: c.pos.clone() }),
+        }
+    }
+    // 数だけになる行（切り口の平面と重なる・交わらない行）が無ければ、今までの道（3D の形の切り口。z ≠ 0 の白丸なども、そのまま）
+    if !constant {
+        return None;
+    }
+    if out.is_empty() {
+        out.push(all(Rel::Le));
+    }
+    Some(out)
+}
+
 pub(crate) fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Params, space: &Space) -> Result<Plot, String> {
     let shown = space.shown();
     for chain in &mut chains {
@@ -1417,6 +1479,13 @@ pub(crate) fn compile_chains(mut chains: Vec<crate::parser::Chain>, params: &Par
     chains = crate::parser::expand_shared_bounds(chains);
     // ベクトル = ベクトルは、成分ごとの等式の連立（(x, y, z) = (1, 2, 3) は x = 1, y = 2, z = 3）。計画 M6
     chains = split_vector_relations(chains)?;
+    // 2D の切り口（縦の座標 = 0 の平面との交わり）: 回していなければ、縦の座標に 0 を入れて 2D として描くのと同じ。
+    // 交わりを 3D の形から求めると、z = 0 と重なる図形（z = 0 の平面・その上の円板・円）が消えた（#162）
+    if let Some(sliced) = slice_into_plane(&chains, params, space) {
+        let mut flat = space.clone();
+        flat.flat_slice = false;
+        return compile_chains(sliced, params, &flat);
+    }
     // 関係が「= 1 つだけ」か「無し」の 1 行の式は、今までの道（陽関数・陰関数・媒介変数表示・パラメータの定義）。それ以外は連立
     let single = chains.len() == 1 && (chains[0].rels.is_empty() || chains[0].rels == [Rel::Eq]);
     if !single {
