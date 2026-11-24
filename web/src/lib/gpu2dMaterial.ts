@@ -113,6 +113,13 @@ float gGrid(float coord, float spacing) {
 
 // 点 q で、不等式を全部満たすか（skip と同じ番号の不等式は除く）。
 // ループの回数を uniform（uIters）にして、展開させない（展開すると gF の中身が不等式の数だけ複製される）
+// ベクトルの長さ。大きさをそろえてから求める（length は 2 乗するので、10⁻²⁰ 倍した式の勾配 × 画素の大きさ ≈ 10⁻²² が
+// f32 で下にあふれて 0 になり、距離 |F| / |∇F| が ∞ になって画面全体を塗っていた。#169）
+float gLen(vec2 v) {
+  float m = max(abs(v.x), abs(v.y));
+  return m > 0.0 ? m * length(v / m) : 0.0;
+}
+
 // 不等式 k が点 q で成り立つか。厳密な不等式（G < 0）は境目の上を含めない（x > 0, x ≤ 0 の x = 0 を塗らない。#139）。
 // tol は境目からの近さの許し（線の上に寄せた点で調べるときの、寄せた誤差の分）
 bool gHolds(int k, vec2 q, float tol) {
@@ -135,7 +142,7 @@ bool gInsideOn(vec2 q, int skip, vec2 px) {
     if (k >= G_CUTS) break;
     if (k == skip) continue;
     vec4 g = gFD(G_EQ + k, q);
-    if (!gHolds(k, q, 1e-3 * length(g.yz * px))) return false;
+    if (!gHolds(k, q, 1e-3 * gLen(g.yz * px))) return false;
   }
   return true;
 }
@@ -266,7 +273,7 @@ void gWork(vec2 c, vec2 px, float hw, out float line, out bool regOut, out bool 
     if (done > 0) {
       // 1 次の近似の距離 |F| / |∇F|（画素単位）
       vec4 g = gFD(f, c);
-      float len = length(g.yz * px);
+      float len = gLen(g.yz * px);
       float dist = g.x == 0.0 ? 0.0 : abs(g.x) / len;
       if (done == 2) {
         // 符号の変わらない零点（(x² + y² − 4)² = 0 など）。F = u^k では |F| / |∇F| が本当の距離の 1/k になるので、距離では塗らない。
