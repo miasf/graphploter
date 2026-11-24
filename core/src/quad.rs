@@ -42,11 +42,13 @@ pub struct Budget {
     left: Cell<u64>,
     /// 誤差の見積もりが目標に届かなかった区間があったか
     pub rough: Cell<bool>,
+    /// ∞ までの積分で、振動が小さくならなかった（零点の間の積分が 0 に近づかない。$\int_0^\infty \sin t\,dt$）
+    pub nondecay: Cell<bool>,
 }
 
 impl Budget {
     pub fn new(evals: u64) -> Budget {
-        Budget { left: Cell::new(evals), rough: Cell::new(false) }
+        Budget { left: Cell::new(evals), rough: Cell::new(false), nondecay: Cell::new(false) }
     }
 
     /// n 回分を使う。足りなければ false
@@ -335,6 +337,255 @@ pub fn integrate(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, tol: Tol
         (false, true) => infinite(f, b, -1.0, tol, budget),
         (false, false) => infinite(f, 0.0, 1.0, tol, budget) + infinite(f, 0.0, -1.0, tol, budget),
     }
+}
+
+/// 端の近くを調べた結果、値を出せないとき（計画 `docs/plan-stage2b-integrals.md` の 2.2）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trouble {
+    /// 端 `at` の近くで |f| が |t − at|^power（power ≤ −1）のように大きくなり、積分が発散する
+    Diverges { at: f64, power: f64 },
+    /// 端 `at` の近くで、収束が遅すぎる（−1 < power ≤ −0.956）・きれいな累乗にならない・振動しながら大きくなる
+    /// ので、収束するかを確かめられない
+    Unsure { at: f64, power: f64, oscillating: bool },
+    /// 発散しうる点（分母が 0 になる所など）が多すぎて、区間を分けきれない
+    TooManyPoints,
+}
+
+/// 端 `a` から内側へ、幅 h の区間（dir > 0 なら [a, a + h]、dir < 0 なら [a − h, a]）の、ふつうの向きの積分。端に向かって幅を半分ずつにした区間
+/// $[a + h 2^{-k-1}, a + h 2^{-k}]$ に分けて積分し、区間ごとの |f| の最大 $M_k$ の増え方から、端での f の振る舞い
+/// $f \approx C (t - a)^p$ の p を見積もる（$M_k \propto 2^{-kp}$）。
+/// - p ≤ −1（振動していない）: 発散する
+/// - −1 < p ≤ −0.956、または p < −0.5 で見積もりが区間ごとにそろわない（$1/(t \ln^2 t)$）: 確かめられない
+/// - それ以外: 収束する。最後の区間から先の分は、公比 $r = 2^{-(p+1)}$ の等比級数で足す
+fn toward_end(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, tol: Tol, budget: &Budget) -> Result<f64, Trouble> {
+    const SHELLS: usize = 60;
+    // 区間ごとの (積分, 幅, |f| の最大)
+    let mut shells: Vec<(f64, f64, f64)> = Vec::with_capacity(SHELLS);
+    let mut sum = 0.0;
+    // 端の近くの区間で、誤差が目標に届かなかったか（激しく振動して区間の数の上限に届いた）
+    let was_rough = budget.rough.replace(false);
+    let reciprocal = |f: &mut dyn FnMut(&[f64], &mut [f64]), budget: &Budget| -> Option<f64> {
+        // t = a ± 1/u と置き換えて、u の ∞ までの積分にする（∫_a^{a+h} f dt = ∫_{1/h}^∞ f(a + 1/u) / u² du。
+        // sin(1/t) のように端の近くで激しく振動する関数も、振動の加速 [`oscillatory`] で求まる）
+        let was = budget.rough.replace(false);
+        let mut ts = [0.0; 15];
+        let mut g = |us: &[f64], out: &mut [f64]| {
+            let n = us.len();
+            for (t, &u) in ts[..n].iter_mut().zip(us) {
+                *t = a + dir / u;
+            }
+            f(&ts[..n], out);
+            for (o, &u) in out.iter_mut().zip(us) {
+                *o = if *o == 0.0 { 0.0 } else { *o / (u * u) };
+            }
+        };
+        let v = integrate(&mut g, 1.0 / h, f64::INFINITY, tol, budget);
+        let rough = budget.rough.replace(was);
+        (v.is_finite() && !rough && !budget.exhausted()).then_some(v)
+    };
+    let unresolved = |budget: &Budget| budget.rough.get();
+    for k in 0..SHELLS {
+        let outer = h * 0.5f64.powi(k as i32);
+        let inner = 0.5 * outer;
+        // 端の数の桁より細かい所は計算しない（a + δ が a と区別できない）
+        if inner < 1e-12 * a.abs() || inner < f64::MIN_POSITIVE * 1e10 {
+            break;
+        }
+        // 区間の数の上限: 端から遠い区間（幅が広く、振動の回数が多いかもしれない）ほど多く、端に近づくほど少なく
+        // （sin(1/t) のように端の近くで激しく振動する関数で、細い区間に計算を使い切らない。値は幅 × 最大 で抑えられる）
+        let shell_tol = Tol { rel: tol.rel, panels: (tol.panels >> k.min(20)).max(200), ends: false };
+        let (lo, hi) = if dir > 0.0 { (a + inner, a + outer) } else { (a - outer, a - inner) };
+        let mut big = 0.0f64;
+        let mut g = |ts: &[f64], out: &mut [f64]| {
+            f(ts, out);
+            for v in out.iter() {
+                if v.is_finite() {
+                    big = big.max(v.abs());
+                }
+            }
+        };
+        let c = finite(&mut g, lo, hi, shell_tol, budget);
+        if !c.is_finite() {
+            return Ok(f64::NAN);
+        }
+        sum += c;
+        shells.push((c, outer - inner, big));
+        if budget.exhausted() {
+            return Ok(f64::NAN);
+        }
+        // 端の近くで f が大きくならず、残りの区間の分（幅 × 最大 の和は、この区間の分の 2 倍まで）が無視できるなら、先へ進まない
+        if k >= 8 && big <= 2.0 * shells[k - 4].2 && 2.0 * (outer - inner) * big <= 1e-4 * tol.rel * sum.abs() {
+            break;
+        }
+    }
+    if unresolved(budget) {
+        if let Some(v) = reciprocal(f, budget) {
+            budget.rough.set(was_rough);
+            return Ok(v);
+        }
+    }
+    budget.rough.set(was_rough || budget.rough.get());
+    // 打ち切った先の分: 最後の 2 区間の比を公比とする等比級数（端で f が有限なら、公比はほぼ 1/2）
+    let geometric_tail = |shells: &[(f64, f64, f64)]| -> f64 {
+        let n = shells.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let r = shells[n - 1].0 / shells[n - 2].0;
+        if r.is_finite() && r > 0.0 && r < 0.9 { shells[n - 1].0 * r / (1.0 - r) } else { 0.0 }
+    };
+    if 2.0 * shells.last().map_or(0.0, |s| s.1 * s.2) <= 1e-4 * tol.rel * sum.abs() && shells.len() < SHELLS {
+        return Ok(sum + geometric_tail(&shells));
+    }
+    let n = shells.len();
+    if n < 8 {
+        return Ok(sum + geometric_tail(&shells));
+    }
+    // 区間の番号 k に対する log₂ M_k の傾き = −p（最小二乗）
+    let slope = |from: usize, to: usize| -> Option<f64> {
+        let pts: Vec<(f64, f64)> = (from..to).filter(|&k| shells[k].2 > 0.0).map(|k| (k as f64, shells[k].2.log2())).collect();
+        if pts.len() < 3 {
+            return None;
+        }
+        let m = pts.len() as f64;
+        let (sx, sy) = pts.iter().fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+        let (mx, my) = (sx / m, sy / m);
+        let (num, den) = pts.iter().fold((0.0, 0.0), |(a, b), (x, y)| (a + (x - mx) * (y - my), b + (x - mx) * (x - mx)));
+        Some(num / den)
+    };
+    // 最後の 8 区間の傾き（端のすぐ近くの p）と、真ん中の 8 区間の傾き。きれいな累乗 (t − a)^p ならそろう。
+    // 1/(t ln² t) のように累乗からずれる関数は、端に近づくほど傾きが −1 に寄っていくのでそろわない
+    let last = n.saturating_sub(16);
+    let mid = (n / 2).saturating_sub(4);
+    let (Some(all), Some(middle), Some(second)) = (slope(last, n), slope(mid, (mid + 8).min(n)), slope(n - 8, n)) else {
+        // 端の近くで f が 0（区間の外を 0 にした場合分けなど）
+        return Ok(sum + geometric_tail(&shells));
+    };
+    let (p, p_first) = (-second, -middle);
+    // 振動して打ち消し合っているか（積分が、幅 × 最大 よりずっと小さい）
+    let cancel = shells[last..].iter().filter(|(c, w, m)| c.abs() < 0.1 * w * m).count();
+    let oscillating = cancel * 2 > n - last;
+    let at = a;
+    if oscillating {
+        if let Some(v) = reciprocal(f, budget) {
+            return Ok(v);
+        }
+    }
+    if p <= -0.999 || -all <= -0.999 {
+        return Err(if oscillating { Trouble::Unsure { at, power: p, oscillating } } else { Trouble::Diverges { at, power: p.min(-all) } });
+    }
+    if p < -0.956 || (p < -0.5 && (p - p_first).abs() > 0.01) {
+        return Err(Trouble::Unsure { at, power: p, oscillating });
+    }
+    // 先の分: 公比 r の等比級数（振動していて区間ごとの値がそろわなければ、足さずに誤差として見る）
+    let r = 2f64.powf(-(p + 1.0));
+    let (c_last, w_last, m_last) = shells[n - 1];
+    let tail = if oscillating { 0.0 } else { c_last * r / (1.0 - r) };
+    let bound = w_last * m_last * r / (1.0 - r);
+    if bound > 1e3 * tol.rel * sum.abs().max(f64::MIN_POSITIVE) && oscillating {
+        budget.rough.set(true);
+    }
+    Ok(sum + tail)
+}
+
+/// 区間 [a, b]（端は ±∞ でもよい。a > b なら符号を変える）の f の積分を、点 `cuts` で分けて求める。
+/// 有限の端（分けた点も、小区間の端になる）ごとに [`toward_end`] で発散しないかを確かめる。
+/// `pv` なら、区間の中の点 c では、c から等しい距離の両側をまとめて積分する（コーシーの主値。$\frac1t$ の打ち消し合いを使う）
+pub fn integrate_split(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, cuts: &[f64], pv: bool, tol: Tol, budget: &Budget) -> Result<f64, Trouble> {
+    if a.is_nan() || b.is_nan() {
+        return Ok(f64::NAN);
+    }
+    if a > b {
+        return integrate_split(f, b, a, cuts, pv, tol, budget).map(|v| -v);
+    }
+    if a == b {
+        return Ok(0.0);
+    }
+    let mut inner: Vec<f64> = cuts.iter().copied().filter(|c| *c > a && *c < b && c.is_finite()).collect();
+    inner.sort_by(f64::total_cmp);
+    inner.dedup();
+    // 無限の端は、最後の点から先を今までの無限区間の積分にする（振動の加速も含む）。その前の 1 区間は有限の端の扱い
+    let mut total = 0.0;
+    let (mut lo, mut hi) = (a, b);
+    if !a.is_finite() || !b.is_finite() {
+        let mut fin: Vec<f64> = inner.clone();
+        if fin.is_empty() {
+            fin.push(if a.is_finite() { a } else if b.is_finite() { b } else { 0.0 });
+        }
+        let first = if a.is_finite() { a } else { fin[0] };
+        let last = if b.is_finite() { b } else { *fin.last().unwrap() };
+        if !b.is_finite() {
+            let start = last + last.abs().max(1.0);
+            total += integrate(f, start, f64::INFINITY, tol, budget);
+            hi = start;
+        }
+        if !a.is_finite() {
+            let end = first - first.abs().max(1.0);
+            total += integrate(f, f64::NEG_INFINITY, end, tol, budget);
+            lo = end;
+        }
+        if !total.is_finite() {
+            return Ok(f64::NAN);
+        }
+        inner.retain(|c| *c > lo && *c < hi);
+    }
+    let mut points = vec![lo];
+    points.extend(&inner);
+    points.push(hi);
+    // 主値: 区間の中の点ごとに、両側の等しい距離 hs の所までをまとめて積分する
+    let mut sym: Vec<(f64, f64)> = Vec::new();
+    if pv {
+        for k in 1..points.len() - 1 {
+            let c = points[k];
+            let hs = 0.5 * (c - points[k - 1]).min(points[k + 1] - c);
+            sym.push((c, hs));
+        }
+    }
+    // 端から端までの小区間。主値なら、点の周りの対称な所を除いた残り
+    let mut pieces: Vec<(f64, f64)> = Vec::new();
+    for k in 0..points.len() - 1 {
+        let (mut x0, mut x1) = (points[k], points[k + 1]);
+        if pv {
+            if k > 0 {
+                x0 = sym[k - 1].0 + sym[k - 1].1;
+            }
+            if k + 1 < points.len() - 1 {
+                x1 = sym[k].0 - sym[k].1;
+            }
+        }
+        if x1 > x0 {
+            pieces.push((x0, x1));
+        }
+    }
+    for (x0, x1) in pieces {
+        let h = 0.5 * (x1 - x0);
+        total += toward_end(f, x0, 1.0, h, tol, budget)?;
+        total += toward_end(f, x1, -1.0, h, tol, budget)?;
+        if !total.is_finite() {
+            return Ok(f64::NAN);
+        }
+    }
+    for (c, hs) in sym {
+        // g(u) = f(c + u) + f(c − u)（u ∈ (0, hs]）
+        let mut buf = Vec::new();
+        let mut g = |us: &[f64], out: &mut [f64]| {
+            let n = us.len();
+            buf.clear();
+            buf.extend(us.iter().map(|u| c + u));
+            buf.extend(us.iter().map(|u| c - u));
+            let mut both = vec![0.0; 2 * n];
+            f(&buf, &mut both);
+            for k in 0..n {
+                out[k] = both[k] + both[n + k];
+            }
+        };
+        total += toward_end(&mut g, 0.0, 1.0, hs, tol, budget).map_err(|e| match e {
+            Trouble::Diverges { power, .. } => Trouble::Diverges { at: c, power },
+            Trouble::Unsure { power, oscillating, .. } => Trouble::Unsure { at: c, power, oscillating },
+            t => t,
+        })?;
+    }
+    Ok(total)
 }
 
 /// 極限の標本では、長い区間の端や、原点へ近づく端の寄与を拾えるように分割する。
