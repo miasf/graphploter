@@ -12,7 +12,7 @@
     UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
   } from './lib/library'
   import GraphsDialog from './lib/GraphsDialog.svelte'
-  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
+  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, plainNumber, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
   import { keyboardOcclusion, setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -1616,7 +1616,7 @@
     item.param.re = re
     item.param.im = im
     // 条件で止めた値は、丸めずに書く（丸めると境目を越えて、条件が成り立たなくなる）
-    item.latex = `${latexName(item.param.name)}=${limit.clamped ? String(re) : complexLatex(re, im, step, item.slider.min)}`
+    item.latex = `${latexName(item.param.name)}=${limit.clamped ? plainNumber(re) : complexLatex(re, im, step, item.slider.min)}`
     paramsChanged([item.param.name], item)
     refreshConditions()
     // 光線で描く式は、計算し直しを待たずに uniform を変える（計画 G7）

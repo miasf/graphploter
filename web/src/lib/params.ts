@@ -190,7 +190,23 @@ function decimals(x: number): number {
  */
 export function formatNumber(v: number, step: number, base = 0): string {
   const digits = Math.max(decimals(step), decimals(base))
-  return String(Number(v.toFixed(digits)))
+  return plainNumber(Number(v.toFixed(digits)))
+}
+
+/**
+ * 数を、指数表記を使わない小数の文字列にする（1.01e-8 → "0.0000000101"、1e21 → "1000000000000000000000"）。
+ * 計算エンジンは 1.01e-8 の e をネイピア数と読むので、式の欄に書き戻す数はこの形にする。桁は String と同じ（読み直すと同じ数）
+ */
+export function plainNumber(v: number): string {
+  const s = String(v)
+  const m = /^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(s)
+  if (!m) return s
+  const [, sign, int, frac = '', e] = m
+  const digits = int + frac
+  const point = int.length + Number(e) // 小数点の位置（digits の先頭から）
+  if (point <= 0) return `${sign}0.${'0'.repeat(-point)}${digits}`
+  if (point >= digits.length) return sign + digits + '0'.repeat(point - digits.length)
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`
 }
 
 /** 複素数 re + im·i を、数式入力欄に入れる形（LaTeX）にする。例: 1.5−0.5i → "1.5-0.5i" */
