@@ -155,7 +155,7 @@ fn real_fn1(f: Func) -> bool {
 
 /// 実数だけの計算で扱える2引数の関数か
 fn real_fn2(f: Func) -> bool {
-    matches!(f, Func::Min | Func::Max | Func::Mod)
+    matches!(f, Func::Min | Func::Max | Func::Mod | Func::Guard)
 }
 
 /// 計算の結果の受け取り先。CHUNK ごとに、結果ごとの値の列を受け取る
@@ -407,6 +407,8 @@ impl Code {
                 Op::Call2(f, a, b) => match f {
                     Func::Min => iv::min(r(*a), r(*b))?,
                     Func::Max => iv::max(r(*a), r(*b))?,
+                    // 描かない点（NaN）は、値の範囲の外として扱う（値の範囲は v のもの）
+                    Func::Guard => r(*a),
                     // mod は値が飛ぶ所が多いので、最初は扱わない
                     _ => return None,
                 },
@@ -568,6 +570,8 @@ impl Code {
                     Func::Min => dec_of(iv::min(r(*a), r(*b)), Dec::Com, Dec::Dac),
                     Func::Max => dec_of(iv::max(r(*a), r(*b)), Dec::Com, Dec::Dac),
                     Func::Mod => dec_mod(r(*a), r(*b)),
+                    // 余裕が確かに 0 以上なら v、そうでなければ、描かない点があるかもしれない
+                    Func::Guard => if r(*b).lo >= 0.0 { D::new(r(*a), Dec::Com) } else { D::entire(Dec::Trv) },
                     _ => D::entire(Dec::Trv),
                 },
                 // 場合分けなど: 値の範囲は言えない
@@ -707,6 +711,7 @@ impl Code {
                 Op::Call2(f, a, b) => match f {
                     Func::Min => map2!(*a, *b, |x: f64, y: f64| if y < x { y } else { x }),
                     Func::Max => map2!(*a, *b, |x: f64, y: f64| if y > x { y } else { x }),
+                    Func::Guard => map2!(*a, *b, |v: f64, m: f64| if m >= 0.0 { v } else { f64::NAN }),
                     Func::Mod => map2!(*a, *b, |x: f64, y: f64| x - y * (x / y).floor()),
                     _ => return false,
                 },

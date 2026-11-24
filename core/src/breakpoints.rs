@@ -229,9 +229,14 @@ pub fn find(f: &Expr, var: &str, params: &Params, a: f64, b: f64) -> Found {
             target.push(b);
         }
     }
-    // 端と、ほぼ同じ所の点を除く
+    // 端と、ほぼ同じ所の点を除く。区間の幅に比べてとても小さい点は 0 にそろえる（二分法で −1e−17 のようになる）
     let tiny = |x: f64| 1e-12 * width.max(x.abs());
     let clean = |mut v: Vec<f64>| -> Vec<f64> {
+        for x in v.iter_mut() {
+            if x.abs() <= 1e-12 * width {
+                *x = 0.0;
+            }
+        }
         v.retain(|&x| x > a + tiny(a) && x < b - tiny(b));
         v.sort_by(f64::total_cmp);
         v.dedup_by(|x, y| (*x - *y).abs() <= tiny(*y));

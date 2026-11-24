@@ -548,10 +548,13 @@ pub fn integrate_split(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, cu
     // 主値: 区間の中の点ごとに、両側の等しい距離 hs の所までをまとめて積分する
     let mut sym: Vec<(f64, f64)> = Vec::new();
     if pv {
-        for k in 1..points.len() - 1 {
+        // 両側の幅 hs: 隣が区間の端ならその端まで、隣も分ける点なら、その点との中点まで（両側の対称な所どうしが重ならない）
+        let last = points.len() - 1;
+        for k in 1..last {
             let c = points[k];
-            let hs = 0.5 * (c - points[k - 1]).min(points[k + 1] - c);
-            sym.push((c, hs));
+            let left = if k - 1 == 0 { points[0] } else { 0.5 * (points[k - 1] + c) };
+            let right = if k + 1 == last { points[last] } else { 0.5 * (c + points[k + 1]) };
+            sym.push((c, (c - left).min(right - c)));
         }
     }
     // 端から端までの小区間。主値なら、点の周りの対称な所を除いた残り

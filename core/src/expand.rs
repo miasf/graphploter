@@ -2204,7 +2204,7 @@ impl<'a> Expander<'a> {
     }
 
     /// 変数の端の積分（いちばん外側）: $s \in [s_0, s_1]$ を $s = s_0 + (s_1 - s_0)\frac{1 - \cos \pi u}{2}$ と置き換えて端に点を集め
-    /// （端の $\frac{1}{\sqrt t}$ がなめらかになる）、$u$ の 8 区間（両端に向かって幅を半分ずつ）ごとにガウス・クロンロッドの 15 点の和 K と、同じ点の 7 点の和 G を作る。
+    /// （端の $\frac{1}{\sqrt t}$ がなめらかになる）、$u$ の 8 区間（曲面は 4 区間。両端に向かって幅を半分ずつ）ごとにガウス・クロンロッドの 15 点の和 K と、同じ点の 7 点の和 G を作る。
     /// $|K - G| > 10^{-5}(1 + |K|)$ の点（振動が速くて点が足りない所）は、値を出さない（NaN。グラフが途切れる）
     fn integral_checked(&mut self, var: &str, body: &Expr, phi: &Expr, dphi: &Expr, s0: Expr, s1: Expr) -> Result<Expr, String> {
         use crate::functions::Func;
@@ -2217,8 +2217,14 @@ impl<'a> Expander<'a> {
             BinOp::Div => crate::diff::div(x, y),
             BinOp::Pow => crate::diff::pow(x, y),
         };
-        // u の区間: 両端に向かって幅を半分ずつにする（端の近くの山 e^{−t²}・端の特異点を、x が大きくても捉える）
-        const CUTS: [f64; 9] = [0.0, 0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0];
+        // u の区間: 両端に向かって幅を半分ずつにする（端の近くの山 e^{−t²}・端の特異点を、x が大きくても捉える）。
+        // 曲面（端か中身が座標を 2 つ以上使う）は点の数が多いので 4 区間、曲線は 8 区間
+        let mut used = Vec::new();
+        for e in [body, phi, &s0, &s1] {
+            e.collect_vars(&mut used);
+        }
+        let coords = used.iter().filter(|v| v.as_str() != var && !v.starts_with('#') && !self.params.contains_key(v.as_str())).count();
+        let cuts: &[f64] = if coords >= 2 { &[0.0, 0.125, 0.5, 0.875, 1.0] } else { &[0.0, 0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0] };
         let width = b(BinOp::Sub, s1, s0.clone());
         self.int_depth += 1;
         let symbolic = self.scalar(body).ok();
@@ -2239,8 +2245,8 @@ impl<'a> Expander<'a> {
         let mut kronrod = Vec::new();
         let mut gauss = Vec::new();
         let mut size = 0;
-        for p in 0..CUTS.len() - 1 {
-            let (u0, u1) = (CUTS[p], CUTS[p + 1]);
+        for p in 0..cuts.len() - 1 {
+            let (u0, u1) = (cuts[p], cuts[p + 1]);
             let (c, h) = (0.5 * (u0 + u1), 0.5 * (u1 - u0));
             let mid = match node(self, c) {
                 Ok(e) => e,
@@ -2273,15 +2279,16 @@ impl<'a> Expander<'a> {
         self.int_depth -= 1;
         let k = balanced(kronrod, BinOp::Add);
         let g = balanced(gauss, BinOp::Add);
-        // 余裕 10⁻⁵ (1 + |K|) − |K − G| が 0 以上なら K、そうでなければ NaN（場合分け [`Func::Piece`]）。
+        // 余裕 m = 10⁻⁵ (1 + |K|) − |K − G| が 0 以上なら K、そうでなければ NaN（[`Func::Guard`]。場合分け [`Func::Piece`] にすると、
+        // 値が飛ぶ所を探す処理が曲面の全体で動いて、描くのが 70 倍遅くなる。√min(0, m) を足すと、微分が NaN になる）。
         // |K − G| は 7 点の和の誤差なので、K の誤差はずっと小さい（QUADPACK の見積もり (200 |K − G|)^{1.5} で 10⁻⁴ 程度まで）
         let margin = b(
             BinOp::Sub,
             b(BinOp::Mul, num(1e-5), b(BinOp::Add, num(1.0), Expr::Call(Func::Abs, vec![k.clone()]))),
             Expr::Call(Func::Abs, vec![b(BinOp::Sub, k.clone(), g)]),
         );
-        add_note("積分の近似の誤差の見積もりが大きい点（振動が速い・発散しそうな所）は、値を出さずに描いていません");
-        Ok(Expr::Call(Func::Piece, vec![num(1.0), num(0.0), margin, k, num(0.0), num(0.0), num(f64::NAN)]))
+        add_note("変数の端の積分は近似です。誤差の見積もりが大きい点（振動が速い所など）は、値を出さずに描きません");
+        Ok(Expr::Call(Func::Guard, vec![k, margin]))
     }
 
     /// 変数の端の積分 $\int_a^x f(t)\,dt$ の、数の端 a で発散しないかを先に確かめる（中身が積分の変数とパラメータだけのとき。
@@ -4367,7 +4374,7 @@ fn trouble_message(var: &str, t: crate::quad::Trouble) -> String {
     let near = |at: f64| if at == 0.0 { format!("|{var}|") } else if at < 0.0 { format!("|{var} + {}|", short_number(-at)) } else { format!("|{var} − {}|", short_number(at)) };
     match t {
         Trouble::Diverges { at, power } => format!(
-            "積分は発散します（{var} = {} の近くで、中身の大きさが {}^({}) のように大きくなる。−1 乗より速く大きくなると、面積は有限になりません）",
+            "積分は発散します（{var} = {} の近くで、中身の大きさが {}^({}) のように大きくなる。−1 乗かそれより速く大きくなると、面積は有限になりません）",
             short_number(at),
             near(at),
             short_number((power * 100.0).round() / 100.0)
