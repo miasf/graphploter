@@ -66,6 +66,10 @@ impl Rat {
     /// 浮動小数点数をぴったり表す分数。有限桁の小数（打った数・刻みのスライダー。小数点以下 22 桁まで、n は 2⁵³ まで）は n / 10ᵈ
     /// （0.9999999 = 9999999 / 10⁷。#141）、ほかは分母が 10⁶ 以下の分数（連分数。1/3 など）。無ければ None（π などは多項式の係数にしない）
     pub(crate) fn from_f64(v: f64) -> Option<Rat> {
+        // 整数は 2⁵³ を超えても（10¹⁶ など）そのまま
+        if v.is_finite() && v == v.trunc() && v.abs() < 1e30 {
+            return Rat::new(v as i128, 1);
+        }
         if !v.is_finite() || v.abs() > 1e15 {
             return None;
         }
@@ -380,6 +384,22 @@ fn univariate(p: &Poly, k: usize, vals: &[f64; 3]) -> Vec<f64> {
         c[m[k] as usize] += v;
     }
     c
+}
+
+/// 式 e が変数 `var` の多項式（係数は有理数。パラメータは値を入れる）なら、その定積分 ∫_a^b e d var を有理数で正確に求めた値（#204）。
+/// (t + 10¹⁶) − 10¹⁶ は t、∫_{−1}^{1} (10¹⁶ t + 1) dt は 2。多項式でない・端が有理数で表せない・途中であふれるなら None
+pub(crate) fn polynomial_integral(e: &Expr, var: &str, params: &Params, a: f64, b: f64) -> Option<f64> {
+    let p = from_expr(e, &[var], params)?;
+    let (ra, rb) = (Rat::from_f64(a)?, Rat::from_f64(b)?);
+    let pow = |r: Rat, k: u32| -> Option<Rat> { (0..k).try_fold(Rat::ONE, |acc, _| acc.mul(r)) };
+    let mut total = Rat { n: 0, d: 1 };
+    for (m, c) in &p.0 {
+        let k = m[0] as u32;
+        // c (b^{k+1} − a^{k+1}) / (k + 1)
+        let diff = pow(rb, k + 1)?.add(pow(ra, k + 1)?.neg())?;
+        total = total.add(c.mul(diff)?.div(Rat::new(k as i128 + 1, 1)?)?)?;
+    }
+    Some(total.f())
 }
 
 /// 連立方程式 eqs = 0（変数は names。2 つか 3 つ）の実数の解（有限個のときだけ）。多項式でない・解が無限個・

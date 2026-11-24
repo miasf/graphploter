@@ -13,6 +13,7 @@
 
 pub mod adaptive;
 pub mod coords;
+pub mod accurate;
 pub mod critical;
 pub mod diff;
 pub mod equation;

@@ -1057,6 +1057,8 @@ struct Expander<'a> {
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
 pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
+    let folded = fold_gamma_ratios(e, params);
+    let e = &folded;
     if !e.has_notation() && !mentions_defs(e) && !nested_tuple(e, true) && !e.uses_var("∗") {
         return Ok(e.clone());
     }
@@ -1294,7 +1296,7 @@ impl<'a> Expander<'a> {
                 if let Some(m) = if let [Val::S(v)] = vals.as_slice() { Mat::of(v) } else { None } {
                     use crate::functions::Func;
                     return Ok(Val::S(match f {
-                        Func::Abs if m.cols == 1 => norm(&m.items),
+                        Func::Abs if m.cols == 1 => self.accurate_norm(&m.items),
                         Func::Abs => m.det()?,
                         Func::Re | Func::Im | Func::Conj => {
                             Mat { rows: m.rows, cols: m.cols, items: m.items.iter().map(|c| Expr::Call(*f, vec![c.clone()])).collect() }.into_expr()
@@ -1463,7 +1465,14 @@ impl<'a> Expander<'a> {
                     None => v,
                 },
             },
-            "tr" => self.mat(&args[0], &what)?.trace()?,
+            "tr" => {
+                let m = self.mat(&args[0], &what)?;
+                let diagonal: Vec<Expr> = (0..m.rows.min(m.cols)).map(|k| m.at(k, k).clone()).collect();
+                match (m.rows == m.cols).then(|| self.real_values(&diagonal)).flatten() {
+                    Some(v) => Expr::Num(crate::accurate::sum(&v)),
+                    None => m.trace()?,
+                }
+            }
             "inv" => self.mat(&args[0], &what)?.inverse()?.into_expr(),
             "transpose" => self.mat(&args[0], &what)?.transpose().into_expr(),
             "norm" => {
@@ -1471,14 +1480,17 @@ impl<'a> Expander<'a> {
                 if m.cols != 1 {
                     return Err("@norm にはベクトルを書いてください".into());
                 }
-                norm(&m.items)
+                self.accurate_norm(&m.items)
             }
             _ => {
                 let (u, v) = (self.mat(&args[0], &what)?, self.mat(&args[1], &what)?);
                 if u.cols != 1 || v.cols != 1 {
                     return Err(format!("{what} にはベクトルを 2 つ書いてください"));
                 }
-                let d = linalg::dot(&u.items, &v.items)?;
+                let d = match (u.items.len() == v.items.len()).then(|| self.real_values(&u.items).zip(self.real_values(&v.items))).flatten() {
+                    Some((a, b)) => Expr::Num(crate::accurate::dot(&a, &b)),
+                    None => linalg::dot(&u.items, &v.items)?,
+                };
                 if op == "dot" {
                     d
                 } else {
@@ -1950,6 +1962,10 @@ impl<'a> Expander<'a> {
                 return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));
             }
             terms.push(t);
+        }
+        // 項が全部定数なら、桁を保って計算する（10¹⁶ + 1 − 10¹⁶ を 0 にしない、10²⁰⁰ · 10²⁰⁰ · 10⁻²⁰⁰ を途中であふれさせない。#204）
+        if let Some(values) = self.real_values(&terms[..1]).and_then(|_| self.real_values(&terms)) {
+            return Ok(Expr::Num(if sum { crate::accurate::sum(&values) } else { crate::accurate::product(&values) }));
         }
         Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
     }
@@ -2426,6 +2442,12 @@ impl<'a> Expander<'a> {
                 }
             };
             let (a, b) = (at(&bounds[0].0), at(&bounds[0].1));
+            // 多項式なら有理数で正確に（被積分関数の値そのものが丸めで 1 や t を失う (t + 10¹⁶) − 10¹⁶ など。#204）
+            if !pv && a.is_finite() && b.is_finite() {
+                if let Some(v) = crate::groebner::polynomial_integral(&g, var, self.params, a, b) {
+                    return Some(Ok((v, false, false)));
+                }
+            }
             let found = crate::breakpoints::find(&g, var, self.params, a, b);
             if found.too_many_singular {
                 return Some(Err(trouble_message(var, crate::quad::Trouble::TooManyPoints)));
@@ -3874,6 +3896,22 @@ impl<'a> Expander<'a> {
         Ok(balanced(terms, BinOp::Add))
     }
 
+    /// ベクトルの大きさ。成分が全部実数の定数なら、いちばん大きい成分で割ってから求める（#204）
+    fn accurate_norm(&self, items: &[Expr]) -> Expr {
+        match self.real_values(items) {
+            Some(v) => Expr::Num(crate::accurate::norm(&v)),
+            None => norm(items),
+        }
+    }
+
+    /// 式が全部、実数の定数（数とパラメータだけ）なら、その値の並び（#204。桁を保って和・積・内積を求めるため）
+    fn real_values(&self, items: &[Expr]) -> Option<Vec<f64>> {
+        items
+            .iter()
+            .map(|e| self.constant_value(e).filter(|c| c.im == 0.0).map(|c| c.re))
+            .collect()
+    }
+
     /// 数とパラメータだけの式の値（変数を含めば None）。使ったパラメータを覚える
     fn constant_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
         self.numeric_value(e).filter(|v| v.re.is_finite() && v.im.is_finite())
@@ -4072,6 +4110,10 @@ impl<'a> Expander<'a> {
                 return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));
             }
             terms.push(t);
+        }
+        // 項が全部定数なら、桁を保って計算する（10¹⁶ + 1 − 10¹⁶ を 0 にしない、10²⁰⁰ · 10²⁰⁰ · 10⁻²⁰⁰ を途中であふれさせない。#204）
+        if let Some(values) = self.real_values(&terms[..1]).and_then(|_| self.real_values(&terms)) {
+            return Ok(Expr::Num(if sum { crate::accurate::sum(&values) } else { crate::accurate::product(&values) }));
         }
         Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
     }
@@ -4747,6 +4789,47 @@ fn superscript(n: usize) -> String {
         return String::new();
     }
     n.to_string().chars().map(|c| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect()
+}
+
+/// Γ(a)/Γ(b)（a, b が数だけの式。172!/171! など）を [`gamma_ratio`] の値にする（#204）。
+/// どちらの Γ もあふれても比は有限。整数の階乗の比は正確に（5!/3! = 20）
+fn fold_gamma_ratios(e: &Expr, params: &Params) -> Expr {
+    use crate::functions::Func;
+    // 数だけの式に限る（パラメータを使う比を数に畳むと、使ったパラメータが分からなくなり、スライダーを動かしても描き直されない）
+    let _ = params;
+    let none = Params::new();
+    let value = |x: &Expr| -> Option<f64> {
+        let p = crate::eval::Program::compile_with(x, &[], &none).ok()?;
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        p.eval_batch(&[], &mut out);
+        (out[0].im == 0.0).then_some(out[0].re)
+    };
+    e.rewrite(&|n| match n {
+        Expr::Bin(BinOp::Div, a, b) => match (&**a, &**b) {
+            (Expr::Call(Func::Gamma, x), Expr::Call(Func::Gamma, y)) if x.len() == 1 && y.len() == 1 => {
+                gamma_ratio(value(&x[0])?, value(&y[0])?).map(Expr::Num)
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// Γ(p)/Γ(q)（p, q > 0）。p − q が 0〜1000 の整数なら q (q + 1) ⋯ (p − 1) を桁を保って掛け（5!/3! = 20 ちょうど）、
+/// そうでなければ exp(ln Γ(p) − ln Γ(q))。整数でなく、どちらの Γ もあふれない（171 未満）なら None（今までどおり割る）
+fn gamma_ratio(p: f64, q: f64) -> Option<f64> {
+    let d = p - q;
+    let integers = p == p.round() && q == q.round();
+    if !(p.is_finite() && q.is_finite()) || (p < 171.0 && q < 171.0 && !integers) || p <= 0.0 || q <= 0.0 {
+        return None;
+    }
+    if d == d.round() && d.abs() <= 1000.0 {
+        let factors: Vec<f64> = (0..d.abs() as usize).map(|k| q.min(p) + k as f64).collect();
+        let prod = crate::accurate::product(&factors);
+        return Some(if d >= 0.0 { prod } else { 1.0 / prod });
+    }
+    let lg = |v: f64| crate::special::log_gamma(num_complex::Complex64::new(v, 0.0)).re;
+    Some((lg(p) - lg(q)).exp())
 }
 
 /// 式 e の、点 `at`（変数 `names`）での値と、まわりからの極限。変数とパラメータのほかに文字が残れば None

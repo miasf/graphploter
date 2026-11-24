@@ -40,3 +40,41 @@ fn ode_undefined_at_start() {
     assert_eq!(ode("y'=x-y", "", d).0, "常微分方程式の解曲線と傾きの場");
     assert_eq!(ode("y''+y=0", "", d).0, "常微分方程式の解曲線");
 }
+
+fn value(src: &str) -> f64 {
+    graph_core::equation::eval_constant(src).unwrap_or_else(|e| panic!("{src}: {e}"))
+}
+
+fn near(src: &str, want: f64, rel: f64) {
+    let v = value(src);
+    assert!((v - want).abs() <= rel * want.abs(), "{src}: {v}（正しくは {want}）");
+}
+
+/// 定数の和・積・内積・トレース・ノルム・階乗の比・多項式の積分を、桁を保って計算する（#204）
+#[test]
+fn constants_keep_their_digits() {
+    // 和・内積・トレースの桁落ち（0 と出ていた）
+    assert_eq!(value("@sum(k,1,3) @cases(10^(16), k = 1; 1, k = 2; -10^(16))"), 1.0);
+    assert_eq!(value("@dot((10^(16),1,10^(16)),(1,1,-1))"), 1.0);
+    assert_eq!(value("@tr(⟦10^(16),0,0;0,1,0;0,0,-10^(16)⟧)"), 1.0);
+    // 途中だけあふれる積・内積・ノルム（実数の値にならなかった・0 と出ていた）
+    near("@prod(n,1,3) @cases(10^(200), n = 1; 10^(200), n = 2; 10^(-200))", 1e200, 1e-13);
+    assert_eq!(value("@dot((10^(200),10^(200),1),(10^(110),-10^(110),2))"), 2.0);
+    near("@norm((10^(200),10^(200)))", 2f64.sqrt() * 1e200, 1e-13);
+    near("@norm((10^(-200),10^(-200)))", 2f64.sqrt() * 1e-200, 1e-13);
+    assert_eq!(value("abs((3,4))"), 5.0);
+    // 2⁵³ を超える整数の行列の階数（1 と出ていた）
+    assert_eq!(value("@rank(⟦10^(16),0;0,1⟧)"), 2.0);
+    // 階乗の比（どちらもあふれる。整数どうしは正確に）
+    assert_eq!(value("172!/171!"), 172.0);
+    assert_eq!(value("200!/198!"), 39800.0);
+    assert_eq!(value("5!/3!"), 20.0);
+    // 多項式の定積分は有理数で正確に（被積分関数の値が丸めで 1・t を失っていた）
+    assert_eq!(value("@int(t,-1,1)(10^(16) t+1)"), 2.0);
+    assert_eq!(value("@int(t,0,1)((t+10^(16))-10^(16))"), 0.5);
+    assert_eq!(value("@int(t,0,3)(t^(2))"), 9.0);
+    // ふつうの値は今までどおり
+    near("@sum(k,1,100) 1/k^2", 1.6349839001848923, 1e-15);
+    assert_eq!(value("@prod(k,1,10) k"), 3628800.0);
+    near("@int(t,0,1)(e^(t))", std::f64::consts::E - 1.0, 1e-12);
+}
