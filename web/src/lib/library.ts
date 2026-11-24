@@ -70,6 +70,26 @@ function remove(k: string) {
   }
 }
 
+/** 前の値に戻す（null なら消す） */
+function restore(k: string, v: string | null) {
+  if (v === null) remove(k)
+  else set(k, v)
+}
+
+/**
+ * いくつかのキーをまとめて書く。どれかが書けなければ、書いた分を前の値に戻して false。
+ * 一覧と本体の片方だけが新しくなる（容量がいっぱいで 2 つ目が書けない）のを防ぐ
+ */
+function commit(writes: [string, string][]): boolean {
+  const before = writes.map(([k]) => get(k))
+  for (let i = 0; i < writes.length; i++) {
+    if (set(writes[i][0], writes[i][1])) continue
+    for (let j = i - 1; j >= 0; j--) restore(writes[j][0], before[j])
+    return false
+  }
+  return true
+}
+
 function readIndex(): GraphMeta[] {
   try {
     const raw = get(INDEX_KEY)
@@ -81,8 +101,10 @@ function readIndex(): GraphMeta[] {
   }
 }
 
+const indexText = (list: GraphMeta[]) => JSON.stringify(list)
+
 function writeIndex(list: GraphMeta[]): boolean {
-  return set(INDEX_KEY, JSON.stringify(list))
+  return set(INDEX_KEY, indexText(list))
 }
 
 /** 新しい id（時刻と乱数。グラフの数は多くないので、これで重ならない） */
@@ -90,18 +112,19 @@ export function newId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
-/** 前の版の自動保存があれば、一覧の最初のグラフにする（1 回だけ） */
+/**
+ * 前の版の自動保存があれば、一覧の最初のグラフにする（1 回だけ）。
+ * 本体と一覧の両方が書けてから古いキーを消す。書けなければ何も変えず、次に開いたときにもう一度試す
+ */
 export function migrate(now = Date.now()) {
   const old = get(OLD_KEY)
   if (!old) return
   if (readIndex().length === 0) {
     const id = newId()
-    if (set(graphKey(id), old)) {
-      writeIndex([{ id, title: UNTITLED, created: now, updated: now }])
-      set(CURRENT_KEY, id)
-    } else {
-      return
-    }
+    const list = [{ id, title: UNTITLED, created: now, updated: now }]
+    if (!commit([[graphKey(id), old], [INDEX_KEY, indexText(list)]])) return
+    // 最後に開いたグラフの印は書けなくてもよい（一覧の先頭を開く）
+    set(CURRENT_KEY, id)
   }
   remove(OLD_KEY)
 }
@@ -162,15 +185,16 @@ export function saveGraph(id: string, state: SavedState, now = Date.now()): bool
   let meta = list.find((m) => m.id === id)
   const title = (state.title ?? '').trim() || UNTITLED
   if (meta && get(graphKey(id)) === text && meta.title === title) return true
-  if (!set(graphKey(id), text)) return false
   if (!meta) {
     meta = { id, title, created: now, updated: now }
     list.push(meta)
   }
   meta.title = title
   meta.updated = now
+  // 本体と一覧は両方そろって書く（片方だけ新しいと、一覧に無い本体・中身の無い一覧の項目が残る）
+  if (!commit([[graphKey(id), text], [INDEX_KEY, indexText(list)]])) return false
   set(CURRENT_KEY, id)
-  return writeIndex(list)
+  return true
 }
 
 /** 小さな絵を付ける（入らなければ付けない） */
@@ -185,23 +209,27 @@ export function setThumb(id: string, thumb: string) {
   }
 }
 
-/** 名前を変える（保存した状態の中の名前も） */
-export function renameGraph(id: string, title: string) {
+/** 名前を変える（保存した状態の中の名前も）。一覧と中身の両方を変えられなければ、どちらも変えずに false */
+export function renameGraph(id: string, title: string): boolean {
   const t = title.trim() || UNTITLED
   const list = readIndex()
   const meta = list.find((m) => m.id === id)
-  if (!meta) return
+  if (!meta) return false
   meta.title = t
-  writeIndex(list)
+  const writes: [string, string][] = []
   const s = loadGraph(id) as SavedState | null
-  if (s && typeof s === 'object') set(graphKey(id), JSON.stringify({ ...s, title: t }))
+  if (s && typeof s === 'object') writes.push([graphKey(id), JSON.stringify({ ...s, title: t })])
+  writes.push([INDEX_KEY, indexText(list)])
+  return commit(writes)
 }
 
-/** グラフを消す */
-export function deleteGraph(id: string) {
-  writeIndex(readIndex().filter((m) => m.id !== id))
+/** グラフを消す。一覧から外せなければ、本体も消さずに false（一覧に中身の無い項目が残らないように） */
+export function deleteGraph(id: string): boolean {
+  const list = readIndex()
+  if (list.some((m) => m.id === id) && !writeIndex(list.filter((m) => m.id !== id))) return false
   remove(graphKey(id))
   if (get(CURRENT_KEY) === id) remove(CURRENT_KEY)
+  return true
 }
 
 /** 複製する（名前は「〜 のコピー」）。新しい id。できなければ null */

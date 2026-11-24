@@ -359,15 +359,20 @@
     const title = graphList.find((m) => m.id === id)?.title ?? UNTITLED
     if (!confirm(`「${title}」を削除します。元に戻せません。よろしいですか？`)) return
     if (id !== graphId) {
-      deleteGraph(id)
+      saveFailed = !deleteGraph(id)
       refreshGraphs()
       return
     }
-    // 開いているグラフを消したら、次に新しいものを開く（無ければ新しいグラフ）
+    // 開いているグラフを消したら、次に新しいものを開く（無ければ新しいグラフ）。
+    // 一覧から外せなければ（容量がいっぱいなど）消さずに、そのまま開いておく
+    if (!deleteGraph(id)) {
+      saveFailed = true
+      refreshGraphs()
+      return
+    }
     loaded = false
     unsaved = null
     clearTimeout(saveTimer)
-    deleteGraph(id)
     const next = lastGraphId()
     if (next) setCurrent(next)
     else markNew()
@@ -385,7 +390,8 @@
       graphTitle = title.trim() || UNTITLED
       flushSave()
     } else {
-      renameGraph(id, title)
+      // 保存できなければ、一覧も中身も前の名前のまま（失敗はダイアログに出す）
+      saveFailed = !renameGraph(id, title)
     }
     refreshGraphs()
   }
