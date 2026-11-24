@@ -1869,8 +1869,9 @@ function splitTop(toks: Token[], sep: (t: Token) => boolean): Token[][] {
       if (k + 1 < toks.length) out[out.length - 1].push(toks[++k]) // 括弧そのものは深さに数えない
       continue
     }
-    if (t === '{' || t === '(' || t === '[' || t === '\\{') depth++
-    else if (t === '}' || t === ')' || t === ']' || t === '\\}') depth--
+    // \begin{cases} … \end{cases} の中も深さに数える（場合分けの中の不等号・& で区切らない。#200）
+    if (t === '{' || t === '(' || t === '[' || t === '\\{' || t === '\\begin') depth++
+    else if (t === '}' || t === ')' || t === ']' || t === '\\}' || t === '\\end') depth--
     if (depth === 0 && sep(t)) out.push([])
     else out[out.length - 1].push(t)
   }
@@ -3169,9 +3170,13 @@ export function paramConditions(latex: string): ParamCondition[] | null {
   const out: ParamCondition[] = []
   for (const c of chains) {
     if (c.length === 0) continue
-    const pieces = splitTop(c, (t) => RELATIONS.has(t))
-    const rels = c.filter((t) => RELATIONS.has(t))
-    // 括弧の中の不等号は数えない（splitTop と同じ深さだけ）
+    // 括弧・場合分けの中の不等号は数えない（splitTop と同じ深さだけ。区切った不等号を、区切った順に覚える）
+    const rels: Token[] = []
+    const pieces = splitTop(c, (t) => {
+      if (!RELATIONS.has(t)) return false
+      rels.push(t)
+      return true
+    })
     if (pieces.length < 2 || pieces.length !== rels.length + 1 || pieces.some((p) => p.length === 0)) return null
     out.push({
       parts: pieces.map(joinToks),

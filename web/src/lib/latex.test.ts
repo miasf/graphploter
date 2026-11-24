@@ -691,5 +691,11 @@ check(
   check('PV の近似は描かない', r !== null && 'error' in r, true)
 }
 
+// 第3段階: 場合分けの中の不等号で、スライダーの条件を区切らない（#200）
+check('#200 場合分けの条件', paramConditions('\\begin{cases}1&a<0\\\\2&a\\ge0\\end{cases}<3')?.map((c) => [c.parts.length, c.rels]), [[2, ['<']]])
+check('#200 連鎖はそのまま', paramConditions('0<a<3')?.map((c) => c.rels), [['<', '<']])
+check('#200 場合分けと連鎖', paramConditions('\\begin{cases}1&a<0\\\\2&a\\ge0\\end{cases}<b<3')?.map((c) => c.rels), [['<', '<']])
+check('#200 括弧の中の不等号も数えない', paramConditions('\\left(a+1\\right)<2')?.map((c) => c.rels), [['<']])
+
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')
