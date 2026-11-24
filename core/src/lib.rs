@@ -2204,9 +2204,9 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind.push_str(&format!("（霧、{n}³）"));
             b.volume = Some((region_distance(&g, dom, n), n));
         }
-        P::System { eqs, cuts, faces, .. } if eqs.is_empty() => {
+        P::System { eqs, cuts, faces, strict, .. } if eqs.is_empty() => {
             b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| system::region_faces(cuts, faces, d, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine));
-            b.fields.push(mesh::Field::region(cuts));
+            b.fields.push(mesh::Field::region_strict(cuts, strict));
         }
         P::SetImage(_) => unreachable!("set images are built before the 2D/3D split"),
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
@@ -2273,9 +2273,9 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         let mut b = build(plot, &ctx3)?.settle();
         b.kind = format!("{}の投影", b.kind);
         // 不等式の領域は、境目の面と表示範囲の端のふたをまとめて平らにする（端で切れた所も塗る）
-        if let P::System { eqs, cuts, .. } = plot {
+        if let P::System { eqs, cuts, strict, .. } = plot {
             if eqs.is_empty() {
-                let caps = mesh::Field::region(cuts).box_caps(dom, ctx.implicit_resolution.max(8), None);
+                let caps = mesh::Field::region_strict(cuts, strict).box_caps(dom, ctx.implicit_resolution.max(8), None);
                 b.inner = mesh::merge(vec![std::mem::take(&mut b.inner), caps], false);
             }
         }
@@ -2374,18 +2374,26 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::System { eqs, cuts, strict, gpu, exact, .. } => match eqs.len() {
             0 => {
                 b.kind = "不等式の領域（2D）".into();
-                b.inner = mesh::Field::region(cuts).cap(dom, 2, 0.0, true, res2 / 2);
+                b.inner = mesh::Field::region_strict(cuts, strict).cap(dom, 2, 0.0, true, res2 / 2);
                 b.gpu2d = match gpu {
                     Some(g) => gpu2d::scene_affine(None, &g.cuts, strict, g.dims, g.params.len()).ok().map(|s| with_affine(s, space, &g.params)),
                     None => gpu2d::scene(None, cuts, strict).ok(),
                 };
-                // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線
+                // 境目の線: 不等式ごとに G_i = 0 の線を、ほかの不等式で切る。厳密な不等式（< ・ >）の分は点線。
+                // 厳密な不等式 G < 0 は G ≤ −ε で切る（x > 0.3, x ≤ 0.3 の x = 0.3 の線を残さない。#139）
+                let margins: Vec<f64> = cuts.iter().zip(strict).map(|(g, &s)| if s { strict_margin(g, dom) } else { 0.0 }).collect();
                 for (i, g) in cuts.iter().enumerate() {
                     let mut line = mesh::implicit_curve_2d(g, dom, res2).positions;
                     for (j, other) in cuts.iter().enumerate() {
                         if j != i {
-                            system::clip_segments(&mut line, &mut system::values_of(other), 12);
+                            let eps = margins[j];
+                            let mut value = system::values_of(other);
+                            system::clip_segments(&mut line, &mut |p: &[[f64; 3]]| value(p).into_iter().map(|v| v + eps).collect(), 12);
                         }
+                    }
+                    // 厳密な不等式の境目は、すぐ近くに領域があるときだけ（x² + y² < 0 の原点・y > x², y < x² の放物線は、空集合の境目）
+                    if strict[i] {
+                        keep_region_edges(&mut line, cuts, strict, dom);
                     }
                     if strict[i] { &mut b.outline.1 } else { &mut b.outline.0 }.extend(line);
                 }
@@ -2413,6 +2421,42 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         },
     }
     Ok(b)
+}
+
+/// 境目の線を切るとき、厳密な不等式 G < 0 を G ≤ −ε として扱う ε（表示範囲の z = 0 の 33 × 33 点での |G| の最大の 10⁻⁶ 倍。#139）。
+/// 線の頂点は f32 なので、10⁻⁷ ほどずれる（0.3 は 0.30000001）。それより大きく、見えないほど小さく
+fn strict_margin(g: &eval::Program, dom: mesh::Domain) -> f64 {
+    let n = 33;
+    let at = |a: usize, k: usize| dom.lo[a] + (dom.hi[a] - dom.lo[a]) * k as f64 / (n - 1) as f64;
+    let pts: Vec<[f64; 3]> = (0..n * n).map(|k| [at(0, k % n), at(1, k / n), 0.0]).collect();
+    let max = system::values_of(g)(&pts).into_iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+    (1e-6 * max).max(1e-300)
+}
+
+/// 厳密な不等式の境目の線から、まわり（表示範囲の対角線の 10⁻⁴ 倍の 8 方向）に領域の点が無い頂点を除く。
+/// 領域は全部の不等式 G_j < 0（厳密）・G_j ≤ 0。まわりの点は境目から離れているので、余裕 ε は使わない
+fn keep_region_edges(line: &mut [f32], cuts: &[eval::Program], strict: &[bool], dom: mesh::Domain) {
+    let size = ((dom.hi[0] - dom.lo[0]).powi(2) + (dom.hi[1] - dom.lo[1]).powi(2)).sqrt();
+    let r = 1e-4 * size;
+    let verts: Vec<usize> = (0..line.len() / 3).filter(|&k| line[3 * k].is_finite() && line[3 * k + 1].is_finite()).collect();
+    let mut pts = Vec::with_capacity(verts.len() * 8);
+    for &k in &verts {
+        for d in 0..8 {
+            let a = std::f64::consts::TAU * d as f64 / 8.0;
+            pts.push([line[3 * k] as f64 + r * a.cos(), line[3 * k + 1] as f64 + r * a.sin(), 0.0]);
+        }
+    }
+    let mut inside = vec![true; pts.len()];
+    for (g, &s) in cuts.iter().zip(strict) {
+        for (ok, v) in inside.iter_mut().zip(system::values_of(g)(&pts)) {
+            *ok &= if s { v < 0.0 } else { v <= 0.0 };
+        }
+    }
+    for (n, &k) in verts.iter().enumerate() {
+        if !inside[8 * n..8 * n + 8].iter().any(|&b| b) {
+            line[3 * k..3 * k + 3].fill(f32::NAN);
+        }
+    }
 }
 
 /// 3D の陰関数を光線で描くためのもの（[`Gpu3d`]）と、使えないときの理由（2D 表示では、画素ごとの描き方を使えない理由）。

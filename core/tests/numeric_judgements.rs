@@ -260,3 +260,35 @@ fn small_determinants_are_not_shown_as_zero() {
     let k = kind_with("@det(⟦1,1;1,0.999999999999⟧)", &[]);
     assert!(k.starts_with("det = −1×10⁻¹²（"), "{k}");
 }
+
+/// (塗りの三角形, 実線の点, 点線の点)
+fn region(src: &str, flat: bool) -> (usize, usize, usize) {
+    graph_core::definitions("");
+    let mut m = graph_core::plot(
+        src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+        &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が描けない"));
+    let count = |v: Vec<f32>| v.chunks_exact(3).filter(|p| p[0].is_finite()).count();
+    (m.indices().len() / 3, count(m.take_outline()), count(m.take_outline_dashed()))
+}
+
+/// 厳密な不等式で空集合になる領域に、偽の境界・面積 0 の三角形を出さない（#139）
+#[test]
+fn empty_strict_regions() {
+    for src in ["x>0,x<=0", "x>0,x<0", "x>0.3,x<=0.3", "x^(2)+y^(2)<0", "y>x^(2), y<x^(2)"] {
+        assert_eq!(region(src, true), (0, 0, 0), "{src}");
+    }
+    // 3D の投影
+    assert_eq!(region("0<z<=0", true), (0, 0, 0));
+    assert_eq!(region("0<z<=0", false).0, 0);
+    // 対照: ≤ どうしは直線 x = 0.3、x² + y² ≤ 0 は原点の点、x² + y² > 0 は原点を除いた平面（原点に点線の印）
+    let (_, solid, _) = region("x>=0.3,x<=0.3", true);
+    assert!(solid > 0, "x ≥ 0.3, x ≤ 0.3 の直線");
+    assert!(region("x^(2)+y^(2)<=0", true).1 > 0, "原点");
+    let (fill, _, dashed) = region("x^(2)+y^(2)>0", true);
+    assert!(fill > 0 && dashed > 0, "原点を除いた平面: {fill} {dashed}");
+    let (fill, _, dashed) = region("x>0", true);
+    assert!(fill > 0 && dashed > 0, "x > 0 の半平面と点線の境目");
+    assert!(region("0<z<=0.3", true).0 > 0, "0 < z ≤ 0.3 の投影");
+}

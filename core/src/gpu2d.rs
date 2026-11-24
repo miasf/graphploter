@@ -8,7 +8,7 @@
 //! 画面側（`web/src/lib/gpu2dMaterial.ts`）は、ここで作った GLSL の決まった名前の関数を呼ぶ:
 //! `float gF(int f, vec2 q)`（値）、`vec4 gFD(int f, vec2 q)`（値と、横・奥の座標についての勾配）、
 //! `Div gFI(int f, vec2 lo, vec2 hi)`（矩形の上の飾り付きの区間）。`q` は表示中の (横, 奥) の座標で、縦の座標は 0。
-//! 関数の数は `#define G_EQ`・`G_CUTS`・`G_LINES` で渡す。
+//! 関数の数は `#define G_EQ`・`G_CUTS`・`G_LINES`（境目の線を引く不等式）・`G_STRICT`（厳密な不等式）で渡す。
 
 use crate::eval::{glsl_bundle, Program};
 use std::fmt::Write;
@@ -29,6 +29,11 @@ pub struct Scene2d {
     pub affine: Vec<f64>,
     pub params: Vec<String>,
     pub values: Vec<f64>,
+}
+
+/// 厳密な不等式（G < 0）の番号のビット（`#define G_STRICT`。境目の上を中身に入れない。#139）
+fn strict_mask(strict: &[bool]) -> u32 {
+    strict.iter().enumerate().filter(|(_, s)| **s).fold(0u32, |m, (k, _)| m | (1 << k))
 }
 
 /// 等式の上限（0 か 1）と不等式の上限。多いと、画素ごとの計算が重い
@@ -63,6 +68,7 @@ pub fn scene(eq: Option<&Program>, cuts: &[Program], strict: &[bool]) -> Result<
         0
     };
     let mut s = format!("#define G_EQ {}\n#define G_CUTS {}\n#define G_LINES {lines}\n#define G_FUNCS {}\n", eq.is_some() as usize, cuts.len(), items.len());
+    let _ = writeln!(s, "#define G_STRICT {}", strict_mask(strict));
     s.push_str(&body);
     // 引数の配列を作る（横 q.x、奥 q.y、縦 0）
     let fill = |out: &mut String, n: usize, ty: &str, vals: [&str; 3]| {
@@ -122,6 +128,7 @@ pub fn scene_affine(eq: Option<&Program>, cuts: &[Program], strict: &[bool], dim
     let (body, _) = glsl_bundle(&refs, &idx)?;
     let lines = if eq.is_none() { strict.iter().enumerate().filter(|(_, s)| !**s).fold(0u32, |m, (k, _)| m | (1 << k)) } else { 0 };
     let mut s = format!("#define G_EQ {}\n#define G_CUTS {}\n#define G_LINES {lines}\n#define G_FUNCS {}\n", eq.is_some() as usize, cuts.len(), items.len());
+    let _ = writeln!(s, "#define G_STRICT {}", strict_mask(strict));
     let _ = writeln!(s, "#define G_N {dims}\nuniform vec3 uPA[G_N];\nuniform float uPb[G_N];");
     if n_params > 0 {
         let _ = writeln!(s, "uniform float uParam[{n_params}];");

@@ -113,11 +113,29 @@ float gGrid(float coord, float spacing) {
 
 // 点 q で、不等式を全部満たすか（skip と同じ番号の不等式は除く）。
 // ループの回数を uniform（uIters）にして、展開させない（展開すると gF の中身が不等式の数だけ複製される）
+// 不等式 k が点 q で成り立つか。厳密な不等式（G < 0）は境目の上を含めない（x > 0, x ≤ 0 の x = 0 を塗らない。#139）。
+// tol は境目からの近さの許し（線の上に寄せた点で調べるときの、寄せた誤差の分）
+bool gHolds(int k, vec2 q, float tol) {
+  float v = gF(G_EQ + k, q);
+  return ((G_STRICT >> k) & 1) == 1 ? v < -tol : v <= tol;
+}
+
 bool gInside(vec2 q, int skip) {
   for (int k = 0; k < uIters; k++) {
     if (k >= G_CUTS) break;
     if (k == skip) continue;
-    if (!(gF(G_EQ + k, q) <= 0.0)) return false;
+    if (!gHolds(k, q, 0.0)) return false;
+  }
+  return true;
+}
+
+// 曲線の上の点 q（ニュートン法で 1 回寄せた点）で、ほかの不等式が成り立つか。許しは距離で画素の 10⁻³
+bool gInsideOn(vec2 q, int skip, vec2 px) {
+  for (int k = 0; k < uIters; k++) {
+    if (k >= G_CUTS) break;
+    if (k == skip) continue;
+    vec4 g = gFD(G_EQ + k, q);
+    if (!gHolds(k, q, 1e-3 * length(g.yz * px))) return false;
   }
   return true;
 }
@@ -257,8 +275,16 @@ void gWork(vec2 c, vec2 px, float hw, out float line, out bool regOut, out bool 
       } else {
         a = !(dist < 1e30) ? 1.0 : 1.0 - smoothstep(hw - 0.5, hw + 0.5, dist);
       }
-      // ほかの不等式で切る（等式なら全部の不等式、境目の線ならその不等式以外）
-      if (a > 0.0 && G_CUTS > 0 && !gInside(c, G_EQ == 1 ? -1 : k)) a = 0.0;
+      // ほかの不等式で切る（等式なら全部の不等式、境目の線ならその不等式以外）。画素の中心でなく、線の上に寄せた点
+      // q = c − F ∇F / |∇F|² で調べる（x ≤ 0 の線 x = 0 を、x > 0 の側の画素の中心で x > 0 が成り立つからと残さない）
+      if (a > 0.0 && G_CUTS > 0) {
+        vec2 q = c;
+        if (done == 1) {
+          float n2 = dot(g.yz, g.yz);
+          if (n2 > 0.0 && g.x == g.x && n2 < 1e30) q = c - g.x * g.yz / n2;
+        }
+        if (!gInsideOn(q, G_EQ == 1 ? -1 : k, px)) a = 0.0;
+      }
     }
     line = max(line, a);
 #if G_EQ == 1
