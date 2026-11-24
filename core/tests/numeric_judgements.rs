@@ -26,3 +26,51 @@ fn zeta_trivial_zeros() {
     close("zeta(-21)", -281.460_144_927_536_25, 1e-12);
     close("zeta(-41)", -2.004_031_065_651_625_2e16, 1e-12);
 }
+
+fn crit(src: &str, r: f64) -> String {
+    graph_core::definitions("");
+    let m = graph_core::plot(
+        src, &[-r, r, -r, r, -r, r], 40, 24, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10],
+        &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が描けない"));
+    m.kind().to_string()
+}
+
+/// 平坦な停留点（f′ の重根）で、0 でない最初の導関数の階数の偶奇を取り違えない（#117）。
+/// ニュートン法が 1 回に 0.8 倍（x⁶）しか近づかず、−1.5×10⁻⁸ に残った点で f⁽⁵⁾ = 720x ≠ 0 と見ていた
+#[test]
+fn flat_critical_points() {
+    for r in [3.0, 6.0] {
+        let k = crit("@crit(x^(6))", r);
+        assert!(k.contains("1 個") && k.contains("x = 0: 極小 f = 0（f″ = f‴ = f⁽⁴⁾ = f⁽⁵⁾ = 0, f⁽⁶⁾ = 720 > 0）"), "{k}");
+        let k = crit("@crit(-x^(6))", r);
+        assert!(k.contains("x = 0: 極大 f = 0（f″ = f‴ = f⁽⁴⁾ = f⁽⁵⁾ = 0, f⁽⁶⁾ = −720 < 0）"), "{k}");
+        let k = crit("@crit(x^(8))", r);
+        assert!(k.contains("x = 0: 極小 f = 0（f″ = f‴ = f⁽⁴⁾ = f⁽⁵⁾ = f⁽⁶⁾ = f⁽⁷⁾ = 0, f⁽⁸⁾ = 40320 > 0）"), "{k}");
+        // x⁷ は極大と出ていた（f⁽⁶⁾ = 5040x < 0）
+        let k = crit("@crit(x^(7))", r);
+        assert!(k.contains("x = 0: 極値でない f = 0（f″ = f‴ = f⁽⁴⁾ = f⁽⁵⁾ = f⁽⁶⁾ = 0, f⁽⁷⁾ = 5040 ≠ 0"), "{k}");
+        let k = crit("@crit((x-0.3)^(6))", r);
+        assert!(k.contains("x = 0.3: 極小"), "{k}");
+        // 展開した (x − 0.3)⁶: f′ の丸め誤差で、0.2〜0.4 に 50 個の停留点が散らばっていた
+        let k = crit("@crit(x^(6)-1.8x^(5)+1.35x^(4)-0.54x^(3)+0.1215x^(2)-0.01458x+0.000729)", r);
+        assert!(k.contains("1 個") && k.contains("x = 0.3: 極小"), "{k}");
+        // 今までどおり
+        assert!(crit("@crit(x^(4))", r).contains("x = 0: 極小 f = 0（f″ = f‴ = 0, f⁽⁴⁾ = 24 > 0）"));
+        assert!(crit("@crit(x^(3))", r).contains("x = 0: 極値でない"));
+        assert!(crit("@crit(x^(5))", r).contains("x = 0: 極値でない"));
+        let k = crit("@crit(x^(6)+x^(7))", r);
+        assert!(k.contains("x = −0.857143: 極大") && k.contains("x = 0: 極小"), "{k}");
+        // 近い 2 つの単根の停留点（±10⁻⁴）は、間の f″ = 0 の点へ動かさない
+        let k = crit("@crit(x^(3)-3*10^(-8) x)", r);
+        assert!(k.contains("x = −0.0001: 極大"), "{k}");
+    }
+    // 2 変数: 探すときの減衰で (±0.016, 0) に止まり、「極小」が 2 つ出ていた。原点の 1 点（ヘッセ行列が退化しているので判定できない）
+    for src in ["@crit(x^(6)+y^(2))", "@crit(x^(4)+y^(2))"] {
+        let k = crit(src, 3.0);
+        assert!(k.contains("1 個") && k.contains("(0, 0): 判定できない"), "{k}");
+    }
+    // 座標軸に沿って続く停留点は、今までどおり続いていると知らせる
+    assert!(crit("@crit(sin(x) sin(y) sin(z))", 3.0).contains("線・面に沿って続いている可能性"));
+}

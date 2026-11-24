@@ -5,7 +5,9 @@
 //!   $\mathrm H_f$ が特異でも進めるよう、刻みは $(\mathrm H^\top \mathrm H + \mu I)\,\mathbf d = \mathrm H^\top \nabla f$（レーベンバーグ・マルカート）で決める。
 //!   偏導関数は記号微分（[`crate::diff`]）の式。全部の種を 1 回の命令列の実行でまとめて進める
 //! - 種のマスより小さい所に固まった停留点は見落とすことがある（説明に書く）
+//! - 2・3 変数は、見つけた後に減衰なしのニュートン法で詰め直す（[`polish`]）
 //! - 分け方: 1 変数は $f''$ の符号。$f'' = 0$ なら、0 でない最初の高階導関数 $f^{(m)}$ の $m$ の偶奇と符号（8 階まで）。
+//!   平坦な停留点では見つけた点がずれているので、ずれの中に $f^{(j)}$ の零点があればそこへ詰め直してから見る（[`classify_one`]）。
 //!   2・3 変数は主小行列式（シルベスターの判定法）。$\det \mathrm H = 0$ なら「判定できない」
 
 use crate::eval::{as_real, Params, Program};
@@ -101,7 +103,9 @@ pub fn num_text(v: f64) -> String {
         format!("{}", v.round() as i64).replace('-', "−")
     } else {
         let s = format!("{v:.6}");
-        s.trim_end_matches('0').trim_end_matches('.').replace('-', "−")
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        // 0 に丸まった負の小さい数（−0.0000001）は「0」と書く
+        if s == "-0" { "0".to_string() } else { s.replace('-', "−") }
     }
 }
 
@@ -159,6 +163,9 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
 
     // ニュートン法（全部の種をまとめて）
     let mut alive: Vec<bool> = vec![true; total];
+    // 最後に動いた長さ（座標の単位）。平坦な停留点（∇f の重根）や丸め誤差で ∇f が 0 に見える所では収束が遅く、
+    // 本当の停留点がこの何倍か先にある（x⁶ なら 1 回に 0.8 倍しか近づかないので、残りは 4 倍）
+    let mut last = vec![0.0f64; total];
     for _ in 0..60 {
         let g: Vec<Vec<f64>> = gp.iter().map(|p| real(p, &xs)).collect();
         let h: Vec<Vec<f64>> = hp.iter().map(|p| real(p, &xs)).collect();
@@ -196,6 +203,7 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
             for a in 0..k {
                 xs[a][i] -= d[a];
             }
+            last[i] = d.iter().map(|v| v * v).sum::<f64>().sqrt();
             if len > 1e-15 {
                 moved = true;
             }
@@ -211,7 +219,8 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
 
     // 収束したものを集めて、近いものをまとめる
     let g: Vec<Vec<f64>> = gp.iter().map(|p| real(p, &xs)).collect();
-    let mut found: Vec<(Vec<f64>, f64)> = Vec::new();
+    // (点, |∇f|, まとめる半径)
+    let mut found: Vec<(Vec<f64>, f64, f64)> = Vec::new();
     let mut more = false;
     for i in 0..total {
         if !alive[i] {
@@ -225,38 +234,50 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
         if !(gn <= 1e-9 * gscale.max(1.0)) {
             continue;
         }
-        let near = found.iter_mut().find(|(q, _)| q.iter().zip(&p).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() <= 1e-4 * diag);
+        // 近いものをまとめる: 範囲の 10⁻⁴ か、1 変数なら、まだ動いていた分（8 倍。f′ の 7 重の根まで）の近さ。
+        // 2 変数以上では、停留点が線・面に沿って続くとき（sin x sin y sin z の座標軸）にも刻みが大きく残り、
+        // まとめると続いていることが分からなくなるので、まとめない
+        let reach = if k == 1 { 8.0 * last[i] } else { 0.0 };
+        let near = found.iter_mut().find(|(q, _, r)| q.iter().zip(&p).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() <= (1e-4 * diag).max(*r + reach));
         match near {
-            Some(q) if gn < q.1 => *q = (p, gn),
-            Some(_) => {}
+            Some(q) => {
+                q.2 = q.2.max(reach);
+                if gn < q.1 {
+                    (q.0, q.1) = (p, gn);
+                }
+            }
             None => {
                 if found.len() >= MAX_POINTS {
                     more = true;
                     break;
                 }
-                found.push((p, gn));
+                found.push((p, gn, reach));
             }
         }
     }
+    if k >= 2 {
+        polish(&mut found, &gp, &hp, k, diag);
+    }
     // 小さい誤差を丸める（0 の近く、整数の近く）
-    for (p, _) in &mut found {
+    for (p, _, _) in &mut found {
         for (a, v) in p.iter_mut().enumerate() {
             let tol = 1e-9 * size[a].max(1.0);
             if (*v - v.round()).abs() < tol {
-                *v = v.round();
+                // −0 は 0 にする（並べるときに −0 と 0 が別の値になる）
+                *v = v.round() + 0.0;
             }
         }
     }
     found.sort_by(|a, b| a.0.iter().zip(&b.0).map(|(x, y)| x.total_cmp(y)).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
 
     // 分ける
-    let pts: Vec<Vec<f64>> = (0..k).map(|a| found.iter().map(|(p, _)| p[a]).collect()).collect();
+    let pts: Vec<Vec<f64>> = (0..k).map(|a| found.iter().map(|(p, _, _)| p[a]).collect()).collect();
     if found.is_empty() {
         return Ok(Found { points: Vec::new(), more });
     }
     let fv = real(&fp, &pts);
     let hv: Vec<Vec<f64>> = hp.iter().map(|p| real(p, &pts)).collect();
-    // 1 変数の高階導関数（f'' = 0 のとき）
+    // 1 変数の 3〜8 階の導関数（f'' = 0 のとき）
     let mut higher: Vec<Program> = Vec::new();
     if k == 1 {
         let mut d = hess_e[0].clone();
@@ -265,47 +286,22 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
             higher.push(compile(&d)?);
         }
     }
-    let higher_v: Vec<Vec<f64>> = higher.iter().map(|p| real(p, &pts)).collect();
     let mut points = Vec::new();
-    for (i, (p, _)) in found.iter().enumerate() {
+    for (i, (p, _, _)) in found.iter().enumerate() {
         let h: Vec<f64> = (0..k * k).map(|a| hv[a][i]).collect();
         let hs = h.iter().fold(0.0f64, |s, v| s.max(v.abs()));
         // 0 とみなす大きさ（f の大きさと範囲で決める）
         let fscale = fv[i].abs().max(gscale * diag).max(1e-300);
         let zero2 = 1e-7 * fscale / (diag * diag);
-        let (class, reason) = if k == 1 {
-            if hs > zero2 {
-                let c = if h[0] > 0.0 { Class::Min } else { Class::Max };
-                (c, format!("f″ = {} {}", num_text(h[0]), sign_text(h[0])))
-            } else {
-                // 0 でない最初の高階導関数
-                let mut res = (Class::Degenerate, "f″ = 0 で、8 階までの導関数も 0".to_string());
-                let primes = ["f‴", "f⁽⁴⁾", "f⁽⁵⁾", "f⁽⁶⁾", "f⁽⁷⁾", "f⁽⁸⁾"];
-                let mut zeros = vec!["f″"];
-                for (j, d) in higher_v.iter().enumerate() {
-                    let order = j + 3;
-                    let v = d[i];
-                    let tol = 1e-6 * fscale / diag.powi(order as i32);
-                    if !v.is_finite() {
-                        res = (Class::Degenerate, format!("{} = 0 で、{} が求まらない", zeros.join(" = "), primes[j]));
-                        break;
-                    }
-                    if v.abs() > tol {
-                        let z = format!("{} = 0, {} = {}", zeros.join(" = "), primes[j], num_text(v));
-                        res = if order % 2 == 1 {
-                            (Class::NotExtremum, format!("{z} ≠ 0。奇数階なので極値でない"))
-                        } else if v > 0.0 {
-                            (Class::Min, format!("{z} {}", sign_text(v)))
-                        } else {
-                            (Class::Max, format!("{z} {}", sign_text(v)))
-                        };
-                        break;
-                    }
-                    zeros.push(primes[j]);
-                }
-                res
-            }
-        } else {
+        if k == 1 {
+            // 2 階から 8 階の導関数の列（f″ は hp[0]）
+            let derivs: Vec<&Program> = std::iter::once(&hp[0]).chain(&higher).collect();
+            let c = classify_one(&gp[0], &derivs, p[0], fscale, diag, 1e-9 * gscale.max(1.0));
+            let value = if c.point == p[0] { fv[i] } else { real(&fp, &[vec![c.point]])[0] };
+            points.push(Critical { point: vec![c.point], value, class: c.class, reason: c.reason });
+            continue;
+        }
+        let (class, reason) = {
             let d = minors(&h, k);
             let det = d[k - 1];
             let second = |a: usize| format!("∂²f/∂{}²", vars[a]);
@@ -332,6 +328,131 @@ pub fn find(f: &Expr, vars: &[String], boxes: &[(f64, f64)], params: &Params) ->
         points.push(Critical { point: p.clone(), value: fv[i], class, reason });
     }
     Ok(Found { points, more })
+}
+
+/// 2 変数以上で、ふつうのニュートン法 $\mathrm H\,\mathbf d = \nabla f$ で停留点を詰め直し、同じ所に着いたものをまとめる。
+/// 探すときの減衰 $\mu$ は、ヘッセ行列の固有値が $\sqrt\mu$ より小さい向き（$x^6 + y^2$ の $x$）で刻みを縮めるので、
+/// 平坦な停留点の手前（$(\pm 0.016, 0)$）で止まり、2 つの「極小」に分かれていた（#117 と同じ根）。
+/// 詰めて範囲の 1% より遠くへ行く点（停留点が線に沿って続き、その上を滑っていく。$\sin x \sin y \sin z$ の座標軸）は、元の位置のまま
+fn polish(found: &mut Vec<(Vec<f64>, f64, f64)>, gp: &[Program], hp: &[Program], k: usize, diag: f64) {
+    let n = found.len();
+    let start: Vec<Vec<f64>> = found.iter().map(|(p, _, _)| p.clone()).collect();
+    let mut xs: Vec<Vec<f64>> = (0..k).map(|a| start.iter().map(|p| p[a]).collect()).collect();
+    let mut active = vec![true; n];
+    for _ in 0..100 {
+        if !active.iter().any(|&a| a) {
+            break;
+        }
+        let g: Vec<Vec<f64>> = gp.iter().map(|p| real(p, &xs)).collect();
+        let h: Vec<Vec<f64>> = hp.iter().map(|p| real(p, &xs)).collect();
+        for i in 0..n {
+            if !active[i] {
+                continue;
+            }
+            let gi: Vec<f64> = (0..k).map(|a| g[a][i]).collect();
+            let hi: Vec<f64> = (0..k * k).map(|a| h[a][i]).collect();
+            let d = solve(hi, gi).filter(|d| d.iter().all(|v| v.is_finite()));
+            let Some(d) = d else {
+                active[i] = false;
+                continue;
+            };
+            for a in 0..k {
+                xs[a][i] -= d[a];
+            }
+            let moved = (0..k).map(|a| (xs[a][i] - start[i][a]).powi(2)).sum::<f64>().sqrt();
+            let step = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if moved > 1e-2 * diag {
+                for a in 0..k {
+                    xs[a][i] = start[i][a];
+                }
+                active[i] = false;
+            } else if step <= 1e-15 * diag {
+                active[i] = false;
+            }
+        }
+    }
+    // |∇f| が大きくなったものは元に戻す
+    let g: Vec<Vec<f64>> = gp.iter().map(|p| real(p, &xs)).collect();
+    let mut out: Vec<(Vec<f64>, f64, f64)> = Vec::new();
+    for (i, (p0, gn0, r)) in found.iter().enumerate() {
+        let gn = (0..k).map(|a| g[a][i] * g[a][i]).sum::<f64>().sqrt();
+        let (p, gn) = if gn <= *gn0 { ((0..k).map(|a| xs[a][i]).collect(), gn) } else { (p0.clone(), *gn0) };
+        match out.iter_mut().find(|(q, _, _)| q.iter().zip(&p).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() <= 1e-4 * diag) {
+            Some(q) if gn < q.1 => (q.0, q.1) = (p, gn),
+            Some(_) => {}
+            None => out.push((p, gn, *r)),
+        }
+    }
+    *found = out;
+}
+
+struct OneVar {
+    point: f64,
+    class: Class,
+    reason: String,
+}
+
+/// 1 変数の停留点の分類: 0 でない最初の導関数 $f^{(m)}$（2〜8 階）の $m$ の偶奇と符号。
+///
+/// 見つけた点 $p$ は本当の停留点 $x_0$ から少しずれている。$x_0$ が平坦（$f'$ の重根）だと、ニュートン法は 1 回に
+/// 一定の割合（$x^6$ なら $0.8$ 倍）しか近づかず、$p$ が $10^{-8}$ ほど離れて残る。すると $f^{(m-1)}(x_0) = 0$ でも
+/// $f^{(m-1)}(p) \approx f^{(m)}(x_0)\,(p - x_0)$ が 0 に見えず、奇数階・偶数階を取り違える（#117: $x^6$ が「極値でない」、
+/// $x^7$ が「極大」）。そこで $f^{(j)}(p)$ が 0 に見えないときは、その零点 $q = p - f^{(j)}(p)/f^{(j+1)}(p)$（ニュートン法の 1 歩）を見て、
+/// $q$ が位置の誤差の中（$|q - p| \le 10\,|f'(p)/f''(p)|$）にあり、$q$ でも $f' \approx 0$、それまで 0 だった導関数も 0 のままなら、
+/// $x_0 = q$ で $f^{(j)} = 0$ とする。
+/// $q$ でも $f^{(j)}$ が 0 に見えなければ、位置の誤差で判定できないとして「判定できない」にする。
+/// `derivs` は 2 階から 8 階の導関数、`gtol` は停留点とみなす $|f'|$ の大きさ
+fn classify_one(fp1: &Program, derivs: &[&Program], p: f64, fscale: f64, diag: f64, gtol: f64) -> OneVar {
+    let at = |prog: &Program, x: f64| real(prog, &[vec![x]])[0];
+    let tol = |order: usize| if order == 2 { 1e-7 } else { 1e-6 } * fscale / diag.powi(order as i32);
+    let names = ["f″", "f‴", "f⁽⁴⁾", "f⁽⁵⁾", "f⁽⁶⁾", "f⁽⁷⁾", "f⁽⁸⁾"];
+    let mut x = p;
+    let mut zeros: Vec<&str> = Vec::new();
+    let done = |x: f64, class: Class, reason: String| OneVar { point: x + 0.0, class, reason };
+    let prefix = |zeros: &[&str]| if zeros.is_empty() { String::new() } else { format!("{} = 0, ", zeros.join(" = ")) };
+    for (j, d) in derivs.iter().enumerate() {
+        let order = j + 2;
+        let mut v = at(d, x);
+        if !v.is_finite() {
+            return done(x, Class::Degenerate, format!("{}{} が求まらない", prefix(&zeros), names[j]));
+        }
+        if v.abs() > tol(order) {
+            // f⁽ʲ⁾ の零点が、停留点の位置の誤差の中にあるか
+            if let Some(next) = derivs.get(j + 1) {
+                let w = at(next, x);
+                let q = x - v / w;
+                // 動かしてよいのは、停留点の位置の誤差の分まで。f' の m − 1 重の根なら、x − x₀ = (m − 1) f′/f″（m ≤ 8）。
+                // 単根（f″ ≠ 0 で収束が速い）なら f′/f″ はほぼ 0 なので動かさない（近くの別の停留点へ移らない）
+                let (g1, g2) = (at(fp1, x), at(derivs[0], x));
+                let reach = if g2 != 0.0 && g1.is_finite() && g2.is_finite() { 10.0 * (g1 / g2).abs() } else { f64::INFINITY };
+                let near = w.is_finite() && w != 0.0 && (q - x).abs() <= reach.min(1e-4 * diag);
+                if near && at(fp1, q).abs() <= gtol && derivs[..j].iter().enumerate().all(|(i, e)| at(e, q).abs() <= tol(i + 2)) {
+                    let vq = at(d, q);
+                    if vq.abs() > tol(order) {
+                        return done(
+                            x,
+                            Class::Degenerate,
+                            format!("{}{} = {}。位置の誤差の中で {} が 0 になりうるので、判定できない", prefix(&zeros), names[j], num_text(v), names[j]),
+                        );
+                    }
+                    x = q;
+                    v = vq;
+                }
+            }
+        }
+        if v.abs() > tol(order) {
+            let z = format!("{}{} = {}", prefix(&zeros), names[j], num_text(v));
+            return if order % 2 == 1 {
+                done(x, Class::NotExtremum, format!("{z} ≠ 0。奇数階なので極値でない"))
+            } else if v > 0.0 {
+                done(x, Class::Min, format!("{z} {}", sign_text(v)))
+            } else {
+                done(x, Class::Max, format!("{z} {}", sign_text(v)))
+            };
+        }
+        zeros.push(names[j]);
+    }
+    done(x, Class::Degenerate, "f″ = 0 で、8 階までの導関数も 0".to_string())
 }
 
 /// 種類の名前
