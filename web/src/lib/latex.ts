@@ -1074,10 +1074,15 @@ class Converter {
     const keepEmpty = /matrix\*?$/.test(env)
     const rows: Token[][][] = [[[]]]
     let depth = 0
+    // pmatrix* などの列のそろえ方 [r]・[l]・[c] は、値ではないので読み飛ばす
+    if (env.endsWith('*')) this.skipBracket(/^[lcr]$/)
     while (this.i < this.toks.length) {
       const t = this.toks[this.i++]
       if (t === '\\end' && depth === 0) {
         this.rawGroup()
+        // 最後の行の後の \\（\\ \end{pmatrix}）で、空の行を足さない
+        const last = rows[rows.length - 1]
+        if (rows.length > 1 && last.length === 1 && last[0].length === 0) rows.pop()
         const out = rows
           .map((cells) => cells.map((c) => (c.length ? new Converter(c).run() : '')))
           .filter((cells) => keepEmpty || cells.some((c) => c !== ''))
@@ -1087,10 +1092,22 @@ class Converter {
       if (t === '\\end') depth--
       const row = rows[rows.length - 1]
       if (depth === 0 && t === '&') row.push([])
-      else if (depth === 0 && t === '\\\\') rows.push([[]])
-      else row[row.length - 1].push(t)
+      else if (depth === 0 && t === '\\\\') {
+        rows.push([[]])
+        // 行の間の空き \\[2pt] は、値ではないので読み飛ばす
+        this.skipBracket(/^-?[\d.]+\s*(pt|em|ex|mm|cm|in|mu|bp|pc|dd|cc|sp)$/)
+      } else row[row.length - 1].push(t)
     }
     throw new LatexError(`\\end{${env}} がありません`)
+  }
+
+  /** 次が [ … ] で、中身が pattern に合えば読み飛ばす（行の間の空き・列のそろえ方など） */
+  private skipBracket(pattern: RegExp) {
+    if (this.toks[this.i] !== '[') return
+    const close = this.toks.indexOf(']', this.i + 1)
+    if (close < 0 || close - this.i > 12) return
+    const inner = this.toks.slice(this.i + 1, close).join('').trim()
+    if (pattern.test(inner)) this.i = close + 1
   }
 
   /**

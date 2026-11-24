@@ -79,5 +79,22 @@ check('新しい行列', latexToText(blankMatrix(2, 2)), '⟦0,0;0,0⟧')
   check('消した行は戻らない', step({ op: 'size', rows: 3, cols: 3 }), [['', '', ''], ['4', '5', '6'], ['7', '8', '9']])
 }
 
+// 行の間の空き・最後の \\・pmatrix*・smallmatrix（#209）。計算のほうと同じ大きさで読む
+{
+  const det = (latex: string) => latexToText(latex).replace(/\s+/g, '')
+  check('行の間の空き: 成分', parseMatrix('\\begin{pmatrix}1&2\\\\[2pt]3&4\\end{pmatrix}')?.cells, [['1', '2'], ['3', '4']])
+  check('行の間の空き: 計算', det('\\begin{vmatrix}1&2\\\\[2pt]3&4\\end{vmatrix}'), det('\\begin{vmatrix}1&2\\\\3&4\\end{vmatrix}'))
+  check('最後の \\\\: 成分', parseMatrix('\\begin{pmatrix}1&2\\\\3&4\\\\\\end{pmatrix}')?.cells, [['1', '2'], ['3', '4']])
+  check('最後の \\\\: 計算', det('\\begin{vmatrix}1&2\\\\3&4\\\\\\end{vmatrix}'), det('\\begin{vmatrix}1&2\\\\3&4\\end{vmatrix}'))
+  check('pmatrix*', parseMatrix('\\begin{pmatrix*}1&2\\\\3&4\\end{pmatrix*}')?.cells, [['1', '2'], ['3', '4']])
+  const star = parseMatrix('\\begin{pmatrix*}[r]1&-2\\\\3&4\\end{pmatrix*}')!
+  check('pmatrix*[r]: 成分', star.cells, [['1', '-2'], ['3', '4']])
+  check('pmatrix*[r]: 大きさを変えてもそろえ方を残す', formatMatrix(resize(star, 2, 3)), `\\begin{pmatrix*}[r]1 & -2 & ${BLANK}\\\\ 3 & 4 & ${BLANK}\\end{pmatrix*}`)
+  check('pmatrix*[r]: 計算', det('\\begin{pmatrix*}[r]1&-2\\\\3&4\\end{pmatrix*}'), det('\\begin{pmatrix}1&-2\\\\3&4\\end{pmatrix}'))
+  check('smallmatrix', formatMatrix(insertRow(parseMatrix('\\begin{smallmatrix}1&2\\\\3&4\\end{smallmatrix}')!, 2)), `\\begin{smallmatrix}1 & 2\\\\ 3 & 4\\\\ ${BLANK} & ${BLANK}\\end{smallmatrix}`)
+  // 区間のような [ ] で始まる成分は消さない
+  check('[ で始まる成分は残す', parseMatrix('\\begin{pmatrix}1\\\\[a]\\end{pmatrix}')?.cells, [['1'], ['[a]']])
+}
+
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('matrixEdit.ts: すべて成功')
