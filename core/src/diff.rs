@@ -3,11 +3,44 @@
 //! - 変数は実数として扱う。値が複素数の式も微分できる（実の変数での微分。$\frac{d}{dx}|u| = \frac{\operatorname{Re}(\bar u\,u')}{|u|}$ など）
 //! - 導関数の表に無い関数（ゼータ関数・楕円関数など）は、中心差分の式
 //!   $\dfrac{g(u + h) - g(u - h)}{2h}$、$h = 10^{-5}\max(1, |u|)$ に置き換える。これも式なので、同じ道（区間演算・段差の切り分け）を通る
-//! - 微分できない点（`abs` の折れ目・`floor` の段差）は、片側の値（段差の上では 0）。段差の上での微分を δ 関数にはしない
+//! - 微分できない点（`abs` の折れ目・`floor` の段差）は、片側の値（段差の上では 0）。段差の上での微分を δ 関数にはしない。
+//!   利用者が書いた微分（`d/dx`・`f′`。[`diff_n_marked`]）では、そういう点に印を付ける（#161。[`kink`]・[`jump`]）
 //! - 節を作るたびに簡約する（$0 + u$、$0 \cdot u$、$1 \cdot u$、$u^1$、定数どうし）。簡約しないと、高い階の微分で式が大きくなりすぎる
 
 use crate::functions::Func;
 use crate::parser::{BinOp, Constant, Expr};
+use std::cell::Cell;
+
+thread_local! {
+    /// 導関数が存在しない点の印を付けるか（[`diff_n_marked`] の間だけ）
+    static MARK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 折れ目の印: 値は v のまま（余裕 |s| ≥ 0 の [`Func::Guard`]）。s = 0 の所で導関数の片側の値が違えば、
+/// 描くときにその点を除いて白丸にする（`holes.rs` の `kinks`）。|x|³ の導関数 3x|x| のように、
+/// 外の掛け算で跳びが消えれば、そのまま描く
+fn kink(v: Expr, s: Expr) -> Expr {
+    if MARK.get() {
+        call(Func::Guard, vec![v, c1(Func::Abs, &s)])
+    } else {
+        v
+    }
+}
+
+/// 段差の印: s = 0 の所（`floor` の引数が整数の所など）で値を NaN にする（余裕 |s| − 10⁻³⁰⁰ の [`Func::Guard`]）。
+/// 関数そのものが跳ぶので、導関数は存在しない
+fn jump(v: Expr, s: Expr) -> Expr {
+    if MARK.get() {
+        call(Func::Guard, vec![v, sub(c1(Func::Abs, &s), num(1e-300))])
+    } else {
+        v
+    }
+}
+
+/// 整数との差 u − round(u)（整数で 0、そこで符号が変わる）
+fn off_integer(u: &Expr) -> Expr {
+    sub(u.clone(), c1(Func::Round, u))
+}
 
 // ---------------------------------------------------------------------------
 // 簡約しながら節を作る
@@ -262,7 +295,19 @@ pub fn diff(e: &Expr, var: &str) -> Result<Expr, String> {
                 out[v] = diff(&args[v], var)?;
                 pos = v + 1;
             }
-            call(Func::Piece, out)
+            // 条件の境目（余裕 = 0）は、枝の導関数がそろわなければ折れ目
+            let mut d = call(Func::Piece, out);
+            let mut pos = 0;
+            while pos + 2 < args.len() {
+                let k = as_num(&args[pos]).unwrap_or(0.0) as usize;
+                for margin in args.iter().skip(pos + 2).take(k) {
+                    if margin.uses_var(var) {
+                        d = kink(d, margin.clone());
+                    }
+                }
+                pos += 2 + k + 1;
+            }
+            d
         }
         Expr::Call(f, args) => {
             match (f, args.as_slice()) {
@@ -273,11 +318,15 @@ pub fn diff(e: &Expr, var: &str) -> Result<Expr, String> {
                     return Ok(if has_i(u) || has_i(&du) {
                         div(c1(Func::Re, &mul(c1(Func::Conj, u), du)), c1(Func::Abs, u))
                     } else {
-                        mul(c1(Func::Sign, u), du)
+                        kink(mul(c1(Func::Sign, u), du), u.clone())
                     });
                 }
                 // arg(u)' = Im(u'/u)
                 (Func::Arg, [u]) => return Ok(c1(Func::Im, &div(diff(u, var)?, u.clone()))),
+                // 段差の上では導関数が無い（round は半整数、sign は 0 で跳ぶ）
+                (Func::Floor | Func::Ceil, [u]) => return Ok(jump(num(0.0), off_integer(u))),
+                (Func::Round, [u]) => return Ok(jump(num(0.0), off_integer(&sub(u.clone(), num(0.5))))),
+                (Func::Sign, [u]) => return Ok(jump(num(0.0), u.clone())),
                 _ => {}
             }
             let mut total = num(0.0);
@@ -287,7 +336,12 @@ pub fn diff(e: &Expr, var: &str) -> Result<Expr, String> {
                 }
                 total = add(total, mul(partial(*f, args, k), diff(a, var)?));
             }
-            total
+            match (f, args.as_slice()) {
+                // min・max は a = b の所で折れる。mod(a, b) は a/b が整数の所で跳ぶ
+                (Func::Min | Func::Max, [a, b]) => kink(total, sub(a.clone(), b.clone())),
+                (Func::Mod, [a, b]) => jump(total, off_integer(&div(a.clone(), b.clone()))),
+                _ => total,
+            }
         }
         Expr::Tuple(items) => Expr::Tuple(items.iter().map(|a| diff(a, var)).collect::<Result<_, _>>()?),
         Expr::List(items) => Expr::List(items.iter().map(|a| diff(a, var)).collect::<Result<_, _>>()?),
@@ -302,6 +356,15 @@ pub fn diff_n(e: &Expr, var: &str, k: usize) -> Result<Expr, String> {
         out = diff(&out, var)?;
     }
     Ok(out)
+}
+
+/// 利用者が書いた微分（`d/dx`・`f′`）: [`diff_n`] に、導関数が存在しない点の印を付ける（#161）。
+/// 印は値を変えないか（折れ目）、段差の上だけ NaN にする。停留点・テイラー展開などの中の微分には付けない
+pub fn diff_n_marked(e: &Expr, var: &str, k: usize) -> Result<Expr, String> {
+    let before = MARK.replace(true);
+    let out = diff_n(e, var, k);
+    MARK.set(before);
+    out
 }
 
 #[cfg(test)]

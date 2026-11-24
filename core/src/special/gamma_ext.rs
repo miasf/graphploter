@@ -203,7 +203,11 @@ pub fn dirichlet_eta(s: C) -> C {
     if s == C::new(1.0, 0.0) {
         return C::new(2f64.ln(), 0.0);
     }
-    (1.0 - C::new(2.0, 0.0).powc(1.0 - s)) * zeta(s)
+    let z = zeta(s);
+    if z == C::new(0.0, 0.0) {
+        return z; // 負の偶数（−0 にしない）
+    }
+    (1.0 - C::new(2.0, 0.0).powc(1.0 - s)) * z
 }
 
 /// ベルヌーイ数 B₀, B₁, …, Bₙ（B₁ = −1/2）

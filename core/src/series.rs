@@ -210,3 +210,94 @@ pub fn taylor(e: &Expr, var: &str, a: C, n: usize, value: &dyn Fn(&Expr) -> Opti
     };
     s.iter().all(|c| c.re.is_finite() && c.im.is_finite()).then_some(s)
 }
+
+/// 点 $\mathbf a$ のまわりでの式の値の様子（テイラー多項式を作れるかを確かめる。#116）
+#[derive(Debug, Clone, Copy)]
+pub enum Near {
+    /// どの向きから近づいても同じ極限（極限, その誤差の見積もり）
+    Limit(C, f64),
+    /// ある向きの両側で極限が違う（負の側, 正の側）。多変数では、向きによって極限が違うときも
+    Jump(C, C),
+    /// 近づくほど大きくなる
+    Diverges,
+    /// 極限が求まらない（振動する・片側で値が無いなど）
+    Unknown,
+}
+
+/// $\mathbf a \pm h\,\mathbf u$（$h = 1, 10^{-1}, \dots, 10^{-9}$ 倍）の値から、各向き $\mathbf u$ の片側極限を求めてくらべる。
+/// 向きは座標軸と、2 変数以上では斜め $(1, \dots, 1)$・$(1, -1, 0, \dots)$。
+/// 片側の値の列で、となりどうしの差 $d_i$ がいちばん小さい所を使う。なめらかなら $d_i$ は $h$ とともに縮み（1 桁で $1/10$）、
+/// 小さい $h$ では桁落ち（$\frac{\sin x}{x}$ の導関数の式など）で大きくなるので、その間の底が極限の値と誤差。
+/// 底に向かって縮んでいなければ（$\ln x$・$1/\sqrt x$ は差が縮まない・増える）極限は無い。そのとき、絶対値が増え続け、
+/// 符号がそろっていれば発散（桁落ちの雑音も増えていくが、符号がばらばら）。
+/// 両側・どの向きの極限も、その誤差の 10 倍の中でそろえば、その平均を極限とする
+pub fn near(prog: &crate::eval::Program, a: &[f64]) -> Near {
+    const STEPS: usize = 10;
+    let k = a.len();
+    let s = a.iter().fold(1.0f64, |m, v| m.max(v.abs()));
+    let mut dirs: Vec<Vec<f64>> = (0..k).map(|i| (0..k).map(|j| if i == j { 1.0 } else { 0.0 }).collect()).collect();
+    if k >= 2 {
+        dirs.push(vec![1.0 / (k as f64).sqrt(); k]);
+        let mut d = vec![0.0; k];
+        (d[0], d[1]) = (std::f64::consts::FRAC_1_SQRT_2, -std::f64::consts::FRAC_1_SQRT_2);
+        dirs.push(d);
+    }
+    let mut cols: Vec<Vec<f64>> = vec![Vec::new(); k];
+    for d in &dirs {
+        for sign in [1.0, -1.0] {
+            for e in 0..STEPS {
+                let h = s * 10f64.powi(-(e as i32));
+                for i in 0..k {
+                    cols[i].push(a[i] + sign * h * d[i]);
+                }
+            }
+        }
+    }
+    let mut out = vec![C::new(0.0, 0.0); cols[0].len()];
+    let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+    prog.eval_batch(&inputs, &mut out);
+    let finite = |v: &C| v.re.is_finite() && v.im.is_finite();
+    // 片側ごとの (極限, 誤差)
+    let mut sides: Vec<(C, f64)> = Vec::new();
+    for side in out.chunks(STEPS) {
+        // 値のある所（∞・未定義でない所）がいちばん長く続く区間（同じ長さなら、展開点に近いほう）
+        let (mut best, mut start) = ((0, 0), None);
+        for i in 0..=STEPS {
+            match (i < STEPS && finite(&side[i]), start) {
+                (true, None) => start = Some(i),
+                (false, Some(b)) => {
+                    if i - b >= best.1 - best.0 {
+                        best = (b, i);
+                    }
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        let v = &side[best.0..best.1];
+        if v.len() < 4 {
+            return if side[best.1.min(STEPS - 1)..].iter().any(|v| v.norm().is_infinite()) { Near::Diverges } else { Near::Unknown };
+        }
+        let d: Vec<f64> = v.windows(2).map(|w| (w[1] - w[0]).norm()).collect();
+        let i = (0..d.len()).min_by(|&x, &y| d[x].total_cmp(&d[y])).unwrap();
+        // 底に向かって縮んでいること（1 つ前の差の 1/3 以下）。どこも差が 0（定数）でもよい
+        let converged = d[i] == 0.0 || (i >= 1 && d[i - 1] >= 3.0 * d[i]);
+        if !converged {
+            let tail = &v[v.len() - 4..];
+            let grows = tail.windows(2).all(|w| w[1].norm() > 1.05 * w[0].norm());
+            let same_sign = tail.windows(2).all(|w| (w[1] * w[0].conj()).re > 0.0);
+            return if grows && same_sign { Near::Diverges } else { Near::Unknown };
+        }
+        let noise = 1e-12 * v[i + 1].norm();
+        sides.push((v[i + 1], d[i] + noise));
+    }
+    // sides は 向き 0 の正の側, 負の側, 向き 1 の正の側, …
+    let (l0, e0) = sides[0];
+    for &(l, e) in &sides[1..] {
+        if (l - l0).norm() > 10.0 * (e + e0) {
+            return Near::Jump(l, l0);
+        }
+    }
+    let err = sides.iter().fold(0.0f64, |m, (_, e)| m.max(*e));
+    Near::Limit(sides.iter().map(|(l, _)| *l).sum::<C>() / sides.len() as f64, err)
+}

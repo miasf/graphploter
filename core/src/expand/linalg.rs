@@ -112,9 +112,14 @@ impl Mat {
         Ok(self.rows)
     }
 
-    /// 行列式（余因子展開。下の行から、使う列の組ごとに小行列式を覚えておく）
+    /// 行列式（余因子展開。下の行から、使う列の組ごとに小行列式を覚えておく）。
+    /// 成分が全部、有限桁の小数なら正確に計算する（[`crate::linalg::exact_det`]。#123）
     pub fn det(&self) -> Result<Expr, String> {
         let n = self.square("行列式")?;
+        let numbers: Option<Vec<f64>> = self.items.iter().map(|e| if let Expr::Num(v) = e { Some(*v) } else { None }).collect();
+        if let Some(v) = numbers.and_then(|a| crate::linalg::exact_det(&a, n)) {
+            return Ok(Expr::Num(v));
+        }
         Ok(minors(self, &(0..n).collect::<Vec<_>>(), &(0..n).collect::<Vec<_>>()))
     }
 

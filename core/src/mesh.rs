@@ -6680,6 +6680,8 @@ pub struct Field {
     pub also: Vec<Program>,
     /// 不等式の領域（どちらの側が中身か決まっている。表示範囲の端のふたも作る）
     pub region: bool,
+    /// 不等式の領域の、式ごとの厳密か（`<`・`>`。[`Field::region_strict`]）。空なら全部 `≤`
+    pub strict: Vec<bool>,
 }
 
 impl Field {
@@ -6706,7 +6708,7 @@ impl Field {
             let pos = v.iter().filter(|&&f| f > 0.0).count();
             negative = neg <= pos;
         }
-        Field { prog: prog.clone(), combos, negative, map: None, also: Vec::new(), region: false }
+        Field { prog: prog.clone(), combos, negative, map: None, also: Vec::new(), region: false, strict: Vec::new() }
     }
 
     /// 回す前の形の F（変数は回す前の表示中の座標）と、表示中の座標から F の変数への 1 次式 p = A q + b。
@@ -6719,6 +6721,7 @@ impl Field {
             map: Some((a, b)),
             also: Vec::new(),
             region: false,
+            strict: Vec::new(),
         };
         let n = 16;
         let mut cols: [Vec<f64>; 3] = Default::default();
@@ -6760,7 +6763,14 @@ impl Field {
             map: None,
             also: cuts[1..].to_vec(),
             region: true,
+            strict: Vec::new(),
         }
+    }
+
+    /// [`Field::region`] の、厳密な不等式（G < 0）を区別するもの。厳密な不等式の境目の上は中身に入れない
+    /// （x > 0, x ≤ 0 の x = 0 に、面積 0 の三角形を作らない。#139）
+    pub fn region_strict(cuts: &[Program], strict: &[bool]) -> Field {
+        Field { strict: strict.to_vec(), ..Field::region(cuts) }
     }
 
     /// 中身の側が決まっているか（範囲で重ねた立体・不等式の領域。表示範囲の端のふたを作る）。
@@ -6812,10 +6822,18 @@ impl Field {
         }
         let point = |k: usize| [cols[0][k], cols[1][k], cols[2][k]];
         // 一緒に満たす式の値（格子点ごと）
-        let also: Vec<Vec<f64>> = self.also.iter().map(|p| field_values(p, &[Vec::new()], [&cols[0], &cols[1], &cols[2]])).collect();
+        let mut also: Vec<Vec<f64>> = self.also.iter().map(|p| field_values(p, &[Vec::new()], [&cols[0], &cols[1], &cols[2]])).collect();
         let f = self.values(cols.clone());
         // 中身なら負になる値
-        let g: Vec<f64> = if self.negative { f } else { f.iter().map(|v| -v).collect() };
+        let mut g: Vec<f64> = if self.negative { f } else { f.iter().map(|v| -v).collect() };
+        // 厳密な不等式 G < 0 は、G ≤ −ε（ε はこの面の格子での |G| の最大の 10⁻⁹ 倍）にする。境目の上を中身に入れない
+        let margin = |v: &[f64]| (1e-9 * v.iter().filter(|x| x.is_finite()).fold(0.0f64, |m, x| m.max(x.abs()))).max(1e-300);
+        for (k, vals) in std::iter::once(&mut g).chain(also.iter_mut()).enumerate() {
+            if self.strict.get(k) == Some(&true) {
+                let eps = margin(vals);
+                vals.iter_mut().for_each(|x| *x += eps);
+            }
+        }
 
         let mut mesh = Mesh::default();
         // 各マスを2つの三角形に分け、三角形ごとに中身の部分（g < 0）を切り出す（値は辺の上で直線で補間）

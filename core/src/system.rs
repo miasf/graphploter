@@ -442,6 +442,10 @@ pub fn intersection_curve(f1: &Program, f2: &Program, dom: Domain, n: usize, ref
 }
 
 /// 点を、互いに `tol` より近いものを 1 つにまとめ、表示範囲（はじめの `dims` 個の座標）の外を捨てる
+/// 寄せた点を同じ点とみなす近さ（マスの幅の何倍か）。ニュートン法で受け入れる点は、最後の一歩がマスの幅の 10⁻³ 倍より小さいので、
+/// 同じ解へ寄った点どうしはそれより近い。マスの幅の 1/4 にしていたので、0.01 離れた 2 つの解（x(x − 0.01) = 0）が 1 つになっていた（#141）
+const DISTINCT: f64 = 1e-2;
+
 fn distinct_inside(points: impl IntoIterator<Item = [f64; 3]>, dom: Domain, dims: usize, tol: f64) -> Vec<[f64; 3]> {
     let mut found: Vec<[f64; 3]> = Vec::new();
     for p in points {
@@ -479,7 +483,7 @@ pub fn points_on_curve(progs: &[Program], dom: Domain, n: usize, refine: Refine)
     let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| points.iter().map(|p| p[c]).collect());
     let seeds = sign_changes(&points, &segs, &values_at(&progs[2], &cols));
     let refs: Vec<&Program> = progs.iter().collect();
-    distinct_inside(newton_onto(&refs, &seeds, h).into_iter().flatten(), dom, 3, 0.25 * h)
+    distinct_inside(newton_onto(&refs, &seeds, h).into_iter().flatten(), dom, 3, DISTINCT * h)
 }
 
 /// 点を、描画側が点とみなす形（同じ点を 2 つと NaN）の曲線のメッシュにする
@@ -520,7 +524,7 @@ pub fn flat_points(f1: &Program, f2: &Program, dom: Domain, n: usize) -> Vec<[f6
     }
     let h = (0..2).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
     let seeds = sign_changes(&points, &segs, &values_of(f2)(&points));
-    distinct_inside(newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten(), dom, 2, 0.25 * h)
+    distinct_inside(newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten(), dom, 2, DISTINCT * h)
 }
 
 /// 数値で探した点に、グレブナー基底で求めた点（`exact`。表示範囲の中のもの）を合わせる。近い点は 1 つにする

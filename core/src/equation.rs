@@ -869,6 +869,35 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         }
         _ => return Ok(None),
     };
+    let numeric = |e: &Expr| -> Result<Option<Matrix>, String> {
+        Ok(match crate::expand::matrix_value(e, params)? {
+            Some((rows, cols, items)) => {
+                crate::expand::note_names(&items);
+                crate::expand::numbers(&items, params).map(|a| Matrix::new(rows, cols, a))
+            }
+            None => None,
+        })
+    };
+    // det A の値の書き方（#123）。成分が有限桁の小数なら正確な値。そうでなければ（√2・π・スライダーの値など）、
+    // 丸め誤差の見積もりより小さい値を「= 0」と言い切らない
+    // (「= −1」・「≈ 0」, 説明に足す文)
+    let det_text = |m: &Matrix, v: f64| -> (String, String) {
+        if m.rows != m.cols {
+            return (format!("= {}", format_number(v)), String::new());
+        }
+        // 0 でない小さい値を、有効 6 桁で「0」と書かない（10⁻¹² は 1×10⁻¹²）
+        let text = |v: f64| if v != 0.0 && v.abs() < 1e-4 { format_number_short(v.abs()).replace(".0×", "×").to_string() } else { format_number(v) };
+        let signed = |v: f64| if v < 0.0 && v.abs() < 1e-4 { format!("−{}", text(v)) } else { text(v) };
+        if let Some(exact) = crate::linalg::exact_det(&m.a, m.rows) {
+            return (format!("= {}", signed(exact)), String::new());
+        }
+        let bound = crate::linalg::det_rounding(&m.a, m.rows);
+        if v.abs() <= bound {
+            (format!("≈ {}", format_number(v)), format!("丸め誤差の見積もり {} より小さく、0 かどうかは確かめられない。", format_number_short(bound)))
+        } else {
+            (format!("= {}", signed(v)), String::new())
+        }
+    };
     // tr A・det A・rank A などだけの行: 値を説明に出す（図形は今までどおり、高さがその値の平面）
     if let Expr::Op { op, args } = expr {
         if def.is_none() && args.len() == 1 && matches!(op.as_str(), "tr" | "det" | "rank" | "dim" | "norm" | "angle" | "dot") {
@@ -879,19 +908,24 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
                     "dot" => "内積".to_string(),
                     o => o.to_string(),
                 };
-                crate::expand::set_kind(format!("{name} = {}（高さがこの値の平面）", format_number(v)));
+                // rank A・dim ker A・dim Im A で、丸め誤差より大きい特異値を 0 とみなしたら「≈」と判定基準（#124）
+                let inner = match (op.as_str(), &args[0]) {
+                    ("dim", Expr::Op { op: o, args: a }) if (o == "ker" || o == "im") && a.len() == 1 => Some(&a[0]),
+                    ("dim", Expr::Call(Func::Im, a)) if a.len() == 1 => Some(&a[0]),
+                    ("rank", e) => Some(e),
+                    _ => None,
+                };
+                let (value, note) = match (op.as_str(), numeric(&args[0])) {
+                    ("det", Ok(Some(m))) => det_text(&m, v),
+                    _ => match inner.map(|e| numeric(e)) {
+                        Some(Ok(Some(m))) if !rank_note(&m).is_empty() => (format!("≈ {}", format_number(v)), format!("{}。", rank_note(&m))),
+                        _ => (format!("= {}", format_number(v)), String::new()),
+                    },
+                };
+                crate::expand::set_kind(format!("{name} {value}（{note}高さがこの値の平面）"));
             }
         }
     }
-    let numeric = |e: &Expr| -> Result<Option<Matrix>, String> {
-        Ok(match crate::expand::matrix_value(e, params)? {
-            Some((rows, cols, items)) => {
-                crate::expand::note_names(&items);
-                crate::expand::numbers(&items, params).map(|a| Matrix::new(rows, cols, a))
-            }
-            None => None,
-        })
-    };
     match expr {
         Expr::Op { op, args } if op == "eig" && args.len() == 1 => {
             let label = matrix_label(&args[0]);
@@ -932,7 +966,8 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
                 e => crate::expand::numbers(&[e], params).and_then(|v| v.first().copied()).unwrap_or(f64::NAN),
             };
             let shape = if m.rows == 3 { "平行六面体。体積は |det|" } else { "平行四辺形。面積は |det|" };
-            crate::expand::set_kind(format!("det = {}（列ベクトルが張る{shape}）", format_number(det)));
+            let (value, note) = det_text(&m, det);
+            crate::expand::set_kind(format!("det {value}（{note}列ベクトルが張る{shape}）"));
             parametric(items, params, space).map(Some)
         }
         _ => {
@@ -970,6 +1005,17 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
             segments(&vectors, params, space).map(Some)
         }
     }
+}
+
+/// 誤差の大きさなど、小さいかもしれない正の数を、有効 2 桁で書く（2.2×10⁻⁸）
+fn format_number_short(v: f64) -> String {
+    if !(v.is_finite() && v > 0.0) || (1e-3..1e6).contains(&v) {
+        return format_number(v);
+    }
+    let e = v.log10().floor() as i32;
+    let m = v / 10f64.powi(e);
+    let sup: String = e.to_string().chars().map(|c| match c { '-' => '⁻', d => "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(d.to_digit(10).unwrap() as usize).unwrap() }).collect();
+    format!("{m:.1}×10{sup}")
 }
 
 /// 数を、説明に出す短い文字列にする（整数はそのまま、ほかは有効 6 桁）
@@ -1120,10 +1166,35 @@ fn equation_text(c: &[f64], names: &[String]) -> String {
 /// ker A は、掃き出した A の独立な行が方程式、自由変数ごとの解が張るベクトル。Im A は、ピボットの列が張るベクトル、
 /// ker Aᵀ のベクトル n ごとの n · y = 0 が方程式
 fn subspace_formula(name: &str, m: &crate::linalg::Matrix, ker: bool) -> String {
+    use crate::linalg::Matrix;
     let ambient = if ker { m.cols } else { m.rows };
-    let basis = if ker { m.null_space_basis() } else { m.pivot_columns() };
-    let eqs = if ker { m.reduced_rows() } else { m.transpose().null_space_basis() };
-    span_formula(name, ambient, &basis, &eqs)
+    let (red, how) = m.reduce_judged();
+    let basis = if ker { m.null_basis_of(&red) } else { m.pivot_columns_of(&red) };
+    let eqs = if ker {
+        Matrix::rows_of(&red)
+    } else {
+        let t = m.transpose();
+        t.null_basis_of(&t.reduce_judged().0)
+    };
+    let formula = span_formula(name, ambient, &basis, &eqs);
+    // 丸め誤差より大きい特異値を 0 とみなしたら「=」と言い切らない（#124）
+    if matches!(how, crate::linalg::RankHow::Approx(..)) {
+        formula.replacen(&format!("{name} = "), &format!("{name} ≈ "), 1)
+    } else {
+        formula
+    }
+}
+
+/// 数値の階数で、丸め誤差より大きい特異値を 0 とみなしたときの説明（#124。それ以外は空）
+fn rank_note(m: &crate::linalg::Matrix) -> String {
+    match m.reduce_judged().1 {
+        crate::linalg::RankHow::Approx(zero, top) => format!(
+            "数値の階数。特異値 {} が最大（{}）の 10⁻⁹ 倍以下なので 0 とみなした",
+            format_number_short(zero),
+            format_number_short(top)
+        ),
+        _ => String::new(),
+    }
 }
 
 /// 部分空間の式: 張るベクトル basis・方程式の係数 eqs（どちらも見やすくして出す）
@@ -1169,10 +1240,12 @@ fn subspace(name: &str, m: &crate::linalg::Matrix, ker: bool, params: &Params, s
             "{formula}。{ambient} 次元の空間の中の集合なので描けません（{label} の{side}を {n} つ以下にするか、次元を {ambient} にしてください）"
         ));
     }
-    let mut basis = if ker { m.null_space() } else { m.column_space() };
+    let red = m.reduce_judged().0;
+    let mut basis = crate::linalg::orthonormalize(if ker { m.null_basis_of(&red) } else { m.pivot_columns_of(&red) });
     basis.iter_mut().for_each(|b| b.resize(n, 0.0));
     let k = basis.len();
-    crate::expand::set_kind(format!("{formula}（{}）", dim_word(k)));
+    let note = rank_note(m);
+    crate::expand::set_kind(format!("{formula}（{}{}）", dim_word(k), if note.is_empty() { String::new() } else { format!("。{note}") }));
     let reach = crate::expand::reach();
     let names = ["u", "v", "t"];
     // 表示中の 3 つの座標を全部含む（全体）なら、表示範囲の箱

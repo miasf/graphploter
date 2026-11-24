@@ -1229,7 +1229,7 @@ impl<'a> Expander<'a> {
                             if arity != 1 {
                                 return Err(format!("{name} は引数が {arity} 個なので、' ではなく ∂ で微分してください"));
                             }
-                            crate::diff::diff_n(&body, &arg_name(0), *primes as usize)?
+                            crate::diff::diff_n_marked(&body, &arg_name(0), *primes as usize)?
                         } else {
                             body
                         };
@@ -1362,9 +1362,9 @@ impl<'a> Expander<'a> {
                     _ => return Err("微分は d/dx か d²/dx² の形で書いてください".into()),
                 };
                 match self.val(body)? {
-                    Val::S(s) => Val::S(crate::diff::diff_n(&s, var, k)?),
+                    Val::S(s) => Val::S(crate::diff::diff_n_marked(&s, var, k)?),
                     // df/dx（f は引数 1 つの関数）は f'(x)
-                    Val::Fn { arity: 1, body } => Val::S(apply_body(&crate::diff::diff_n(&body, &arg_name(0), k)?, &[Expr::Var(var.clone())])),
+                    Val::Fn { arity: 1, body } => Val::S(apply_body(&crate::diff::diff_n_marked(&body, &arg_name(0), k)?, &[Expr::Var(var.clone())])),
                     Val::Fn { .. } => return Err(fn_as_value_error(body)),
                 }
             }
@@ -3761,10 +3761,21 @@ impl<'a> Expander<'a> {
             return Err("テイラー展開できるのは、値が数になる式です（ベクトル・リストは成分ごとに書いてください）".into());
         }
         // 1 変数で中心が数なら、べき級数の計算で係数を直接求める（記号微分で 20 階まで微分すると式が大きくなりすぎる。[`crate::series`]）
+        let center_values: Option<Vec<f64>> = centers.iter().map(|c| self.constant_value(c).filter(|c| c.im == 0.0).map(|c| c.re)).collect();
+        let name_refs: Vec<&str> = names.iter().map(|v| v.as_str()).collect();
+        // 展開点での値と、まわりからの極限（#116）。展開する変数のほかに文字が残る式（sin(x y) の x についての展開）は確かめない
+        let check = |e: &Expr| center_values.as_ref().and_then(|cv| point_check(e, &name_refs, cv, self.params));
         if k == 1 {
             if let Some(a) = self.constant_value(&centers[0]) {
                 let value = |e: &Expr| self.constant_value(e);
                 if let Some(coefs) = crate::series::taylor(&body, &names[0], a, n, &value) {
+                    // べき級数で求まるのは、展開点で解析的なとき。ただし中心が極に丸めの分だけ近い（tan x の π/2）と、
+                    // 値は有限でも、まわりで発散している
+                    if let (Some((v, near)), Some(cv)) = (check(&body), &center_values) {
+                        if matches!(near, crate::series::Near::Diverges) {
+                            taylor_value(&[0], &names, cv, v, near, n)?;
+                        }
+                    }
                     let real = coefs.iter().all(|c| c.im.abs() <= 1e-12 * c.re.abs().max(1.0)) && a.im == 0.0;
                     let mut terms = Vec::new();
                     for (j, c) in coefs.iter().enumerate() {
@@ -3819,16 +3830,28 @@ impl<'a> Expander<'a> {
             for p in start..indices.len() {
                 let alpha = &indices[p];
                 let fact: f64 = alpha.iter().map(|&a| (1..=a).map(|i| i as f64).product::<f64>()).product();
-                let coef = crate::diff::div(at(&derivs[p]), Expr::Num(fact));
+                // 展開点の値とまわりからの極限で、∂^α f(a) が存在するかを確かめる（#116。|x| の f′(0) を sign(0) = 0 にしない）
+                let checked = match (check(&derivs[p]), &center_values) {
+                    (Some((v, near)), Some(cv)) => Some(taylor_value(alpha, &names, cv, v, near, n)? / fact),
+                    _ => None,
+                };
+                let coef = match checked {
+                    Some(c) => Some(c),
+                    None => self.constant_value(&crate::diff::div(at(&derivs[p]), Expr::Num(fact))),
+                };
                 // 数とパラメータだけの係数は、数にする（式が短くなり、説明にも出せる）
-                let coef = match self.constant_value(&coef) {
+                let coef = match coef {
                     Some(c) if c.im.abs() <= 1e-12 * c.re.abs().max(1.0) => {
                         shown.push((alpha.clone(), num_complex::Complex64::new(c.re, 0.0)));
                         Expr::Num(c.re)
                     }
-                    _ => {
+                    Some(c) => {
                         numeric = false;
-                        coef
+                        crate::diff::add(Expr::Num(c.re), crate::diff::mul(Expr::Num(c.im), Expr::Const(crate::parser::Constant::I)))
+                    }
+                    None => {
+                        numeric = false;
+                        crate::diff::div(at(&derivs[p]), Expr::Num(fact))
                     }
                 };
                 if matches!(coef, Expr::Num(v) if v.abs() < 1e-14) {
@@ -3845,7 +3868,6 @@ impl<'a> Expander<'a> {
             }
         }
         // 中心が数なら、説明に多項式を出す
-        let center_values: Option<Vec<f64>> = centers.iter().map(|c| self.constant_value(c).filter(|c| c.im == 0.0).map(|c| c.re)).collect();
         if let (true, Some(cv)) = (numeric, center_values) {
             add_note(&taylor_text(n, &names, &cv, &shown));
         }
@@ -4725,6 +4747,99 @@ fn superscript(n: usize) -> String {
         return String::new();
     }
     n.to_string().chars().map(|c| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect()
+}
+
+/// 式 e の、点 `at`（変数 `names`）での値と、まわりからの極限。変数とパラメータのほかに文字が残れば None
+fn point_check(e: &Expr, names: &[&str], at: &[f64], params: &Params) -> Option<(num_complex::Complex64, crate::series::Near)> {
+    let prog = crate::eval::Program::compile_with(e, names, params).ok()?;
+    let cols: Vec<[f64; 1]> = at.iter().map(|v| [*v]).collect();
+    let inputs: Vec<&[f64]> = cols.iter().map(|c| c.as_slice()).collect();
+    let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+    prog.eval_batch(&inputs, &mut out);
+    Some((out[0], crate::series::near(&prog, at)))
+}
+
+/// テイラー多項式の、展開点 $\mathbf a$ での $\partial^\alpha f$ の値（#116）。`value` は記号微分した式に $\mathbf a$ を入れた値、
+/// `near` はまわりからの極限。
+/// - 0 階: $f(\mathbf a)$ が数でなければ作れない。1 次以上なら $f$ が $\mathbf a$ で連続（極限 = 値）であること
+/// - 1 階以上: 極限があること。値は極限（1 つ下の導関数が連続で、導関数に極限があれば、導関数の値はその極限。
+///   1 点だけ値を決めた場合分け `{1, x = 0; sin(x)/x}` を記号微分すると、決めた枝の導関数 0 が入るので、値でなく極限を使う）。
+///   極限が無ければ（左右で違う・発散する）、その階の導関数は存在しない
+fn taylor_value(
+    alpha: &[usize],
+    names: &[String],
+    a: &[f64],
+    value: num_complex::Complex64,
+    near: crate::series::Near,
+    n: usize,
+) -> Result<num_complex::Complex64, String> {
+    use crate::series::Near;
+    let num = |v: num_complex::Complex64| {
+        if v.im.abs() <= 1e-12 * v.re.abs().max(1.0) {
+            crate::critical::num_text(v.re)
+        } else {
+            format!("{} {} {}i", crate::critical::num_text(v.re), if v.im < 0.0 { "−" } else { "+" }, crate::critical::num_text(v.im.abs()))
+        }
+    };
+    let at = if names.len() == 1 {
+        format!("{} = {}", names[0], crate::critical::num_text(a[0]))
+    } else {
+        format!("({}) = ({})", names.join(", "), a.iter().map(|v| crate::critical::num_text(*v)).collect::<Vec<_>>().join(", "))
+    };
+    let degree: usize = alpha.iter().sum();
+    let name = if names.len() == 1 {
+        match degree {
+            0 => "f".to_string(),
+            1 => "f′".to_string(),
+            2 => "f″".to_string(),
+            3 => "f‴".to_string(),
+            d => format!("f⁽{}⁾", superscript(d)),
+        }
+    } else if degree == 0 {
+        "f".to_string()
+    } else {
+        let den: String = alpha.iter().zip(names).filter(|(a, _)| **a > 0).map(|(a, v)| format!("∂{v}{}", if *a > 1 { superscript(*a) } else { String::new() })).collect();
+        format!("∂{}f/{den}", if degree > 1 { superscript(degree) } else { String::new() })
+    };
+    let finite = |v: num_complex::Complex64| v.re.is_finite() && v.im.is_finite();
+    let fails_from = |d: usize| {
+        if d == 0 {
+            "テイラー多項式は作れません".to_string()
+        } else {
+            format!("{d} 次以上のテイラー多項式は作れません（{} 次までなら作れます）", d - 1)
+        }
+    };
+    // 「{at} で {name} …ので」の …
+    let why = |near: Near, name: &str| match near {
+        Near::Jump(l, r) if names.len() == 1 => format!("{at} で {name} の左の極限 {} と右の極限 {} が違う", num(l), num(r)),
+        Near::Jump(l, r) => format!("{at} で {name} の極限が、近づく向きによって違う（{} と {}）", num(l), num(r)),
+        Near::Diverges => format!("{at} に近づくと {name} が発散する"),
+        _ => format!("{at} で {name} の極限が求まらない（振動する・片側で値が無いなど）"),
+    };
+    if degree == 0 {
+        if !finite(value) {
+            let hint = match near {
+                Near::Limit(l, _) => format!("。{at} に近づくときの極限は {} なので、場合分けで値を決めれば展開できます", num(l)),
+                _ => String::new(),
+            };
+            return Err(format!("{at} で f の値がありません（∞ や未定義）。テイラー多項式は、展開点で値のある関数で作ります{hint}"));
+        }
+        if n == 0 {
+            return Ok(value);
+        }
+        return match near {
+            Near::Limit(l, err) if (l - value).norm() <= 10.0 * err + 1e-12 * l.norm() => Ok(value),
+            Near::Limit(l, _) => Err(format!("{at} で f が連続でない（値 {}、極限 {}）ので、{}", num(value), num(l), fails_from(1))),
+            near => Err(format!("{}ので f は連続でなく、{}", why(near, "f"), fails_from(1))),
+        };
+    }
+    match near {
+        Near::Limit(l, err) if finite(value) && (l - value).norm() <= 10.0 * err + 1e-12 * l.norm() => Ok(value),
+        Near::Limit(l, _) => Ok(l),
+        Near::Unknown if !finite(value) => Err(format!("{at} のまわりで {name} の値を計算できないので、{}", fails_from(degree))),
+        Near::Unknown => Err(format!("{}ので、{name} が存在するかを確かめられません。{}", why(near, &name), fails_from(degree))),
+        near => Err(format!("{}ので、{name} は存在しません。{}", why(near, &name), fails_from(degree))),
+    }
 }
 
 /// 説明に出すテイラー多項式（`T₃(x) = x − x³/6`、`T₂(x, y) = 1 + (x − 1) + …`）

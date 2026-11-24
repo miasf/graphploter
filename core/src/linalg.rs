@@ -10,6 +10,88 @@ pub struct Matrix {
     pub a: Vec<f64>,
 }
 
+/// 成分が有限桁の小数（整数を含む）の正方行列の行列式を、正確に求める（#123）。
+/// 成分を 10ᵈ 倍して整数にし（d は小数点以下の桁の最大。15 まで。10ᵈ 倍が 2⁵³ を超えるものは使わない）、Bareiss 法（割り算が割り切れる消去）で i128 のまま計算して、
+/// 最後に 10^(dn) で割る（丸めは最後の 1 回だけ）。小数にならない成分（√2 など）・桁あふれは None。
+/// 浮動小数点で計算すると、`(10⁸ + 1)(10⁸ − 1) − 10⁸·10⁸` の 10¹⁶ − 1 が丸まって 0 になる
+pub fn exact_det(a: &[f64], n: usize) -> Option<f64> {
+    if n == 0 || a.len() != n * n {
+        return None;
+    }
+    let decimals = |v: f64| -> Option<i32> {
+        let s = format!("{}", v.abs());
+        if !v.is_finite() || s.contains('e') {
+            return None;
+        }
+        Some(s.split_once('.').map_or(0, |(_, f)| f.len() as i32))
+    };
+    let d = a.iter().map(|&v| decimals(v)).collect::<Option<Vec<_>>>()?.into_iter().max()?;
+    if d > 15 {
+        return None;
+    }
+    let scale = 10f64.powi(d);
+    let mut m: Vec<i128> = Vec::with_capacity(n * n);
+    for &v in a {
+        let r = (v * scale).round();
+        if r.abs() > 9_007_199_254_740_992.0 || r / scale != v {
+            return None;
+        }
+        m.push(r as i128);
+    }
+    // Bareiss: M[i][j] ← (M[i][j]·M[k][k] − M[i][k]·M[k][j]) / 前のピボット（割り切れる）
+    let mut sign = 1i128;
+    let mut prev = 1i128;
+    for k in 0..n {
+        if m[k * n + k] == 0 {
+            // この列がこの先 全部 0 なら、行列式は 0
+            let Some(p) = (k + 1..n).find(|&i| m[i * n + k] != 0) else { return Some(0.0) };
+            for j in 0..n {
+                m.swap(k * n + j, p * n + j);
+            }
+            sign = -sign;
+        }
+        let pivot = m[k * n + k];
+        for i in k + 1..n {
+            for j in k + 1..n {
+                let v = m[i * n + j].checked_mul(pivot)?.checked_sub(m[i * n + k].checked_mul(m[k * n + j])?)?;
+                m[i * n + j] = v / prev;
+            }
+            m[i * n + k] = 0;
+        }
+        prev = pivot;
+    }
+    let det = sign * m[n * n - 1];
+    Some(det as f64 / 10f64.powi(d * n as i32))
+}
+
+/// 行列式を浮動小数点で計算したときの丸め誤差の上限の見積もり 4nε Σ|a₁σ(1) ⋯ aₙσ(n)|（展開の全部の項の絶対値の和。6 × 6 まで）
+pub fn det_rounding(a: &[f64], n: usize) -> f64 {
+    fn perm(a: &[f64], n: usize, row: usize, used: u32) -> f64 {
+        if row == n {
+            return 1.0;
+        }
+        (0..n).filter(|c| used & (1 << c) == 0).map(|c| a[row * n + c].abs() * perm(a, n, row + 1, used | (1 << c))).sum()
+    }
+    if n > 6 {
+        return f64::NAN;
+    }
+    4.0 * n as f64 * f64::EPSILON * perm(a, n, 0, 0)
+}
+
+/// ker・Im・rank の階数をどう決めたか（#124。計画 `docs/plan-stage3b-kernel.md`）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RankHow {
+    /// 成分が有限桁の小数・分母の小さい分数なので、有理数で正確に掃き出した
+    Exact,
+    /// 特異値で決めた。0 とみなした特異値は丸め誤差の程度（√2 を含むちょうど特異な行列など）
+    Rounding,
+    /// 特異値で決め、丸め誤差より大きい特異値も 0 とみなした（0 とみなした中で最大の特異値, 最大の特異値）
+    Approx(f64, f64),
+}
+
+/// 数値の階数で 0 とみなす特異値の比（最大の特異値に対して）
+pub const RANK_TOL: f64 = 1e-9;
+
 /// 掃き出しの結果
 #[derive(Debug, Clone)]
 pub struct Reduced {
@@ -96,36 +178,13 @@ impl Matrix {
         Reduced { rref: Matrix::new(m, n, a), pivots }
     }
 
-    /// 階数
+    /// 階数（rank・dim の値。[`Self::reduce_judged`] で決める）
     pub fn rank(&self) -> usize {
-        self.reduce(self.cols).pivots.len()
+        self.reduce_judged().0.pivots.len()
     }
 
-    /// 零空間（A x = 0 の解）の正規直交基底
-    pub fn null_space(&self) -> Vec<Vec<f64>> {
-        let red = self.reduce(self.cols);
-        let n = self.cols;
-        let mut basis = Vec::new();
-        for free in (0..n).filter(|c| !red.pivots.contains(c)) {
-            // 自由変数を 1、ほかの自由変数を 0 にした解
-            let mut v = vec![0.0; n];
-            v[free] = 1.0;
-            for (r, &p) in red.pivots.iter().enumerate() {
-                v[p] = -red.rref.at(r, free);
-            }
-            basis.push(v);
-        }
-        orthonormalize(basis)
-    }
-
-    /// 零空間の基底（掃き出した形のまま。自由変数の 1 つを 1、ほかを 0 にした解。式で見せるとき用）
-    pub fn null_space_basis(&self) -> Vec<Vec<f64>> {
-        self.null_space_basis_tol(1e-9)
-    }
-
-    /// [`Self::null_space_basis`] の、しきい値を決められるもの（[`Self::reduce_tol`]）
-    pub fn null_space_basis_tol(&self, rel: f64) -> Vec<Vec<f64>> {
-        let red = self.reduce_tol(self.cols, rel);
+    /// 掃き出した形 `red` から、零空間の基底（自由変数の 1 つを 1、ほかを 0 にした解）
+    pub fn null_basis_of(&self, red: &Reduced) -> Vec<Vec<f64>> {
         (0..self.cols)
             .filter(|c| !red.pivots.contains(c))
             .map(|free| {
@@ -139,6 +198,31 @@ impl Matrix {
             .collect()
     }
 
+    /// 掃き出した形 `red` の 0 でない行
+    pub fn rows_of(red: &Reduced) -> Vec<Vec<f64>> {
+        (0..red.pivots.len()).map(|r| red.rref.row(r).to_vec()).collect()
+    }
+
+    /// 掃き出した形 `red` のピボットの列（元の行列の列そのもの）
+    pub fn pivot_columns_of(&self, red: &Reduced) -> Vec<Vec<f64>> {
+        red.pivots.iter().map(|&c| (0..self.rows).map(|i| self.at(i, c)).collect()).collect()
+    }
+
+    /// 零空間（A x = 0 の解）の正規直交基底
+    pub fn null_space(&self) -> Vec<Vec<f64>> {
+        orthonormalize(self.null_basis_of(&self.reduce(self.cols)))
+    }
+
+    /// 零空間の基底（掃き出した形のまま。自由変数の 1 つを 1、ほかを 0 にした解。式で見せるとき用）
+    pub fn null_space_basis(&self) -> Vec<Vec<f64>> {
+        self.null_space_basis_tol(1e-9)
+    }
+
+    /// [`Self::null_space_basis`] の、しきい値を決められるもの（[`Self::reduce_tol`]）
+    pub fn null_space_basis_tol(&self, rel: f64) -> Vec<Vec<f64>> {
+        self.null_basis_of(&self.reduce_tol(self.cols, rel))
+    }
+
     /// 掃き出した形の 0 でない行（A x = 0 と同じ連立方程式の、独立な式の係数）
     pub fn reduced_rows(&self) -> Vec<Vec<f64>> {
         self.reduced_rows_tol(1e-9)
@@ -146,21 +230,114 @@ impl Matrix {
 
     /// [`Self::reduced_rows`] の、しきい値を決められるもの（[`Self::reduce_tol`]）
     pub fn reduced_rows_tol(&self, rel: f64) -> Vec<Vec<f64>> {
-        let red = self.reduce_tol(self.cols, rel);
-        (0..red.pivots.len()).map(|r| red.rref.row(r).to_vec()).collect()
+        Self::rows_of(&self.reduce_tol(self.cols, rel))
     }
 
     /// 列空間の基底（ピボットの列そのもの。式で見せるとき用）
     pub fn pivot_columns(&self) -> Vec<Vec<f64>> {
-        let red = self.reduce(self.cols);
-        red.pivots.iter().map(|&c| (0..self.rows).map(|i| self.at(i, c)).collect()).collect()
+        self.pivot_columns_of(&self.reduce(self.cols))
     }
 
     /// 列空間（像）の正規直交基底
     pub fn column_space(&self) -> Vec<Vec<f64>> {
-        let red = self.reduce(self.cols);
-        let basis = red.pivots.iter().map(|&c| (0..self.rows).map(|i| self.at(i, c)).collect()).collect();
-        orthonormalize(basis)
+        orthonormalize(self.pivot_columns())
+    }
+
+    /// 有理数で掃き出す（成分が全部、有限桁の小数か分母の小さい分数のときだけ。途中であふれたら None）。
+    /// `1 + 10⁻¹²` も 0 でないピボットになる（#124）
+    pub fn reduce_exact(&self) -> Option<Reduced> {
+        use crate::groebner::Rat;
+        let (m, n) = (self.rows, self.cols);
+        let mut a: Vec<Rat> = self.a.iter().map(|&v| Rat::from_f64(v)).collect::<Option<_>>()?;
+        let mut pivots = Vec::new();
+        let mut r = 0;
+        for c in 0..n {
+            if r >= m {
+                break;
+            }
+            let Some(p) = (r..m).find(|&i| a[i * n + c].n != 0) else { continue };
+            for k in 0..n {
+                a.swap(r * n + k, p * n + k);
+            }
+            let d = a[r * n + c];
+            for k in 0..n {
+                a[r * n + k] = a[r * n + k].div(d)?;
+            }
+            for i in 0..m {
+                let f = a[i * n + c];
+                if i == r || f.n == 0 {
+                    continue;
+                }
+                for k in 0..n {
+                    a[i * n + k] = a[i * n + k].add(f.mul(a[r * n + k])?.neg())?;
+                }
+            }
+            pivots.push(c);
+            r += 1;
+        }
+        Some(Reduced { rref: Matrix::new(m, n, a.iter().map(|x| x.f()).collect()), pivots })
+    }
+
+    /// 特異値（片側ヤコビ法。大きい順に、列の数だけ。列が行より多ければ、余りは 0 に近い値）
+    pub fn singular_values(&self) -> Vec<f64> {
+        let (m, n) = (self.rows, self.cols);
+        let mut u: Vec<Vec<f64>> = (0..n).map(|j| (0..m).map(|i| self.at(i, j)).collect()).collect();
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+        for _ in 0..60 {
+            let mut rotated = false;
+            for p in 0..n {
+                for q in p + 1..n {
+                    let (alpha, beta, gamma) = (dot(&u[p], &u[p]), dot(&u[q], &u[q]), dot(&u[p], &u[q]));
+                    if gamma == 0.0 || gamma.abs() <= 1e-15 * (alpha * beta).sqrt() {
+                        continue;
+                    }
+                    rotated = true;
+                    let zeta = (beta - alpha) / (2.0 * gamma);
+                    let t = zeta.signum() / (zeta.abs() + (1.0 + zeta * zeta).sqrt());
+                    let c = 1.0 / (1.0 + t * t).sqrt();
+                    let s = c * t;
+                    for i in 0..m {
+                        let (x, y) = (u[p][i], u[q][i]);
+                        u[p][i] = c * x - s * y;
+                        u[q][i] = s * x + c * y;
+                    }
+                }
+            }
+            if !rotated {
+                break;
+            }
+        }
+        let mut sv: Vec<f64> = u.iter().map(|v| dot(v, v).sqrt()).collect();
+        sv.sort_by(|a, b| b.total_cmp(a));
+        sv
+    }
+
+    /// ker・Im・rank の掃き出しと、階数の決め方（#124）。成分が有限桁の小数なら有理数で正確に。そうでなければ特異値
+    /// σ₁ ≥ σ₂ ≥ … で、σₖ ≤ 10⁻⁹ σ₁ を 0 とみなした階数 r にし、ちょうど r 本のピボットになる掃き出しを使う。
+    /// 0 とみなした特異値が丸め誤差（16 max(m, n) ε σ₁）より大きければ [`RankHow::Approx`]
+    pub fn reduce_judged(&self) -> (Reduced, RankHow) {
+        if let Some(red) = self.reduce_exact() {
+            return (red, RankHow::Exact);
+        }
+        let sv = self.singular_values();
+        let top = sv.first().copied().unwrap_or(0.0);
+        let k = self.rows.min(self.cols);
+        if !(top > 0.0 && top.is_finite()) {
+            return (self.reduce(self.cols), RankHow::Rounding);
+        }
+        let r = sv.iter().take(k).filter(|&&v| v > RANK_TOL * top).count();
+        // ちょうど r 本のピボットになるしきい値（σ_r と σ_{r+1} の間の、対数で真ん中に近いもの）
+        let hi = if r > 0 { sv[r - 1] / top } else { 1.0 };
+        let lo = if r < k { (sv[r] / top).max(f64::EPSILON) } else { f64::EPSILON };
+        let mid = (hi * lo).sqrt();
+        let mut tries: Vec<f64> = (1..=16).map(|e| 10f64.powi(-e)).collect();
+        tries.push(mid);
+        tries.sort_by(|a, b| (a.ln() - mid.ln()).abs().total_cmp(&(b.ln() - mid.ln()).abs()));
+        let red = tries.iter().map(|&rel| self.reduce_tol(self.cols, rel)).find(|red| red.pivots.len() == r).unwrap_or_else(|| self.reduce(self.cols));
+        let r = red.pivots.len();
+        let rounding = 16.0 * self.rows.max(self.cols) as f64 * f64::EPSILON * top;
+        let how = if r < k && sv[r] > rounding { RankHow::Approx(sv[r], top) } else { RankHow::Rounding };
+        (red, how)
     }
 
     /// 行列 × ベクトル
