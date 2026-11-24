@@ -1229,7 +1229,7 @@ impl<'a> Expander<'a> {
                             if arity != 1 {
                                 return Err(format!("{name} は引数が {arity} 個なので、' ではなく ∂ で微分してください"));
                             }
-                            crate::diff::diff_n(&body, &arg_name(0), *primes as usize)?
+                            crate::diff::diff_n_marked(&body, &arg_name(0), *primes as usize)?
                         } else {
                             body
                         };
@@ -1362,9 +1362,9 @@ impl<'a> Expander<'a> {
                     _ => return Err("微分は d/dx か d²/dx² の形で書いてください".into()),
                 };
                 match self.val(body)? {
-                    Val::S(s) => Val::S(crate::diff::diff_n(&s, var, k)?),
+                    Val::S(s) => Val::S(crate::diff::diff_n_marked(&s, var, k)?),
                     // df/dx（f は引数 1 つの関数）は f'(x)
-                    Val::Fn { arity: 1, body } => Val::S(apply_body(&crate::diff::diff_n(&body, &arg_name(0), k)?, &[Expr::Var(var.clone())])),
+                    Val::Fn { arity: 1, body } => Val::S(apply_body(&crate::diff::diff_n_marked(&body, &arg_name(0), k)?, &[Expr::Var(var.clone())])),
                     Val::Fn { .. } => return Err(fn_as_value_error(body)),
                 }
             }

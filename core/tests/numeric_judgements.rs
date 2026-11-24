@@ -131,3 +131,52 @@ fn taylor_needs_derivatives() {
     poly("y = @taylor(besselJ(0,x), x, 0, 4)", "", "T₄(x) = 1 − x²/4 + x⁴/64");
     poly("y = @taylor(gamma(x), x, 1, 3)", "", "T₃(x) = 1 − 0.577216(x − 1) + 0.989056(x − 1)² − 0.907479(x − 1)³");
 }
+
+/// 2D の曲線の頂点（区切りの NaN を除く）と白丸
+fn curve(src: &str, defs: &str) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+    graph_core::definitions(defs);
+    let mut m = graph_core::plot(
+        src, &[-2.0, 2.0, -2.0, 2.0, -2.0, 2.0], 60, 40, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+        &[0.0; 10], &[0.0; 5], 0.0, 0, false, true, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が描けない"));
+    let holes = m.take_holes().chunks_exact(3).map(|p| [p[0], p[1]]).collect();
+    let verts = m.positions().chunks_exact(3).filter(|p| p[0].is_finite()).map(|p| [p[0], p[1]]).collect();
+    (verts, holes)
+}
+
+fn at(points: &[[f32; 2]], q: [f32; 2]) -> bool {
+    points.iter().any(|p| (p[0] - q[0]).abs() < 1e-5 && (p[1] - q[1]).abs() < 1e-5)
+}
+
+/// 導関数が存在しない点（折れ目・段差）は、曲線から除いて白丸にする（#161）
+#[test]
+fn derivative_gaps() {
+    // |x| の原点: 左右の極限 −1 と 1 に白丸。(0, 0) の点は描かない
+    for (src, defs) in [("y = @diff(x) abs(x)", ""), ("y = f'(x)", "f(x) = abs(x)"), ("y = f'(x)", "f(x) = @cases(-x, x < 0; x)")] {
+        let (verts, holes) = curve(src, defs);
+        assert!(at(&holes, [0.0, -1.0]) && at(&holes, [0.0, 1.0]) && holes.len() == 2, "{src} {defs}: {holes:?}");
+        assert!(!at(&verts, [0.0, 0.0]), "{src} {defs}: (0, 0) を描いた");
+    }
+    let (verts, holes) = curve("y = @diff(x) min(x, -x)", "");
+    assert!(at(&holes, [0.0, 1.0]) && at(&holes, [0.0, -1.0]) && !at(&verts, [0.0, 0.0]), "min: {holes:?}");
+    // floor の段差: 整数ごとに白丸
+    let (_, holes) = curve("y = @diff(x) floor(x)", "");
+    for k in -2..=2 {
+        assert!(at(&holes, [k as f32, 0.0]), "floor の {k}: {holes:?}");
+    }
+    // |x| の 2 階の導関数も原点に無い
+    let (_, holes) = curve("y = @diff(x, 2) abs(x)", "");
+    assert!(at(&holes, [0.0, 0.0]), "|x|″: {holes:?}");
+    // 導関数が存在する所は、今までどおり描く（|x|³ の導関数 3x|x|、x|x| の導関数 2|x|）
+    for src in ["y = @diff(x) abs(x)^(3)", "y = @diff(x) (x abs(x))"] {
+        let (verts, holes) = curve(src, "");
+        assert!(holes.is_empty() && at(&verts, [0.0, 0.0]), "{src}: {holes:?}");
+    }
+    // 関数そのものの sign(x)・|x| は、今までどおり（白丸を付けない）
+    assert!(curve("y = sign(x)", "").1.is_empty());
+    assert!(curve("y = abs(x)", "").1.is_empty());
+    // 除いた点（分母が 0）の導関数の穴も今までどおり
+    let (_, holes) = curve("y = @diff(x) ((x^(2)-1)/(x-1))", "");
+    assert!(at(&holes, [1.0, 1.0]) && holes.len() == 1, "{holes:?}");
+}

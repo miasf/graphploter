@@ -94,6 +94,14 @@ fn boundaries(expr: &Expr) -> Vec<Expr> {
                     add_factors(arg, &mut out);
                 }
             }
+            // 導関数の段差の印（`diff.rs` の `jump`）: |s| − 10⁻³⁰⁰ < 0 の所で NaN
+            Expr::Call(Func::Guard, args) => {
+                if let [_, Expr::Bin(BinOp::Sub, abs, tol)] = args.as_slice() {
+                    if let (Expr::Call(Func::Abs, s), Expr::Num(_)) = (&**abs, &**tol) {
+                        add_factors(&s[0], &mut out);
+                    }
+                }
+            }
             Expr::Call(Func::Piece, args) => {
                 let mut rest = args.as_slice();
                 while let [Expr::Num(count), _, tail @ ..] = rest {
@@ -109,6 +117,21 @@ fn boundaries(expr: &Expr) -> Vec<Expr> {
         None
     });
     guards.into_inner()
+}
+
+/// 導関数の折れ目の印（`diff.rs` の `kink`。余裕が |s| の [`Func::Guard`]）の s。s = 0 の所で導関数の片側の値が違えば、
+/// 導関数はそこに無い（$\frac{d}{dx}|x|$ の原点。#161）
+fn kinks(expr: &Expr) -> Vec<Expr> {
+    let found = std::cell::RefCell::new(Vec::new());
+    let _ = expr.rewrite(&|node| {
+        if let Expr::Call(Func::Guard, args) = node {
+            if let [_, Expr::Call(Func::Abs, s)] = args.as_slice() {
+                add_factors(&s[0], &mut found.borrow_mut());
+            }
+        }
+        None
+    });
+    found.into_inner()
 }
 
 fn roots_on_grid(guard: &Program, grid: &[f64]) -> Vec<(f64, bool)> {
@@ -217,6 +240,25 @@ pub(crate) fn curve(
             }
         }
     }
+    // 導関数の折れ目の候補（値はあるので、左右の極限が違うときだけ残す）
+    let mut corners = Vec::new();
+    for kink in kinks(expr) {
+        let Ok(guard) = Program::compile_with(&kink, &[variable], params) else { continue };
+        if !guard.uses_var_index(0) {
+            continue;
+        }
+        corners.extend(roots_on_grid(&guard, &grid).into_iter().map(|(x, _)| x));
+        for root in crate::solve::roots(&kink, variable, &[variable], params).into_iter().flatten() {
+            if let Ok(program) = Program::compile_with(&root, &[], params) {
+                let mut value = [Complex64::default()];
+                program.eval_batch(&[], &mut value);
+                let x = as_real(value[0]);
+                if (lo..=hi).contains(&x) {
+                    corners.push(x);
+                }
+            }
+        }
+    }
     candidates.sort_by(f64::total_cmp);
     candidates.dedup();
     let defined = sample(&candidates);
@@ -224,8 +266,19 @@ pub(crate) fn curve(
         candidates.into_iter().zip(defined).filter_map(|(x, y)| (!y.is_finite()).then_some(x)).collect();
     approximate.retain(|x| !candidates.iter().any(|y| (x - y).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0)));
     candidates.extend(approximate);
-    candidates.sort_by(f64::total_cmp);
-    candidates.dedup_by(|a, b| (*a as f32) == (*b as f32));
+    let undefined = candidates.len();
+    corners.retain(|x| !candidates.iter().any(|y| (x - y).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0)));
+    candidates.extend(corners);
+    // 折れ目の候補か（並べ替えても分かるように、印を付けて並べる）
+    let mut candidates: Vec<(f64, bool)> = candidates.into_iter().enumerate().map(|(i, x)| (x, i >= undefined)).collect();
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    candidates.dedup_by(|a, b| (a.0 as f32) == (b.0 as f32) && {
+        b.1 &= a.1;
+        true
+    });
+    let corner: Vec<bool> = candidates.iter().map(|c| c.1).collect();
+    // −0 は 0 にする（白丸の座標）
+    let candidates: Vec<f64> = candidates.into_iter().map(|c| c.0 + 0.0).collect();
     candidates
         .iter()
         .enumerate()
@@ -245,6 +298,14 @@ pub(crate) fn curve(
                     })
                 })
             });
+            if corner[i] {
+                // 折れ目: 左右の極限が違う（片側だけ無い）ときだけ、導関数が無い点として除く
+                let differ = match sides {
+                    [Some(l), Some(r)] => (l - r).abs() > 1e-7 * l.abs().max(r.abs()).max(1.0),
+                    [l, r] => l.is_some() != r.is_some(),
+                };
+                return differ.then_some(Break { x, sides });
+            }
             sides.iter().any(Option::is_some).then_some(Break { x, sides })
         })
         .take(MAX_MARKS)
