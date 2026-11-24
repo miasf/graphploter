@@ -490,6 +490,12 @@ fn toward_end(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, t
     Ok(sum + tail)
 }
 
+/// 端 `a` の近く（dir の向きに幅 h）で、積分が発散しないか・収束を確かめられるか（変数上限の積分 $\int_a^x$ の端を先に調べる）
+pub fn end_check(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64) -> Option<Trouble> {
+    let budget = Budget::new(600_000);
+    toward_end(f, a, dir, h, Tol { rel: 1e-10, panels: 2000, ends: false }, &budget).err()
+}
+
 /// 区間 [a, b]（端は ±∞ でもよい。a > b なら符号を変える）の f の積分を、点 `cuts` で分けて求める。
 /// 有限の端（分けた点も、小区間の端になる）ごとに [`toward_end`] で発散しないかを確かめる。
 /// `pv` なら、区間の中の点 c では、c から等しい距離の両側をまとめて積分する（コーシーの主値。$\frac1t$ の打ち消し合いを使う）

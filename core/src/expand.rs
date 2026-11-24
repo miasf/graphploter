@@ -2156,6 +2156,12 @@ impl<'a> Expander<'a> {
             }
             _ => return Err("積分の範囲を確かめてください".into()),
         };
+        if self.int_depth == 0 && !has_integral(body) {
+            // いちばん外側の積分は、誤差を見積もれる形にする（計画 stage2b の 2.5 (a)。#113）。
+            // 中に積分がある入れ子は、式が大きくなりすぎる（コンパイルが 10 倍）ので、今までの点の和のまま
+            self.end_checks(var, &lo, &hi, body)?;
+            return self.integral_checked(var, body, &phi, &dphi, s0, s1);
+        }
         // 入れ子の深さごとの点の数（2 区間それぞれ）。3 重積分で被積分関数を 32 × 16 × 8 = 4,096 回計算する
         let (nodes, weights) = gauss_legendre([16, 8, 4][self.int_depth.min(2)]);
         // 区間 [s0, s1] を 2 つに分ける: 幅の半分 h、j 番目の中点 m_j
@@ -2194,6 +2200,111 @@ impl<'a> Expander<'a> {
         }
         self.int_depth -= 1;
         Ok(b(BinOp::Mul, half_h, balanced(terms, BinOp::Add)))
+    }
+
+    /// 変数の端の積分（いちばん外側）: $s \in [s_0, s_1]$ を $s = s_0 + (s_1 - s_0)\frac{1 - \cos \pi u}{2}$ と置き換えて端に点を集め
+    /// （端の $\frac{1}{\sqrt t}$ がなめらかになる）、$u$ の 8 区間（両端に向かって幅を半分ずつ）ごとにガウス・クロンロッドの 15 点の和 K と、同じ点の 7 点の和 G を作る。
+    /// $|K - G| > 10^{-5}(1 + |K|)$ の点（振動が速くて点が足りない所）は、値を出さない（NaN。グラフが途切れる）
+    fn integral_checked(&mut self, var: &str, body: &Expr, phi: &Expr, dphi: &Expr, s0: Expr, s1: Expr) -> Result<Expr, String> {
+        use crate::functions::Func;
+        use crate::quad::{WG, WGK, XGK};
+        let num = Expr::Num;
+        let b = |op: BinOp, x: Expr, y: Expr| match op {
+            BinOp::Add => crate::diff::add(x, y),
+            BinOp::Sub => crate::diff::sub(x, y),
+            BinOp::Mul => crate::diff::mul(x, y),
+            BinOp::Div => crate::diff::div(x, y),
+            BinOp::Pow => crate::diff::pow(x, y),
+        };
+        // u の区間: 両端に向かって幅を半分ずつにする（端の近くの山 e^{−t²}・端の特異点を、x が大きくても捉える）
+        const CUTS: [f64; 9] = [0.0, 0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0];
+        let width = b(BinOp::Sub, s1, s0.clone());
+        self.int_depth += 1;
+        let symbolic = self.scalar(body).ok();
+        // u での被積分関数の値 g(u) ds/du
+        let node = |this: &mut Self, u: f64| -> Result<Expr, String> {
+            let q = std::f64::consts::PI * u;
+            let sk = b(BinOp::Add, s0.clone(), b(BinOp::Mul, num(0.5 * (1.0 - q.cos())), width.clone()));
+            let jac_u = b(BinOp::Mul, num(0.5 * std::f64::consts::PI * q.sin()), width.clone());
+            let at_s = |e: &Expr| e.substitute(&|v: &str| (v == "#s").then(|| sk.clone()));
+            let t = at_s(phi);
+            let put = |e: &Expr| e.substitute(&|v: &str| (v == var).then(|| t.clone()));
+            let g = match &symbolic {
+                Some(s) => put(s),
+                None => this.scalar(&put(body))?,
+            };
+            Ok(b(BinOp::Mul, g, b(BinOp::Mul, at_s(dphi), jac_u)))
+        };
+        let mut kronrod = Vec::new();
+        let mut gauss = Vec::new();
+        let mut size = 0;
+        for p in 0..CUTS.len() - 1 {
+            let (u0, u1) = (CUTS[p], CUTS[p + 1]);
+            let (c, h) = (0.5 * (u0 + u1), 0.5 * (u1 - u0));
+            let mid = match node(self, c) {
+                Ok(e) => e,
+                Err(e) => {
+                    self.int_depth -= 1;
+                    return Err(e);
+                }
+            };
+            kronrod.push(b(BinOp::Mul, num(h * WGK[7]), mid.clone()));
+            gauss.push(b(BinOp::Mul, num(h * WG[3]), mid));
+            for j in 0..7 {
+                let pair = match (node(self, c - h * XGK[j]), node(self, c + h * XGK[j])) {
+                    (Ok(l), Ok(r)) => b(BinOp::Add, l, r),
+                    (Err(e), _) | (_, Err(e)) => {
+                        self.int_depth -= 1;
+                        return Err(e);
+                    }
+                };
+                size += pair.node_count();
+                if size > MAX_NODES {
+                    self.int_depth -= 1;
+                    return Err("積分の式が大きくなりすぎます（入れ子を減らしてください）".into());
+                }
+                kronrod.push(b(BinOp::Mul, num(h * WGK[j]), pair.clone()));
+                if j % 2 == 1 {
+                    gauss.push(b(BinOp::Mul, num(h * WG[j / 2]), pair));
+                }
+            }
+        }
+        self.int_depth -= 1;
+        let k = balanced(kronrod, BinOp::Add);
+        let g = balanced(gauss, BinOp::Add);
+        // 余裕 10⁻⁵ (1 + |K|) − |K − G| が 0 以上なら K、そうでなければ NaN（場合分け [`Func::Piece`]）。
+        // |K − G| は 7 点の和の誤差なので、K の誤差はずっと小さい（QUADPACK の見積もり (200 |K − G|)^{1.5} で 10⁻⁴ 程度まで）
+        let margin = b(
+            BinOp::Sub,
+            b(BinOp::Mul, num(1e-5), b(BinOp::Add, num(1.0), Expr::Call(Func::Abs, vec![k.clone()]))),
+            Expr::Call(Func::Abs, vec![b(BinOp::Sub, k.clone(), g)]),
+        );
+        add_note("積分の近似の誤差の見積もりが大きい点（振動が速い・発散しそうな所）は、値を出さずに描いていません");
+        Ok(Expr::Call(Func::Piece, vec![num(1.0), num(0.0), margin, k, num(0.0), num(0.0), num(f64::NAN)]))
+    }
+
+    /// 変数の端の積分 $\int_a^x f(t)\,dt$ の、数の端 a で発散しないかを先に確かめる（中身が積分の変数とパラメータだけのとき。
+    /// $\int_0^x \frac1t\,dt$ は、どの x でも発散するので描かない。#109）
+    fn end_checks(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Result<(), String> {
+        use crate::eval::Program;
+        let Ok(g) = self.scalar(body) else { return Ok(()) };
+        let Ok(f) = Program::compile_with(&g, &[var], self.params) else { return Ok(()) };
+        let mut h = |ts: &[f64], out: &mut [f64]| {
+            let mut vals = vec![num_complex::Complex64::new(0.0, 0.0); ts.len()];
+            f.eval_batch(&[ts], &mut vals);
+            for (o, v) in out.iter_mut().zip(&vals) {
+                *o = crate::eval::as_real(*v);
+            }
+        };
+        for end in [lo, hi] {
+            let Some(a) = self.constant_value(end).filter(|v| v.im == 0.0 && v.re.is_finite()).map(|v| v.re) else { continue };
+            for dir in [1.0, -1.0] {
+                if let Some(t) = crate::quad::end_check(&mut h, a, dir, 1.0) {
+                    return Err(trouble_message(var, t));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn wide_integral_primitive(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Option<f64> {
@@ -4215,6 +4326,19 @@ type RegionPrograms = (Vec<crate::eval::Program>, Vec<(Option<f64>, Option<f64>)
 enum Bound {
     Prog(crate::eval::Program),
     Inf(f64),
+}
+
+/// 式の中に積分（`@int`・`@intset`）があるか
+fn has_integral(e: &Expr) -> bool {
+    match e {
+        Expr::Binder { op, body, args, .. } => op == "int" || has_integral(body) || args.iter().any(has_integral),
+        Expr::Op { op, args } => op == "intset" || args.iter().any(has_integral),
+        Expr::Neg(a) => has_integral(a),
+        Expr::Bin(_, a, b) => has_integral(a) || has_integral(b),
+        Expr::Call(_, args) | Expr::Tuple(args) | Expr::List(args) => args.iter().any(has_integral),
+        Expr::Apply { args, .. } => args.iter().any(has_integral),
+        _ => false,
+    }
 }
 
 /// 数を短く書く（0.3・1.5708・−2）
