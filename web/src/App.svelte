@@ -134,8 +134,31 @@
     }
   }
 
+  /** グラフを描けない理由（WebGL を使えないブラウザ・設定など）。描けるなら空 */
+  let viewerError = $state('')
+
+  /**
+   * 描画の代わり（何もしない）。WebGL を使えなくても、式の計算・値の表示・保存・共有リンクの読み込みは続ける（#118）。
+   * App から呼ぶ Viewer のメソッドは、どれも描くだけか、無くても困らない値（小さな絵・GPU を使わない理由）を返すだけ
+   */
+  function noDrawViewer(): Viewer {
+    const props: Record<PropertyKey, unknown> = {}
+    return new Proxy(props, {
+      get: (t, k) => (k in t ? t[k] : () => undefined),
+      set: (t, k, v) => ((t[k] = v), true),
+    }) as unknown as Viewer
+  }
+
   onMount(() => {
-    viewer = new Viewer(viewerEl, () => narrow.matches)
+    try {
+      viewer = new Viewer(viewerEl, () => narrow.matches)
+    } catch (e) {
+      console.error('グラフを描く準備（WebGL）に失敗しました', e)
+      viewerError = e instanceof Error ? e.message : String(e)
+      // 途中まで作った描画の部品は外す（Svelte の目印のコメントは残す）
+      for (const c of [...viewerEl.children]) c.remove()
+      viewer = noDrawViewer()
+    }
     viewer.onPick = handlePick
     // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
     viewer.onGpuFallback = (id, reason) => {
@@ -3349,7 +3372,16 @@
     ></div>
   </aside>
 
-  <main class="viewer" bind:this={viewerEl}></main>
+  <main class="viewer" bind:this={viewerEl}>
+    {#if viewerError}
+      <div class="viewer-error" role="alert">
+        <p><strong>このブラウザではグラフを描けません</strong>（WebGL を使えません）。</p>
+        <p>式の入力・計算した値・保存したグラフや共有リンクの読み込みは、このまま使えます。
+          グラフを見るには、ブラウザの設定でハードウェアアクセラレーション（WebGL）を有効にするか、別のブラウザで開いてください。</p>
+        <p class="detail">{viewerError}</p>
+      </div>
+    {/if}
+  </main>
   {#if BENCH}
     <pre class="bench-report">{benchText}</pre>
   {/if}
@@ -4369,6 +4401,27 @@
     position: relative;
     overflow: hidden;
     min-height: 0;
+  }
+  .viewer-error {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    max-width: 520px;
+    margin: auto;
+    padding: 24px 16px;
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .viewer-error p {
+    margin: 0;
+  }
+  .viewer-error .detail {
+    font-size: 12px;
+    opacity: 0.6;
+    word-break: break-word;
   }
   /* 2D / 3D の切り替え（グラフの右上） */
   .flat-mode {
