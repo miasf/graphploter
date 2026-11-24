@@ -47,6 +47,21 @@ pub fn pochhammer(a: C, n: C) -> C {
 
 /// 下側不完全ガンマ関数の級数 γ(a, z) = zᵃ e^(−z) Σ zᵏ / (a (a+1) … (a+k))
 fn gamma_lower_series(a: C, z: C) -> C {
+    // Re z < 0 は γ(a, z) = zᵃ Σ (−z)ᵏ / (k! (a + k))（#154）。上の形は e^(−z) を外に出すので、z = −50 では
+    // 大きさ 10²⁰ ほどの項が打ち消し合って 1/50 ほどになり、桁が全部消えていた
+    if z.re < 0.0 {
+        let mut term = C::new(1.0, 0.0);
+        let mut sum = 1.0 / a;
+        for k in 1..5000 {
+            term *= -z / k as f64;
+            let t = term / (a + k as f64);
+            sum += t;
+            if t.norm() < 1e-17 * sum.norm() {
+                break;
+            }
+        }
+        return power(z, a) * sum;
+    }
     let mut term = 1.0 / a;
     let mut sum = term;
     for k in 1..5000 {
@@ -56,7 +71,16 @@ fn gamma_lower_series(a: C, z: C) -> C {
             break;
         }
     }
-    z.powc(a) * (-z).exp() * sum
+    power(z, a) * (-z).exp() * sum
+}
+
+/// zᵃ（主枝）。a が整数なら掛け算で（負の実数 z で虚部のゴミを出さない）
+fn power(z: C, a: C) -> C {
+    if a.im == 0.0 && a.re.fract() == 0.0 && a.re.abs() <= 1024.0 {
+        z.powi(a.re as i32)
+    } else {
+        z.powc(a)
+    }
 }
 
 /// 上側不完全ガンマ関数の連分数（|z| が大きく Re z > 0 のとき）
@@ -94,6 +118,12 @@ pub fn gamma_upper(a: C, z: C) -> C {
     }
     // a が 0 以下の整数: Γ(0, z) = E₁(z) から、Γ(a, z) = (Γ(a + 1, z) − zᵃ e^(−z)) / a で下げていく
     if let Some(n) = nonpositive_int(a) {
+        // Re z > 0、|z| > 1 は Γ(a, z) = zᵃ E_{1−a}(z) の連分数（漸化式は桁が消える。#155）
+        if z.re > 0.0 && z.norm() > 1.0 {
+            if let Some(v) = crate::special::expint::en_cf(1.0 - a, z) {
+                return power(z, a) * v;
+            }
+        }
         let mut g = e1(z);
         let ez = (-z).exp();
         for j in (n..0).rev() {
@@ -115,9 +145,9 @@ pub fn gamma_p(a: C, z: C) -> C {
         return C::new(1.0, 0.0); // Γ(a) が無限大なので Q = 0
     }
     if z.re > 0.0 && z.norm() > a.norm() + 4.0 {
-        1.0 - gamma_upper(a, z) / gamma(a)
+        1.0 - gamma_upper(a, z) * rgamma(a)
     } else {
-        gamma_lower_series(a, z) / gamma(a)
+        gamma_lower_series(a, z) * rgamma(a)
     }
 }
 
@@ -126,19 +156,71 @@ pub fn gamma_q(a: C, z: C) -> C {
     // 上側を連分数で求める範囲では、Γ(a, z) / Γ(a) をそのまま返す。1 − P にすると、Q が小さい所（gammaQ(0.5, 100) ≈ 2·10⁻⁴⁵）で
     // 桁が全部消えて 0 になっていた（P のほうも 1 − Γ(a, z)/Γ(a) で計算しているので、二重に引き算していた）
     if nonpositive_int(a).is_none() && z.re > 0.0 && z.norm() > a.norm() + 4.0 {
-        return gamma_upper(a, z) / gamma(a);
+        return gamma_upper(a, z) * rgamma(a);
     }
     1.0 - gamma_p(a, z)
 }
 
-/// 不完全ベータ関数 B(z; a, b) = ∫₀ᶻ t^(a−1) (1 − t)^(b−1) dt = zᵃ / a · ₂F₁(a, 1 − b; a + 1; z)
+/// 不完全ベータ関数 B(z; a, b) = ∫₀ᶻ t^(a−1) (1 − t)^(b−1) dt = zᵃ / a · ₂F₁(a, 1 − b; a + 1; z)。
+/// 0 ≤ z ≤ 1、a, b > 0 の実数は、連分数の I_z(a, b) · B(a, b)（[`beta_real`]）
 pub fn beta_incomplete(z: C, a: C, b: C) -> C {
+    if let Some(i) = beta_real(z, a, b) {
+        return i * beta(a, b);
+    }
     z.powc(a) / a * hyp2f1(a, 1.0 - b, a + 1.0, z)
 }
 
 /// 正則化した不完全ベータ関数 I_z(a, b) = B(z; a, b) / B(a, b)
 pub fn beta_regularized(z: C, a: C, b: C) -> C {
-    beta_incomplete(z, a, b) / beta(a, b)
+    if let Some(i) = beta_real(z, a, b) {
+        return i;
+    }
+    crate::eval::div(z.powc(a) / a * hyp2f1(a, 1.0 - b, a + 1.0, z), beta(a, b))
+}
+
+/// I_x(a, b)（0 ≤ x ≤ 1、a, b > 0 の実数。それ以外は None）。連分数（Lentz の方法）と、
+/// x > (a + 1)/(a + b + 2) では I_x(a, b) = 1 − I_{1−x}(b, a)。前の因子 xᵃ (1 − x)ᵇ / (a B(a, b)) は対数で計算する。
+/// ₂F₁(a, 1 − b; a + 1; x) の有限和は、a, b が大きいと正負の大きい項が打ち消し合う（#148。I_{0.5}(100, 100) が実数にならなかった）
+fn beta_real(z: C, a: C, b: C) -> Option<C> {
+    if z.im != 0.0 || a.im != 0.0 || b.im != 0.0 {
+        return None;
+    }
+    let (x, a, b) = (z.re, a.re, b.re);
+    if !(0.0..=1.0).contains(&x) || a <= 0.0 || b <= 0.0 || !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    if x == 0.0 || x == 1.0 || (x == 0.5 && a == b) {
+        // 両端と、左右対称な分布の中央（ちょうど 1/2）
+        return Some(C::new(x, 0.0));
+    }
+    let lbeta = |p: f64, q: f64| log_gamma(C::new(p, 0.0)).re + log_gamma(C::new(q, 0.0)).re - log_gamma(C::new(p + q, 0.0)).re;
+    let part = |x: f64, a: f64, b: f64| -> Option<f64> {
+        let front = (a * x.ln() + b * (-x).ln_1p() - lbeta(a, b)).exp() / a;
+        // 連分数 1 / (1 + d₁ / (1 + d₂ / …))
+        const TINY: f64 = 1e-300;
+        let mut c = 1.0;
+        let mut d = 1.0 - (a + b) * x / (a + 1.0);
+        d = 1.0 / if d.abs() < TINY { TINY } else { d };
+        let mut h = d;
+        for m in 1..=10_000 {
+            let m = m as f64;
+            for k in [m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m)), -(a + m) * (a + b + m) * x / ((a + 2.0 * m) * (a + 2.0 * m + 1.0))] {
+                d = 1.0 + k * d;
+                d = 1.0 / if d.abs() < TINY { TINY } else { d };
+                c = 1.0 + k / c;
+                if c.abs() < TINY {
+                    c = TINY;
+                }
+                h *= d * c;
+            }
+            if (d * c - 1.0).abs() < 1e-16 {
+                return Some(front * h);
+            }
+        }
+        None
+    };
+    let v = if x <= (a + 1.0) / (a + b + 2.0) { part(x, a, b)? } else { 1.0 - part(1.0 - x, b, a)? };
+    Some(C::new(v, 0.0))
 }
 
 /// ポリガンマ関数 ψ⁽ⁿ⁾(z)。n = 0 はディガンマ、n ≥ 1 は (−1)ⁿ⁺¹ n! ζ(n + 1, z)
@@ -174,7 +256,45 @@ pub fn hurwitz_zeta(s: C, a: C) -> C {
     if s == C::new(1.0, 0.0) {
         return C::new(f64::INFINITY, 0.0);
     }
-    let n = (15.0 + s.norm()).min(400.0) as usize;
+    // 負の整数 s = −n は ζ(−n, a) = −B_{n+1}(a) / (n + 1)（#173）。下の和公式では、項 (a + k)ⁿ の大きな和と補正項が打ち消し合い、
+    // 小さな答え（ζ(−12, 0.2) = 0.038）が丸め誤差に埋もれていた。a = 1 はリーマンのゼータ（負の偶数でちょうど 0）
+    if let Some(m) = nonpositive_int(s) {
+        if m >= -60 {
+            if a == C::new(1.0, 0.0) {
+                return zeta(s);
+            }
+            let n = (-m) as usize;
+            return -bernoulli_poly(n + 1, a) / (n + 1) as f64;
+        }
+    }
+    // Re s ≤ −4、実数の a > 0 は、フルヴィッツの公式（0 < a ≤ 1 にずらしてから）
+    // ζ(s, a) = 2Γ(σ) / (2π)^σ · Σ_{k≥1} cos(2πka − πσ/2) / k^σ（σ = 1 − s）。和公式は負の整数の近く（s = −12.0001）でも打ち消し合う。
+    // cos を e^(±i(2πka − πσ/2)) に分け、Γ(σ) e^(∓iπσ/2) / (2π)^σ は対数で（虚部が大きい s で Γ と cos が桁あふれしないように）
+    if s.re <= -4.0 && a.im == 0.0 && a.re > 0.0 && a.re < 1e6 {
+        let shift = (a.re.ceil() - 1.0).max(0.0);
+        let a0 = a.re - shift;
+        let sigma = 1.0 - s;
+        let i = C::new(0.0, 1.0);
+        let base = log_gamma(sigma) - sigma * (2.0 * PI).ln();
+        let (front_plus, front_minus) = ((base - i * PI / 2.0 * sigma).exp(), (base + i * PI / 2.0 * sigma).exp());
+        let (mut plus, mut minus) = (C::new(0.0, 0.0), C::new(0.0, 0.0));
+        let terms = (1e-17f64.powf(1.0 / (sigma.re - 1.0)).recip()).clamp(10.0, 100_000.0) as usize;
+        for k in 1..=terms {
+            let k = k as f64;
+            // 2πka は ka の小数部分から（大きい k でも丸め誤差を増やさない）
+            let turn = C::from_polar(1.0, 2.0 * PI * (k * a0).fract());
+            let pk = C::new(k, 0.0).powc(-sigma);
+            plus += turn * pk;
+            minus += turn.conj() * pk;
+        }
+        let mut v = front_plus * plus + front_minus * minus;
+        for k in 0..shift as usize {
+            v -= C::new(a0 + k as f64, 0.0).powc(-s);
+        }
+        return v;
+    }
+    // 補正項の級数が収束するように、w = a + n を |s| / (2π · 0.3) より大きくする（虚部の大きい s。#150）
+    let n = (15.0 + s.norm() / (2.0 * PI * 0.3)).min(200_000.0) as usize;
     let mut sum = C::new(0.0, 0.0);
     for k in 0..n {
         sum += (a + k as f64).powc(-s);
@@ -262,6 +382,34 @@ pub fn polylog(s: C, z: C) -> C {
     }
     // 実軸上の分岐切断 (1, ∞) では下側からの値にそろえる
     let z = if z.im == 0.0 && z.re > 1.0 { C::new(z.re, -0.0) } else { z };
+    // s = −n（0 以下の整数）は有理式 Li_{−n}(z) = Σ_{k=0}^{n} k! S(n+1, k+1) (z/(1 − z))^(k+1)（S は第2種スターリング数。#203）。
+    // 下の μ = ln z の級数は |ln z| < 2π でしか使えず、Li₀(−100) などが値にならなかった
+    if let Some(m) = nonpositive_int(s) {
+        if m >= -60 {
+            if z == C::new(1.0, 0.0) {
+                return C::new(f64::INFINITY, 0.0);
+            }
+            let n = (-m) as usize;
+            // S(n+1, j)（j = 0..=n+1）の表
+            let mut stirling = vec![vec![0.0f64; n + 2]; n + 2];
+            stirling[0][0] = 1.0;
+            for i in 1..=n + 1 {
+                for j in 1..=i {
+                    stirling[i][j] = j as f64 * stirling[i - 1][j] + stirling[i - 1][j - 1];
+                }
+            }
+            let w = crate::eval::div(z, 1.0 - z);
+            let (mut sum, mut wk, mut fact) = (C::new(0.0, 0.0), w, 1.0);
+            for k in 0..=n {
+                if k > 0 {
+                    fact *= k as f64;
+                }
+                sum += fact * stirling[n + 1][k + 1] * wk;
+                wk *= w;
+            }
+            return sum;
+        }
+    }
     if z.norm() <= 0.5 {
         let mut sum = C::new(0.0, 0.0);
         let mut zk = z;

@@ -77,6 +77,12 @@ pub fn hyp2f1(a: C, b: C, c: C, z: C) -> C {
     if nonpositive_int(a).is_some() || nonpositive_int(b).is_some() {
         return pfq(&[a, b], &[c], z, 100_000);
     }
+    // c − a か c − b が 0 以下の整数: オイラー変換 (1 − z)^(c−a−b) ₂F₁(c − a, c − b; c; z) は多項式（#203。₂F₁(2, 11; 1; −100)）
+    if nonpositive_int(c - a).is_some() || nonpositive_int(c - b).is_some() {
+        return (1.0 - z).powc(c - a - b) * pfq(&[c - a, c - b], &[c], z, 100_000);
+    }
+    // a と b を入れ替えても同じ値になるように、順をそろえる（下の変換の「少しずらした値の平均」が a の側をずらすため。#203）
+    let (a, b) = if (a.re, a.im) < (b.re, b.im) { (b, a) } else { (a, b) };
     if z == C::new(1.0, 0.0) {
         // ガウスの公式 ₂F₁(a, b; c; 1) = Γ(c) Γ(c − a − b) / (Γ(c − a) Γ(c − b))（Re(c − a − b) > 0）
         return gamma(c) * gamma(c - a - b) * rgamma(c - a) * rgamma(c - b);

@@ -51,18 +51,71 @@ pub fn legendre_p_assoc(n: C, m: C, x: C) -> C {
                     if mi > ni {
                         return C::new(0.0, 0.0);
                     }
-                    let dfact: f64 = (1..=mi).map(|k| (2 * k - 1) as f64).product();
-                    let deriv = dfact
-                        * gegenbauer_c(C::new((ni - mi) as f64, 0.0), C::new(mi as f64 + 0.5, 0.0), x);
-                    let mf = mi as f64;
-                    let sign = if mi % 2 == 1 { -1.0 } else { 1.0 };
-                    sign * ((1.0 + x) / (1.0 - x)).powf(mf / 2.0) * (1.0 - x).powf(mf) * deriv
+                    assoc_recur(ni as usize, mi as usize, x)
                 }
                 _ => nudge(general, m),
             }
         }
         None => general(m),
     }
+}
+
+/// (1 − x)^(1/2) (1 + x)^(1/2)（実数の −1 ≤ x ≤ 1 では √(1 − x²) = sin θ。x = ±1 で 0）
+fn sine_of(x: C) -> C {
+    (1.0 - x).sqrt() * (1.0 + x).sqrt()
+}
+
+/// 整数の n ≥ m ≥ 0 の Pₙᵐ(x)。Pₘᵐ = (−1)ᵐ (2m − 1)!! sᵐ（s = [`sine_of`]）から、
+/// (l − m) Pₗᵐ = (2l − 1) x Pₗ₋₁ᵐ − (l + m − 1) Pₗ₋₂ᵐ で上げる（#171）。
+/// ((1 + x)/(1 − x))^(m/2) を使うと、x = 1 で ∞ × 0 になって値が無かった
+fn assoc_recur(n: usize, m: usize, x: C) -> C {
+    let s = sine_of(x);
+    // (−1)ᵐ (2m − 1)!! sᵐ は、掛ける順を交互にして途中の桁あふれを避ける
+    let mut pmm = C::new(1.0, 0.0);
+    for k in 1..=m {
+        pmm *= -(2.0 * k as f64 - 1.0) * s;
+    }
+    if n == m {
+        return pmm;
+    }
+    let mf = m as f64;
+    let mut prev = pmm;
+    let mut cur = (2.0 * mf + 1.0) * x * pmm;
+    for l in m + 2..=n {
+        let lf = l as f64;
+        let next = ((2.0 * lf - 1.0) * x * cur - (lf + mf - 1.0) * prev) / (lf - mf);
+        prev = cur;
+        cur = next;
+    }
+    cur
+}
+
+/// 整数の l ≥ m ≥ 0 の、規格化した √((2l + 1)/(4π) (l − m)!/(l + m)!) Pₗᵐ(x)（球面調和関数の θ の部分。#172）。
+/// 規格化した量の漸化式で計算するので、途中の (l + m)! や (2m − 1)!! が桁あふれしない
+fn normalized_assoc(l: usize, m: usize, x: C) -> C {
+    let s = sine_of(x);
+    // P̄ₘᵐ = (−1)ᵐ √((2m + 1)/(4π)) Π_{k=1}^{m} √((2k − 1)/(2k)) sᵐ
+    let mut pmm = C::new((1.0 / (4.0 * PI)).sqrt(), 0.0);
+    for k in 1..=m {
+        let kf = k as f64;
+        pmm *= -((2.0 * kf - 1.0) / (2.0 * kf)).sqrt() * s;
+    }
+    let mf = m as f64;
+    pmm *= (2.0 * mf + 1.0).sqrt();
+    if l == m {
+        return pmm;
+    }
+    let mut prev = pmm;
+    let mut cur = (2.0 * mf + 3.0).sqrt() * x * pmm;
+    for k in m + 2..=l {
+        let kf = k as f64;
+        let a = ((4.0 * kf * kf - 1.0) / (kf * kf - mf * mf)).sqrt();
+        let b = (((kf - 1.0) * (kf - 1.0) - mf * mf) / (4.0 * (kf - 1.0) * (kf - 1.0) - 1.0)).sqrt();
+        let next = a * (x * cur - b * prev);
+        prev = cur;
+        cur = next;
+    }
+    cur
 }
 
 /// エルミート多項式（関数）Hₙ(x)
@@ -123,7 +176,10 @@ pub fn gegenbauer_c(n: C, a: C, x: C) -> C {
 /// ヤコビ多項式 Pₙ^(a, b)(x)
 pub fn jacobi_p(n: C, a: C, b: C, x: C) -> C {
     if let Some(n) = degree(n) {
-        // Σ C(n+a, n−s) C(n+b, s) ((x−1)/2)ˢ ((x+1)/2)^(n−s)
+        if let Some(v) = jacobi_recur(n, a, b, x) {
+            return v;
+        }
+        // Σ C(n+a, n−s) C(n+b, s) ((x−1)/2)ˢ ((x+1)/2)^(n−s)（漸化式の分母が 0 になる a, b だけ）
         let nf = n as f64;
         let (xm, xp) = ((x - 1.0) / 2.0, (x + 1.0) / 2.0);
         let mut sum = C::new(0.0, 0.0);
@@ -139,11 +195,42 @@ pub fn jacobi_p(n: C, a: C, b: C, x: C) -> C {
     pochhammer(a + 1.0, n) * rgamma(n + 1.0) * hyp2f1(-n, n + a + b + 1.0, a + 1.0, (1.0 - x) / 2.0)
 }
 
+/// ヤコビ多項式の 3 項漸化式（#170）
+/// 2k(k + a + b)(2k + a + b − 2) Pₖ = (2k + a + b − 1)((2k + a + b)(2k + a + b − 2) x + a² − b²) Pₖ₋₁
+/// − 2(k + a − 1)(k + b − 1)(2k + a + b) Pₖ₋₂。
+/// 有限和は、次数が大きいと正負の大きい項が打ち消し合う（P₁₀₀^(0,0)(0) が 3×10¹³ になっていた）。分母が 0 になれば None
+fn jacobi_recur(n: usize, a: C, b: C, x: C) -> Option<C> {
+    let p0 = C::new(1.0, 0.0);
+    if n == 0 {
+        return Some(p0);
+    }
+    let p1 = (a + 1.0) + (a + b + 2.0) * (x - 1.0) / 2.0;
+    let (mut prev, mut cur) = (p0, p1);
+    for k in 2..=n {
+        let kf = k as f64;
+        let c = 2.0 * kf + a + b;
+        let den = 2.0 * kf * (kf + a + b) * (c - 2.0);
+        if den.norm() == 0.0 {
+            return None;
+        }
+        let next = ((c - 1.0) * (c * (c - 2.0) * x + a * a - b * b) * cur - 2.0 * (kf + a - 1.0) * (kf + b - 1.0) * c * prev) / den;
+        prev = cur;
+        cur = next;
+    }
+    Some(cur)
+}
+
 /// 球面調和関数 Y_l^m(θ, φ)
 pub fn spherical_harmonic_y(l: C, m: C, theta: C, phi: C) -> C {
     if let (Some(li), true) = (nonnegative_int(l), m.im == 0.0 && m.re == m.re.round()) {
         if m.re.abs() > li as f64 {
             return C::new(0.0, 0.0);
+        }
+        // 整数の l, m: 規格化した漸化式（Y_l^{−m} = (−1)ᵐ P̄_l^m(cos θ) e^(−imφ)）
+        if li <= MAX_DEGREE {
+            let mi = m.re.abs() as usize;
+            let sign = if m.re < 0.0 && mi % 2 == 1 { -1.0 } else { 1.0 };
+            return sign * normalized_assoc(li as usize, mi, theta.cos()) * (C::new(0.0, 1.0) * m * phi).exp();
         }
     }
     let norm = ((2.0 * l + 1.0) / (4.0 * PI) * gamma(l - m + 1.0) * rgamma(l + m + 1.0)).sqrt();
