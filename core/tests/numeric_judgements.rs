@@ -292,3 +292,40 @@ fn empty_strict_regions() {
     assert!(fill > 0 && dashed > 0, "x > 0 の半平面と点線の境目");
     assert!(region("0<z<=0.3", true).0 > 0, "0 < z ≤ 0.3 の投影");
 }
+
+/// 連立方程式の点（重なりを除いた座標）
+fn solutions(src: &str, flat: bool, res: u32) -> Vec<[f32; 3]> {
+    graph_core::definitions("");
+    let m = graph_core::plot(
+        src, &[-6.0, 6.0, -6.0, 6.0, -6.0, 6.0], res, res, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+        &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が描けない"));
+    let mut v: Vec<[f32; 3]> = m.positions().chunks_exact(3).filter(|p| p[0].is_finite()).map(|p| [p[0], p[1], p[2]]).collect();
+    v.dedup();
+    v
+}
+
+/// 接する手前の近い 2 つの交点、近い 2 つの解を 1 つにしない（#141）
+#[test]
+fn close_intersections_stay_apart() {
+    // x = ±√(1 − 0.9999999²) ≈ ±0.0004472136（細かさ 48・80・120 で 0 個、160 で 1 個だった）
+    let r = (1.0f64 - 0.9999999f64 * 0.9999999).sqrt() as f32;
+    for res in [48, 80, 120, 160] {
+        let p = solutions("x^(2)+y^(2)=1,y=0.9999999", true, res);
+        assert_eq!(p.len(), 2, "細かさ {res}: {p:?}");
+        assert!(p.iter().all(|q| (q[0].abs() - r).abs() < 1e-7 && (q[1] - 0.9999999).abs() < 1e-6), "細かさ {res}: {p:?}");
+    }
+    // 接しない・接する・ふつうに交わる
+    assert!(solutions("x^(2)+y^(2)=1,y=1.000001", true, 80).is_empty());
+    assert_eq!(solutions("x^(2)+y^(2)=1,y=1", true, 80).len(), 1);
+    assert_eq!(solutions("x^(2)+y^(2)=1,y=0.99", true, 80).len(), 2);
+    // 3D: 原点と (0.01, 0, 0)。多項式でない式（数値で探す道）でも、マスの幅より近い 2 つの解を分ける
+    for (src, want) in [("x(x-0.01)=0,y=0,z=0", 2), ("x(x-0.001)=0,y=0,z=0", 2), ("sin(x)(x-0.01)=0,y=0,z=0", 4)] {
+        for res in [24, 48, 80] {
+            let p = solutions(src, false, res);
+            assert_eq!(p.len(), want, "{src} 細かさ {res}: {p:?}");
+            assert!(p.iter().any(|q| q[0].abs() < 1e-6) && p.iter().any(|q| q[0] > 0.0 && q[0] < 0.011), "{src}: {p:?}");
+        }
+    }
+}

@@ -63,10 +63,20 @@ impl Rat {
     fn f(self) -> f64 {
         self.n as f64 / self.d as f64
     }
-    /// 浮動小数点数をぴったり表す、分母が 10⁶ 以下の分数（連分数）。無ければ None（π などは多項式の係数にしない）
+    /// 浮動小数点数をぴったり表す分数。有限桁の小数（打った数・刻みのスライダー。小数点以下 15 桁まで）は n / 10ᵈ
+    /// （0.9999999 = 9999999 / 10⁷。#141）、ほかは分母が 10⁶ 以下の分数（連分数。1/3 など）。無ければ None（π などは多項式の係数にしない）
     fn from_f64(v: f64) -> Option<Rat> {
         if !v.is_finite() || v.abs() > 1e15 {
             return None;
+        }
+        let text = format!("{v}");
+        if let Some((_, frac)) = text.split_once('.') {
+            let d = frac.len() as i32;
+            let scale = 10f64.powi(d);
+            let n = (v * scale).round();
+            if d <= 15 && !text.contains('e') && n.abs() <= 9_007_199_254_740_992.0 && n / scale == v {
+                return Rat::new(n as i128, 10i128.pow(d as u32));
+            }
         }
         let (mut h0, mut h1, mut k0, mut k1) = (0i128, 1i128, 1i128, 0i128);
         let mut x = v;
