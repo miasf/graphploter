@@ -74,3 +74,60 @@ fn flat_critical_points() {
     // 座標軸に沿って続く停留点は、今までどおり続いていると知らせる
     assert!(crit("@crit(sin(x) sin(y) sin(z))", 3.0).contains("線・面に沿って続いている可能性"));
 }
+
+/// 描けたら説明（式の行に出す文）、描けなければエラーの文
+fn row(src: &str, defs: &str) -> Result<String, String> {
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse(defs, &Default::default()));
+    graph_core::equation::compile(src)?;
+    drop(_d);
+    graph_core::definitions(defs);
+    let m = graph_core::plot(
+        src, &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, 5.0], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16,
+        &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .map_err(|_| format!("{src} が描けない"))?;
+    Ok(m.kind().to_string())
+}
+
+/// 展開点で関数が定義されていない・要求した次数まで微分できないテイラー多項式を作らない（#116）
+#[test]
+fn taylor_needs_derivatives() {
+    let fails = |src: &str, defs: &str, why: &str| match row(src, defs) {
+        Ok(k) => panic!("{src}: {k} を描いた（「{why}」と出すはず）"),
+        Err(e) => assert!(e.contains(why), "{src}: 「{e}」（「{why}」と出すはず）"),
+    };
+    let poly = |src: &str, defs: &str, want: &str| match row(src, defs) {
+        Ok(k) => assert!(k.contains(want), "{src}: {k}（{want} のはず）"),
+        Err(e) => panic!("{src}: {e}（{want} のはず）"),
+    };
+    // |x| の原点: f′ は左右で −1 と 1（T₃ = 0 と出ていた）。0 次は作れる
+    fails("y = @taylor(abs(x), x, 0, 3)", "", "x = 0 で f′ の左の極限 −1 と右の極限 1 が違うので、f′ は存在しません。1 次以上のテイラー多項式は作れません（0 次までなら作れます）");
+    poly("y = @taylor(abs(x), x, 0, 0)", "", "T₀(x) = 0");
+    poly("y = @taylor(abs(x), x, 1, 3)", "", "T₃(x) = 1 + (x − 1)");
+    // √x・ln x の原点（説明のない空の図だった）
+    fails("y = @taylor(sqrt(x), x, 0, 3)", "", "x = 0 に近づくと f′ が発散するので、f′ は存在しません");
+    fails("y = @taylor(ln(x), x, 0, 3)", "", "x = 0 で f の値がありません");
+    fails("y = @taylor(1/x, x, 0, 2)", "", "x = 0 で f の値がありません");
+    fails("y = @taylor(sin(x)/x, x, 0, 4)", "", "極限は 1 なので、場合分けで値を決めれば展開できます");
+    // 何階まで微分できるか
+    fails("y = @taylor(x abs(x), x, 0, 3)", "", "f″ は存在しません。2 次以上");
+    poly("y = @taylor(x abs(x), x, 0, 1)", "", "T₁(x) = 0");
+    fails("y = @taylor(abs(x)^(3), x, 0, 3)", "", "f‴ は存在しません。3 次以上");
+    fails("y = @taylor(max(x,0), x, 0, 2)", "", "f′ は存在しません");
+    fails("y = @taylor(f, x, 0, 3)", "f(x) = @cases(x^(2), x < 0; x^(3))", "f″ の左の極限 2 と右の極限 0 が違う");
+    // 値が飛ぶ所
+    fails("y = @taylor(floor(x), x, 0, 2)", "", "f は連続でなく、1 次以上");
+    fails("y = @taylor(sign(x), x, 0, 1)", "", "f は連続でなく");
+    poly("y = @taylor(floor(x), x, 0.5, 2)", "", "T₂(x) = 0");
+    // 極に丸めの分だけ近い中心
+    fails("y = @taylor(tan(x), x, pi/2, 2)", "", "発散する");
+    // 1 点だけ値を決めた場合分け: 決めた枝の導関数（0）でなく、まわりからの極限を使う（T₄ = 1 と出ていた）
+    poly("y = @taylor(f, x, 0, 4)", "f(x) = @cases(1, x = 0; sin(x)/x)", "T₄(x) = 1 − 0.166667x² + 0.008333x⁴");
+    // 多変数
+    fails("z = @taylor(abs(x)+y^(2), (x,y), (0,0), 2)", "", "∂f/∂x の極限が、近づく向きによって違う（−1 と 1）");
+    poly("z = @taylor(abs(x)+y^(2), (x,y), (1,0), 2)", "", "T₂(x, y) = 1 + (x − 1) + y²");
+    // なめらかな関数は今までどおり
+    poly("y = @taylor(sin(x), x, 0, 5)", "", "T₅(x) = x − x³/6 + x⁵/120");
+    poly("y = @taylor(besselJ(0,x), x, 0, 4)", "", "T₄(x) = 1 − x²/4 + x⁴/64");
+    poly("y = @taylor(gamma(x), x, 1, 3)", "", "T₃(x) = 1 − 0.577216(x − 1) + 0.989056(x − 1)² − 0.907479(x − 1)³");
+}
