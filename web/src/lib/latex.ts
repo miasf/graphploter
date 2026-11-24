@@ -19,6 +19,11 @@ const FUNCTIONS = new Set([
   'max', 'min', 'arg', 'Re', 'Im', 'sec', 'csc', 'cot',
 ])
 
+/** \sin^{-1} のように -1 乗で書いた逆関数の、計算エンジンの名前（#164） */
+const INVERSE_FUNCTIONS: Record<string, string> = {
+  sin: 'arcsin', cos: 'arccos', tan: 'arctan', sinh: 'arcsinh', cosh: 'arccosh', tanh: 'arctanh',
+}
+
 /** 単純に置き換えるコマンド */
 const SYMBOLS: Record<string, string> = {
   pi: ' pi ',
@@ -187,7 +192,39 @@ const OPENERS: Record<string, string> = {
 type Token = string // "\\name"（コマンド）か 1 文字
 
 function tokenize(src: string): Token[] {
-  return markPrincipalValue(repairSetBraces(normalizeSetTokens(rawTokenize(src))))
+  return markPrincipalValue(repairSetBraces(normalizeSetTokens(normalizeStyles(rawTokenize(src)))))
+}
+
+/** 表示の大きさだけを変える指定（#187。計算には関係ないので読み飛ばす） */
+const MATH_STYLES = new Set(['\\displaystyle', '\\textstyle', '\\scriptstyle', '\\scriptscriptstyle'])
+
+/**
+ * 書体だけが違う書き方をそろえる。
+ * - `\displaystyle` などの数式スタイルの指定を消す（#187）
+ * - 積分の微分記号: `\mathrm{dt}`・`\operatorname{dt}` は `\mathrm{d}t`、`\text{d}`・`\textrm{d}`・`\mathit{d}`・`\mathsf{d}` は `\mathrm{d}`（#181。
+ *   教材の LaTeX から貼り付けた形）。中身が「d と文字 1 つ」のときだけで、`\mathrm{dim}` のような名前は変えない
+ */
+function normalizeStyles(toks: Token[]): Token[] {
+  const out: Token[] = []
+  const fonts = new Set(['\\mathrm', '\\operatorname', '\\text', '\\textrm', '\\mathit', '\\mathsf', '\\textup'])
+  for (let k = 0; k < toks.length; k++) {
+    const t = toks[k]
+    if (MATH_STYLES.has(t)) continue
+    if (fonts.has(t) && toks[k + 1] === '{' && toks[k + 2] === 'd') {
+      if (toks[k + 3] === '}') {
+        out.push('\\mathrm', '{', 'd', '}')
+        k += 3
+        continue
+      }
+      if (/^[A-Za-z]$/.test(toks[k + 3] ?? '') && toks[k + 4] === '}' && t !== '\\text' && t !== '\\textrm' && t !== '\\textup') {
+        out.push('\\mathrm', '{', 'd', '}', toks[k + 3])
+        k += 4
+        continue
+      }
+    }
+    out.push(t)
+  }
+  return out
 }
 
 /** コーシーの主値の印（\operatorname{PV}・\mathrm{p.v.}・PV など）の名前 */
@@ -641,6 +678,22 @@ class Converter {
       return
     }
     if (FUNCTIONS.has(name)) {
+      // 教科書の逆関数の書き方 \sin^{-1} x は arcsin x（逆数 1/sin x ではない。#164）。逆数は (\sin x)^{-1}・\frac{1}{\sin x} と書く
+      const inverse = this.peek() === '^' && ((this.toks[this.i + 1] === '{' && this.toks[this.i + 2] === '-' && this.toks[this.i + 3] === '1' && this.toks[this.i + 4] === '}') || (this.toks[this.i + 1] === '-' && this.toks[this.i + 2] === '1'))
+      if (inverse) {
+        const arc = INVERSE_FUNCTIONS[name]
+        if (!arc) throw new LatexError(`\\${name}^{-1} はまだ使えません（逆関数なら、${name === 'sec' ? '\\arccos\\left(\\frac{1}{x}\\right)' : name === 'csc' ? '\\arcsin\\left(\\frac{1}{x}\\right)' : name === 'cot' ? '\\arctan\\left(\\frac{1}{x}\\right)' : '逆関数の名前'} のように書いてください）`)
+        this.i += this.toks[this.i + 1] === '{' ? 5 : 3
+        this.out += ` ${arc} `
+        return
+      }
+      // 底のある対数 \log_{b} x = ln x / ln b（#164）
+      if (name === 'log' && this.peek() === '_') {
+        this.i++
+        const base = this.arg()
+        this.out += ` @logbase(${base}) `
+        return
+      }
       this.out += ` ${name} `
       return
     }

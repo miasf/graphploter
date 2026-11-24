@@ -345,6 +345,8 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         // ∃・∀（行の先頭だけ。equation.rs が行ごと読む。計画 M12）
         "exists" | "forall" => OpKind::Func,
         "cases" | "intset" | "sumset" | "prodset" | "bigcup" | "bigcap" | "bigvee" | "bigwedge" => OpKind::Func,
+        // 底のある対数 `@logbase(b) x`（[`Parser::op`] で読む。#164）
+        "logbase" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
         "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" | "eig" => OpKind::Func,
         // テイラー多項式 @taylor(f, x, a, n)
@@ -1077,6 +1079,14 @@ impl Parser<'_> {
             self.expect(Tok::LParen, "@intset の後の '('")?;
             return self.intset();
         }
+        // 底のある対数 `@logbase(b) x` = ln x / ln b（LaTeX の \log_b x。#164）。引数の読み方は ln と同じ
+        if name == "logbase" {
+            self.expect(Tok::LParen, "@logbase の後の '('")?;
+            let base = self.expr()?;
+            self.expect(Tok::RParen, "閉じ括弧 ')'")?;
+            let ln_x = self.call(crate::functions::Func::Ln, pos)?;
+            return Ok(Expr::Bin(BinOp::Div, Box::new(ln_x), Box::new(Expr::Call(crate::functions::Func::Ln, vec![base]))));
+        }
         if name == "sumset" || name == "prodset" {
             // 集合の上の総和・総積 `@sumset(n; 条件) 項`（添字は変数か変数の組）
             let (vars, cond) = self.index_set(&name)?;
@@ -1092,8 +1102,10 @@ impl Parser<'_> {
         match op_kind(&name) {
             Some(OpKind::Binder) => {
                 self.expect(Tok::LParen, &format!("@{name} の後の '('"))?;
-                let var = match self.next().tok {
-                    Tok::Var(v) => v,
+                // 添字の i（教科書の Σ_{i=1}^{n}・∫ … di）は、字句では虚数単位なので、ここで変数にする（#163）
+                let (var, imaginary) = match self.next().tok {
+                    Tok::Var(v) => (v, false),
+                    Tok::Const(Constant::I) => ("i".to_string(), true),
                     _ => return err(format!("@{name}( の後には、束縛する変数の名前を書いてください"), pos),
                 };
                 let args = if *self.peek() == Tok::Comma {
@@ -1105,6 +1117,8 @@ impl Parser<'_> {
                 };
                 // 中身は直後の項（掛け算・割り算のかたまり）
                 let body = self.term()?;
+                // 添字が i なら、中身の i は虚数単位でなく添字（範囲と、この項の外の i は虚数単位のまま）
+                let body = if imaginary { body.rewrite(&|e| matches!(e, Expr::Const(Constant::I)).then(|| Expr::Var("i".into()))) } else { body };
                 Ok(Expr::Binder { op: name, var, args, body: Box::new(body) })
             }
             Some(OpKind::Prefix) => Ok(Expr::Op { op: name, args: vec![self.term()?] }),
