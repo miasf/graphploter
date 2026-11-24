@@ -1181,13 +1181,21 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
     let mut points: Vec<f64> = Vec::new();
     let mut steps = 0;
     let mut truncated = false;
+    // 初期時刻に右辺が定義されない初期値（y′ = 1/x の x = 0。#132）は、解き始められないので描かない
+    let mut undefined = 0;
     for init in &o.inits {
         if steps >= TOTAL_STEPS {
             truncated = true;
             break;
         }
-        let left = TOTAL_STEPS - steps;
         let mut f = ode_rhs(&o.rhs);
+        let mut d0 = vec![0.0; init.len()];
+        f(t0, init, &mut d0);
+        if init.iter().chain(&d0).any(|v| !v.is_finite()) {
+            undefined += 1;
+            continue;
+        }
+        let left = TOTAL_STEPS - steps;
         let back = ode::solve(&mut f, t0, init, lo, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
         let fwd = ode::solve(&mut f, t0, init, hi, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
         steps += back.points.len() + fwd.points.len();
@@ -1240,14 +1248,28 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
             }
         }
     }
-    let n = o.inits.len();
-    let mut kind = match o.one {
-        Some(_) if o.rhs.len() == 1 => "常微分方程式の解曲線と傾きの場".to_string(),
-        Some(_) => "常微分方程式の解曲線".to_string(),
-        None => "常微分方程式の解曲線".to_string(),
+    let n = o.inits.len() - undefined;
+    let slope_field = o.one.is_some() && o.rhs.len() == 1;
+    let mut kind = match (n, slope_field) {
+        (0, true) => "常微分方程式の傾きの場".to_string(),
+        (0, false) => "常微分方程式".to_string(),
+        (_, true) => "常微分方程式の解曲線と傾きの場".to_string(),
+        (_, false) => "常微分方程式の解曲線".to_string(),
     };
     if n > 1 {
         kind.push_str(&format!("（{n} 本）"));
+    }
+    if undefined > 0 {
+        let var = match o.one {
+            Some((x, _)) => crate::equation::coord_name(x),
+            None => "t".to_string(),
+        };
+        let t0_text = crate::critical::num_text(t0);
+        kind.push_str(&if n == 0 {
+            format!("（初期時刻 {var} = {t0_text} で右辺が定義されないので、解曲線は描けません）")
+        } else {
+            format!("（初期時刻 {var} = {t0_text} で右辺が定義されない初期値が {undefined} 本あり、その解曲線は描きません）")
+        });
     }
     if truncated {
         kind.push_str("（途中で打ち切り）");
