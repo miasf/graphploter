@@ -576,11 +576,14 @@ pub fn eval_range(source: &str, param_names: &str, param_values: &[f64]) -> Resu
         }
     }
     LAST_USED.with(|u| *u.borrow_mut() = used.join(","));
+    LAST_USED_DEFS.with(|u| *u.borrow_mut() = expand::used().join(","));
     Ok(v)
 }
 
 thread_local! {
     static LAST_USED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// 直前の [`eval_range`] で使った定義の名前（[`last_used_defs`]）
+    static LAST_USED_DEFS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// 次の [`plot`]・[`check_expression`]・[`eval_range`] だけに効く、定義の行（[`definitions`]）
     static DEFINITIONS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
@@ -597,6 +600,12 @@ pub fn definitions(src: &str) {
 fn take_definitions(params: &eval::Params) -> expand::Installed {
     let src = DEFINITIONS.with(|d| std::mem::take(&mut *d.borrow_mut()));
     expand::install(expand::Defs::parse(&src, params))
+}
+
+/// 直前の `eval_range` で使った定義の名前（カンマ区切り。範囲の式 [0, f(2)] の f。定義が変わったら描き直すため。#191 #208）
+#[wasm_bindgen]
+pub fn last_used_defs() -> String {
+    LAST_USED_DEFS.with(|u| u.borrow().clone())
 }
 
 /// 直前の `eval_range` で使ったパラメータの名前（カンマ区切り）

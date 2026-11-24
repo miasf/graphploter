@@ -17,6 +17,7 @@ import init, {
   definitions,
   last_poi,
   take_sequence_table,
+  last_used_defs,
   last_used_params,
   plot,
   take_field_values,
@@ -53,6 +54,11 @@ function limitResult(result: MeshResult): LimitResult | undefined {
   }
 }
 
+/** 今の依頼の、ほかの行の定義（範囲の式 [0, f(2)] で使う。#208） */
+let rangeDefinitions = ''
+/** 今の依頼の範囲の式で使った定義の名前（定義が変わったら描き直すため、描画で使った定義に合わせて返す） */
+const rangeDefsUsed = new Set<string>()
+
 /**
  * 範囲の文字列（"2pi" や、パラメータを使った "b" など）を数値にする。誤りがあれば説明付きで投げる。
  * 使ったパラメータの名前は `used` に足す（パラメータが変わったら計算し直すため）
@@ -68,8 +74,11 @@ function range(
   const names = Object.keys(params).join(',')
   const values = new Float64Array(Object.values(params).flatMap((p) => [p.re, p.im]))
   const value = (src: string) => {
+    // 定義は計算 1 回で消費されるので、範囲の式ごとに入れ直す（t の範囲 [0, f(2)] の f。#208）
+    if (rangeDefinitions !== '') definitions(rangeDefinitions)
     const v = eval_range(src, names, values)
     for (const n of last_used_params().split(',')) if (n) used.add(n)
+    for (const n of last_used_defs().split(',')) if (n) rangeDefsUsed.add(n)
     return v
   }
   try {
@@ -261,6 +270,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     try {
       const used = new Set<string>()
       const names = ['x', 'y', 'z']
+      rangeDefinitions = g.definitions ?? ''
       const ranges = g.ranges.flatMap((r, k) => {
         const [a, b] = range(`座標系の ${names[k]}`, r, g.params, used)
         return [a, a < b ? b : a + 1]
@@ -307,6 +317,9 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
   try {
     const rangeNames = Object.keys(ranges)
     const rangeUsed = new Set<string>()
+    // 描画と同じく、この行そのものも（定義の行なら、自分の定義が要る）
+    rangeDefinitions = req.definitions ? `${req.definitions}\n${source}` : source
+    rangeDefsUsed.clear()
     // 座標系: 図形は作る範囲（座標の値の範囲）で作る（画面の箱は表示範囲のまま）
     if (req.coord) {
       const names = ['x', 'y', 'z']
@@ -643,7 +656,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     geom?.free()
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
-    res = { requestId, ok: true, mesh, kind, limit, ms: total, usedParams, usedDefs: defs.used, defName: defs.name, odeStates: defs.ode, sequenceTable, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
+    const usedDefs = [...new Set([...defs.used, ...rangeDefsUsed])]
+    res = { requestId, ok: true, mesh, kind, limit, ms: total, usedParams, usedDefs, defName: defs.name, odeStates: defs.ode, sequenceTable, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     field_mode_reset()
     forget(itemId)
