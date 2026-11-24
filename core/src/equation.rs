@@ -869,6 +869,32 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         }
         _ => return Ok(None),
     };
+    let numeric = |e: &Expr| -> Result<Option<Matrix>, String> {
+        Ok(match crate::expand::matrix_value(e, params)? {
+            Some((rows, cols, items)) => {
+                crate::expand::note_names(&items);
+                crate::expand::numbers(&items, params).map(|a| Matrix::new(rows, cols, a))
+            }
+            None => None,
+        })
+    };
+    // det A の値の書き方（#123）。成分が有限桁の小数なら正確な値。そうでなければ（√2・π・スライダーの値など）、
+    // 丸め誤差の見積もりより小さい値を「= 0」と言い切らない
+    // (「= −1」・「≈ 0」, 説明に足す文)
+    let det_text = |m: &Matrix, v: f64| -> (String, String) {
+        if m.rows != m.cols {
+            return (format!("= {}", format_number(v)), String::new());
+        }
+        if let Some(exact) = crate::linalg::exact_det(&m.a, m.rows) {
+            return (format!("= {}", format_number(exact)), String::new());
+        }
+        let bound = crate::linalg::det_rounding(&m.a, m.rows);
+        if v.abs() <= bound {
+            (format!("≈ {}", format_number(v)), format!("丸め誤差の見積もり {} より小さく、0 かどうかは確かめられない。", format_number_short(bound)))
+        } else {
+            (format!("= {}", format_number(v)), String::new())
+        }
+    };
     // tr A・det A・rank A などだけの行: 値を説明に出す（図形は今までどおり、高さがその値の平面）
     if let Expr::Op { op, args } = expr {
         if def.is_none() && args.len() == 1 && matches!(op.as_str(), "tr" | "det" | "rank" | "dim" | "norm" | "angle" | "dot") {
@@ -879,19 +905,14 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
                     "dot" => "内積".to_string(),
                     o => o.to_string(),
                 };
-                crate::expand::set_kind(format!("{name} = {}（高さがこの値の平面）", format_number(v)));
+                let (value, note) = match (op.as_str(), numeric(&args[0])) {
+                    ("det", Ok(Some(m))) => det_text(&m, v),
+                    _ => (format!("= {}", format_number(v)), String::new()),
+                };
+                crate::expand::set_kind(format!("{name} {value}（{note}高さがこの値の平面）"));
             }
         }
     }
-    let numeric = |e: &Expr| -> Result<Option<Matrix>, String> {
-        Ok(match crate::expand::matrix_value(e, params)? {
-            Some((rows, cols, items)) => {
-                crate::expand::note_names(&items);
-                crate::expand::numbers(&items, params).map(|a| Matrix::new(rows, cols, a))
-            }
-            None => None,
-        })
-    };
     match expr {
         Expr::Op { op, args } if op == "eig" && args.len() == 1 => {
             let label = matrix_label(&args[0]);
@@ -932,7 +953,8 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
                 e => crate::expand::numbers(&[e], params).and_then(|v| v.first().copied()).unwrap_or(f64::NAN),
             };
             let shape = if m.rows == 3 { "平行六面体。体積は |det|" } else { "平行四辺形。面積は |det|" };
-            crate::expand::set_kind(format!("det = {}（列ベクトルが張る{shape}）", format_number(det)));
+            let (value, note) = det_text(&m, det);
+            crate::expand::set_kind(format!("det {value}（{note}列ベクトルが張る{shape}）"));
             parametric(items, params, space).map(Some)
         }
         _ => {
@@ -970,6 +992,17 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
             segments(&vectors, params, space).map(Some)
         }
     }
+}
+
+/// 誤差の大きさなど、小さいかもしれない正の数を、有効 2 桁で書く（2.2×10⁻⁸）
+fn format_number_short(v: f64) -> String {
+    if !(v.is_finite() && v > 0.0) || (1e-3..1e6).contains(&v) {
+        return format_number(v);
+    }
+    let e = v.log10().floor() as i32;
+    let m = v / 10f64.powi(e);
+    let sup: String = e.to_string().chars().map(|c| match c { '-' => '⁻', d => "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(d.to_digit(10).unwrap() as usize).unwrap() }).collect();
+    format!("{m:.1}×10{sup}")
 }
 
 /// 数を、説明に出す短い文字列にする（整数はそのまま、ほかは有効 6 桁）

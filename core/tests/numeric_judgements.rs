@@ -210,3 +210,43 @@ fn small_oscillations_have_no_limit() {
     close("@lim(x,0) (tan(x)-sin(x))/x^3", 0.5, 1e-10);
     assert!(eval_constant("@lim(x,0) (10^(-9) x sin(1/x))").is_ok_and(|v| v.abs() < 1e-20));
 }
+
+fn kind_with(src: &str, params: &[(&str, f64)]) -> String {
+    graph_core::definitions("");
+    let names: Vec<&str> = params.iter().map(|p| p.0).collect();
+    let values: Vec<f64> = params.iter().flat_map(|p| [p.1, 0.0]).collect();
+    graph_core::plot(
+        src, &[-3.0, 3.0, -3.0, 3.0, -3.0, 3.0], 40, 24, "t", &[0.0, 5.0], &names.join(","), &values, "", 3, &[0, 1, 2], &[0.0; 3],
+        &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, false, 1, false, 0,
+    )
+    .unwrap_or_else(|_| panic!("{src} が描けない"))
+    .kind()
+    .to_string()
+}
+
+/// 成分が整数・有限桁の小数の行列式は正確に。そうでなければ、丸め誤差より小さい値を 0 と言い切らない（#123）
+#[test]
+fn determinants_without_cancellation() {
+    let det = |src: &str| eval_constant(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+    // (N + 1)(N − 1) − N² = −1（0 と出ていた）。列を入れ替えると 1、同じ列が 2 本なら 0
+    assert_eq!(det("@det(⟦100000001,100000000;100000000,99999999⟧)"), -1.0);
+    assert_eq!(det("@det(⟦100000000,100000001;99999999,100000000⟧)"), 1.0);
+    assert_eq!(det("@det(⟦100000001,100000001;100000000,100000000⟧)"), 0.0);
+    assert_eq!(det("@det(⟦1,2;3,4⟧)"), -2.0);
+    assert_eq!(det("@det(⟦2,-1,0;-1,2,-1;0,-1,2⟧)"), 4.0);
+    assert_eq!(det("@det(⟦0.1,0.2;0.3,0.4⟧)"), -0.02);
+    assert_eq!(det("@det(⟦1.1,2.2;0.5,1⟧)"), 0.0);
+    // 逆行列も正確な行列式で割る: ⟦N+1, N; N, N−1⟧⁻¹ = ⟦−(N−1), N; N, −(N+1)⟧
+    assert_eq!(det("⟦1,0⟧ @inv(⟦100000001,100000000;100000000,99999999⟧) (1,0)"), -99999999.0);
+    let k = kind_with("@det(⟦100000001,100000000;100000000,99999999⟧)", &[]);
+    assert!(k.starts_with("det = −1（"), "{k}");
+    // スライダーの値でも
+    let k = kind_with("@det(⟦a+1,a;a,a-1⟧)", &[("a", 100000000.0)]);
+    assert!(k.starts_with("det = −1（"), "{k}");
+    // √2 を含む特異な行列: 計算した値は 4×10⁻¹⁶ で、0 と言い切らない
+    let k = kind_with("@det(⟦sqrt(2),1;2,sqrt(2)⟧)", &[]);
+    assert!(k.starts_with("det ≈ 0（丸め誤差の見積もり") && k.contains("0 かどうかは確かめられない"), "{k}");
+    // 誤差より十分大きい値は、今までどおり
+    let k = kind_with("@det(⟦sqrt(2),1;1,sqrt(2)⟧)", &[]);
+    assert!(k.starts_with("det = 1（"), "{k}");
+}

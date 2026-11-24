@@ -10,6 +10,74 @@ pub struct Matrix {
     pub a: Vec<f64>,
 }
 
+/// 成分が有限桁の小数（整数を含む）の正方行列の行列式を、正確に求める（#123）。
+/// 成分を 10ᵈ 倍して整数にし（d は小数点以下の桁の最大。9 まで）、Bareiss 法（割り算が割り切れる消去）で i128 のまま計算して、
+/// 最後に 10^(dn) で割る（丸めは最後の 1 回だけ）。小数にならない成分（√2 など）・桁あふれは None。
+/// 浮動小数点で計算すると、`(10⁸ + 1)(10⁸ − 1) − 10⁸·10⁸` の 10¹⁶ − 1 が丸まって 0 になる
+pub fn exact_det(a: &[f64], n: usize) -> Option<f64> {
+    if n == 0 || a.len() != n * n {
+        return None;
+    }
+    let decimals = |v: f64| -> Option<i32> {
+        let s = format!("{}", v.abs());
+        if !v.is_finite() || s.contains('e') {
+            return None;
+        }
+        Some(s.split_once('.').map_or(0, |(_, f)| f.len() as i32))
+    };
+    let d = a.iter().map(|&v| decimals(v)).collect::<Option<Vec<_>>>()?.into_iter().max()?;
+    if d > 9 {
+        return None;
+    }
+    let scale = 10f64.powi(d);
+    let mut m: Vec<i128> = Vec::with_capacity(n * n);
+    for &v in a {
+        let r = (v * scale).round();
+        if r.abs() > 9_007_199_254_740_992.0 || r / scale != v {
+            return None;
+        }
+        m.push(r as i128);
+    }
+    // Bareiss: M[i][j] ← (M[i][j]·M[k][k] − M[i][k]·M[k][j]) / 前のピボット（割り切れる）
+    let mut sign = 1i128;
+    let mut prev = 1i128;
+    for k in 0..n {
+        if m[k * n + k] == 0 {
+            // この列がこの先 全部 0 なら、行列式は 0
+            let Some(p) = (k + 1..n).find(|&i| m[i * n + k] != 0) else { return Some(0.0) };
+            for j in 0..n {
+                m.swap(k * n + j, p * n + j);
+            }
+            sign = -sign;
+        }
+        let pivot = m[k * n + k];
+        for i in k + 1..n {
+            for j in k + 1..n {
+                let v = m[i * n + j].checked_mul(pivot)?.checked_sub(m[i * n + k].checked_mul(m[k * n + j])?)?;
+                m[i * n + j] = v / prev;
+            }
+            m[i * n + k] = 0;
+        }
+        prev = pivot;
+    }
+    let det = sign * m[n * n - 1];
+    Some(det as f64 / 10f64.powi(d * n as i32))
+}
+
+/// 行列式を浮動小数点で計算したときの丸め誤差の上限の見積もり 4nε Σ|a₁σ(1) ⋯ aₙσ(n)|（展開の全部の項の絶対値の和。6 × 6 まで）
+pub fn det_rounding(a: &[f64], n: usize) -> f64 {
+    fn perm(a: &[f64], n: usize, row: usize, used: u32) -> f64 {
+        if row == n {
+            return 1.0;
+        }
+        (0..n).filter(|c| used & (1 << c) == 0).map(|c| a[row * n + c].abs() * perm(a, n, row + 1, used | (1 << c))).sum()
+    }
+    if n > 6 {
+        return f64::NAN;
+    }
+    4.0 * n as f64 * f64::EPSILON * perm(a, n, 0, 0)
+}
+
 /// 掃き出しの結果
 #[derive(Debug, Clone)]
 pub struct Reduced {
