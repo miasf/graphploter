@@ -7,7 +7,7 @@
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
-  import { loadInitial, shareUrl, type SavedState } from './lib/persist'
+  import { loadInitial, shareUrl, type SavedItem, type SavedState } from './lib/persist'
   import {
     UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
   } from './lib/library'
@@ -426,6 +426,10 @@
       folder: it.folder,
       coordSys: coordOf(it) ? it.coordSys : undefined,
       angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
+      // 積分の図の設定（近似・進み具合・図のために隠したか）。進み具合は図を出しているときだけ
+      riemann: it.riemann,
+      integralProgress: integralItem(it) && (it.integralProgress ?? 1) < 1 ? it.integralProgress : undefined,
+      integralAutoHidden: hiddenForIntegral.has(it.id) || undefined,
     }
   }
 
@@ -475,7 +479,10 @@
     regions = { ...(s.regions ?? {}) }
     setRegions(regions)
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
-    items = s.items.map((si) => newItem(si.latex, { ...si, rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }))
+    hiddenForIntegral.clear()
+    items = s.items.map(({ integralAutoHidden: _hidden, ...si }) =>
+      newItem(si.latex, { ...si, ...savedIntegral(si), rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }),
+    )
     domain = s.domain
     // 数でない値（壊れた・別の版の保存データ）は、今の値のままにする
     const num = (v: unknown, now: number) => (typeof v === 'number' && Number.isFinite(v) ? v : now)
@@ -513,6 +520,23 @@
     const sources = (s.integralsShown ?? []).flatMap((k) => (items[k] ? [items[k]] : []))
     for (const name of s.regionsShown ?? []) showRegion(name)
     for (const it of sources) showIntegral(it)
+    // 図のために隠した式は、図を消したら表示に戻す（保存しないと、開き直した後に図を消しても隠れたまま。#189）
+    s.items.forEach((si, k) => {
+      const it = items[k]
+      if (si.integralAutoHidden === true && it && !it.visible && sources.includes(it)) hiddenForIntegral.add(it.id)
+    })
+  }
+
+  /** 保存した積分の図の設定のうち、正しいものだけ（壊れた・外から来た共有リンクでも、変な値を入れない） */
+  function savedIntegral(si: SavedItem): Partial<PlotItem> {
+    const methods: RiemannMethod[] = ['left', 'right', 'mid', 'trap', 'simpson']
+    const r = si.riemann
+    const n = Number(r?.n)
+    const p = si.integralProgress
+    return {
+      riemann: r && methods.includes(r.method) && Number.isFinite(n) ? { method: r.method, n: Math.max(1, Math.min(400, Math.round(n))) } : undefined,
+      integralProgress: typeof p === 'number' && Number.isFinite(p) ? Math.min(1, Math.max(0, p)) : undefined,
+    }
   }
 
   // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
@@ -1296,7 +1320,8 @@
    * 色は、元の式と見分けられるように次の色にする
    */
   function duplicateItem(item: PlotItem) {
-    const { color: _color, ...saved } = $state.snapshot(savedItem(item)) as ReturnType<typeof savedItem>
+    // 積分の図は写さない（図のために隠した印・進み具合も要らない）
+    const { color: _color, integralAutoHidden: _hidden, integralProgress: _progress, ...saved } = $state.snapshot(savedItem(item)) as ReturnType<typeof savedItem>
     const copy = newItem(saved.latex, structuredClone(saved))
     const k = items.indexOf(item) + 1
     items.splice(k, 0, copy)
