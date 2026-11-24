@@ -360,6 +360,11 @@ pub enum Trouble {
 /// - −1 < p ≤ −0.956、または p < −0.5 で見積もりが区間ごとにそろわない（$1/(t \ln^2 t)$）: 確かめられない
 /// - それ以外: 収束する。最後の区間から先の分は、公比 $r = 2^{-(p+1)}$ の等比級数で足す
 fn toward_end(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, tol: Tol, budget: &Budget) -> Result<f64, Trouble> {
+    toward_end_until(f, a, dir, h, tol, budget, 1e-12 * a.abs())
+}
+
+/// [`toward_end`] で、端からの距離が `min_width` より細かい所は計算しない（主値の両側の和は、端の数の桁の 10⁻⁶ まで）
+fn toward_end_until(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, tol: Tol, budget: &Budget, min_width: f64) -> Result<f64, Trouble> {
     const SHELLS: usize = 60;
     // 区間ごとの (積分, 幅, |f| の最大)
     let mut shells: Vec<(f64, f64, f64)> = Vec::with_capacity(SHELLS);
@@ -390,7 +395,7 @@ fn toward_end(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, dir: f64, h: f64, t
         let outer = h * 0.5f64.powi(k as i32);
         let inner = 0.5 * outer;
         // 端の数の桁より細かい所は計算しない（a + δ が a と区別できない）
-        if inner < 1e-12 * a.abs() || inner < f64::MIN_POSITIVE * 1e10 {
+        if inner < min_width || inner < f64::MIN_POSITIVE * 1e10 {
             break;
         }
         // 区間の数の上限: 端から遠い区間（幅が広く、振動の回数が多いかもしれない）ほど多く、端に近づくほど少なく
@@ -574,7 +579,8 @@ pub fn integrate_split(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, cu
         }
     }
     for (c, hs) in sym {
-        // g(u) = f(c + u) + f(c − u)（u ∈ (0, hs]）
+        // g(u) = f(c + u) + f(c − u)（u ∈ (0, hs]）。c + u の丸め（絶対で ε|c|）で f は相対 ε|c|/u ずれるので、
+        // 打ち消し合って丸めの大きさ以下になった g は 0 とみなす（1/(t − 1) の両側は、ちょうど打ち消し合う）
         let mut buf = Vec::new();
         let mut g = |us: &[f64], out: &mut [f64]| {
             let n = us.len();
@@ -584,10 +590,13 @@ pub fn integrate_split(f: &mut dyn FnMut(&[f64], &mut [f64]), a: f64, b: f64, cu
             let mut both = vec![0.0; 2 * n];
             f(&buf, &mut both);
             for k in 0..n {
-                out[k] = both[k] + both[n + k];
+                let (l, r) = (both[k], both[n + k]);
+                let noise = 64.0 * f64::EPSILON * (c.abs() + us[k]) * (l.abs() + r.abs()) / us[k];
+                let v = l + r;
+                out[k] = if v.abs() <= noise { 0.0 } else { v };
             }
         };
-        total += toward_end(&mut g, 0.0, 1.0, hs, tol, budget).map_err(|e| match e {
+        total += toward_end_until(&mut g, 0.0, 1.0, hs, tol, budget, 1e-6 * c.abs()).map_err(|e| match e {
             Trouble::Diverges { power, .. } => Trouble::Diverges { at: c, power },
             Trouble::Unsure { power, oscillating, .. } => Trouble::Unsure { at: c, power, oscillating },
             t => t,

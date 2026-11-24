@@ -664,5 +664,32 @@ check(
   check('#179 文字の端は min・max', sym && !('error' in sym) && latexToText(sym.latex).includes('min'), true)
 }
 
+// 第2段階 2b: コーシーの主値 PV（ふつうの積分では主値を出さず、PV と書いたときだけ）
+{
+  for (const [input, want] of [
+    ['\\operatorname{PV}\\int_{-1}^{1}\\frac{1}{t}\\,dt', '@pvint(t,-1,1)(((1)/(t)))'],
+    ['\\mathrm{PV}\\int_{-1}^{1}\\frac{1}{t}\\,dt', '@pvint(t,-1,1)(((1)/(t)))'],
+    ['\\mathrm{p.v.}\\int_{-1}^{2}\\frac{1}{t}\\,dt', '@pvint(t,-1,2)(((1)/(t)))'],
+    ['PV\\int_{-1}^{1}\\frac{1}{t}\\,dt', '@pvint(t,-1,1)(((1)/(t)))'],
+    ['\\operatorname{PV}\\left(\\int_{-1}^{1}\\frac{1}{t}\\,dt\\right)', '( @pvint(t,-1,1)(((1)/(t))) )'],
+    ['\\int_{-1}^{1}\\frac{1}{t}\\,dt', '@int(t,-1,1)(((1)/(t)))'],
+  ] as const) check(`PV ${input}`, latexToText(input), want)
+  // 積分の前でなければ、P と V のまま
+  check('PV の名前', latexToText('P V x'), 'PVx')
+  for (const bad of ['\\operatorname{PV}\\int\\frac1t\\,dt', '\\operatorname{PV}\\iint_{[0,1]\\times[0,1]}x\\,dA']) {
+    let msg = ''
+    try {
+      latexToText(bad)
+    } catch (e) {
+      msg = (e as Error).message
+    }
+    check(`PV は 1 重の定積分だけ ${bad}`, msg.includes('1 重の定積分'), true)
+  }
+  const v = integralDisplay('\\operatorname{PV}\\int_{-1}^{2}\\frac{1}{t}\\,dt', 0.5, 1, true)
+  check('PV の途中の積分', v && !('error' in v) && latexToText(v.partial!), '@pvint(t,-1,0.5)(((1)/(t)))')
+  const r = riemannDisplay('\\operatorname{PV}\\int_{-1}^{2}\\frac{1}{t}\\,dt', 'left', 4)
+  check('PV の近似は描かない', r !== null && 'error' in r, true)
+}
+
 if (failures > 0) throw new Error(`${failures} 件失敗`)
 console.log('latex.ts: すべて成功')

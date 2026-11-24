@@ -146,3 +146,20 @@ fn variable_upper_limit() {
     // 下の端で発散する積分は、曲線にしない
     assert!(compile_with("z= @int(t,0,x)(((1)/(t)))", &ps, &sp).is_err());
 }
+
+/// コーシーの主値（決めたこと 1: ふつうの積分では出さず、PV と書いたときだけ）
+#[test]
+fn principal_values() {
+    close("@pvint(t,-1,1)(((1)/(t)))", 0.0, 1e-10);
+    close("@pvint(t,-1,2)(((1)/(t)))", 2f64.ln(), 1e-9);
+    close("@pvint(t,0,3)(((1)/(t-1)))", 2f64.ln(), 1e-9);
+    // 2 Shi(1)
+    close("@pvint(t,-1,1)(((e^(t))/(t)))", 2.114_501_750_751_457, 1e-9);
+    // 特異点の無い積分は、ふつうの積分と同じ
+    close("@pvint(t,0,1)(t^(2))", 1.0 / 3.0, 1e-12);
+    // 主値でも発散するもの
+    refused("@pvint(t,-1,1)(((1)/(t^(2))))", DIVERGES);
+    refused("@pvint(t,0,1)(((1)/(t)))", DIVERGES);
+    // ふつうの積分では、主値を出さない
+    refused("@int(t,-1,2)(((1)/(t)))", DIVERGES);
+}

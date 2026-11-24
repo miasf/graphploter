@@ -1338,6 +1338,7 @@ impl<'a> Expander<'a> {
             Expr::Op { op, .. } if op == "ellipsis" => return Err("… はリスト [1, 2, …, 10] の中で使ってください".into()),
             Expr::Binder { op, var, args, body } if op == "sum" || op == "prod" => Val::S(self.sum_or_prod(op == "sum", var, args, body)?),
             Expr::Binder { op, var, args, body } if op == "int" => Val::S(self.integral(var, args, body)?),
+            Expr::Binder { op, var, args, body } if op == "pvint" => Val::S(self.principal_value(var, args, body)?),
             Expr::Binder { op, var, args, body } if matches!(op.as_str(), "lim" | "seqlim") => {
                 let (_, report) = self.limit_expression(op, var, args, body, false)?;
                 Val::S(Expr::Num(report.value()?))
@@ -2305,6 +2306,17 @@ impl<'a> Expander<'a> {
             }
         }
         Ok(())
+    }
+
+    /// コーシーの主値 $\mathrm{PV}\int_a^b f(t)\,dt = \lim_{\varepsilon \to 0} \left(\int_a^{c - \varepsilon} + \int_{c + \varepsilon}^b\right)$
+    /// （区間の中の特異点 c ごと）。値が定数になる 1 重の積分だけ。端で発散する積分は、主値でも発散する
+    fn principal_value(&mut self, var: &str, args: &[Expr], body: &Expr) -> Result<Expr, String> {
+        let [lo, hi] = args else { return Err("主値（PV）は、∫_a^b … dt の形の定積分に付けてください".into()) };
+        let (lo, hi) = (self.scalar(lo)?, self.scalar(hi)?);
+        match self.closed_integral_pv(var, &lo, &hi, body, true)? {
+            Some(v) => Ok(Expr::Num(v)),
+            None => Err("主値（PV）は、値が定数になる定積分（端と中身が、積分の変数とパラメータだけの式）だけ計算できます".into()),
+        }
     }
 
     fn wide_integral_primitive(&mut self, var: &str, lo: &Expr, hi: &Expr, body: &Expr) -> Option<f64> {

@@ -187,7 +187,44 @@ const OPENERS: Record<string, string> = {
 type Token = string // "\\name"（コマンド）か 1 文字
 
 function tokenize(src: string): Token[] {
-  return repairSetBraces(normalizeSetTokens(rawTokenize(src)))
+  return markPrincipalValue(repairSetBraces(normalizeSetTokens(rawTokenize(src))))
+}
+
+/** コーシーの主値の印（\operatorname{PV}・\mathrm{p.v.}・PV など）の名前 */
+const PV_NAMES = new Set(['PV', 'P.V.', 'pv', 'p.v.', 'Pv'])
+
+/**
+ * 定積分の前のコーシーの主値の印を、1 つの字句 `\PV` にする（計画 stage2b。決めたこと 1）。
+ * `\operatorname{PV}\int …`・`\mathrm{p.v.}\int …`・`PV\int …`（打った文字のまま）・`PV\left(\int … \right)`。
+ * 後ろに積分記号が無ければ、そのまま（P と V の掛け算・名前のまま）
+ */
+function markPrincipalValue(toks: Token[]): Token[] {
+  const out: Token[] = []
+  for (let k = 0; k < toks.length; k++) {
+    let end = -1
+    if (['\\operatorname', '\\mathrm', '\\text', '\\mathit', '\\mathbf'].includes(toks[k]) && toks[k + 1] === '{') {
+      const close = toks.indexOf('}', k + 2)
+      if (close > 0 && PV_NAMES.has(toks.slice(k + 2, close).join(''))) end = close + 1
+    } else if (toks[k] === 'P' && toks[k + 1] === 'V') {
+      end = k + 2
+    } else if (toks[k] === 'P' && toks[k + 1] === '.' && toks[k + 2] === 'V' && toks[k + 3] === '.') {
+      end = k + 4
+    }
+    if (end > 0) {
+      let j = end
+      while (SPACES.has(toks[j] ?? '')) j++
+      if (toks[j] === '\\left' && toks[j + 1] === '(') j += 2
+      else if (toks[j] === '(') j++
+      // 重積分・線積分の前でも印にする（変換のときに「1 重の定積分だけ」と知らせる）
+      if (INTEGRALS.has(toks[j] ?? '')) {
+        out.push('\\PV')
+        k = end - 1
+        continue
+      }
+    }
+    out.push(toks[k])
+  }
+  return out
 }
 
 /**
@@ -414,6 +451,8 @@ class Converter {
   private out = ''
   /** \left なしの | で開いている絶対値の数 */
   private bars = 0
+  /** 直前にコーシーの主値の印 \PV があったか（次の積分を主値にする） */
+  private pv = false
 
   private toks: Token[]
 
@@ -610,6 +649,10 @@ class Converter {
       return
     }
     switch (name) {
+      case 'PV':
+        // コーシーの主値 PV ∫_a^b f dt（印は markPrincipalValue が、積分記号の前にだけ付ける）
+        this.pv = true
+        return
       case 'frac':
       case 'dfrac':
       case 'tfrac':
@@ -949,6 +992,8 @@ class Converter {
         // 定積分 \int_{a}^{b} … dt → @int(t,a,b)(…)、不定積分 \int … dx → @int(x)(…)、
         // 領域の上の積分 \iint_{\{(x,y)\mid …\}} … dA・\int_{[0,1]\times[0,2]} … dx\,dy → @intset((x,y),条件…)(…)
         const multi = name === 'iint' || name === 'oiint' ? 2 : name === 'iiint' ? 3 : 1
+        const pv = this.pv
+        this.pv = false
         let subToks: Token[] | null = null
         let hi: string | null = null
         while (this.peek() === '_' || this.peek() === '^' || this.peek() === '\\limits' || this.peek() === '\\nolimits') {
@@ -960,6 +1005,9 @@ class Converter {
         const integrand = this.integrand(multi)
         const { body, vector } = integrand
         const vars = integrand.vars.map(engineVar)
+        if (pv && (subToks === null || hi === null || multi > 1 || vars.length !== 1 || vector)) {
+          throw new LatexError('主値（PV）は、∫_a^b … dt の形の 1 重の定積分に付けてください')
+        }
         /** 積分の d の後の文字（計算エンジンが、範囲の次元と合うかを確かめる。ds の範囲が曲面なら誤り） */
         const marks = (vs: string[]) => vs.map((v) => `{d_${v}}`).join(',')
         if (vector) {
@@ -978,7 +1026,7 @@ class Converter {
           if (multi > 1) throw new LatexError('重積分は、∬ の下に領域を書いてください（{(x,y) | …} か [0,1]×[0,2]）')
           const lo = new Converter(subToks).run()
           if (lo === '' || hi.trim() === '') throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
-          this.out += ` @int(${vars[0]},${lo},${hi.trim()})(${body}) `
+          this.out += ` @${pv ? 'pvint' : 'int'}(${vars[0]},${lo},${hi.trim()})(${body}) `
           return
         }
         if (subToks === null) throw new LatexError('積分の範囲を書いてください（∫ の下と上）')
@@ -2436,6 +2484,7 @@ export function riemannDisplay(latex: string, method: RiemannMethod, nIn: number
     if (i < 0) return null
     // \intop・\smallint も \int と同じ（#195）
     if (!SINGLE_INTEGRALS.has(toks[i])) throw new LatexError('近似は、1 変数の定積分 ∫_a^b f dx で描けます')
+    if (toks[i - 1] === '\\PV') throw new LatexError('主値（PV）の積分は、近似を描けません（区間の中の特異点の両側を打ち消し合わせた値なので、長方形の和では近づけません）')
     const head = limitsAt(toks, i)
     if (head.sub === null || head.sup === null || head.sub.length === 0 || head.sup.length === 0) throw new LatexError('近似は、上下の端のある定積分で描けます')
     const span = integrandSpan(toks, head.k, 1)
@@ -2702,7 +2751,12 @@ function integralView(toks: Token[], i: number, progress: number, scale: number,
       cond = sw.with(tokenize(between(sw.lo, sw.hi, progress)))
     }
     const sym = ['\\int', '\\iint', '\\iiint'][names.length - 1] ?? '\\int'
-    const partial = sw ? `${sym}_{${set(paren(names.join(',')), joinToks(cond))}}${joinToks(body)}\\,${names.map((n) => `d${n}`).join('\\,')}` : undefined
+    // 主値（PV）は、∫_a^b の形のまま途中の端にする（主値は範囲の集合の形では書けない）
+    const partial = !sw
+      ? undefined
+      : toks[i - 1] === '\\PV' && names.length === 1
+        ? `\\operatorname{PV}\\int_{${joinToks(sw.lo)}}^{${between(sw.lo, sw.hi, progress)}}${joinToks(body)}\\,d${names[0]}`
+        : `${sym}_{${set(paren(names.join(',')), joinToks(cond))}}${joinToks(body)}\\,${names.map((n) => `d${n}`).join('\\,')}`
     const swept = { sweep: sw?.name, partial, extras: fieldExtra() }
     // 積分の変数でない座標 x, y, z が残っていると、1 つの図形にならない（∫_0^x … dt は x ごとに違う図形）
     const used = new Set([...bareLetters(body), ...bareLetters(cond)])
