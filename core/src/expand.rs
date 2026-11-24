@@ -28,6 +28,7 @@
 
 use crate::eval::Params;
 use crate::parser::{definition_head, parse_system_with, BinOp, Expr, Rel};
+use crate::functions::Func;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -1398,6 +1399,7 @@ impl<'a> Expander<'a> {
                     Val::S(s) => s,
                     Val::Fn { arity, body } => field_at_xyz(arity, &body).ok_or_else(|| fn_as_value_error(&args[0]))?,
                 };
+                self.check_kinks_at(&body, &names, &values)?;
                 Val::S(body.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone())))
             }
             // テイラー多項式 `@taylor(f, x, a, n)`・`@taylor(f, (x, y), (a, b), n)`
@@ -1752,12 +1754,45 @@ impl<'a> Expander<'a> {
         let b = |o: BinOp, x: Expr, y: Expr| Expr::Bin(o, Box::new(x), Box::new(y));
         let x = Expr::Var(var.to_string());
         let shifted = |f: &Expr, by: Expr| f.substitute(&|v: &str| (v == var).then(|| b(BinOp::Add, x.clone(), by.clone())));
+        // 多項式 f は、有限のテイラー展開 f(x + s) − f(x) = Σ_{j≥1} f⁽ʲ⁾(x) sʲ / j! で引き算をしない（#205）。
+        // 引き算だと、x に比べて小さい幅（Δ_{10⁻²⁰} x の x = 1）は x + h が x に丸められて 0 になる
+        let taylor = |f: &Expr, by: &Expr| -> Option<Expr> {
+            if !is_polynomial_in(f, var) {
+                return None;
+            }
+            let (mut d, mut sum, mut factorial) = (f.clone(), None::<Expr>, 1.0);
+            for j in 1..=64 {
+                d = crate::diff::diff(&d, var).ok()?;
+                if matches!(d, Expr::Num(v) if v == 0.0) {
+                    return Some(sum.unwrap_or(Expr::Num(0.0)));
+                }
+                factorial *= j as f64;
+                let term = b(BinOp::Div, b(BinOp::Mul, d.clone(), b(BinOp::Pow, by.clone(), Expr::Num(j as f64))), Expr::Num(factorial));
+                sum = Some(match sum {
+                    Some(s) => b(BinOp::Add, s, term),
+                    None => term,
+                });
+            }
+            None
+        };
+        // 多項式でなければ引き算。x + s が丸めで s の半分以上を失う所（幅が x に比べて小さすぎる所）は、値にしない
+        let kept = |by: &Expr, value: Expr| {
+            let moved = b(BinOp::Sub, b(BinOp::Add, x.clone(), by.clone()), x.clone());
+            let ratio = b(BinOp::Div, Expr::Call(Func::Abs, vec![moved]), Expr::Call(Func::Abs, vec![by.clone()]));
+            Expr::Call(Func::Guard, vec![value, b(BinOp::Sub, ratio, Expr::Num(0.5))])
+        };
+        let neg = |e: Expr| Expr::Neg(Box::new(e));
         for _ in 0..k {
             let half = b(BinOp::Div, h.clone(), Expr::Num(2.0));
             f = match op {
-                "fdiff" => b(BinOp::Sub, shifted(&f, h.clone()), f),
-                "bdiff" => b(BinOp::Sub, f.clone(), shifted(&f, Expr::Neg(Box::new(h.clone())))),
-                _ => b(BinOp::Sub, shifted(&f, half.clone()), shifted(&f, Expr::Neg(Box::new(half)))),
+                "fdiff" => taylor(&f, &h).unwrap_or_else(|| kept(&h, b(BinOp::Sub, shifted(&f, h.clone()), f.clone()))),
+                "bdiff" => taylor(&f, &neg(h.clone())).map(neg).unwrap_or_else(|| {
+                    kept(&h, b(BinOp::Sub, f.clone(), shifted(&f, neg(h.clone()))))
+                }),
+                _ => match (taylor(&f, &half), taylor(&f, &neg(half.clone()))) {
+                    (Some(p), Some(m)) => b(BinOp::Sub, p, m),
+                    _ => kept(&half, b(BinOp::Sub, shifted(&f, half.clone()), shifted(&f, neg(half.clone())))),
+                },
             };
             if f.node_count() > MAX_NODES {
                 return Err(format!("{sym} の式が大きくなりすぎます（階数を減らしてください）"));
@@ -3917,6 +3952,51 @@ impl<'a> Expander<'a> {
         self.numeric_value(e).filter(|v| v.re.is_finite() && v.im.is_finite())
     }
 
+    /// 導関数の折れ目の印（`diff.rs` の `kink`。余裕 |s| の Guard）がある式を、s = 0 の点で値にするとき（#205）:
+    /// 式に入れた値は片側の値（$\frac{d}{dx}|x|$ の原点で sign(0) = 0）なので、左右の極限をくらべ、違えば導関数は存在しない。
+    /// 点が数でなければ（スライダーを使う式など）調べない
+    fn check_kinks_at(&self, body: &Expr, names: &[String], values: &[Expr]) -> Result<(), String> {
+        let kinks = std::cell::RefCell::new(Vec::new());
+        let _ = body.rewrite(&|node| {
+            if let Expr::Call(Func::Guard, args) = node {
+                if let [_, Expr::Call(Func::Abs, s)] = args.as_slice() {
+                    kinks.borrow_mut().push(s[0].clone());
+                }
+            }
+            None
+        });
+        let kinks = kinks.into_inner();
+        if kinks.is_empty() {
+            return Ok(());
+        }
+        let Some(at) = values.iter().map(|v| self.numeric_value(v).filter(|c| c.im == 0.0).map(|c| c.re)).collect::<Option<Vec<f64>>>() else {
+            return Ok(());
+        };
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let on_kink = kinks.iter().any(|s| {
+            point_check(s, &name_refs, &at, self.params).is_some_and(|(v, _)| v.re == 0.0 && v.im == 0.0)
+        });
+        if !on_kink {
+            return Ok(());
+        }
+        let Some((_, near)) = point_check(body, &name_refs, &at, self.params) else { return Ok(()) };
+        let num = |v: num_complex::Complex64| crate::critical::num_text(v.re);
+        let point = if names.len() == 1 {
+            format!("{} = {}", names[0], crate::critical::num_text(at[0]))
+        } else {
+            format!("({}) = ({})", names.join(", "), at.iter().map(|v| crate::critical::num_text(*v)).collect::<Vec<_>>().join(", "))
+        };
+        match near {
+            crate::series::Near::Jump(l, r) if names.len() == 1 => {
+                Err(format!("{point} は折れ目で、導関数の左の極限 {} と右の極限 {} が違うので、導関数は存在しません", num(l), num(r)))
+            }
+            crate::series::Near::Jump(l, r) => {
+                Err(format!("{point} は折れ目で、導関数の極限が近づく向きによって違う（{} と {}）ので、導関数は存在しません", num(l), num(r)))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn numeric_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
         // 数列で既に数にした項や初期値を、表と描画のために再コンパイルしない。
         if let Expr::Num(n) = e {
@@ -4833,6 +4913,23 @@ fn gamma_ratio(p: f64, q: f64) -> Option<f64> {
 }
 
 /// 式 e の、点 `at`（変数 `names`）での値と、まわりからの極限。変数とパラメータのほかに文字が残れば None
+/// var の多項式か（係数は var を含まない式でよい。累乗は 0 以上の整数の定数だけ）
+fn is_polynomial_in(e: &Expr, var: &str) -> bool {
+    if !e.uses_var(var) {
+        return true;
+    }
+    match e {
+        Expr::Var(_) => true,
+        Expr::Neg(a) => is_polynomial_in(a, var),
+        Expr::Bin(BinOp::Add | BinOp::Sub | BinOp::Mul, a, b) => is_polynomial_in(a, var) && is_polynomial_in(b, var),
+        Expr::Bin(BinOp::Div, a, b) => is_polynomial_in(a, var) && !b.uses_var(var),
+        Expr::Bin(BinOp::Pow, a, b) => {
+            matches!(**b, Expr::Num(n) if n >= 0.0 && n.fract() == 0.0 && n <= 64.0) && is_polynomial_in(a, var)
+        }
+        _ => false,
+    }
+}
+
 fn point_check(e: &Expr, names: &[&str], at: &[f64], params: &Params) -> Option<(num_complex::Complex64, crate::series::Near)> {
     let prog = crate::eval::Program::compile_with(e, names, params).ok()?;
     let cols: Vec<[f64; 1]> = at.iter().map(|v| [*v]).collect();

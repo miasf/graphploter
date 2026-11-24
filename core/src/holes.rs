@@ -95,9 +95,10 @@ fn boundaries(expr: &Expr) -> Vec<Expr> {
                 }
             }
             // 導関数の段差の印（`diff.rs` の `jump`）: |s| − 10⁻³⁰⁰ < 0 の所で NaN
+            // （`times_jump` で、掛けた式 a が 0 の所を除いたもの |s| − min(|a|, 10⁻³⁰⁰) も。その点で値があれば白丸にしない）
             Expr::Call(Func::Guard, args) => {
-                if let [_, Expr::Bin(BinOp::Sub, abs, tol)] = args.as_slice() {
-                    if let (Expr::Call(Func::Abs, s), Expr::Num(_)) = (&**abs, &**tol) {
+                if let [_, Expr::Bin(BinOp::Sub, abs, _)] = args.as_slice() {
+                    if let Expr::Call(Func::Abs, s) = &**abs {
                         add_factors(&s[0], &mut out);
                     }
                 }

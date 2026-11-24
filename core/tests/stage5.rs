@@ -78,3 +78,46 @@ fn constants_keep_their_digits() {
     assert_eq!(value("@prod(k,1,10) k"), 3628800.0);
     near("@int(t,0,1)(e^(t))", std::f64::consts::E - 1.0, 1e-12);
 }
+
+/// 微分・極限・差分の合成で、同じ値の式や尺度によって結果が変わっていた（#205）
+#[test]
+fn compositions_agree() {
+    // 偶数乗の |u| は u の偶数乗（折れ目が無い）
+    assert_eq!(value("@at(@diff(x, 2) abs(x)^2, x, 0)"), 2.0);
+    assert_eq!(value("@at(@diff(x, 4) abs(x)^4, x, 0)"), 24.0);
+    assert_eq!(value("@at(@diff(x, 2) sqrt(x^2)^2, x, 0)"), 2.0);
+    assert_eq!(value("@at(@diff(x, 2) abs(sin(x))^2, x, 0)"), 2.0);
+    // 段差 sign(x) の微分に掛けた式が 0 なら、導関数は存在する（|x|³″ = 6|x|、(x² sign x)″ = 6|x|）
+    assert_eq!(value("@at(@diff(x, 2) abs(x)^3, x, 0)"), 0.0);
+    assert_eq!(value("@at(@diff(x, 2) sign(x) x^3, x, 0)"), 0.0);
+    // 折れ目で左右の値が違えば、点での値も「存在しない」（前は sign(0) = 0 の片側の値 0 を出していた）
+    for src in ["@at(@diff(x, 1) abs(x), x, 0)", "@at(@diff(x, 3) abs(x)^3, x, 0)", "@at(@diff(x, 2) x abs(x), x, 0)", "@at(@diff(x, 1) x floor(x), x, 0)"] {
+        let e = graph_core::equation::eval_constant(src).expect_err(src);
+        assert!(e.contains("導関数は存在しません"), "{src}: {e}");
+    }
+    assert_eq!(value("@at(@diff(x, 1) abs(x), x, 1)"), 1.0);
+    assert_eq!(value("@at(@diff(x, 1) max(x^2, 0), x, 0)"), 0.0);
+    // 大きい点の極限: a ± h が丸めなしで表せる h で近づく
+    assert_eq!(value("@lim(x,10^(16)) (x-10^(16))"), 0.0);
+    assert_eq!(value("@lim(x,10^(16)) abs(x-10^(16))"), 0.0);
+    assert_eq!(value("@lim(x,10^(16)) (x-10^(16)+0.5)"), 0.5);
+    assert_eq!(value("@lim(x,10^(16)) 5"), 5.0);
+    // ゆっくり 0 に近づくべき
+    assert_eq!(value("@lim(x,∞) 1/x^(0.01)"), 0.0);
+    assert_eq!(value("@lim(x,0,1) x^(0.01)"), 0.0);
+    // 収束しないもの・遅すぎるものは、今までどおり確かめられない
+    for src in ["@lim(x,∞) ln(ln(x))", "@lim(x,∞) 1/ln(x)", "@lim(x,∞) x^(0.01)", "@lim(x,∞) sin(ln(x))"] {
+        assert!(graph_core::equation::eval_constant(src).is_err(), "{src}");
+    }
+    // 振動（#115 の追加の例。標本と周期がそろう）
+    let e = graph_core::equation::eval_constant("@lim(x,0) sin(2π/x^2)").unwrap_err();
+    assert!(e.contains("振動"), "{e}");
+    // x に比べて小さい幅の差分: 多項式は引き算をしない。そうでなければ、幅が丸めで消える所は値にしない
+    assert_eq!(value("@at(@fdiff(x, 10^(-20)) x, x, 1)/10^(-20)"), 1.0);
+    assert_eq!(value("@at(@fdiff(x, 10^(-20)) x^2, x, 1)/10^(-20)"), 2.0);
+    near("@at(@cdiff(x, 10^(-20)) x^3, x, 1)/10^(-20)", 3.0, 1e-15);
+    assert!(graph_core::equation::eval_constant("@at(@fdiff(x, 10^(-20)) sin(x), x, 1)").is_err());
+    near("@at(@fdiff(x, 10^(-10)) sin(x), x, 1)/10^(-10)", 1f64.cos(), 1e-6);
+    assert_eq!(value("@at(@fdiff(x, 1, 2) x^3, x, 1)"), 12.0);
+    assert_eq!(value("@at(@fdiff(x, 1, 2) x floor(x), x, 1)"), 2.0);
+}
