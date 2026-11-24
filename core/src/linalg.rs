@@ -11,7 +11,7 @@ pub struct Matrix {
 }
 
 /// 成分が有限桁の小数（整数を含む）の正方行列の行列式を、正確に求める（#123）。
-/// 成分を 10ᵈ 倍して整数にし（d は小数点以下の桁の最大。9 まで）、Bareiss 法（割り算が割り切れる消去）で i128 のまま計算して、
+/// 成分を 10ᵈ 倍して整数にし（d は小数点以下の桁の最大。15 まで。10ᵈ 倍が 2⁵³ を超えるものは使わない）、Bareiss 法（割り算が割り切れる消去）で i128 のまま計算して、
 /// 最後に 10^(dn) で割る（丸めは最後の 1 回だけ）。小数にならない成分（√2 など）・桁あふれは None。
 /// 浮動小数点で計算すると、`(10⁸ + 1)(10⁸ − 1) − 10⁸·10⁸` の 10¹⁶ − 1 が丸まって 0 になる
 pub fn exact_det(a: &[f64], n: usize) -> Option<f64> {
@@ -26,7 +26,7 @@ pub fn exact_det(a: &[f64], n: usize) -> Option<f64> {
         Some(s.split_once('.').map_or(0, |(_, f)| f.len() as i32))
     };
     let d = a.iter().map(|&v| decimals(v)).collect::<Option<Vec<_>>>()?.into_iter().max()?;
-    if d > 9 {
+    if d > 15 {
         return None;
     }
     let scale = 10f64.powi(d);

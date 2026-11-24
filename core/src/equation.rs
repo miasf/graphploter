@@ -885,14 +885,17 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         if m.rows != m.cols {
             return (format!("= {}", format_number(v)), String::new());
         }
+        // 0 でない小さい値を、有効 6 桁で「0」と書かない（10⁻¹² は 1×10⁻¹²）
+        let text = |v: f64| if v != 0.0 && v.abs() < 1e-4 { format_number_short(v.abs()).replace(".0×", "×").to_string() } else { format_number(v) };
+        let signed = |v: f64| if v < 0.0 && v.abs() < 1e-4 { format!("−{}", text(v)) } else { text(v) };
         if let Some(exact) = crate::linalg::exact_det(&m.a, m.rows) {
-            return (format!("= {}", format_number(exact)), String::new());
+            return (format!("= {}", signed(exact)), String::new());
         }
         let bound = crate::linalg::det_rounding(&m.a, m.rows);
         if v.abs() <= bound {
             (format!("≈ {}", format_number(v)), format!("丸め誤差の見積もり {} より小さく、0 かどうかは確かめられない。", format_number_short(bound)))
         } else {
-            (format!("= {}", format_number(v)), String::new())
+            (format!("= {}", signed(v)), String::new())
         }
     };
     // tr A・det A・rank A などだけの行: 値を説明に出す（図形は今までどおり、高さがその値の平面）

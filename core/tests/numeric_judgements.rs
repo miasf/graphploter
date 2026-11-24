@@ -250,3 +250,13 @@ fn determinants_without_cancellation() {
     let k = kind_with("@det(⟦sqrt(2),1;1,sqrt(2)⟧)", &[]);
     assert!(k.starts_with("det = 1（"), "{k}");
 }
+
+/// 小数点以下 12 桁の成分も正確に。0 でない小さい値を「0」と書かない（#123）
+#[test]
+fn small_determinants_are_not_shown_as_zero() {
+    assert_eq!(eval_constant("@det(⟦1,1;1,1.000000000001⟧)"), Ok(1e-12));
+    let k = kind_with("@det(⟦1,1;1,1.000000000001⟧)", &[]);
+    assert!(k.starts_with("det = 1×10⁻¹²（"), "{k}");
+    let k = kind_with("@det(⟦1,1;1,0.999999999999⟧)", &[]);
+    assert!(k.starts_with("det = −1×10⁻¹²（"), "{k}");
+}

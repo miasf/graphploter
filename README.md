@@ -795,7 +795,7 @@ npm run dev      # Rust のビルド → 開発用サーバーの起動
     逆行列 $A^{-1}$、転置 $A^{T}$（`^{\top}` でも。$T$ がスライダーでも、行列の右上の $T$ は転置）、共役転置 $A^{\dagger}$、
     行列式 `\det A`・`\left|A\right|`、トレース `\operatorname{tr} A`、内積 `\left\langle a,b\right\rangle`、ノルム `\left\Vert a\right\Vert`、
     なす角 `@angle(u, v)`（計算エンジンの書き方）。`Re`・`Im`・`conj` は成分ごと。
-    成分が全部、整数か有限桁の小数（小数点以下 9 桁まで）の行列式は、10ᵈ 倍した整数で正確に計算する（Bareiss 法。`core/src/linalg.rs` の `exact_det`。
+    成分が全部、整数か有限桁の小数（小数点以下 15 桁まで）の行列式は、10ᵈ 倍した整数で正確に計算する（Bareiss 法。`core/src/linalg.rs` の `exact_det`。
     浮動小数点では $(10^8 + 1)(10^8 - 1) - 10^8 \cdot 10^8 = -1$ が 0 になる）。そうでない成分（$\sqrt 2$ など）で、値が丸め誤差の見積もり
     $4n\varepsilon \sum |a_{1\sigma(1)} \cdots a_{n\sigma(n)}|$ より小さければ、`det ≈ 0（丸め誤差の見積もり … より小さく、0 かどうかは確かめられない。…）` と出す
   - 組 `(a, b, c)` は列ベクトルで、3×1 の行列と同じ。`A (x, y, z)` は行列とベクトルの積、$\mathbf v^{T} \mathbf w$ は内積と同じ数
