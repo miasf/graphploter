@@ -276,6 +276,21 @@ fn erfc_cf(z: C) -> C {
 // ゼータ関数
 // ---------------------------------------------------------------------------
 
+/// sin(πz)。実部を最も近い整数 n との差 r（|r| ≤ 1/2。引き算は丸めなし）にしてから計算するので、
+/// z が整数に近くても相対誤差が大きくならず、整数ではぴったり 0 になる。
+/// sin(π(a + ib)) = sin(πa) cosh(πb) + i cos(πa) sinh(πb)、sin(πa) = (−1)ⁿ sin(πr)
+pub(crate) fn sin_pi(z: C) -> C {
+    let n = z.re.round();
+    let r = z.re - n;
+    let sign = if n.rem_euclid(2.0) == 0.0 { 1.0 } else { -1.0 };
+    let (s, c) = ((PI * r).sin() * sign, (PI * r).cos() * sign);
+    if z.im == 0.0 {
+        return C::new(s, 0.0);
+    }
+    let b = PI * z.im;
+    C::new(s * b.cosh(), c * b.sinh())
+}
+
 /// リーマンのゼータ関数 ζ(s)。
 /// Re s ≥ 1/2 はボーウェインの方法（交代級数 η(s) を速く収束させる）、Re s < 1/2 は関数等式
 /// ζ(s) = 2ˢ πˢ⁻¹ sin(πs/2) Γ(1 − s) ζ(1 − s) を使う。s = 1 は極。
@@ -287,9 +302,15 @@ pub fn zeta(s: C) -> C {
         return C::new(-0.5, 0.0); // 関数等式では 0 × ∞ になるので、値を直接返す
     }
     if s.re < 0.5 {
+        // 負の偶数は自明な零点。Γ(1 − s) が桁あふれする所（s < −170 くらい）でも 0 × ∞ にしない
+        if s.im == 0.0 && s.re / 2.0 == (s.re / 2.0).round() {
+            return C::new(0.0, 0.0);
+        }
         let two = C::new(2.0, 0.0);
         let pi = C::new(PI, 0.0);
-        return two.powc(s) * pi.powc(s - 1.0) * (PI * s / 2.0).sin() * gamma(1.0 - s) * zeta(1.0 - s);
+        // sin(πs/2) は sin_pi で計算する。(PI * s / 2.0).sin() は π の丸め誤差が s/2 倍され、負の偶数の近くで
+        // 0 からずれる（s = −40 で 10⁻¹⁵ ほど）。それに Γ(1 − s) ζ(1 − s) の大きな値が掛かる（#149）
+        return two.powc(s) * pi.powc(s - 1.0) * sin_pi(s / 2.0) * gamma(1.0 - s) * zeta(1.0 - s);
     }
     // 項の数は、虚部が大きいほど増やす（ボーウェインの誤差の見積もりによる）
     let n = (50.0 + 1.3 * s.im.abs()).min(400.0) as usize;
