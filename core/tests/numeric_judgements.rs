@@ -180,3 +180,33 @@ fn derivative_gaps() {
     let (_, holes) = curve("y = @diff(x) ((x^(2)-1)/(x-1))", "");
     assert!(at(&holes, [1.0, 1.0]) && holes.len() == 1, "{holes:?}");
 }
+
+/// 小さい振幅の振動を、収束と取り違えない（#115）。振動・判定不能のときは値を出さない
+#[test]
+fn small_oscillations_have_no_limit() {
+    for src in [
+        "@lim(x,0) (10^(-9) sin(1/x))",
+        "@lim(x,0) (1+10^(-9) sin(1/x))",
+        "@lim(x,0) (10^(-12) sin(1/x))",
+        "@lim(n,∞) (1+10^(-9) (-1)^n)",
+        "@lim(n,∞) (10^(-9) (-1)^n)",
+        "@lim(x,∞) (10^(-9) sin(x))",
+        // 今までどおり
+        "@lim(x,0) sin(1/x)",
+        "@lim(n,∞) (-1)^n",
+    ] {
+        match eval_constant(src) {
+            Ok(v) => panic!("{src}: {v} に収束と出した"),
+            Err(e) => assert!(e.contains("振動"), "{src}: {e}"),
+        }
+    }
+    // 減衰する振動・桁落ちのある式は、今までどおり極限がある
+    close("@lim(n,∞) (-1)^n/n", 0.0, 1e-9);
+    close("@lim(x,0) (1+10^(-9) x sin(1/x))", 1.0, 1e-12);
+    close("@lim(x,∞) (1 + sin(x)/x)", 1.0, 1e-12);
+    close("@lim(x,0) (1+x)^(1/x)", std::f64::consts::E, 1e-10);
+    close("@lim(x,∞) (sqrt(x^2+x)-x)", 0.5, 1e-10);
+    close("@lim(n,∞) n (sqrt(n^2+1)-n)", 0.5, 1e-9);
+    close("@lim(x,0) (tan(x)-sin(x))/x^3", 0.5, 1e-10);
+    assert!(eval_constant("@lim(x,0) (10^(-9) x sin(1/x))").is_ok_and(|v| v.abs() < 1e-20));
+}

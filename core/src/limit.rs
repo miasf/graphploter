@@ -141,23 +141,44 @@ fn extrapolate([a, b, c]: [f64; 3]) -> Option<f64> {
     }
 }
 
+/// 値の範囲（最大 − 最小）。値が無い（∞・NaN）ものがあれば NaN
+fn spread(values: impl Iterator<Item = f64>) -> f64 {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in values {
+        if !v.is_finite() {
+            return f64::NAN;
+        }
+        (lo, hi) = (lo.min(v), hi.max(v));
+    }
+    hi - lo
+}
+
 fn finite_estimate(a: &[f64], b: &[f64]) -> Option<f64> {
+    let windows = a.len().min(b.len()).saturating_sub(WINDOW - 1);
+    let span = |i: usize| spread(a[i..i + WINDOW].iter().chain(&b[i..i + WINDOW]).copied());
     let mut stable = None;
-    for (a, b) in a.windows(WINDOW).zip(b.windows(WINDOW)).rev() {
+    for i in (0..windows).rev() {
+        let (a, b) = (&a[i..i + WINDOW], &b[i..i + WINDOW]);
         if a.iter().chain(b).any(|x| !x.is_finite()) {
             continue;
         }
         let last = a[WINDOW - 1];
         if a.iter().chain(b).all(|&x| close(x, last)) {
-            stable.get_or_insert(last);
+            // 値がそろって見えても、ばらつきが外側の窓より縮んでいなければ（丸め誤差の程度でもなければ）、
+            // 小さい振幅で振動が続いているだけ（10⁻⁹ sin(1/x) は close の 10⁻⁹ の中に入る。#115）
+            let width = span(i);
+            let decays = width <= 1e-12 * last.abs() || (i >= WINDOW && width <= 0.25 * span(i - WINDOW));
+            if decays {
+                stable.get_or_insert(last);
+            }
             continue;
         }
         let Some(estimate) = extrapolate([a[0], a[1], a[2]]) else { continue };
-        // 複数の距離・異なる間隔の列から、同じ値が得られる場合に限る。
-        if a.windows(3)
-            .chain(b.windows(3))
-            .all(|w| extrapolate([w[0], w[1], w[2]]).is_some_and(|v| close(v, estimate)))
-        {
+        // 複数の距離・異なる間隔の列から、同じ値が得られる場合に限る。0 に近い値は、標本のばらつきに対して一致を見る
+        // （close の 10⁻⁹ の下限だと、振幅 10⁻⁹ の振動の外挿がどれも一致してしまう）
+        let scale = span(i).max(estimate.abs());
+        let agrees = |v: f64| v.is_finite() && (v - estimate).abs() <= 1e-9 * scale.max(v.abs());
+        if a.windows(3).chain(b.windows(3)).all(|w| extrapolate([w[0], w[1], w[2]]).is_some_and(agrees)) {
             // 近い点が桁落ちで同じ値に丸められたときは、外挿と一致しない。
             return match stable {
                 Some(last) => close(last, estimate).then_some(last),
@@ -200,10 +221,11 @@ fn growing(samples: &[f64], growth: f64) -> Option<f64> {
 }
 
 fn oscillates(samples: &[f64]) -> bool {
+    // 幅と、値の大きさ。小さい振幅（10⁻⁹ sin(1/x)・1 + 10⁻⁹ sin(1/x)）も、丸め誤差より十分大きければ振動（#115）
     let span = |values: &[f64]| {
         let min = values.iter().copied().fold(f64::INFINITY, f64::min);
         let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        (max - min, max.abs().max(min.abs()).max(1.0))
+        (max - min, max.abs().max(min.abs()).max(f64::MIN_POSITIVE))
     };
     let tail = &samples[samples.len() - 4 * WINDOW..];
     if tail.iter().any(|v| !v.is_finite()) {
@@ -211,7 +233,7 @@ fn oscillates(samples: &[f64]) -> bool {
     }
     let (before, after) = tail.split_at(tail.len() / 2);
     let (width, scale) = span(after);
-    if !width.is_finite() || width < 1e-6 * scale || width < 0.5 * span(before).0 {
+    if !width.is_finite() || width < 1e-12 * scale || width < 0.5 * span(before).0 {
         return false;
     }
     let directions = after.windows(2).filter_map(|w| {
@@ -349,7 +371,9 @@ fn sequence_through(
         .filter(|&v| {
             let previous = max_error(&earlier, v);
             let last = max_error(&near, v);
-            last.is_finite() && (last <= 1e-8 * v.abs().max(1.0) || (previous.is_finite() && last < 0.8 * previous))
+            // 最後の項の区間の誤差が、丸め誤差の程度か、前の区間より縮んでいること（10⁻⁸ 以下ならよい、としていたので、
+            // 1 + 10⁻⁹ (−1)ⁿ が 1.000000001 に収束と出ていた。#115）
+            last.is_finite() && (last <= 1e-11 * v.abs() || (previous.is_finite() && last < 0.8 * previous))
         });
     let width = |v: &[f64]| max_error(v, v[0]);
     let divergent = || {
