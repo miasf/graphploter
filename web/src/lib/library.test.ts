@@ -1,5 +1,5 @@
 // library.ts のテスト。実行: npm test
-import { deleteGraph, duplicateGraph, graphMeta, formatDate, importGraph, isEmptyState, lastGraphId, listGraphs, loadGraph, markNew, migrate, renameGraph, saveGraph, setCurrent, setThumb, useStore, UNTITLED } from './library.ts'
+import { deleteGraph, duplicateGraph, graphMeta, graphRev, formatDate, importGraph, isEmptyState, lastGraphId, listGraphs, loadGraph, markNew, migrate, renameGraph, saveGraph, setCurrent, setThumb, useStore, UNTITLED } from './library.ts'
 import type { SavedState } from './persist.ts'
 
 const mem = new Map<string, string>()
@@ -143,6 +143,25 @@ const snapshot = () => JSON.stringify([...mem.entries()].sort())
   failKey = null
   check('削除の失敗: 何も変わらない', snapshot() === before)
   check('削除: 成功なら true', deleteGraph('r') === true && !graphMeta('r') && loadGraph('r') === null)
+}
+
+// 版の番号: 中身・名前を変えると増え、小さな絵・同じ中身の保存では増えない。消すと null（#138）
+{
+  saveGraph('v', state('y=x'), 9000)
+  const r1 = graphRev('v')!
+  saveGraph('v', state('y=x'), 9100)
+  check('版: 同じ中身では増えない', graphRev('v') === r1)
+  setThumb('v', 'data:image/jpeg;base64,BBBB')
+  check('版: 小さな絵では増えない', graphRev('v') === r1)
+  saveGraph('v', state('y=2x'), 9200)
+  check('版: 中身を変えると増える', graphRev('v') === r1 + 1)
+  renameGraph('v', '別の名前')
+  check('版: 名前を変えると増える', graphRev('v') === r1 + 2)
+  deleteGraph('v')
+  check('版: 消すと null', graphRev('v') === null)
+  // 古い一覧（版の番号が無い）は 0
+  mem.set(INDEX, JSON.stringify([{ id: 'old', title: '古い', created: 1, updated: 1 }]))
+  check('版: 古い一覧は 0', graphRev('old') === 0)
 }
 
 // 空の状態

@@ -9,7 +9,7 @@
   import EditableValue from './lib/EditableValue.svelte'
   import { loadInitial, shareUrl, type SavedItem, type SavedState } from './lib/persist'
   import {
-    UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
+    UNTITLED, deleteGraph, duplicateGraph, graphRev, isEmptyState, newId, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
   } from './lib/library'
   import GraphsDialog from './lib/GraphsDialog.svelte'
   import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, plainNumber, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
@@ -181,6 +181,7 @@
       blankState = snapshot()
       const init = await loadInitial()
       graphId = init.id
+      knownRev = graphRev(graphId)
       const saved = init.state
       if (saved) {
         // 読み込めない保存データ（別の版のものなど）で止まると、開き直しても同じ所で止まり続ける。最初の状態に戻して続ける
@@ -320,6 +321,65 @@
   let saveFailed = $state(false)
   /** 最後に小さな絵を撮った時刻 */
   let lastThumb = 0
+  /** このタブが最後に開いた・保存したときの、グラフの版の番号（まだ一覧に無い新しいグラフなら null） */
+  let knownRev: number | null = null
+  /**
+   * 別のタブでこのグラフが変わった（changed）・消された（deleted）。このタブでは上書きせず、どうするかを利用者が選ぶまで保存を止める（#138）
+   */
+  let conflict = $state<null | 'changed' | 'deleted'>(null)
+
+  /** 別のタブで変わった・消されたかを調べる（そうなら conflict に入れて true） */
+  function checkConflict(): boolean {
+    if (conflict) return true
+    if (!graphId) return false
+    const rev = graphRev(graphId)
+    if (rev === knownRev) return false
+    conflict = rev === null ? 'deleted' : 'changed'
+    return true
+  }
+
+  // 別のタブが保存・削除したら、すぐに知らせる（このタブで書き換え始める前に選べるように）
+  window.addEventListener('storage', () => {
+    if (loaded) checkConflict()
+  })
+
+  /** 「このタブの内容を別のグラフとして保存」: 新しい id で保存し直す（別のタブの内容はそのまま） */
+  function saveConflictAsNew() {
+    graphId = newId()
+    graphTitle = `${graphTitle} のコピー`
+    knownRev = null
+    conflict = null
+    unsaved = snapshot()
+    flushSave()
+  }
+
+  /** 「あちらの内容を読み込む」: このタブの変更は捨てて、保存されている内容で開き直す */
+  function loadConflictTheirs() {
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
+    setCurrent(graphId)
+    location.reload()
+  }
+
+  /** 「このタブの内容で作り直す」: 消されたグラフを、同じ id で保存し直す */
+  function recreateDeleted() {
+    knownRev = null
+    conflict = null
+    unsaved = snapshot()
+    flushSave()
+  }
+
+  /** 「閉じる」: 消されたグラフは作り直さず、次のグラフ（無ければ新しいグラフ）を開く */
+  function closeDeleted() {
+    loaded = false
+    unsaved = null
+    clearTimeout(saveTimer)
+    const next = lastGraphId()
+    if (next) setCurrent(next)
+    else markNew()
+    location.reload()
+  }
 
   $effect(() => {
     document.title = graphTitle && graphTitle !== UNTITLED ? `${graphTitle} – graphploter` : 'graphploter'
@@ -353,8 +413,8 @@
   function reloadInto(prepare: () => void) {
     flushSave()
     takeThumb()
-    // 何も書いていない今のグラフは、一覧に残さない
-    if (currentEmpty()) deleteGraph(graphId)
+    // 何も書いていない今のグラフは、一覧に残さない（別のタブで変わったものは、あちらの内容なので消さない）
+    if (currentEmpty() && !checkConflict()) deleteGraph(graphId)
     loaded = false
     unsaved = null
     clearTimeout(saveTimer)
@@ -571,9 +631,12 @@
     clearTimeout(saveTimer)
     saveTimer = undefined
     if (unsaved && graphId) {
+      // 別のタブで変わった・消された: 上書きしない（どうするかを選ぶまで、変更はこのタブに残す）
+      if (checkConflict()) return
       // 開いただけの空のグラフは一覧に入れない（式を書いたら入る）
       if (!isEmptyState(unsaved) || listGraphs().some((m) => m.id === graphId)) {
         saveFailed = !saveGraph(graphId, unsaved)
+        if (!saveFailed) knownRev = graphRev(graphId)
         // 小さな絵は、変わってから 10 秒ごとまで（描き直しの手間を減らす）
         if (!saveFailed && Date.now() - lastThumb > 10000) takeThumb()
       }
@@ -3138,6 +3201,24 @@
   onkeydown={(e) => e.key === 'Escape' && settingsOpen && closeSettings()}
 />
 
+{#if conflict}
+  <div class="conflict" role="alert">
+    {#if conflict === 'changed'}
+      <p>このグラフは別のタブで変更されました。このタブの変更はまだ保存していません。</p>
+      <div class="conflict-actions">
+        <button class="primary" onclick={saveConflictAsNew}>このタブの内容を別のグラフとして保存</button>
+        <button onclick={loadConflictTheirs}>あちらの内容を読み込む（このタブの変更は捨てる）</button>
+      </div>
+    {:else}
+      <p>このグラフは別のタブで削除されました。このタブの内容はまだ残っています。</p>
+      <div class="conflict-actions">
+        <button class="primary" onclick={recreateDeleted}>このタブの内容で作り直す</button>
+        <button onclick={closeDeleted}>閉じる（作り直さない）</button>
+      </div>
+    {/if}
+  </div>
+{/if}
+
 {#if graphsOpen}
   <GraphsDialog
     graphs={graphList}
@@ -4401,6 +4482,28 @@
     position: relative;
     overflow: hidden;
     min-height: 0;
+  }
+  .conflict {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 900;
+    width: min(560px, calc(100vw - 32px));
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #d9822b;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  }
+  .conflict p {
+    margin: 0 0 8px;
+  }
+  .conflict-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .viewer-error {
     position: absolute;
