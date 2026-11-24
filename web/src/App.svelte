@@ -974,6 +974,9 @@
 
   /** 定義 names が変わった・増えた・消えたとき、それを使う式と、エラーの式（未定義だった関数が定義されたかもしれない）を計算し直す */
   function defsChanged(names: string[], except?: PlotItem) {
+    // スライダーの範囲・刻み、座標の範囲の式も定義を使える（#191 #208）
+    updateSliderBounds()
+    updateSpaceRangeErrors()
     for (const it of items) {
       if (it === except) continue
       const uses = it.usedDefs?.some((n) => names.includes(n))
@@ -1037,12 +1040,14 @@
       // 自分自身は使えない（c の範囲を c で決めることはできない）
       const params = { ...all }
       if (it.param) delete params[it.param.name]
+      // ほかの行の定義（範囲・刻みに f(a) を書ける。#191）。f が自分を使えば、自分は params に無いので誤りになる
+      const defs = currentDefinitions(it)
       // 刻み（Step）
       const stepExpr = it.slider.stepExpr?.trim() ?? ''
       let stepError: string | undefined
       if (stepExpr === '') it.slider.step = undefined
       else {
-        const s = evalValue(stepExpr, params, updateSliderBounds)
+        const s = evalValue(stepExpr, params, updateSliderBounds, defs)
         if (s && 'error' in s) stepError = `刻み: ${s.error}`
         else if (s && !(s.value > 0)) stepError = '刻み: 0 より大きい値にしてください'
         else if (s) it.slider.step = s.value
@@ -1051,7 +1056,7 @@
         it.sliderError = stepError
         continue
       }
-      const r = evalBounds(it.slider.bounds, params, updateSliderBounds)
+      const r = evalBounds(it.slider.bounds, params, updateSliderBounds, defs)
       if (!r) continue // 計算エンジンの準備待ち
       if ('error' in r) {
         it.sliderError = r.error
@@ -1072,11 +1077,13 @@
 
   function updateSpaceRangeErrors() {
     const params = currentParams()
+    // 断面・範囲で重ねる座標の範囲にも、定義した関数を書ける（#208）
+    const defs = currentDefinitions({} as PlotItem)
     const out: Record<number, string> = {}
     space.ranges.forEach((r, k) => {
       if (!r || space.axes.includes(k)) return
       for (const side of r) {
-        const e = exprError(side, params, updateSpaceRangeErrors)
+        const e = exprError(side, params, updateSpaceRangeErrors, defs)
         if (e === undefined) return // 計算エンジンの準備待ち
         if (e) {
           out[k] = e

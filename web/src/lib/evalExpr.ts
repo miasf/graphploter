@@ -42,10 +42,12 @@ export function evalBounds(
   exprs: [string, string],
   params: Record<string, ParamValue>,
   onReady: () => void,
+  /** 定義の行（関数の定義を範囲に使う式のため。#191）。計算エンジンは定義を 1 回の計算で消費するので、両端ごとに渡す */
+  defs = '',
 ): { min: number; max: number } | { error: string } | null {
   try {
-    const min = evaluate(exprs[0], params, onReady)
-    const max = evaluate(exprs[1], params, onReady)
+    const min = evaluate(exprs[0], params, onReady, defs)
+    const max = evaluate(exprs[1], params, onReady, defs)
     if (min === null || max === null) return null
     if (!Number.isFinite(min) || !Number.isFinite(max)) return { error: 'スライダーの範囲: 値が有限ではありません' }
     if (!(min < max)) return { error: 'スライダーの範囲: 最小値を最大値より小さくしてください' }
@@ -73,9 +75,15 @@ export function evalNumber(latex: string, onReady: () => void): { value: number 
 /**
  * 式（パラメータを使ってよい）が計算できるか。誤りの説明 / 計算できるなら null / WASM の準備待ちなら undefined
  */
-export function exprError(latex: string, params: Record<string, ParamValue>, onReady: () => void): string | null | undefined {
+export function exprError(
+  latex: string,
+  params: Record<string, ParamValue>,
+  onReady: () => void,
+  /** 定義の行（範囲の式で関数を使うため。#208） */
+  defs = '',
+): string | null | undefined {
   try {
-    const v = evaluate(latex, params, onReady)
+    const v = evaluate(latex, params, onReady, defs)
     if (v === null) return undefined
     return Number.isFinite(v) ? null : '値が有限ではありません'
   } catch (e) {
