@@ -222,8 +222,9 @@ pub(crate) fn refine_mapped(m: &mut Mesh, t: &[f64], arity: usize, curve: bool, 
 /// 頂点ごとの値（色分けなど）を持つ線は、境目を求めずに、箱の外の点を NaN にして切る（値の並びを崩さないため）
 pub fn trim_to_domain(m: &mut Mesh, dom: Domain, curve: bool, flat: bool) {
     let axes = if flat { 2 } else { 3 };
-    // 範囲ちょうどの所にある頂点（範囲の端の格子点）を外と見ないように、ほんの少し広げる
-    let pad: [f64; 3] = [0, 1, 2].map(|a| 1e-9 * (dom.hi[a] - dom.lo[a]).abs().max(1.0));
+    // 範囲ちょうどの所にある頂点（範囲の端の格子点）を外と見ないように、ほんの少し広げる。頂点は f32 なので、
+    // 端の値の f32 の丸め（φ = π は 3.1415927 で、π より大きい）の分も広げる（#144: φ = π の負の z 軸が消えた）
+    let pad: [f64; 3] = [0, 1, 2].map(|a| (1e-9 * (dom.hi[a] - dom.lo[a]).abs().max(1.0)).max(4.0 * f32::EPSILON as f64 * dom.lo[a].abs().max(dom.hi[a].abs())));
     let outside = move |p: &[f64; 3]| -> f64 {
         (0..axes)
             .map(|a| (dom.lo[a] - pad[a] - p[a]).max(p[a] - dom.hi[a] - pad[a]))
