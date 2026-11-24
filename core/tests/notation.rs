@@ -2011,3 +2011,28 @@ fn flat_eigenvectors_have_triangle_heads_and_line_shafts() {
     assert_eq!(&shafts[..3], &[0.0; 3]);
     assert_eq!(&shafts[9..12], &[0.0; 3]);
 }
+
+/// 積分する領域の条件の ∧・∨ は、行全体を論理式にしない（値の平面として描く。#114）
+#[test]
+fn logic_inside_integral_regions() {
+    let pi = std::f64::consts::PI;
+    for (src, want) in [
+        ("@intset((x,y),x^(2)+y^(2)<=1∧y>=0; {d_A})(1)", pi / 2.0),
+        ("@intset((x,y),x^(2)+y^(2)<=1∨(x-3)^(2)+y^(2)<=1; {d_A})(1)", 2.0 * pi),
+        ("@intset((x,y),x^(2)+y^(2)<=4,¬(x^(2)+y^(2)<1); {d_A})(1)", 3.0 * pi),
+    ] {
+        let comma = src.replace('∧', ",");
+        assert!((value(src) - want).abs() < 1e-6, "{src}");
+        // 画面と同じ入口で描ける（値が表示範囲 z ≤ 3 の外なら、平面は範囲の外で見えないだけ）
+        let m = run(src, "", &[]).unwrap_or_else(|e| panic!("{src}: {e}"));
+        if want < 3.0 {
+            assert!(!m.indices().is_empty(), "{src}: 平面が描けない");
+        }
+        if src.contains('∧') {
+            let c = run(&comma, "", &[]).unwrap();
+            assert_eq!(m.positions(), c.positions(), "{src}: コンマで書いたものと同じ平面");
+        }
+    }
+    // 積分の外の論理式は、今までどおり論理式として描く
+    assert!(run("x^(2)+y^(2)+z^(2)<=4∧¬(z>1)", "", &[]).is_ok());
+}

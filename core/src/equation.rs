@@ -606,6 +606,43 @@ fn check_dims(e: &Expr, space: &Space) -> Result<(), String> {
     Ok(())
 }
 
+/// 論理・集合の記号が、`@intset(…)`（積分する領域）の引数の外にあるか
+fn logic_outside_integrals(source: &str) -> bool {
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '@' {
+            let name: String = chars[i + 1..].iter().take_while(|c| c.is_ascii_alphanumeric() || **c == '_').collect();
+            let open = i + 1 + name.chars().count();
+            if name == "intset" && chars.get(open) == Some(&'(') {
+                // 対応する ')' まで飛ばす
+                let mut depth = 0usize;
+                let mut j = open;
+                while j < chars.len() {
+                    match chars[j] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        if crate::parser::LOGIC_CHARS.contains(chars[i]) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// パラメータなし・ふつうの3次元でコンパイルする
 pub fn compile(source: &str) -> Result<Plot, String> {
     compile_with(source, &Params::new(), &Space::standard())
@@ -616,8 +653,9 @@ pub fn compile_with(source: &str, params: &Params, space: &Space) -> Result<Plot
     if let Some(plot) = limit_line(source, params)? {
         return Ok(plot);
     }
-    // 論理・集合の記号があれば、論理式として描く（計画 M11）
-    if source.chars().any(|c| crate::parser::LOGIC_CHARS.contains(c)) {
+    // 論理・集合の記号があれば、論理式として描く（計画 M11）。
+    // ただし積分する領域の条件（@intset(…) の中の ∧・∨・¬）は、その積分の中だけの記号なので数える所に入れない（#114）
+    if logic_outside_integrals(source) {
         return compile_logic(source, params, space);
     }
     let name = source.trim().trim_start_matches('{').trim_end_matches('}');
