@@ -1,13 +1,15 @@
 // library.ts のテスト。実行: npm test
-import { deleteGraph, duplicateGraph, formatDate, importGraph, isEmptyState, lastGraphId, listGraphs, loadGraph, markNew, migrate, renameGraph, saveGraph, setCurrent, setThumb, useStore, UNTITLED } from './library.ts'
+import { deleteGraph, duplicateGraph, graphMeta, formatDate, importGraph, isEmptyState, lastGraphId, listGraphs, loadGraph, markNew, migrate, renameGraph, saveGraph, setCurrent, setThumb, useStore, UNTITLED } from './library.ts'
 import type { SavedState } from './persist.ts'
 
 const mem = new Map<string, string>()
 let full = false
+/** このキーへの書き込みだけを失敗させる（容量がいっぱいになった所を真似る） */
+let failKey: ((k: string) => boolean) | null = null
 useStore({
   getItem: (k) => mem.get(k) ?? null,
   setItem: (k, v) => {
-    if (full) throw new Error('QuotaExceededError')
+    if (full || failKey?.(k)) throw new Error('QuotaExceededError')
     mem.set(k, v)
   },
   removeItem: (k) => void mem.delete(k),
@@ -78,6 +80,70 @@ check('削除したら次は最後に変えたもの', lastGraphId() === d)
 full = true
 check('容量がいっぱい', saveGraph('e', state('w'), 6000) === false)
 full = false
+
+// 一覧と本体は、片方だけが変わらない（#157, #186）
+const INDEX = 'graphploter:graphs'
+const isBody = (k: string) => k.startsWith('graphploter:graph:')
+const snapshot = () => JSON.stringify([...mem.entries()].sort())
+
+// 移行: 一覧が書けなければ、古い保存を消さず、何も残さない。次に開いたときに移行できる
+{
+  const saved = new Map(mem)
+  mem.clear()
+  mem.set('graphploter:state', JSON.stringify(state('x^3')))
+  failKey = (k) => k === INDEX
+  migrate(7000)
+  failKey = null
+  check('移行の失敗: 古い保存が残る', mem.has('graphploter:state'))
+  check('移行の失敗: 本体だけが残らない', ![...mem.keys()].some(isBody), [...mem.keys()].join(','))
+  check('移行の失敗: 一覧は空', listGraphs().length === 0)
+  migrate(7100)
+  check('移行の再試行', listGraphs().length === 1 && !mem.has('graphploter:state') && lastGraphId() === listGraphs()[0].id)
+  check('移行の再試行: 中身', JSON.stringify(loadGraph(listGraphs()[0].id)) === JSON.stringify(state('x^3')))
+  // 最後に開いたグラフの印だけが書けなくても、移行はする
+  mem.clear()
+  mem.set('graphploter:state', JSON.stringify(state('x^4')))
+  failKey = (k) => k === 'graphploter:current'
+  migrate(7200)
+  failKey = null
+  check('移行: 印が書けなくても一覧の先頭を開く', listGraphs().length === 1 && lastGraphId() === listGraphs()[0].id && !mem.has('graphploter:state'))
+  mem.clear()
+  for (const [k, v] of saved) mem.set(k, v)
+}
+
+// 保存: 一覧が書けなければ、本体も前のまま
+{
+  const before = snapshot()
+  failKey = (k) => k === INDEX
+  check('保存の失敗: false', saveGraph(d!, state('z^2', '新しい中身'), 8000) === false)
+  check('保存の失敗（新しいグラフ）: false', saveGraph('fresh', state('q'), 8000) === false)
+  failKey = null
+  check('保存の失敗: 何も変わらない', snapshot() === before)
+}
+
+// 名前の変更: 本体が書けなければ、一覧の名前も前のまま（#186）
+{
+  saveGraph('r', state('y=x', '旧名'), 8100)
+  const before = snapshot()
+  failKey = isBody
+  check('名前の変更の失敗: false', renameGraph('r', '新しい名前') === false)
+  failKey = (k) => k === INDEX
+  check('名前の変更の失敗（一覧）: false', renameGraph('r', '新しい名前') === false)
+  failKey = null
+  check('名前の変更の失敗: 一覧も中身も旧名', graphMeta('r')?.title === '旧名' && (loadGraph('r') as SavedState).title === '旧名')
+  check('名前の変更の失敗: 何も変わらない', snapshot() === before)
+  check('名前の変更: 成功なら true', renameGraph('r', '新しい名前') === true && graphMeta('r')?.title === '新しい名前' && (loadGraph('r') as SavedState).title === '新しい名前')
+}
+
+// 削除: 一覧から外せなければ、本体も消さない
+{
+  const before = snapshot()
+  failKey = (k) => k === INDEX
+  check('削除の失敗: false', deleteGraph('r') === false)
+  failKey = null
+  check('削除の失敗: 何も変わらない', snapshot() === before)
+  check('削除: 成功なら true', deleteGraph('r') === true && !graphMeta('r') && loadGraph('r') === null)
+}
 
 // 空の状態
 check('空の状態', isEmptyState(state('  ')) && !isEmptyState(state('x')))

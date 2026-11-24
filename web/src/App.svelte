@@ -7,12 +7,12 @@
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
   import NumberInput from './lib/NumberInput.svelte'
   import EditableValue from './lib/EditableValue.svelte'
-  import { loadInitial, shareUrl, type SavedState } from './lib/persist'
+  import { loadInitial, shareUrl, type SavedItem, type SavedState } from './lib/persist'
   import {
     UNTITLED, deleteGraph, duplicateGraph, isEmptyState, lastGraphId, listGraphs, markNew, renameGraph, saveGraph, setCurrent, setThumb, type GraphMeta,
   } from './lib/library'
   import GraphsDialog from './lib/GraphsDialog.svelte'
-  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
+  import { calledAsFunction, complexLatex, coordName, fitRotation, latexName, pairs, plainNumber, prettyName, resizeRotation, resizeSpace, rotDims, sequenceDefinitionName, sequenceInitialLatex, sliderStep, snapToStep } from './lib/params'
   import { keyboardOcclusion, setKeyboardDims } from './lib/mathSetup'
   import { SAMPLE_GROUPS, type Sample, type SampleView } from './lib/samples'
   import RotationPanel from './lib/RotationPanel.svelte'
@@ -134,8 +134,31 @@
     }
   }
 
+  /** グラフを描けない理由（WebGL を使えないブラウザ・設定など）。描けるなら空 */
+  let viewerError = $state('')
+
+  /**
+   * 描画の代わり（何もしない）。WebGL を使えなくても、式の計算・値の表示・保存・共有リンクの読み込みは続ける（#118）。
+   * App から呼ぶ Viewer のメソッドは、どれも描くだけか、無くても困らない値（小さな絵・GPU を使わない理由）を返すだけ
+   */
+  function noDrawViewer(): Viewer {
+    const props: Record<PropertyKey, unknown> = {}
+    return new Proxy(props, {
+      get: (t, k) => (k in t ? t[k] : () => undefined),
+      set: (t, k, v) => ((t[k] = v), true),
+    }) as unknown as Viewer
+  }
+
   onMount(() => {
-    viewer = new Viewer(viewerEl, () => narrow.matches)
+    try {
+      viewer = new Viewer(viewerEl, () => narrow.matches)
+    } catch (e) {
+      console.error('グラフを描く準備（WebGL）に失敗しました', e)
+      viewerError = e instanceof Error ? e.message : String(e)
+      // 途中まで作った描画の部品は外す（Svelte の目印のコメントは残す）
+      for (const c of [...viewerEl.children]) c.remove()
+      viewer = noDrawViewer()
+    }
     viewer.onPick = handlePick
     // 光線の描き方で打ち切りが多く、自動でメッシュに回したとき: 式の ⚙ に理由を出す
     viewer.onGpuFallback = (id, reason) => {
@@ -359,15 +382,20 @@
     const title = graphList.find((m) => m.id === id)?.title ?? UNTITLED
     if (!confirm(`「${title}」を削除します。元に戻せません。よろしいですか？`)) return
     if (id !== graphId) {
-      deleteGraph(id)
+      saveFailed = !deleteGraph(id)
       refreshGraphs()
       return
     }
-    // 開いているグラフを消したら、次に新しいものを開く（無ければ新しいグラフ）
+    // 開いているグラフを消したら、次に新しいものを開く（無ければ新しいグラフ）。
+    // 一覧から外せなければ（容量がいっぱいなど）消さずに、そのまま開いておく
+    if (!deleteGraph(id)) {
+      saveFailed = true
+      refreshGraphs()
+      return
+    }
     loaded = false
     unsaved = null
     clearTimeout(saveTimer)
-    deleteGraph(id)
     const next = lastGraphId()
     if (next) setCurrent(next)
     else markNew()
@@ -385,7 +413,8 @@
       graphTitle = title.trim() || UNTITLED
       flushSave()
     } else {
-      renameGraph(id, title)
+      // 保存できなければ、一覧も中身も前の名前のまま（失敗はダイアログに出す）
+      saveFailed = !renameGraph(id, title)
     }
     refreshGraphs()
   }
@@ -420,6 +449,10 @@
       folder: it.folder,
       coordSys: coordOf(it) ? it.coordSys : undefined,
       angleRanges: it.angleRanges && Object.keys(it.angleRanges).length > 0 ? it.angleRanges : undefined,
+      // 積分の図の設定（近似・進み具合・図のために隠したか）。進み具合は図を出しているときだけ
+      riemann: it.riemann,
+      integralProgress: integralItem(it) && (it.integralProgress ?? 1) < 1 ? it.integralProgress : undefined,
+      integralAutoHidden: hiddenForIntegral.has(it.id) || undefined,
     }
   }
 
@@ -469,7 +502,10 @@
     regions = { ...(s.regions ?? {}) }
     setRegions(regions)
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
-    items = s.items.map((si) => newItem(si.latex, { ...si, rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }))
+    hiddenForIntegral.clear()
+    items = s.items.map(({ integralAutoHidden: _hidden, ...si }) =>
+      newItem(si.latex, { ...si, ...savedIntegral(si), rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }),
+    )
     domain = s.domain
     // 数でない値（壊れた・別の版の保存データ）は、今の値のままにする
     const num = (v: unknown, now: number) => (typeof v === 'number' && Number.isFinite(v) ? v : now)
@@ -507,6 +543,23 @@
     const sources = (s.integralsShown ?? []).flatMap((k) => (items[k] ? [items[k]] : []))
     for (const name of s.regionsShown ?? []) showRegion(name)
     for (const it of sources) showIntegral(it)
+    // 図のために隠した式は、図を消したら表示に戻す（保存しないと、開き直した後に図を消しても隠れたまま。#189）
+    s.items.forEach((si, k) => {
+      const it = items[k]
+      if (si.integralAutoHidden === true && it && !it.visible && sources.includes(it)) hiddenForIntegral.add(it.id)
+    })
+  }
+
+  /** 保存した積分の図の設定のうち、正しいものだけ（壊れた・外から来た共有リンクでも、変な値を入れない） */
+  function savedIntegral(si: SavedItem): Partial<PlotItem> {
+    const methods: RiemannMethod[] = ['left', 'right', 'mid', 'trap', 'simpson']
+    const r = si.riemann
+    const n = Number(r?.n)
+    const p = si.integralProgress
+    return {
+      riemann: r && methods.includes(r.method) && Number.isFinite(n) ? { method: r.method, n: Math.max(1, Math.min(400, Math.round(n))) } : undefined,
+      integralProgress: typeof p === 'number' && Number.isFinite(p) ? Math.min(1, Math.max(0, p)) : undefined,
+    }
   }
 
   // 変わったら（0.5 秒ほどまとめてから）ブラウザに保存する。
@@ -1290,7 +1343,8 @@
    * 色は、元の式と見分けられるように次の色にする
    */
   function duplicateItem(item: PlotItem) {
-    const { color: _color, ...saved } = $state.snapshot(savedItem(item)) as ReturnType<typeof savedItem>
+    // 積分の図は写さない（図のために隠した印・進み具合も要らない）
+    const { color: _color, integralAutoHidden: _hidden, integralProgress: _progress, ...saved } = $state.snapshot(savedItem(item)) as ReturnType<typeof savedItem>
     const copy = newItem(saved.latex, structuredClone(saved))
     const k = items.indexOf(item) + 1
     items.splice(k, 0, copy)
@@ -1426,7 +1480,12 @@
   function toggleFolderVisible(members: PlotItem[]) {
     const plots = members.filter((it) => !it.param)
     const show = !plots.some((it) => it.visible)
-    for (const it of plots) if (it.visible !== show) toggle(it)
+    for (const it of plots) {
+      // まとめて押したのも自分で選んだ表示・非表示なので、積分の図を消しても戻さない（行の ● と同じ）。
+      // 積分の図のために非表示にしていた式は、すでに非表示で押し直されないが、これも「非表示のまま」にする
+      hiddenForIntegral.delete(it.id)
+      if (it.visible !== show) toggle(it)
+    }
   }
 
   function removeItem(item: PlotItem) {
@@ -1605,7 +1664,7 @@
     item.param.re = re
     item.param.im = im
     // 条件で止めた値は、丸めずに書く（丸めると境目を越えて、条件が成り立たなくなる）
-    item.latex = `${latexName(item.param.name)}=${limit.clamped ? String(re) : complexLatex(re, im, step, item.slider.min)}`
+    item.latex = `${latexName(item.param.name)}=${limit.clamped ? plainNumber(re) : complexLatex(re, im, step, item.slider.min)}`
     paramsChanged([item.param.name], item)
     refreshConditions()
     // 光線で描く式は、計算し直しを待たずに uniform を変える（計画 G7）
@@ -3313,7 +3372,16 @@
     ></div>
   </aside>
 
-  <main class="viewer" bind:this={viewerEl}></main>
+  <main class="viewer" bind:this={viewerEl}>
+    {#if viewerError}
+      <div class="viewer-error" role="alert">
+        <p><strong>このブラウザではグラフを描けません</strong>（WebGL を使えません）。</p>
+        <p>式の入力・計算した値・保存したグラフや共有リンクの読み込みは、このまま使えます。
+          グラフを見るには、ブラウザの設定でハードウェアアクセラレーション（WebGL）を有効にするか、別のブラウザで開いてください。</p>
+        <p class="detail">{viewerError}</p>
+      </div>
+    {/if}
+  </main>
   {#if BENCH}
     <pre class="bench-report">{benchText}</pre>
   {/if}
@@ -4333,6 +4401,27 @@
     position: relative;
     overflow: hidden;
     min-height: 0;
+  }
+  .viewer-error {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    max-width: 520px;
+    margin: auto;
+    padding: 24px 16px;
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .viewer-error p {
+    margin: 0;
+  }
+  .viewer-error .detail {
+    font-size: 12px;
+    opacity: 0.6;
+    word-break: break-word;
   }
   /* 2D / 3D の切り替え（グラフの右上） */
   .flat-mode {

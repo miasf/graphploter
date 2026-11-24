@@ -3,6 +3,7 @@
 // - 「共有リンク」: 状態を圧縮して URL の # の後ろに入れる（サーバーは使わない）。開くと、一覧に新しいグラフとして入る
 
 import { importGraph, lastGraphId, loadGraph, migrate, newId, setCurrent } from './library'
+import type { RiemannMethod } from './latex'
 import type { ComplexMode, CoordSystem, CutStyle, Domain, Folder, GridStyle, HiddenStyle, ParamRanges, RotationGroup, SliderStyle, Space } from './types'
 
 /** 保存する式1つ分（計算結果などは保存しない） */
@@ -44,6 +45,12 @@ export interface SavedItem {
   coordSys?: number
   /** 自動の座標系（極座標など）の角度の範囲（書き換えたものだけ） */
   angleRanges?: Record<string, [string, string]>
+  /** 定積分の近似の方法と分割数（古い保存データには無い。無ければ近似しない） */
+  riemann?: { method: RiemannMethod; n: number }
+  /** 積分の図の進み具合（0〜1。図を出していて 1 より小さいときだけ。無ければ 1） */
+  integralProgress?: number
+  /** 積分の図を出すために、図のほうで非表示にした式か（図を消したら表示に戻す。古い保存データには無い） */
+  integralAutoHidden?: boolean
 }
 
 /** 保存する状態全体 */

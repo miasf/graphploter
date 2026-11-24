@@ -1,5 +1,5 @@
 // params.ts のテスト。実行: npm test
-import { fitRotation, formatNumber, pairs, sequenceDefinitionName, sequenceInitialLatex } from './params.ts'
+import { complexLatex, fitRotation, formatNumber, pairs, plainNumber, sequenceDefinitionName, sequenceInitialLatex } from './params.ts'
 
 let failures = 0
 function check(name: string, got: unknown, want: unknown) {
@@ -17,6 +17,15 @@ check('丸め誤差を落とす', formatNumber(0.30000000000000004, 0.1), '0.3')
 check('最小値 2.5・刻み 5 の 7.5', formatNumber(7.5, 5, 2.5), '7.5')
 check('刻みより細かい値は刻みの桁まで', formatNumber(Math.PI, 0.01), '3.14')
 check('-0 は 0', formatNumber(-0.0001, 0.1), '0')
+// 小さい・大きい数は指数表記にしない（計算エンジンは 1e-8 の e をネイピア数と読む。#177）
+check('小さい数', formatNumber(0.0000000101, 1e-10), '0.0000000101')
+check('小さい負の数', formatNumber(-2e-8, 1e-10), '-0.00000002')
+check('条件で止めた値', plainNumber(1.01e-8), '0.0000000101')
+check('桁の多い小さい数', plainNumber(1.2345678901234e-15), '0.0000000000000012345678901234')
+check('大きい数', plainNumber(1.5e21), '1500000000000000000000')
+check('ふつうの数はそのまま', plainNumber(-3.25), '-3.25')
+check('読み直すと同じ数', [1.01e-8, 7.000000000000001e-12, 1.5e21, 9.87654321e-300].every((v) => Number(plainNumber(v)) === v), true)
+check('小さい複素数', complexLatex(3e-9, -2e-9, 1e-10), '0.000000003-0.000000002i')
 
 check('べき付きの数列定義', sequenceDefinitionName('a_(n+1)^(2)=a_(n)+1'), 'a')
 check('名前付きの数列定義', sequenceDefinitionName('{alpha}_(n-2)^3=1'), 'alpha')
