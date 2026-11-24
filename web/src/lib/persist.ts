@@ -123,13 +123,26 @@ export function isState(x: unknown): x is SavedState {
   if (!ok) return false
   // 壊れた・別の版の保存データ（共有リンクは外から来る）でも、画面が壊れたままにならないようにする:
   // LaTeX の無い式は捨て、null の項目は「無い」にする（null のままだと、式の既定の設定を上書きしてしまう）
+  const kept = s.items.map((it) => !!it && typeof it === 'object' && typeof it.latex === 'string')
+  // 積分を描いている式の番号は、捨てた式の分だけ詰めて、同じ式を指すようにする（#209）
+  const newIndex = kept.map((_, k) => kept.slice(0, k).filter(Boolean).length)
   s.items = s.items
-    .filter((it) => !!it && typeof it === 'object' && typeof it.latex === 'string')
+    .filter((_, k) => kept[k])
     .map((it) => Object.fromEntries(Object.entries(it).filter(([, v]) => v !== null)) as unknown as SavedItem)
-  // 古い保存データでは、座標の範囲が数値 [最小, 最大] だった。式（文字列）にそろえる
-  if (Array.isArray(s.space.ranges)) {
-    s.space.ranges = s.space.ranges.map((r) => (Array.isArray(r) ? [String(r[0]), String(r[1])] : null))
+  if (Array.isArray(s.integralsShown)) {
+    s.integralsShown = s.integralsShown.flatMap((k) => (Number.isInteger(k) && kept[k] ? [newIndex[k]] : []))
+  } else delete s.integralsShown
+  // 設定の一部が壊れていても、式は開く: 形の違うものは「無い」（既定の値）にする
+  if (typeof s.title !== 'string') delete s.title
+  for (const key of ['groups', 'folders', 'coordSystems', 'regionsShown'] as const) {
+    if (key in s && !Array.isArray(s[key])) delete s[key]
   }
+  if ('regions' in s && (typeof s.regions !== 'object' || s.regions === null || Array.isArray(s.regions))) delete s.regions
+  // 座標の範囲: 古い保存データでは数値 [最小, 最大] だった。式（文字列）にそろえる。2 つそろっていないものは「範囲なし」
+  if (Array.isArray(s.space.ranges)) {
+    const end = (v: unknown) => typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v))
+    s.space.ranges = s.space.ranges.map((r) => (Array.isArray(r) && r.length === 2 && r.every(end) ? [String(r[0]), String(r[1])] : null))
+  } else if ('ranges' in s.space) delete (s.space as Partial<Space>).ranges
   return true
 }
 

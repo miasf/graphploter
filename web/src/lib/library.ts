@@ -12,6 +12,8 @@ export interface GraphMeta {
   updated: number
   /** 小さな絵（JPEG の data URL）。無ければ無し */
   thumb?: string
+  /** 中身を変えるたびに 1 増える番号（別のタブの変更に気づくため。古い一覧には無い。無ければ 0） */
+  rev?: number
 }
 
 export const UNTITLED = '無題のグラフ'
@@ -191,10 +193,20 @@ export function saveGraph(id: string, state: SavedState, now = Date.now()): bool
   }
   meta.title = title
   meta.updated = now
+  meta.rev = (meta.rev ?? 0) + 1
   // 本体と一覧は両方そろって書く（片方だけ新しいと、一覧に無い本体・中身の無い一覧の項目が残る）
   if (!commit([[graphKey(id), text], [INDEX_KEY, indexText(list)]])) return false
   set(CURRENT_KEY, id)
   return true
+}
+
+/**
+ * グラフの中身の版の番号（保存・名前の変更で増える。小さな絵では増えない）。一覧に無ければ null。
+ * 開いたとき・保存したときの番号と違えば、別のタブで変わった（null なら消された）
+ */
+export function graphRev(id: string): number | null {
+  const meta = graphMeta(id)
+  return meta ? (meta.rev ?? 0) : null
 }
 
 /** 小さな絵を付ける（入らなければ付けない） */
@@ -216,6 +228,7 @@ export function renameGraph(id: string, title: string): boolean {
   const meta = list.find((m) => m.id === id)
   if (!meta) return false
   meta.title = t
+  meta.rev = (meta.rev ?? 0) + 1
   const writes: [string, string][] = []
   const s = loadGraph(id) as SavedState | null
   if (s && typeof s === 'object') writes.push([graphKey(id), JSON.stringify({ ...s, title: t })])

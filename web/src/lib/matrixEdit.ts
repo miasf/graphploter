@@ -7,14 +7,19 @@ export const MAX_SIZE = 6
 /** 空欄 */
 export const BLANK = '\\placeholder{}'
 
-/** 行列 1 つ。`cells` は行ごとの成分の LaTeX、`env` は括弧の形（pmatrix・bmatrix・vmatrix など） */
+/** 行列 1 つ。`cells` は行ごとの成分の LaTeX、`env` は括弧の形（pmatrix・bmatrix・vmatrix・pmatrix*・smallmatrix など） */
 export interface Matrix {
   env: string
   cells: string[][]
+  /** pmatrix* などの列のそろえ方（`[r]`。書いてあったものをそのまま残す） */
+  align?: string
 }
 
-/** 行列の環境の名前か */
-export const isMatrixEnv = (env: string) => /^(p|b|B|v|V)?matrix$/.test(env)
+/** 行列の環境の名前か（計算のほう latex.ts が読めるものと同じ） */
+export const isMatrixEnv = (env: string) => /^(p|b|B|v|V|small)?matrix\*?$/.test(env)
+
+/** 行の間の空き \\[2pt] の [2pt] */
+const ROW_GAP = /^\[\s*-?[\d.]+\s*(pt|em|ex|mm|cm|in|mu|bp|pc|dd|cc|sp)\s*\]/
 
 /** 成分が空欄か（何も無い・空欄の印だけ） */
 export const isBlank = (cell: string) => cell.replace(/\\placeholder\s*\{\s*\}/g, '').trim() === ''
@@ -47,6 +52,8 @@ export function parseMatrix(latex: string): Matrix | null {
   let cur = ''
   let depth = 0
   let i = open.end
+  const align = open.env.endsWith('*') ? /^\[[lcr]\]/.exec(s.slice(i))?.[0] : undefined
+  if (align) i += align.length
   const push = () => {
     cells[cells.length - 1].push(cur.trim())
     cur = ''
@@ -60,15 +67,21 @@ export function parseMatrix(latex: string): Matrix | null {
         const close = envAt(s, i, 'end')
         if (!close || close.env !== open.env || close.end !== s.length) return null
         push()
+        // 最後の行の後の \\（\\ \end{pmatrix}）で、空の行を足さない
+        const last = cells[cells.length - 1]
+        if (cells.length > 1 && last.length === 1 && last[0] === '') cells.pop()
         // 行ごとの成分の数をそろえる（足りない所は空欄）
         const cols = Math.max(...cells.map((r) => r.length))
         for (const r of cells) while (r.length < cols) r.push('')
-        return { env: open.env, cells }
+        return align ? { env: open.env, cells, align } : { env: open.env, cells }
       }
       if (cmd === '\\\\' && depth === 0) {
         push()
         cells.push([])
         i = end
+        // 行の間の空き \\[2pt] は成分に入れない
+        const gap = ROW_GAP.exec(s.slice(i))
+        if (gap) i += gap[0].length
         continue
       }
       if (cmd === '\\begin' || cmd === '\\left') depth++
@@ -93,7 +106,7 @@ export function parseMatrix(latex: string): Matrix | null {
 /** 成分の表を LaTeX にする（空の成分は空欄の印にする） */
 export function formatMatrix(m: Matrix): string {
   const body = m.cells.map((r) => r.map((c) => (isBlank(c) ? BLANK : c)).join(' & ')).join('\\\\ ')
-  return `\\begin{${m.env}}${body}\\end{${m.env}}`
+  return `\\begin{${m.env}}${m.align ?? ''}${body}\\end{${m.env}}`
 }
 
 export const rowsOf = (m: Matrix) => m.cells.length
@@ -103,7 +116,7 @@ export const colsOf = (m: Matrix) => m.cells[0]?.length ?? 0
 export function resize(m: Matrix, rows: number, cols: number): Matrix {
   const clamp = (n: number) => Math.max(1, Math.min(MAX_SIZE, Math.round(n)))
   const [r, c] = [clamp(rows), clamp(cols)]
-  return { env: m.env, cells: Array.from({ length: r }, (_, i) => Array.from({ length: c }, (_, j) => m.cells[i]?.[j] ?? '')) }
+  return { ...m, cells: Array.from({ length: r }, (_, i) => Array.from({ length: c }, (_, j) => m.cells[i]?.[j] ?? '')) }
 }
 
 /** `at` 行目の位置に、空の行を足す（上限を超えるなら、そのまま） */
@@ -111,26 +124,26 @@ export function insertRow(m: Matrix, at: number): Matrix {
   if (rowsOf(m) >= MAX_SIZE) return m
   const cells = m.cells.map((r) => [...r])
   cells.splice(Math.max(0, Math.min(at, cells.length)), 0, Array.from({ length: colsOf(m) }, () => ''))
-  return { env: m.env, cells }
+  return { ...m, cells }
 }
 
 /** `at` 列目の位置に、空の列を足す（上限を超えるなら、そのまま） */
 export function insertCol(m: Matrix, at: number): Matrix {
   if (colsOf(m) >= MAX_SIZE) return m
   const k = Math.max(0, Math.min(at, colsOf(m)))
-  return { env: m.env, cells: m.cells.map((r) => [...r.slice(0, k), '', ...r.slice(k)]) }
+  return { ...m, cells: m.cells.map((r) => [...r.slice(0, k), '', ...r.slice(k)]) }
 }
 
 /** 行を消す（最後の 1 行は消せない） */
 export function removeRow(m: Matrix, row: number): Matrix {
   if (rowsOf(m) <= 1 || row < 0 || row >= rowsOf(m)) return m
-  return { env: m.env, cells: m.cells.filter((_, i) => i !== row).map((r) => [...r]) }
+  return { ...m, cells: m.cells.filter((_, i) => i !== row).map((r) => [...r]) }
 }
 
 /** 列を消す（最後の 1 列は消せない） */
 export function removeCol(m: Matrix, col: number): Matrix {
   if (colsOf(m) <= 1 || col < 0 || col >= colsOf(m)) return m
-  return { env: m.env, cells: m.cells.map((r) => r.filter((_, j) => j !== col)) }
+  return { ...m, cells: m.cells.map((r) => r.filter((_, j) => j !== col)) }
 }
 
 /** 行・列が全部空欄か */
@@ -211,7 +224,7 @@ export function remember(ghost: Matrix | null, m: Matrix): Matrix {
   const cells = Array.from({ length: rows }, (_, i) =>
     Array.from({ length: cols }, (_, j) => (i < rowsOf(m) && j < colsOf(m) ? m.cells[i][j] : (ghost?.cells[i]?.[j] ?? ''))),
   )
-  return { env: m.env, cells }
+  return { ...m, cells }
 }
 
 /** 行列の編集 */
@@ -226,7 +239,7 @@ export type MatrixOp = { op: 'row+' | 'col+'; at: number } | { op: 'row-' | 'col
 export function editWithMemory(m: Matrix, ghost: Matrix | null, e: MatrixOp): { next: Matrix; ghost: Matrix } {
   const g = remember(ghost, m)
   const take = (src: Matrix, rows: number, cols: number): Matrix => ({
-    env: m.env,
+    ...m,
     cells: Array.from({ length: rows }, (_, i) => Array.from({ length: cols }, (_, j) => src.cells[i]?.[j] ?? '')),
   })
   const [R, C] = [rowsOf(m), colsOf(m)]
