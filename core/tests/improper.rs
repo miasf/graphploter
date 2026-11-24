@@ -45,6 +45,8 @@ fn divergent_integrals_are_refused() {
 fn too_slow_integrals_say_so() {
     refused("@int(t,0,1)(((1)/(t^(0.97))))", "確かめられません");
     refused("@int(t,0,0.5)(((1)/(t (ln t)^(2))))", "確かめられません");
+    // 振動の小さくなり方が遅い（収束はするが、零点 48 個では確かめられない）
+    refused("@int(t,1,∞)(((sin t)/(t^(0.1))))", "確かめられません");
 }
 
 /// 4.2 端で発散するが積分できるもの（#109 の対照）

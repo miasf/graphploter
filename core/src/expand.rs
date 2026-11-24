@@ -2328,6 +2328,9 @@ impl<'a> Expander<'a> {
         if budget.nondecay.get() {
             return Some(Err("振動が小さくならないので、積分は収束しません（上の端までの積分が振動し続けて、極限がありません）".into()));
         }
+        if budget.slowdecay.get() {
+            return Some(Err("振動の小さくなり方が遅すぎて、積分が収束するかを確かめられません。収束する場合もありますが、数値では確かめられないので値を出しません".into()));
+        }
         if budget.exhausted() {
             return None;
         }

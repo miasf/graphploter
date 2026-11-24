@@ -44,11 +44,13 @@ pub struct Budget {
     pub rough: Cell<bool>,
     /// ∞ までの積分で、振動が小さくならなかった（零点の間の積分が 0 に近づかない。$\int_0^\infty \sin t\,dt$）
     pub nondecay: Cell<bool>,
+    /// ∞ までの積分で、振動は小さくなっていくが遅すぎて、収束を確かめられない（$\int_0^\infty \sin t / t^{0.1}\,dt$）
+    pub slowdecay: Cell<bool>,
 }
 
 impl Budget {
     pub fn new(evals: u64) -> Budget {
-        Budget { left: Cell::new(evals), rough: Cell::new(false), nondecay: Cell::new(false) }
+        Budget { left: Cell::new(evals), rough: Cell::new(false), nondecay: Cell::new(false), slowdecay: Cell::new(false) }
     }
 
     /// n 回分を使う。足りなければ false
@@ -679,7 +681,14 @@ fn oscillatory(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: 
     const ZEROS: usize = 49;
     let mut zeros: Vec<f64> = Vec::with_capacity(ZEROS);
     let mut step = 0.1f64;
-    let (mut x, mut fx) = (base, at(base)?);
+    // 端で値が数でない（sin t / t の t = 0 の 0/0）なら、少し内側から探し始める。端から最初の零点までは適応型で積分するので、値は変わらない
+    let (mut x, mut fx) = match at(base) {
+        Some(v) => (base, v),
+        None => {
+            let x = base + dir * 1e-9 * (1.0 + base.abs());
+            (x, at(x)?)
+        }
+    };
     let limit = 1e4 * (1.0 + base.abs());
     while zeros.len() < ZEROS {
         let nx = x + dir * step;
@@ -720,6 +729,23 @@ fn oscillatory(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: 
         acc += if dir > 0.0 { piece } else { -piece };
         sums.push(acc);
         from = z;
+    }
+    // 零点の間の積分 p_k が 0 に近づいていくか（計画 stage2b の 2.3）。加速は、収束しない振動（sin t の部分和 0, 2, 0, 2, …）にも
+    // 平均の値を返してしまうので、元の積分が収束することを先に確かめる
+    let pieces: Vec<f64> = sums.iter().scan(0.0, |prev, &s| {
+        let p = s - *prev;
+        *prev = s;
+        Some(p.abs())
+    }).collect();
+    let mean = |r: std::ops::Range<usize>| pieces[r.clone()].iter().sum::<f64>() / r.len() as f64;
+    let (early, late) = (mean(8..16), mean(ZEROS - 8..ZEROS));
+    if early > 0.0 && late >= 0.98 * early {
+        budget.nondecay.set(true);
+        return None;
+    }
+    if early > 0.0 && late >= 0.8 * early {
+        budget.slowdecay.set(true);
+        return None;
     }
     let (e1, e2) = (wynn(&sums[..33]), wynn(&sums));
     ((e1 - e2).abs() <= 1e-10 * e2.abs().max(1e-300) || (e1 - e2).abs() <= 1e-14).then_some(e2)
