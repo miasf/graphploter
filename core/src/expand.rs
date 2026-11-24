@@ -28,6 +28,7 @@
 
 use crate::eval::Params;
 use crate::parser::{definition_head, parse_system_with, BinOp, Expr, Rel};
+use crate::functions::Func;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -760,6 +761,10 @@ thread_local! {
     static ODE_INIT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 常微分方程式の状態の名前（`x`・`y'` など。初期値の欄の見出しに使う）
     static ODE_STATES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 常微分方程式の初期時刻の欄の式（空なら 0）と、初期時刻の欄が無かった前の保存データか（#131。`lib.rs` が入れる）
+    static ODE_START: RefCell<(String, bool)> = const { RefCell::new((String::new(), false)) };
+    /// 解いた常微分方程式の独立変数の名前と初期時刻（説明・見出しに使う。#131）
+    static ODE_SOLVED: RefCell<(String, f64)> = const { RefCell::new((String::new(), f64::NAN)) };
 }
 
 /// 常微分方程式の初期値の欄の式を入れる（[`install`] の後）
@@ -769,6 +774,22 @@ pub fn set_ode_init(v: Vec<String>) {
 
 pub fn ode_init() -> Vec<String> {
     ODE_INIT.with(|x| x.borrow().clone())
+}
+
+pub fn set_ode_start_from((src, legacy): (String, bool)) {
+    ODE_START.with(|x| *x.borrow_mut() = (src, legacy));
+}
+
+pub fn ode_start() -> (String, bool) {
+    ODE_START.with(|x| x.borrow().clone())
+}
+
+pub fn set_ode_solved(var: String, t0: f64) {
+    ODE_SOLVED.with(|x| *x.borrow_mut() = (var, t0));
+}
+
+pub fn ode_solved() -> (String, f64) {
+    ODE_SOLVED.with(|x| x.borrow().clone())
 }
 
 pub fn set_ode_states(v: Vec<String>) {
@@ -880,6 +901,8 @@ pub fn install(defs: Defs) -> Installed {
     KIND.with(|x| *x.borrow_mut() = None);
     ODE_INIT.with(|x| x.borrow_mut().clear());
     ODE_STATES.with(|x| x.borrow_mut().clear());
+    ODE_START.with(|x| *x.borrow_mut() = (String::new(), false));
+    ODE_SOLVED.with(|x| *x.borrow_mut() = (String::new(), f64::NAN));
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
 
@@ -1057,6 +1080,8 @@ struct Expander<'a> {
 
 /// 式を展開して、今までの節だけの式にする。新しい節を使っていない式は、そのまま返す
 pub fn expand(e: &Expr, params: &Params) -> Result<Expr, String> {
+    let folded = fold_gamma_ratios(e, params);
+    let e = &folded;
     if !e.has_notation() && !mentions_defs(e) && !nested_tuple(e, true) && !e.uses_var("∗") {
         return Ok(e.clone());
     }
@@ -1294,7 +1319,7 @@ impl<'a> Expander<'a> {
                 if let Some(m) = if let [Val::S(v)] = vals.as_slice() { Mat::of(v) } else { None } {
                     use crate::functions::Func;
                     return Ok(Val::S(match f {
-                        Func::Abs if m.cols == 1 => norm(&m.items),
+                        Func::Abs if m.cols == 1 => self.accurate_norm(&m.items),
                         Func::Abs => m.det()?,
                         Func::Re | Func::Im | Func::Conj => {
                             Mat { rows: m.rows, cols: m.cols, items: m.items.iter().map(|c| Expr::Call(*f, vec![c.clone()])).collect() }.into_expr()
@@ -1396,6 +1421,7 @@ impl<'a> Expander<'a> {
                     Val::S(s) => s,
                     Val::Fn { arity, body } => field_at_xyz(arity, &body).ok_or_else(|| fn_as_value_error(&args[0]))?,
                 };
+                self.check_kinks_at(&body, &names, &values)?;
                 Val::S(body.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone())))
             }
             // テイラー多項式 `@taylor(f, x, a, n)`・`@taylor(f, (x, y), (a, b), n)`
@@ -1463,7 +1489,14 @@ impl<'a> Expander<'a> {
                     None => v,
                 },
             },
-            "tr" => self.mat(&args[0], &what)?.trace()?,
+            "tr" => {
+                let m = self.mat(&args[0], &what)?;
+                let diagonal: Vec<Expr> = (0..m.rows.min(m.cols)).map(|k| m.at(k, k).clone()).collect();
+                match (m.rows == m.cols).then(|| self.real_values(&diagonal)).flatten() {
+                    Some(v) => Expr::Num(crate::accurate::sum(&v)),
+                    None => m.trace()?,
+                }
+            }
             "inv" => self.mat(&args[0], &what)?.inverse()?.into_expr(),
             "transpose" => self.mat(&args[0], &what)?.transpose().into_expr(),
             "norm" => {
@@ -1471,14 +1504,17 @@ impl<'a> Expander<'a> {
                 if m.cols != 1 {
                     return Err("@norm にはベクトルを書いてください".into());
                 }
-                norm(&m.items)
+                self.accurate_norm(&m.items)
             }
             _ => {
                 let (u, v) = (self.mat(&args[0], &what)?, self.mat(&args[1], &what)?);
                 if u.cols != 1 || v.cols != 1 {
                     return Err(format!("{what} にはベクトルを 2 つ書いてください"));
                 }
-                let d = linalg::dot(&u.items, &v.items)?;
+                let d = match (u.items.len() == v.items.len()).then(|| self.real_values(&u.items).zip(self.real_values(&v.items))).flatten() {
+                    Some((a, b)) => Expr::Num(crate::accurate::dot(&a, &b)),
+                    None => linalg::dot(&u.items, &v.items)?,
+                };
                 if op == "dot" {
                     d
                 } else {
@@ -1740,12 +1776,45 @@ impl<'a> Expander<'a> {
         let b = |o: BinOp, x: Expr, y: Expr| Expr::Bin(o, Box::new(x), Box::new(y));
         let x = Expr::Var(var.to_string());
         let shifted = |f: &Expr, by: Expr| f.substitute(&|v: &str| (v == var).then(|| b(BinOp::Add, x.clone(), by.clone())));
+        // 多項式 f は、有限のテイラー展開 f(x + s) − f(x) = Σ_{j≥1} f⁽ʲ⁾(x) sʲ / j! で引き算をしない（#205）。
+        // 引き算だと、x に比べて小さい幅（Δ_{10⁻²⁰} x の x = 1）は x + h が x に丸められて 0 になる
+        let taylor = |f: &Expr, by: &Expr| -> Option<Expr> {
+            if !is_polynomial_in(f, var) {
+                return None;
+            }
+            let (mut d, mut sum, mut factorial) = (f.clone(), None::<Expr>, 1.0);
+            for j in 1..=64 {
+                d = crate::diff::diff(&d, var).ok()?;
+                if matches!(d, Expr::Num(v) if v == 0.0) {
+                    return Some(sum.unwrap_or(Expr::Num(0.0)));
+                }
+                factorial *= j as f64;
+                let term = b(BinOp::Div, b(BinOp::Mul, d.clone(), b(BinOp::Pow, by.clone(), Expr::Num(j as f64))), Expr::Num(factorial));
+                sum = Some(match sum {
+                    Some(s) => b(BinOp::Add, s, term),
+                    None => term,
+                });
+            }
+            None
+        };
+        // 多項式でなければ引き算。x + s が丸めで s の半分以上を失う所（幅が x に比べて小さすぎる所）は、値にしない
+        let kept = |by: &Expr, value: Expr| {
+            let moved = b(BinOp::Sub, b(BinOp::Add, x.clone(), by.clone()), x.clone());
+            let ratio = b(BinOp::Div, Expr::Call(Func::Abs, vec![moved]), Expr::Call(Func::Abs, vec![by.clone()]));
+            Expr::Call(Func::Guard, vec![value, b(BinOp::Sub, ratio, Expr::Num(0.5))])
+        };
+        let neg = |e: Expr| Expr::Neg(Box::new(e));
         for _ in 0..k {
             let half = b(BinOp::Div, h.clone(), Expr::Num(2.0));
             f = match op {
-                "fdiff" => b(BinOp::Sub, shifted(&f, h.clone()), f),
-                "bdiff" => b(BinOp::Sub, f.clone(), shifted(&f, Expr::Neg(Box::new(h.clone())))),
-                _ => b(BinOp::Sub, shifted(&f, half.clone()), shifted(&f, Expr::Neg(Box::new(half)))),
+                "fdiff" => taylor(&f, &h).unwrap_or_else(|| kept(&h, b(BinOp::Sub, shifted(&f, h.clone()), f.clone()))),
+                "bdiff" => taylor(&f, &neg(h.clone())).map(neg).unwrap_or_else(|| {
+                    kept(&h, b(BinOp::Sub, f.clone(), shifted(&f, neg(h.clone()))))
+                }),
+                _ => match (taylor(&f, &half), taylor(&f, &neg(half.clone()))) {
+                    (Some(p), Some(m)) => b(BinOp::Sub, p, m),
+                    _ => kept(&half, b(BinOp::Sub, shifted(&f, half.clone()), shifted(&f, neg(half.clone())))),
+                },
             };
             if f.node_count() > MAX_NODES {
                 return Err(format!("{sym} の式が大きくなりすぎます（階数を減らしてください）"));
@@ -1950,6 +2019,10 @@ impl<'a> Expander<'a> {
                 return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));
             }
             terms.push(t);
+        }
+        // 項が全部定数なら、桁を保って計算する（10¹⁶ + 1 − 10¹⁶ を 0 にしない、10²⁰⁰ · 10²⁰⁰ · 10⁻²⁰⁰ を途中であふれさせない。#204）
+        if let Some(values) = self.real_values(&terms[..1]).and_then(|_| self.real_values(&terms)) {
+            return Ok(Expr::Num(if sum { crate::accurate::sum(&values) } else { crate::accurate::product(&values) }));
         }
         Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
     }
@@ -2426,6 +2499,12 @@ impl<'a> Expander<'a> {
                 }
             };
             let (a, b) = (at(&bounds[0].0), at(&bounds[0].1));
+            // 多項式なら有理数で正確に（被積分関数の値そのものが丸めで 1 や t を失う (t + 10¹⁶) − 10¹⁶ など。#204）
+            if !pv && a.is_finite() && b.is_finite() {
+                if let Some(v) = crate::groebner::polynomial_integral(&g, var, self.params, a, b) {
+                    return Some(Ok((v, false, false)));
+                }
+            }
             let found = crate::breakpoints::find(&g, var, self.params, a, b);
             if found.too_many_singular {
                 return Some(Err(trouble_message(var, crate::quad::Trouble::TooManyPoints)));
@@ -3874,9 +3953,70 @@ impl<'a> Expander<'a> {
         Ok(balanced(terms, BinOp::Add))
     }
 
+    /// ベクトルの大きさ。成分が全部実数の定数なら、いちばん大きい成分で割ってから求める（#204）
+    fn accurate_norm(&self, items: &[Expr]) -> Expr {
+        match self.real_values(items) {
+            Some(v) => Expr::Num(crate::accurate::norm(&v)),
+            None => norm(items),
+        }
+    }
+
+    /// 式が全部、実数の定数（数とパラメータだけ）なら、その値の並び（#204。桁を保って和・積・内積を求めるため）
+    fn real_values(&self, items: &[Expr]) -> Option<Vec<f64>> {
+        items
+            .iter()
+            .map(|e| self.constant_value(e).filter(|c| c.im == 0.0).map(|c| c.re))
+            .collect()
+    }
+
     /// 数とパラメータだけの式の値（変数を含めば None）。使ったパラメータを覚える
     fn constant_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
         self.numeric_value(e).filter(|v| v.re.is_finite() && v.im.is_finite())
+    }
+
+    /// 導関数の折れ目の印（`diff.rs` の `kink`。余裕 |s| の Guard）がある式を、s = 0 の点で値にするとき（#205）:
+    /// 式に入れた値は片側の値（$\frac{d}{dx}|x|$ の原点で sign(0) = 0）なので、左右の極限をくらべ、違えば導関数は存在しない。
+    /// 点が数でなければ（スライダーを使う式など）調べない
+    fn check_kinks_at(&self, body: &Expr, names: &[String], values: &[Expr]) -> Result<(), String> {
+        let kinks = std::cell::RefCell::new(Vec::new());
+        let _ = body.rewrite(&|node| {
+            if let Expr::Call(Func::Guard, args) = node {
+                if let [_, Expr::Call(Func::Abs, s)] = args.as_slice() {
+                    kinks.borrow_mut().push(s[0].clone());
+                }
+            }
+            None
+        });
+        let kinks = kinks.into_inner();
+        if kinks.is_empty() {
+            return Ok(());
+        }
+        let Some(at) = values.iter().map(|v| self.numeric_value(v).filter(|c| c.im == 0.0).map(|c| c.re)).collect::<Option<Vec<f64>>>() else {
+            return Ok(());
+        };
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let on_kink = kinks.iter().any(|s| {
+            point_check(s, &name_refs, &at, self.params).is_some_and(|(v, _)| v.re == 0.0 && v.im == 0.0)
+        });
+        if !on_kink {
+            return Ok(());
+        }
+        let Some((_, near)) = point_check(body, &name_refs, &at, self.params) else { return Ok(()) };
+        let num = |v: num_complex::Complex64| crate::critical::num_text(v.re);
+        let point = if names.len() == 1 {
+            format!("{} = {}", names[0], crate::critical::num_text(at[0]))
+        } else {
+            format!("({}) = ({})", names.join(", "), at.iter().map(|v| crate::critical::num_text(*v)).collect::<Vec<_>>().join(", "))
+        };
+        match near {
+            crate::series::Near::Jump(l, r) if names.len() == 1 => {
+                Err(format!("{point} は折れ目で、導関数の左の極限 {} と右の極限 {} が違うので、導関数は存在しません", num(l), num(r)))
+            }
+            crate::series::Near::Jump(l, r) => {
+                Err(format!("{point} は折れ目で、導関数の極限が近づく向きによって違う（{} と {}）ので、導関数は存在しません", num(l), num(r)))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn numeric_value(&self, e: &Expr) -> Option<num_complex::Complex64> {
@@ -4072,6 +4212,10 @@ impl<'a> Expander<'a> {
                 return Err(format!("{sym} の式が大きくなりすぎます（項の数を減らしてください）"));
             }
             terms.push(t);
+        }
+        // 項が全部定数なら、桁を保って計算する（10¹⁶ + 1 − 10¹⁶ を 0 にしない、10²⁰⁰ · 10²⁰⁰ · 10⁻²⁰⁰ を途中であふれさせない。#204）
+        if let Some(values) = self.real_values(&terms[..1]).and_then(|_| self.real_values(&terms)) {
+            return Ok(Expr::Num(if sum { crate::accurate::sum(&values) } else { crate::accurate::product(&values) }));
         }
         Ok(balanced(terms, if sum { BinOp::Add } else { BinOp::Mul }))
     }
@@ -4749,7 +4893,65 @@ fn superscript(n: usize) -> String {
     n.to_string().chars().map(|c| "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().nth(c.to_digit(10).unwrap() as usize).unwrap()).collect()
 }
 
+/// Γ(a)/Γ(b)（a, b が数だけの式。172!/171! など）を [`gamma_ratio`] の値にする（#204）。
+/// どちらの Γ もあふれても比は有限。整数の階乗の比は正確に（5!/3! = 20）
+fn fold_gamma_ratios(e: &Expr, params: &Params) -> Expr {
+    use crate::functions::Func;
+    // 数だけの式に限る（パラメータを使う比を数に畳むと、使ったパラメータが分からなくなり、スライダーを動かしても描き直されない）
+    let _ = params;
+    let none = Params::new();
+    let value = |x: &Expr| -> Option<f64> {
+        let p = crate::eval::Program::compile_with(x, &[], &none).ok()?;
+        let mut out = [num_complex::Complex64::new(0.0, 0.0)];
+        p.eval_batch(&[], &mut out);
+        (out[0].im == 0.0).then_some(out[0].re)
+    };
+    e.rewrite(&|n| match n {
+        Expr::Bin(BinOp::Div, a, b) => match (&**a, &**b) {
+            (Expr::Call(Func::Gamma, x), Expr::Call(Func::Gamma, y)) if x.len() == 1 && y.len() == 1 => {
+                gamma_ratio(value(&x[0])?, value(&y[0])?).map(Expr::Num)
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// Γ(p)/Γ(q)（p, q > 0）。p − q が 0〜1000 の整数なら q (q + 1) ⋯ (p − 1) を桁を保って掛け（5!/3! = 20 ちょうど）、
+/// そうでなければ exp(ln Γ(p) − ln Γ(q))。整数でなく、どちらの Γ もあふれない（171 未満）なら None（今までどおり割る）
+fn gamma_ratio(p: f64, q: f64) -> Option<f64> {
+    let d = p - q;
+    let integers = p == p.round() && q == q.round();
+    if !(p.is_finite() && q.is_finite()) || (p < 171.0 && q < 171.0 && !integers) || p <= 0.0 || q <= 0.0 {
+        return None;
+    }
+    if d == d.round() && d.abs() <= 1000.0 {
+        let factors: Vec<f64> = (0..d.abs() as usize).map(|k| q.min(p) + k as f64).collect();
+        let prod = crate::accurate::product(&factors);
+        return Some(if d >= 0.0 { prod } else { 1.0 / prod });
+    }
+    let lg = |v: f64| crate::special::log_gamma(num_complex::Complex64::new(v, 0.0)).re;
+    Some((lg(p) - lg(q)).exp())
+}
+
 /// 式 e の、点 `at`（変数 `names`）での値と、まわりからの極限。変数とパラメータのほかに文字が残れば None
+/// var の多項式か（係数は var を含まない式でよい。累乗は 0 以上の整数の定数だけ）
+fn is_polynomial_in(e: &Expr, var: &str) -> bool {
+    if !e.uses_var(var) {
+        return true;
+    }
+    match e {
+        Expr::Var(_) => true,
+        Expr::Neg(a) => is_polynomial_in(a, var),
+        Expr::Bin(BinOp::Add | BinOp::Sub | BinOp::Mul, a, b) => is_polynomial_in(a, var) && is_polynomial_in(b, var),
+        Expr::Bin(BinOp::Div, a, b) => is_polynomial_in(a, var) && !b.uses_var(var),
+        Expr::Bin(BinOp::Pow, a, b) => {
+            matches!(**b, Expr::Num(n) if n >= 0.0 && n.fract() == 0.0 && n <= 64.0) && is_polynomial_in(a, var)
+        }
+        _ => false,
+    }
+}
+
 fn point_check(e: &Expr, names: &[&str], at: &[f64], params: &Params) -> Option<(num_complex::Complex64, crate::series::Near)> {
     let prog = crate::eval::Program::compile_with(e, names, params).ok()?;
     let cols: Vec<[f64; 1]> = at.iter().map(|v| [*v]).collect();

@@ -28,6 +28,8 @@ export interface SavedItem {
   walls?: boolean
   /** ベクトル場の矢印の設定（古い保存データには無い） */
   field?: { count?: number; unit?: boolean }
+  /** 常微分方程式の初期値と初期時刻（LaTeX。初期時刻は #131 から。古い保存データには無い） */
+  ode?: { init: string[]; t0?: string }
   /** 回転のグループの番号（無ければこの式だけの回転。ただし rotOwn の無い古い保存データでは全体の回転） */
   rotGroup?: number
   /** この式だけの回転角と中心（古い保存データには無い） */
@@ -90,6 +92,8 @@ export interface SavedState {
   controlMode?: 'A' | 'B'
   /** 式の回転の標準が「この式だけ」になった後の保存データか（古いものは、グループに入っていない式が全体の回転） */
   rotOwn?: boolean
+  /** 常微分方程式の初期時刻の欄ができた後の保存データか（#131。古いものは、欄が空なら前の規則で初期時刻を決める） */
+  odeT0?: boolean
 }
 
 const HASH_PREFIX = '#s='

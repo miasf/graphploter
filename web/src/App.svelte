@@ -496,7 +496,7 @@
       slice: it.slice && Object.keys(it.slice).length > 0 ? it.slice : undefined,
       walls: it.walls,
       field: it.field && (it.field.count !== undefined || it.field.unit || it.field.stream) ? it.field : undefined,
-      ode: it.ode && it.ode.init.some((s) => s.trim() !== '') ? it.ode : undefined,
+      ode: it.ode && (it.ode.init.some((s) => s.trim() !== '') || (it.ode.t0 ?? '').trim() !== '') ? it.ode : undefined,
       layers: it.layers,
       edges: it.edges || undefined,
       render: it.render && it.render !== 'auto' ? it.render : undefined,
@@ -553,6 +553,7 @@
         return kept.length > 0 ? Object.fromEntries(kept) : undefined
       })(),
       rotOwn: true,
+      odeT0: true,
     })
   }
 
@@ -564,7 +565,13 @@
     // 古い保存データでは、グループに入っていない式は全体の回転で描いていた
     hiddenForIntegral.clear()
     items = s.items.map(({ integralAutoHidden: _hidden, ...si }) =>
-      newItem(si.latex, { ...si, ...savedIntegral(si), rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP) }),
+      newItem(si.latex, {
+        ...si,
+        ...savedIntegral(si),
+        rotGroup: si.rotGroup ?? (s.rotOwn ? undefined : GLOBAL_GROUP),
+        // 初期時刻の欄が無かった保存データ: 欄が空なら、開いたときの範囲で前の規則の初期時刻を決めて欄に入れる（#131）
+        odeLegacy: !s.odeT0 && !(si.ode?.t0 ?? '').trim() ? true : undefined,
+      }),
     )
     domain = s.domain
     // 数でない値（壊れた・別の版の保存データ）は、今の値のままにする
@@ -1207,6 +1214,7 @@
       currentDefinitions(item),
       { count: item.field?.count ?? 0, unit: item.field?.unit ?? false, stream: item.field?.stream ?? 0 },
       odeInitFor(item),
+      { src: (item.ode?.t0 ?? '').trim() === '' ? '' : latexToText(item.ode?.t0 ?? ''), legacy: item.odeLegacy ?? false },
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1232,6 +1240,14 @@
     item.usedParams = res.usedParams
     item.usedDefs = res.usedDefs
     item.odeStates = res.odeStates && res.odeStates.length > 0 ? res.odeStates : undefined
+    item.odeVar = res.odeVar
+    // 前の保存データの常微分方程式: 前の規則で解いた初期時刻を欄に入れる（0 なら空欄のまま）。それからは表示範囲によらない（#131）
+    if (item.odeLegacy && res.odeVar) {
+      item.odeLegacy = undefined
+      if (res.odeT0 !== undefined && Number.isFinite(res.odeT0) && res.odeT0 !== 0) {
+        item.ode = { init: [...(item.ode?.init ?? [])], t0: String(res.odeT0) }
+      }
+    }
     noteDefinition(item, res.defName, source)
     budget.record(item.id, res.ms, used, res.cost, res.reprojected)
     if (res.reprojected) {
@@ -2164,7 +2180,14 @@
     const init = [...(item.ode?.init ?? [])]
     while (init.length <= k) init.push('')
     init[k] = latex
-    item.ode = { init }
+    item.ode = { init, t0: item.ode?.t0 }
+    schedule(item, 0)
+  }
+
+  /** 常微分方程式の初期時刻の欄を変えた（#131。空なら 0） */
+  function setOdeStart(item: PlotItem, latex: string) {
+    item.ode = { init: [...(item.ode?.init ?? [])], t0: latex }
+    item.odeLegacy = undefined
     schedule(item, 0)
   }
 
@@ -3369,6 +3392,7 @@
             onWalls={(on) => setWalls(item, on)}
             onField={(patch) => setField(item, patch)}
             onOdeInit={(k, s) => setOdeInit(item, k, s)}
+            onOdeStart={(s) => setOdeStart(item, s)}
             flatView={flat}
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}

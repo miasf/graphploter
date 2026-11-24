@@ -37,6 +37,50 @@ fn jump(v: Expr, s: Expr) -> Expr {
     }
 }
 
+/// |u| と同じ値の式（実数の u の `abs(u)`・`sqrt(u^2)`）なら u
+fn abs_base(e: &Expr) -> Option<Expr> {
+    let u = match e {
+        Expr::Call(Func::Abs, args) if args.len() == 1 => &args[0],
+        Expr::Call(Func::Sqrt, args) if args.len() == 1 => match &args[0] {
+            Expr::Bin(BinOp::Pow, u, two) if as_num(two) == Some(2.0) => &**u,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!has_i(u)).then(|| u.clone())
+}
+
+/// 積の微分の項 a · d。d が段差の印（s = 0 で NaN）を含み、a が変数を含むときは、a = 0 の所では段差が消えるので
+/// （x² sign(x) = x|x| は原点で微分できる）、NaN にするのを「s = 0 かつ a ≠ 0」の所だけにする（#205）。
+/// そこは折れ目にもなりうるので、折れ目の印も付ける（左右の値が違えば、描くときに白丸）
+fn times_jump(a: &Expr, d: Expr, var: &str) -> Expr {
+    fn soften(a: &Expr, d: &Expr) -> Option<Expr> {
+        match d {
+            Expr::Call(Func::Guard, args) if args.len() == 2 => match &args[1] {
+                // 折れ目の印の中
+                Expr::Call(Func::Abs, _) => Some(call(Func::Guard, vec![soften(a, &args[0])?, args[1].clone()])),
+                Expr::Bin(BinOp::Sub, abs, _) => {
+                    let Expr::Call(Func::Abs, _) = &**abs else { return None };
+                    let value = call(Func::Guard, vec![mul(a.clone(), args[0].clone()), abs.as_ref().clone()]);
+                    let tol = call(Func::Min, vec![c1(Func::Abs, a), num(1e-300)]);
+                    Some(call(Func::Guard, vec![value, sub(abs.as_ref().clone(), tol)]))
+                }
+                _ => None,
+            },
+            Expr::Bin(BinOp::Mul, x, y) if as_num(x).is_some() => soften(a, y).map(|g| mul((**x).clone(), g)),
+            Expr::Bin(BinOp::Mul, x, y) if as_num(y).is_some() => soften(a, x).map(|g| mul(g, (**y).clone())),
+            Expr::Neg(x) => soften(a, x).map(neg),
+            _ => None,
+        }
+    }
+    if MARK.get() && a.uses_var(var) {
+        if let Some(g) = soften(a, &d) {
+            return g;
+        }
+    }
+    mul(a.clone(), d)
+}
+
 /// 整数との差 u − round(u)（整数で 0、そこで符号が変わる）
 fn off_integer(u: &Expr) -> Expr {
     sub(u.clone(), c1(Func::Round, u))
@@ -263,10 +307,16 @@ pub fn diff(e: &Expr, var: &str) -> Result<Expr, String> {
             match op {
                 BinOp::Add => add(da, db),
                 BinOp::Sub => sub(da, db),
-                BinOp::Mul => add(mul(da, b), mul(a, db)),
+                BinOp::Mul => add(times_jump(&b, da, var), times_jump(&a, db, var)),
                 // (a/b)' = (a' b − a b') / b²
                 BinOp::Div => div(sub(mul(da, b.clone()), mul(a, db)), sq(&b)),
                 BinOp::Pow => {
+                    // |u|²ᵏ = u²ᵏ（√(u²) も |u|）: 折れ目は無い。|u| の導関数 sign(u) を通すと、原点で sign(0)² = 0 になる（#205）
+                    if let (Some(u), Some(n)) = (abs_base(&a), as_num(&b)) {
+                        if n > 0.0 && n % 2.0 == 0.0 {
+                            return diff(&pow(u, b), var);
+                        }
+                    }
                     if !b.uses_var(var) {
                         // (u^c)' = c u^(c−1) u'
                         mul(mul(b.clone(), pow(a, sub(b, num(1.0)))), da)

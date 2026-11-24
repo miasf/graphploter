@@ -173,6 +173,14 @@ fn derivative_gaps() {
         let (verts, holes) = curve(src, "");
         assert!(holes.is_empty() && at(&verts, [0.0, 0.0]), "{src}: {holes:?}");
     }
+    // 段差に掛けた式が 0 になる所では、導関数が存在する（#205）: |x|³″ = 6|x|、(x² sign x)″ = 6|x|、|x|²″ = 2
+    for (src, y) in [("y = @diff(x, 2) abs(x)^(3)", 0.0), ("y = @diff(x, 2) (sign(x) x^(3))", 0.0), ("y = @diff(x, 2) abs(x)^(2)", 2.0)] {
+        let (verts, holes) = curve(src, "");
+        assert!(holes.is_empty() && at(&verts, [0.0, y]), "{src}: {holes:?}");
+    }
+    // 0 にならなければ、今までどおり存在しない（(x + 1) sign(x) は原点で跳ぶ）
+    let (verts, holes) = curve("y = @diff(x) ((x+1) sign(x))", "");
+    assert!(at(&holes, [0.0, -1.0]) && at(&holes, [0.0, 1.0]) && !at(&verts, [0.0, 0.0]), "(x+1) sign x: {holes:?}");
     // 関数そのものの sign(x)・|x| は、今までどおり（白丸を付けない）
     assert!(curve("y = sign(x)", "").1.is_empty());
     assert!(curve("y = abs(x)", "").1.is_empty());

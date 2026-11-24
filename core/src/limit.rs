@@ -134,7 +134,7 @@ fn extrapolate([a, b, c]: [f64; 3]) -> Option<f64> {
     let first = b - a;
     let second = c - b;
     let ratio = second / first;
-    if (0.0..0.95).contains(&ratio) {
+    if (0.0..0.999).contains(&ratio) {
         Some(c + second * ratio / (1.0 - ratio))
     } else {
         None
@@ -179,6 +179,11 @@ fn finite_estimate(a: &[f64], b: &[f64]) -> Option<f64> {
         let scale = span(i).max(estimate.abs());
         let agrees = |v: f64| v.is_finite() && (v - estimate).abs() <= 1e-9 * scale.max(v.abs());
         if a.windows(3).chain(b.windows(3)).all(|w| extrapolate([w[0], w[1], w[2]]).is_some_and(agrees)) {
+            // 等比 r の収束の外挿は、標本の丸め誤差を (1 − r)⁻² 倍ほどに広げる（ゆっくりのべき x^(−0.01) では r ≈ 0.993。#205）。
+            // その程度より小さい値は 0 と区別できないので、0 にする
+            let r = (a[2] - a[1]) / (a[1] - a[0]);
+            let largest = a.iter().chain(b).fold(0.0_f64, |m, v| m.max(v.abs()));
+            let estimate = if estimate.abs() <= 8.0 * f64::EPSILON * largest / (1.0 - r).powi(2) { 0.0 } else { estimate };
             // 近い点が桁落ちで同じ値に丸められたときは、外挿と一致しない。
             return match stable {
                 Some(last) => close(last, estimate).then_some(last),
@@ -264,13 +269,16 @@ fn from_side(
     dir: f64,
 ) -> Result<Behavior, String> {
     let mut samples = [[0.0; STEPS]; 2];
-    for (values, scale) in samples.iter_mut().zip([1.0, std::f64::consts::SQRT_2]) {
+    // 有限の点 a では、a ± h が丸めなしで表せる h を使う（#205）: 2 のべき H と、その 181/128 倍（√2 に近い、短い仮数の数）。
+    // a = 10¹⁶ のような点で a ± h が丸められると、標本の間隔が等比でなくなり、丸めの雑音を極限として外挿していた
+    let base = 2.0_f64.powi((0.25 * point.abs().max(1.0)).log2().floor() as i32);
+    for (values, scale) in samples.iter_mut().zip([1.0, 181.0 / 128.0]) {
         let inputs = std::array::from_fn::<_, STEPS, _>(|k| {
             let step = 2.0_f64.powi(k as i32);
             if point.is_infinite() {
                 dir * scale * step
             } else {
-                point + dir * (point.abs().max(1.0) * (0.25 * scale / step))
+                point + dir * (base * (scale / step))
             }
         });
         for ((v, x), y) in values.iter_mut().zip(inputs).zip(sample(&inputs)?) {
