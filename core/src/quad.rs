@@ -737,15 +737,23 @@ fn oscillatory(f: &mut dyn FnMut(&[f64], &mut [f64]), base: f64, dir: f64, tol: 
         *prev = s;
         Some(p.abs())
     }).collect();
-    let mean = |r: std::ops::Range<usize>| pieces[r.clone()].iter().sum::<f64>() / r.len() as f64;
+    // 大きさが t の何乗で小さくなるか（p_k ∝ |t|^(−q)）で決める。始まりが遠い（Σ の残りの ∫_1024^∞ sin x / x² dx）と、
+    // 零点 48 個の間では比が 1 に近いが、q は場所によらない。q ≤ 0.05: 小さくならない（sin t・t sin t）、
+    // q < 0.3: 小さくなり方が遅すぎて確かめられない（sin t / t^0.1）
+    let mean = |r: std::ops::Range<usize>| r.clone().map(|k| pieces[k]).sum::<f64>() / r.len() as f64;
+    let at = |r: std::ops::Range<usize>| r.clone().map(|k| zeros[k].abs()).sum::<f64>() / r.len() as f64;
     let (early, late) = (mean(8..16), mean(ZEROS - 8..ZEROS));
-    if early > 0.0 && late >= 0.98 * early {
-        budget.nondecay.set(true);
-        return None;
-    }
-    if early > 0.0 && late >= 0.8 * early {
-        budget.slowdecay.set(true);
-        return None;
+    let (x_early, x_late) = (at(8..16), at(ZEROS - 8..ZEROS));
+    if early > 0.0 && x_late > x_early {
+        let q = (early / late.max(f64::MIN_POSITIVE)).ln() / (x_late / x_early).ln();
+        if q <= 0.05 {
+            budget.nondecay.set(true);
+            return None;
+        }
+        if q < 0.3 {
+            budget.slowdecay.set(true);
+            return None;
+        }
     }
     let (e1, e2) = (wynn(&sums[..33]), wynn(&sums));
     ((e1 - e2).abs() <= 1e-10 * e2.abs().max(1e-300) || (e1 - e2).abs() <= 1e-14).then_some(e2)
