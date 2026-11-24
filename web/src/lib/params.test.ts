@@ -25,6 +25,9 @@ check('桁の多い小さい数', plainNumber(1.2345678901234e-15), '0.000000000
 check('大きい数', plainNumber(1.5e21), '1500000000000000000000')
 check('ふつうの数はそのまま', plainNumber(-3.25), '-3.25')
 check('読み直すと同じ数', [1.01e-8, 7.000000000000001e-12, 1.5e21, 9.87654321e-300].every((v) => Number(plainNumber(v)) === v), true)
+check('極小の刻み 1e-101', formatNumber(1e-101, 1e-101), plainNumber(1e-101))
+check('非正規化数の刻み', Number(formatNumber(3e-309, 1e-309)), 3e-309)
+check('極小の刻みの複素数', Number(complexLatex(2e-101, 0, 1e-101)), 2e-101)
 check('小さい複素数', complexLatex(3e-9, -2e-9, 1e-10), '0.000000003-0.000000002i')
 
 check('べき付きの数列定義', sequenceDefinitionName('a_(n+1)^(2)=a_(n)+1'), 'a')

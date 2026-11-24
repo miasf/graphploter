@@ -190,6 +190,8 @@ function decimals(x: number): number {
  */
 export function formatNumber(v: number, step: number, base = 0): string {
   const digits = Math.max(decimals(step), decimals(base))
+  // toFixed は小数 100 桁まで（1e-101 のような極小の刻みでは例外になる。#209）。それより細かい刻みは、有効数字 12 桁で書く
+  if (digits > 100) return plainNumber(Number(v.toPrecision(12)))
   return plainNumber(Number(v.toFixed(digits)))
 }
 
