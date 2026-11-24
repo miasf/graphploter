@@ -1432,7 +1432,12 @@
   function toggleFolderVisible(members: PlotItem[]) {
     const plots = members.filter((it) => !it.param)
     const show = !plots.some((it) => it.visible)
-    for (const it of plots) if (it.visible !== show) toggle(it)
+    for (const it of plots) {
+      // まとめて押したのも自分で選んだ表示・非表示なので、積分の図を消しても戻さない（行の ● と同じ）。
+      // 積分の図のために非表示にしていた式は、すでに非表示で押し直されないが、これも「非表示のまま」にする
+      hiddenForIntegral.delete(it.id)
+      if (it.visible !== show) toggle(it)
+    }
   }
 
   function removeItem(item: PlotItem) {
