@@ -105,6 +105,9 @@ pub struct MeshResult {
     gpu_reason: String,
     /// 常微分方程式なら、状態の成分の名前（`x`・`y'`。初期値の欄の見出し）
     ode_states: Vec<String>,
+    /// 常微分方程式なら、独立変数の名前と、解いた初期時刻（#131。初期時刻の欄の見出し・前の保存データの読み込み）
+    ode_var: String,
+    ode_t0: f64,
     /// 除外点と有限の極限の位置（点ごとに 3 つ）。描画側で白丸を描く。
     holes: Vec<f32>,
     holes_target: Vec<f32>,
@@ -327,6 +330,18 @@ impl MeshResult {
         self.ode_states.join(",")
     }
 
+    /// 常微分方程式の独立変数の名前（常微分方程式でなければ空）
+    #[wasm_bindgen(getter)]
+    pub fn ode_var(&self) -> String {
+        self.ode_var.clone()
+    }
+
+    /// 常微分方程式を解いた初期時刻（常微分方程式でなければ NaN）
+    #[wasm_bindgen(getter)]
+    pub fn ode_t0(&self) -> f64 {
+        self.ode_t0
+    }
+
     #[wasm_bindgen(getter)]
     pub fn used_defs(&self) -> String {
         self.defs.0.join(",")
@@ -535,6 +550,8 @@ pub fn coord_grid(
         gpu3d: None,
         gpu_reason: String::new(),
         ode_states: Vec::new(),
+        ode_var: String::new(),
+        ode_t0: f64::NAN,
         holes: Vec::new(),
         holes_target: Vec::new(),
         source_holes: Vec::new(),
@@ -774,6 +791,7 @@ pub fn plot(
     LAST_SEQUENCE_TABLE.with(|p| p.borrow_mut().clear());
     let _ = equation::take_last_explicit();
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
+    expand::set_ode_start_from(ODE_START_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())));
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
     expand::set_view_x(domain[0], domain[1]);
     expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
@@ -1096,6 +1114,8 @@ pub fn plot(
         coord,
         defs: (expand::used(), expand::def_line()),
         ode_states: expand::ode_states(),
+        ode_var: expand::ode_solved().0,
+        ode_t0: expand::ode_solved().1,
         holes,
         holes_target,
         source_holes,
@@ -1125,6 +1145,14 @@ pub fn coord_system(map: &str, names: &str) {
 
 thread_local! {
     static ODE_INIT_SRC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static ODE_START_SRC: std::cell::RefCell<(String, bool)> = const { std::cell::RefCell::new((String::new(), false)) };
+}
+
+/// 次の [`plot`] だけに効く、常微分方程式の初期時刻の欄（式。空なら 0）。`legacy` は初期時刻の欄が無かった前の保存データで、
+/// 欄が空なら前の規則（範囲に 0 があれば 0、無ければ範囲の始まり）で決める（#131）
+#[wasm_bindgen]
+pub fn ode_start(src: &str, legacy: bool) {
+    ODE_START_SRC.with(|s| *s.borrow_mut() = (src.to_string(), legacy));
 }
 
 /// 次の [`plot`] だけに効く、常微分方程式の初期値の欄（状態の成分ごとの式を `\n` でつないだもの。空の行は既定の値）
@@ -1170,13 +1198,23 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
     let dims = space.dims;
     let dom = ctx.dom;
     let reach = (0..3).map(|a| dom.lo[a].abs().max(dom.hi[a].abs())).fold(0.0, f64::max);
-    // 独立変数の範囲と初期時刻（範囲に 0 があれば 0、無ければ始まり）
+    // 独立変数の範囲と初期時刻。初期時刻は欄の値（空なら 0）で、範囲によらない（#131。範囲を動かしても同じ解の切り取り）。
+    // 初期時刻の欄が無かった前の保存データで欄が空なら、前の規則（範囲に 0 があれば 0、無ければ範囲の始まり）
     let (lo, hi) = match o.one {
         Some(_) => (dom.lo[0], dom.hi[0]),
         None => (ctx.range)("t"),
     };
     let (lo, hi) = (lo.min(hi), lo.max(hi));
-    let t0 = if lo <= 0.0 && 0.0 <= hi { 0.0 } else { lo };
+    let t0 = match o.t0 {
+        Some(v) => v,
+        None if o.legacy && !(lo <= 0.0 && 0.0 <= hi) => lo,
+        None => 0.0,
+    };
+    let var = match o.one {
+        Some((x, _)) => crate::equation::coord_name(x),
+        None => "t".to_string(),
+    };
+    expand::set_ode_solved(var.clone(), t0);
     let opt = ode::Options { limit: 8.0 * reach.max(1.0), chord: ctx.size / 400.0, max_arc: f64::INFINITY, arc_dims: o.rhs.len(), max_steps: ode::MAX_STEPS };
     let base: Vec<f64> = (0..dims).map(|k| space.slice.get(k).copied().unwrap_or(0.0)).collect();
     let mut points: Vec<f64> = Vec::new();
@@ -1184,6 +1222,9 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
     let mut truncated = false;
     // 初期時刻に右辺が定義されない初期値（y′ = 1/x の x = 0。#132）は、解き始められないので描かない
     let mut undefined = 0;
+    // 範囲の外の初期時刻から解いて、範囲に届く前に止まった（発散・歩数の上限）解曲線の数と、止まった時刻
+    let mut unreached = 0;
+    let mut stopped = f64::NAN;
     for init in &o.inits {
         if steps >= TOTAL_STEPS {
             truncated = true;
@@ -1197,14 +1238,37 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
             continue;
         }
         let left = TOTAL_STEPS - steps;
-        let back = ode::solve(&mut f, t0, init, lo, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
-        let fwd = ode::solve(&mut f, t0, init, hi, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
-        steps += back.points.len() + fwd.points.len();
-        truncated |= back.truncated || fwd.truncated;
+        let mut solve_to = |t1: f64| {
+            if (t1 - t0).abs() > 0.0 {
+                let s = ode::solve(&mut f, t0, init, t1, ode::Options { max_steps: opt.max_steps.min(left), ..opt });
+                truncated |= s.truncated;
+                s.points
+            } else {
+                vec![(t0, init.clone())]
+            }
+        };
+        // 初期時刻から範囲の両端へ（初期時刻が範囲の外なら、範囲を通って遠い端まで）
+        let back = if t0 > lo { solve_to(lo) } else { vec![(t0, init.clone())] };
+        let fwd = if t0 < hi { solve_to(hi) } else { vec![(t0, init.clone())] };
+        steps += back.len() + fwd.len();
+        let seq: Vec<&(f64, Vec<f64>)> = back.iter().rev().chain(fwd.iter().skip(1)).collect();
+        // 範囲の中の点と、その外側の 1 点ずつ（曲線が範囲の端まで届くように）だけを描く
+        let first = seq.iter().position(|(t, _)| *t >= lo);
+        let last = seq.iter().rposition(|(t, _)| *t <= hi);
+        let (Some(first), Some(last)) = (first, last) else {
+            unreached += 1;
+            let end = if t0 < lo { seq.last() } else { seq.first() };
+            stopped = end.map_or(f64::NAN, |(t, _)| *t);
+            continue;
+        };
+        if first > last {
+            unreached += 1;
+            continue;
+        }
         if !points.is_empty() {
             points.extend(std::iter::repeat_n(f64::NAN, dims));
         }
-        for (t, y) in back.points.iter().rev().chain(fwd.points.iter().skip(1)) {
+        for (t, y) in seq[first.saturating_sub(1)..(last + 2).min(seq.len())].iter().map(|p| (&p.0, &p.1)) {
             let mut p = base.clone();
             for (k, c) in o.coords.iter().enumerate() {
                 if let Some(c) = c {
@@ -1249,7 +1313,7 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
             }
         }
     }
-    let n = o.inits.len() - undefined;
+    let n = o.inits.len() - undefined - unreached;
     let slope_field = o.one.is_some() && o.rhs.len() == 1;
     let mut kind = match (n, slope_field) {
         (0, true) => "常微分方程式の傾きの場".to_string(),
@@ -1260,11 +1324,16 @@ fn ode_built(o: &equation::Ode, ctx: &Ctx) -> Built {
     if n > 1 {
         kind.push_str(&format!("（{n} 本）"));
     }
+    if unreached > 0 {
+        let t0_text = crate::critical::num_text(t0);
+        let at = if stopped.is_finite() { format!("{var} = {} で止まり", crate::critical::num_text(stopped)) } else { "止まり".to_string() };
+        kind.push_str(&if n == 0 && undefined == 0 {
+            format!("（初期時刻 {var} = {t0_text} から解く途中、{at}、表示範囲に届かないので、解曲線は描けません）")
+        } else {
+            format!("（初期時刻 {var} = {t0_text} から解く途中、{at}、表示範囲に届かない解曲線が {unreached} 本あります）")
+        });
+    }
     if undefined > 0 {
-        let var = match o.one {
-            Some((x, _)) => crate::equation::coord_name(x),
-            None => "t".to_string(),
-        };
         let t0_text = crate::critical::num_text(t0);
         kind.push_str(&if n == 0 {
             format!("（初期時刻 {var} = {t0_text} で右辺が定義されないので、解曲線は描けません）")
@@ -2885,6 +2954,8 @@ impl Shape {
             gpu3d: self.gpu3d.clone(),
             gpu_reason: String::new(),
             ode_states: Vec::new(),
+            ode_var: String::new(),
+            ode_t0: f64::NAN,
             holes: Vec::new(),
             holes_target: Vec::new(),
             source_holes: Vec::new(),
@@ -2992,6 +3063,8 @@ impl CapSource {
             gpu3d: None,
             gpu_reason: String::new(),
             ode_states: Vec::new(),
+            ode_var: String::new(),
+            ode_t0: f64::NAN,
             holes: Vec::new(),
             holes_target: Vec::new(),
             source_holes: Vec::new(),

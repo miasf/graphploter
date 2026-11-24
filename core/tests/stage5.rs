@@ -16,11 +16,24 @@ fn points_of_interest_finish() {
 }
 
 fn ode(src: &str, init: &str, d: [f64; 6]) -> (String, usize) {
+    let (kind, points, _) = ode_from(src, init, "", false, d);
+    (kind, points.len())
+}
+
+/// 初期時刻の欄 `start`・前の保存データか `legacy` を付けて解く。(説明, 点 (x, y) の列, 解いた初期時刻)
+fn ode_from(src: &str, init: &str, start: &str, legacy: bool, d: [f64; 6]) -> (String, Vec<[f32; 2]>, f64) {
     graph_core::definitions("");
     graph_core::ode_init(init);
+    graph_core::ode_start(start, legacy);
     let m = plot(src, &d, 40, 24, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, true, 1, false, 0)
         .unwrap_or_else(|_| panic!("{src} が描けない"));
-    (m.kind().to_string(), m.positions().len() / 3)
+    let points = m.positions().chunks_exact(3).map(|p| [p[0], p[1]]).collect();
+    (m.kind().to_string(), points, m.ode_t0())
+}
+
+/// 解曲線の、x にいちばん近い点の y
+fn y_at(points: &[[f32; 2]], x: f32) -> f32 {
+    points.iter().filter(|p| p[0].is_finite()).min_by(|a, b| (a[0] - x).abs().total_cmp(&(b[0] - x).abs())).map(|p| p[1]).unwrap()
 }
 
 /// 初期時刻に右辺が定義されない常微分方程式は、解曲線を描いたように見せずに理由を出す（#132）
@@ -35,8 +48,8 @@ fn ode_undefined_at_start() {
     assert_eq!(ode("y'=1/x", "[1,2]", d).0, format!("常微分方程式の傾きの場{why}"));
     // y″ = 1/x: 何も描かない（初期点 (0, 1) だけを返していた）
     assert_eq!(ode("y''=1/x", "", d), (format!("常微分方程式{why}"), 0));
-    // 範囲に 0 が無ければ範囲の始まりから解ける。ふつうの式は今までどおり
-    assert_eq!(ode("y'=1/x", "", [0.5, 6.0, -6.0, 6.0, -6.0, 6.0]).0, "常微分方程式の解曲線と傾きの場");
+    // 初期時刻を 0 でない所にすれば解ける（#131 からは、範囲に 0 が無くても初期時刻は 0）。ふつうの式は今までどおり
+    assert_eq!(ode_from("y'=1/x", "", "1", false, [0.5, 6.0, -6.0, 6.0, -6.0, 6.0]).0, "常微分方程式の解曲線と傾きの場");
     assert_eq!(ode("y'=x-y", "", d).0, "常微分方程式の解曲線と傾きの場");
     assert_eq!(ode("y''+y=0", "", d).0, "常微分方程式の解曲線");
 }
@@ -120,4 +133,40 @@ fn compositions_agree() {
     near("@at(@fdiff(x, 10^(-10)) sin(x), x, 1)/10^(-10)", 1f64.cos(), 1e-6);
     assert_eq!(value("@at(@fdiff(x, 1, 2) x^3, x, 1)"), 12.0);
     assert_eq!(value("@at(@fdiff(x, 1, 2) x floor(x), x, 1)"), 2.0);
+}
+
+/// 初期時刻は表示範囲によらない（#131）。範囲を動かしても同じ解の切り取り
+#[test]
+fn ode_initial_time_is_fixed() {
+    let wide = [-1.0, 2.0, -6.0, 6.0, -6.0, 6.0];
+    let narrow = [1.0, 2.0, -6.0, 6.0, -6.0, 6.0];
+    let cos2 = 2f32.cos();
+    // y″ + y = 0、y(0) = 1、y′(0) = 0 は y = cos x。範囲が [1, 2] でも（前は cos(x − 1)）
+    for d in [wide, narrow, [100.0, 101.0, -6.0, 6.0, -6.0, 6.0]] {
+        let (kind, points, t0) = ode_from("y''+y=0", "", "", false, d);
+        assert_eq!((kind.as_str(), t0), ("常微分方程式の解曲線", 0.0), "{d:?}");
+        let x = d[1] as f32;
+        assert!((y_at(&points, x) - x.cos()).abs() < 2e-3, "{d:?}: {}", y_at(&points, x));
+        // 範囲の外の点は、端の外側の 1 点ずつまで
+        assert!(points.iter().filter(|p| p[0] < d[0] as f32 || p[0] > d[1] as f32).count() <= 2, "{d:?}");
+    }
+    assert!((y_at(&ode_from("y''+y=0", "", "", false, narrow).1, 2.0) - cos2).abs() < 2e-3);
+    // 初期時刻の欄: x₀ = 1 なら y = cos(x − 1)
+    let (_, points, t0) = ode_from("y''+y=0", "", "1", false, wide);
+    assert_eq!(t0, 1.0);
+    assert!((y_at(&points, 2.0) - 1f32.cos()).abs() < 2e-3);
+    assert!((y_at(&points, -1.0) - (-2f32).cos()).abs() < 2e-3);
+    // 前の保存データ（初期時刻の欄が無い）で欄が空なら、前の規則（範囲に 0 が無ければ範囲の始まり）
+    let (_, points, t0) = ode_from("y''+y=0", "", "", true, narrow);
+    assert_eq!(t0, 1.0);
+    assert!((y_at(&points, 2.0) - 1f32.cos()).abs() < 2e-3);
+    assert_eq!(ode_from("y''+y=0", "", "", true, wide).2, 0.0);
+    // 範囲に届く前に発散したら、説明に出す（y′ = y²、y(0) = 1 は x = 1 で発散）
+    let (kind, points, _) = ode_from("y'=y^2", "", "", false, [2.0, 3.0, -6.0, 6.0, -6.0, 6.0]);
+    assert!(kind.starts_with("常微分方程式の傾きの場（初期時刻 x = 0 から解く途中、x = "), "{kind}");
+    assert!(kind.ends_with("で止まり、表示範囲に届かないので、解曲線は描けません）"), "{kind}");
+    assert!(points.iter().all(|p| !p[0].is_finite() || p[0] >= 1.9), "傾きの場だけ");
+    // 連立（独立変数 t）も同じ
+    let (kind, _, t0) = ode_from("x'=-y, y'=x", "", "", false, wide);
+    assert_eq!((kind.as_str(), t0), ("常微分方程式の解曲線", 0.0));
 }

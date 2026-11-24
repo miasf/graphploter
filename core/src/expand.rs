@@ -761,6 +761,10 @@ thread_local! {
     static ODE_INIT: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// 常微分方程式の状態の名前（`x`・`y'` など。初期値の欄の見出しに使う）
     static ODE_STATES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 常微分方程式の初期時刻の欄の式（空なら 0）と、初期時刻の欄が無かった前の保存データか（#131。`lib.rs` が入れる）
+    static ODE_START: RefCell<(String, bool)> = const { RefCell::new((String::new(), false)) };
+    /// 解いた常微分方程式の独立変数の名前と初期時刻（説明・見出しに使う。#131）
+    static ODE_SOLVED: RefCell<(String, f64)> = const { RefCell::new((String::new(), f64::NAN)) };
 }
 
 /// 常微分方程式の初期値の欄の式を入れる（[`install`] の後）
@@ -770,6 +774,22 @@ pub fn set_ode_init(v: Vec<String>) {
 
 pub fn ode_init() -> Vec<String> {
     ODE_INIT.with(|x| x.borrow().clone())
+}
+
+pub fn set_ode_start_from((src, legacy): (String, bool)) {
+    ODE_START.with(|x| *x.borrow_mut() = (src, legacy));
+}
+
+pub fn ode_start() -> (String, bool) {
+    ODE_START.with(|x| x.borrow().clone())
+}
+
+pub fn set_ode_solved(var: String, t0: f64) {
+    ODE_SOLVED.with(|x| *x.borrow_mut() = (var, t0));
+}
+
+pub fn ode_solved() -> (String, f64) {
+    ODE_SOLVED.with(|x| x.borrow().clone())
 }
 
 pub fn set_ode_states(v: Vec<String>) {
@@ -881,6 +901,8 @@ pub fn install(defs: Defs) -> Installed {
     KIND.with(|x| *x.borrow_mut() = None);
     ODE_INIT.with(|x| x.borrow_mut().clear());
     ODE_STATES.with(|x| x.borrow_mut().clear());
+    ODE_START.with(|x| *x.borrow_mut() = (String::new(), false));
+    ODE_SOLVED.with(|x| *x.borrow_mut() = (String::new(), f64::NAN));
     Installed(Some(CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), Rc::new(defs)))))
 }
 

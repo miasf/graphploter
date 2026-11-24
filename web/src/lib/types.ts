@@ -288,9 +288,16 @@ export interface PlotItem extends PlotStyle {
   /** ベクトル場の矢印（計画 M8）: 各軸の数（無ければ 3D で 9、2D で 18）と、長さをそろえるか。古い保存データには無い */
   field?: { count?: number; unit?: boolean; stream?: number }
   /** 常微分方程式の初期値（計画 M9）: 状態の成分ごとの式（LaTeX。空なら既定: 状態は 1、導関数は 0）。古い保存データには無い */
-  ode?: { init: string[] }
+  ode?: { init: string[]; t0?: string }
   /** 常微分方程式の状態の成分の名前（計算の結果。保存しない） */
   odeStates?: string[]
+  /** 常微分方程式の独立変数の名前（計算の結果。初期時刻の欄の見出し。保存しない） */
+  odeVar?: string
+  /**
+   * 初期時刻の欄が無かった前の保存データから開いた式（#131。保存しない）。初期時刻の欄が空なら前の規則（範囲に 0 があれば 0、
+   * 無ければ範囲の始まり）で解き、解いた初期時刻を欄に入れて、それからは表示範囲を動かしても変わらないようにする
+   */
+  odeLegacy?: boolean
   /** 回転のグループの番号（無ければこの式だけの回転 rotation, center、0 なら全体の回転を使う） */
   rotGroup?: number
   /** この式だけの回転角（rotGroup が無いとき使う。無ければ全部 0） */
@@ -502,6 +509,8 @@ export interface PlotRequest {
   arrows?: { count: number; unit: boolean; stream: number }
   /** 常微分方程式の初期値（計算エンジン用の式。成分ごと。空なら既定） */
   odeInit?: string[]
+  /** 常微分方程式の初期時刻（計算エンジン用の式。空なら 0）と、前の保存データか（#131） */
+  odeStart?: { src: string; legacy: boolean }
   /**
    * 座標系（計算エンジン用の式。無ければ直交座標）。map は組 (X, Y, Z) の式、ranges は作る範囲 [最小, 最大] × 3（式）、
    * names は座標の名前 3 つ（カンマ区切り。r,theta,phi など。空なら x, y, z だけ）。
@@ -604,6 +613,9 @@ export type PlotResponse =
       defName: string | null
       /** 常微分方程式なら、状態の成分の名前（初期値の欄の見出し） */
       odeStates?: string[]
+      /** 常微分方程式なら、独立変数の名前と、解いた初期時刻（#131） */
+      odeVar?: string
+      odeT0?: number
       /** 項ごとの [添字, 実部, 虚部, 規則に代入した添字]。初期値の行では最後が NaN。 */
       sequenceTable?: Float64Array
       /** パラメータの定義だったときの名前と値 */

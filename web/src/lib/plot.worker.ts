@@ -11,6 +11,7 @@ import init, {
   hidden_style,
   field_style,
   ode_init,
+  ode_start,
   complex_coords,
   coord_system,
   coord_grid,
@@ -132,7 +133,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit, req.odeStart]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -186,7 +187,7 @@ function costOf(kind: string, curve: boolean, flat: boolean): Cost {
 }
 
 /** 式ごとの、最後に計算し直したときの「使った定義」と「定義の行の名前」（使い回して射影し直した結果には入っていないので、これを返す） */
-const lastDefs = new Map<number, { used: string[]; name: string | null; ode?: string[] }>()
+const lastDefs = new Map<number, { used: string[]; name: string | null; ode?: string[]; odeVar?: string; odeT0?: number }>()
 
 function forget(itemId: number) {
   shapes.get(itemId)?.shape.free()
@@ -361,6 +362,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       hidden_style(hiddenStyle)
       field_style(req.arrows?.count ?? 0, req.arrows?.unit ?? false, req.arrows?.stream ?? 0)
       ode_init((req.odeInit ?? []).join('\n'))
+      ode_start(req.odeStart?.src ?? '', req.odeStart?.legacy ?? false)
       complex_coords(req.complexCoords)
       coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
       // ほかの行の定義と、この式そのもの（定義の行なら、自分の定義が要る）
@@ -494,7 +496,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       // 注目する点（陽関数の極値・零点。頼んだときだけ。plot のすぐ後に読む）
       poi = last_poi()
       if (req.flags & PLOT_SEQUENCE_TABLE) sequenceTable = take_sequence_table()
-      lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null, ode: r.ode_states.split(',').filter((s) => s !== '') })
+      lastDefs.set(itemId, { used: r.used_defs.split(',').filter((s) => s !== ''), name: r.def_name || null, ode: r.ode_states.split(',').filter((s) => s !== ''), odeVar: r.ode_var || undefined, odeT0: r.ode_t0 })
       wall = performance.now() - w0
       if (coordError && !r.param_name) {
         r.free()
@@ -657,7 +659,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const total = performance.now() - t0
     const timing: PlotTiming = { ...tally, total, sentAt: performance.timeOrigin + performance.now() }
     const usedDefs = [...new Set([...defs.used, ...rangeDefsUsed])]
-    res = { requestId, ok: true, mesh, kind, limit, ms: total, usedParams, usedDefs, defName: defs.name, odeStates: defs.ode, sequenceTable, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
+    res = { requestId, ok: true, mesh, kind, limit, ms: total, usedParams, usedDefs, defName: defs.name, odeStates: defs.ode, odeVar: defs.odeVar, odeT0: defs.odeT0, sequenceTable, param, cap, timing, reprojected, cost: costOf(kind, mesh.curve, req.flat) }
   } catch (e) {
     field_mode_reset()
     forget(itemId)

@@ -69,6 +69,7 @@ export function requestPlot(
   definitions = '',
   field: { count: number; unit: boolean; stream: number } | null = null,
   odeInit: string[] = [],
+  odeStart: { src: string; legacy: boolean } = { src: '', legacy: false },
 ): Promise<PlotResponse> {
   const requestId = nextId++
   const req: PlotRequest = {
@@ -105,6 +106,7 @@ export function requestPlot(
     definitions,
     arrows: field ? { ...field } : undefined,
     odeInit: [...odeInit],
+    odeStart: { ...odeStart },
   }
   return planned(req)
 }

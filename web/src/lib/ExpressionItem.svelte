@@ -1,7 +1,7 @@
 <script lang="ts">
   // 式の一覧の1行
   import { indexToSpacing, spacingOptions, spacingToIndex } from './gridSpacing'
-  import { RIEMANN_METHODS, hasIntegral, inlineRegions, integralKinds, joinTuple, regionLabel, regionsUsed, splitTuple, type RiemannMethod } from './latex'
+  import { RIEMANN_METHODS, latexToText, hasIntegral, inlineRegions, integralKinds, joinTuple, regionLabel, regionsUsed, splitTuple, type RiemannMethod } from './latex'
   import { matrixDefinition } from './matrixEdit'
   import ColorPicker from './ColorPicker.svelte'
   import EditableValue from './EditableValue.svelte'
@@ -64,6 +64,8 @@
     onField?: (patch: { count?: number; unit?: boolean; stream?: number }) => void
     /** 常微分方程式の初期値の欄を変えた（成分の番号と LaTeX） */
     onOdeInit?: (k: number, latex: string) => void
+    /** 常微分方程式の初期時刻の欄を変えた（LaTeX。空なら 0。#131） */
+    onOdeStart?: (latex: string) => void
     /** 2D 表示か（矢印の数の既定が変わる） */
     flatView?: boolean
     /** 媒介変数が4つ以上の図形の、面を描く所の分割数を変えたとき */
@@ -167,6 +169,7 @@
     onWalls,
     onField,
     onOdeInit,
+    onOdeStart,
     flatView = false,
     onLayers,
     onEdges,
@@ -280,10 +283,26 @@
     DIVISIONS.reduce((best, d, k) => (Math.abs(d - n) < Math.abs(DIVISIONS[best] - n) ? k : best), 0)
 
   /** 範囲の入力欄を出す媒介変数（媒介変数表示のときだけ） */
-  /** 初期値の欄の見出し: y' → y′(0) =（初期時刻は、範囲に 0 があれば 0、無ければ範囲の始まり） */
+  /** 初期値の欄の見出し: y' → y′(0) =。括弧の中は初期時刻の欄の値（空なら 0。#131） */
   function prettyOde(st: string): string {
     const name = st.replace(/'+$/, '')
-    return `${prettyName(name)}${'′'.repeat(st.length - name.length)}(0) =`
+    // 数か 1 つの名前（スライダーの文字）ならそのまま、式なら x₀（初期時刻の欄の名前）
+    const t0 = (item.ode?.t0 ?? '').trim()
+    let at = '0'
+    if (t0 !== '') {
+      let text = ''
+      try {
+        text = latexToText(t0).replace(/\s+/g, '')
+      } catch {
+        text = ''
+      }
+      at = /^-?\d+(\.\d+)?$/.test(text)
+        ? text.replace('-', '−')
+        : /^[A-Za-zα-ω]\w*$/.test(text)
+          ? prettyName(text)
+          : `${prettyName(item.odeVar ?? 't')}₀`
+    }
+    return `${prettyName(name)}${'′'.repeat(st.length - name.length)}(${at}) =`
   }
 
   const paramNames = $derived(item.params.filter((n) => n in item.ranges))
@@ -861,6 +880,19 @@
       </div>
     {/each}
     {#if item.odeStates && onOdeInit}
+      <!-- 常微分方程式の初期時刻（#131）。空欄は 0。表示範囲を動かしても変わらない -->
+      {#if onOdeStart}
+        <div class="param-range">
+          <span>初期時刻 {prettyName(item.odeVar ?? 't')}₀ =</span>
+          <MathInput
+            small
+            value={item.ode?.t0 ?? ''}
+            placeholder="0"
+            label="初期時刻"
+            onInput={(v) => onOdeStart(v)}
+          />
+        </div>
+      {/if}
       <!-- 常微分方程式の初期値（計画 M9）。空欄は既定の値（状態は 1、導関数は 0）。リスト [0, 1, 2] なら何本も描く -->
       {#each item.odeStates as st, k (st)}
         <div class="param-range">

@@ -2031,6 +2031,10 @@ pub struct Ode {
     pub one: Option<(usize, usize)>,
     /// 初期値で使ったパラメータ
     pub uses: Vec<String>,
+    /// 初期時刻（欄の値。#131）。None なら 0（`legacy` なら前の規則: 範囲に 0 があれば 0、無ければ範囲の始まり）
+    pub t0: Option<f64>,
+    /// 初期時刻の欄が無かった前の保存データ
+    pub legacy: bool,
 }
 
 /// 状態の名前: 0 階は座標の名前そのもの、j 階の導関数は `#x1` のような書けない名前
@@ -2231,6 +2235,23 @@ fn ode_line(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>
         };
         choices.push(vals);
     }
+    // 初期時刻（空なら None。スライダーの文字を使ってよい）
+    let (start_src, legacy) = crate::expand::ode_start();
+    let t0 = match start_src.trim() {
+        "" => None,
+        src => {
+            let e = parse_at(src, 0, params).map_err(|e| format!("初期時刻: {e}"))?;
+            let p = Program::compile_with(&e, &[], params).map_err(|e| format!("初期時刻: {e}"))?;
+            uses.extend(p.used_params().iter().filter(|n| !uses.contains(n)).cloned().collect::<Vec<_>>());
+            let mut out = [C::new(0.0, 0.0)];
+            p.eval_batch(&[], &mut out);
+            let v = crate::eval::as_real(out[0]);
+            if !v.is_finite() {
+                return Err("初期時刻が実数になりません".into());
+            }
+            Some(v)
+        }
+    };
     let count: usize = choices.iter().map(|c| c.len()).product();
     if count > 64 {
         return Err(format!("初期値の組み合わせが多すぎます（{count} 通り。64 通りまで）"));
@@ -2250,7 +2271,7 @@ fn ode_line(source: &str, params: &Params, space: &Space) -> Result<Option<Plot>
         })
         .collect();
     crate::expand::set_ode_states(labels);
-    Ok(Some(Plot::Ode(Box::new(Ode { rhs, vars, coords, inits, one, uses }))))
+    Ok(Some(Plot::Ode(Box::new(Ode { rhs, vars, coords, inits, one, uses, t0, legacy }))))
 }
 
 /// 座標系の式（計画 9 章の S36）。組 `(X, Y, Z)` の 3 つの成分を、表示中の 3 つの座標の式としてコンパイルする。
