@@ -6836,12 +6836,13 @@ impl Field {
         }
 
         let mut mesh = Mesh::default();
-        // 各マスを2つの三角形に分け、三角形ごとに中身の部分（g < 0）を切り出す（値は辺の上で直線で補間）
+        // 各マスを2つの三角形に分け、三角形ごとに中身の部分（g ≤ 0）を切り出す（値は辺の上で直線で補間）。
+        // g = 0 も中身（x ≤ x・√x ≤ √x のように、どこでも 0 の式の領域が描かれなかった。#206）。厳密な不等式は上で ε を足してある
         for j in 0..n {
             for i in 0..n {
                 let (a, b, c, d) = (j * m + i, j * m + i + 1, (j + 1) * m + i, (j + 1) * m + i + 1);
                 for tri in [[a, b, d], [a, d, c]] {
-                    if tri.iter().any(|&k| !g[k].is_finite()) || tri.iter().all(|&k| g[k] >= 0.0) {
+                    if tri.iter().any(|&k| !g[k].is_finite()) || tri.iter().all(|&k| g[k] > 0.0) {
                         continue;
                     }
                     let mut poly: Vec<[f64; 3]> = Vec::with_capacity(4);
@@ -6850,11 +6851,11 @@ impl Field {
                     let at = |k: usize| also.iter().map(|a| a[k]).collect::<Vec<f64>>();
                     for e in 0..3 {
                         let (p, q) = (tri[e], tri[(e + 1) % 3]);
-                        if g[p] < 0.0 {
+                        if g[p] <= 0.0 {
                             poly.push(point(p));
                             vals.push(at(p));
                         }
-                        if (g[p] < 0.0) != (g[q] < 0.0) {
+                        if (g[p] <= 0.0) != (g[q] <= 0.0) {
                             let t = g[p] / (g[p] - g[q]);
                             let (pp, pq) = (point(p), point(q));
                             poly.push([0, 1, 2].map(|x| pp[x] + (pq[x] - pp[x]) * t));
@@ -8184,6 +8185,19 @@ pub(crate) fn explicit_curve_with_holes(
             left = next;
         }
     }
+    // 1 点だけ定義された値（場合分けの x = 0.025 の行。#158）: 長さの無い曲線（描画側で黒丸）
+    for b in breaks {
+        if let Some(y) = b.value {
+            let p = point(b.x, y).map(|v| v as f32);
+            if p.iter().all(|v| v.is_finite()) {
+                if !positions.is_empty() {
+                    positions.extend([f32::NAN; 3]);
+                }
+                positions.extend(p);
+                positions.extend(p);
+            }
+        }
+    }
     (Mesh { positions, ..Default::default() }, marks)
 }
 
@@ -8246,6 +8260,205 @@ pub(crate) fn sampled_limit_curve(points: &[[f64; 2]], report: &crate::limit::Re
 /// 2D 表示の陰関数の曲線 F(横, 奥, 0) = 0（マーチング・スクエア法）。
 /// `prog` の変数は (横, 奥, 縦) の3つか、縦の無い (横, 奥) の2つ（`z = f(x, y)` の切り口 f = 0 など）
 pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
+    // 因数に分ける（#140・#120）: A B = 0 は A = 0 と B = 0、|A| = 0・√A = 0・Aⁿ = 0・A/B = 0 は A = 0（3D の部品と同じ。
+    // `Program::zero_factors`）。|A| や √|A| は符号が変わらず、0 に接するだけの所として探すしかなかった（√|x² + y² − 1| = 0 は何も描かなかった）。
+    // 因数の零点のうち、元の式が定義されない所（分母が 0 など）は切り落とす
+    let (factors, changed) = prog.zero_factors();
+    if changed {
+        let parts: Vec<Mesh> = factors
+            .iter()
+            .filter(|f| !f.is_constant())
+            .map(|f| {
+                let mut m = with_jump_lines(f, implicit_curve_2d_single(f, dom, n), dom, n);
+                drop_undefined_2d(&mut m, prog, f, dom, n);
+                m
+            })
+            .collect();
+        return merge(parts, true);
+    }
+    with_jump_lines(prog, implicit_curve_2d_single(prog, dom, n), dom, n)
+}
+
+/// 段差（`floor`・`ceil`・`mod`）の飛ぶ線の上だけで成り立つ解を足す（#175）。`floor(x) + floor(−x) = 0` の解は整数の x の縦線で、
+/// 線の外では値が −1 なので、格子の上の符号からは見つからない（格子が整数に乗るときだけ描けていた）。
+/// 段差の元の引数 s が整数 L になる線 s = L を作り、その頂点で「引数が整数のすぐ近くにある段差」を、その整数の枝に固定した式
+/// （[`Program::frozen`]）の値を調べ、0 になる線分だけを残す
+fn with_jump_lines(prog: &Program, mut mesh: Mesh, dom: Domain, n: usize) -> Mesh {
+    use crate::functions::Func;
+    let sites = prog.branch_sites();
+    if sites == 0 || sites > 4 {
+        return mesh;
+    }
+    let kinds = prog.branch_closed_high();
+    // sign の段（境目そのものが別の枝）と round（半整数で飛ぶ）は扱わない
+    if kinds.iter().any(|k| k.is_none()) {
+        return mesh;
+    }
+    let conds = prog.branch_conds(&vec![0.0; sites]);
+    let rounds = prog.branch_round_sites();
+    if rounds.iter().any(|&r| r) {
+        return mesh;
+    }
+    // 表示範囲での、段差の元の引数の範囲（41 × 41 点）
+    let k = 41;
+    let (mut gx, mut gy) = (Vec::with_capacity(k * k), Vec::with_capacity(k * k));
+    for j in 0..k {
+        for i in 0..k {
+            gx.push(dom.lo[0] + (dom.hi[0] - dom.lo[0]) * i as f64 / (k - 1) as f64);
+            gy.push(dom.lo[1] + (dom.hi[1] - dom.lo[1]) * j as f64 / (k - 1) as f64);
+        }
+    }
+    let snap = |s: f64, high: bool| {
+        let r = s.round();
+        if (s - r).abs() <= 1e-9 * s.abs().max(1.0) {
+            r
+        } else if high {
+            s.floor()
+        } else {
+            s.ceil()
+        }
+    };
+    let mut frozen: crate::adaptive::HashMap<Vec<i64>, Program> = Default::default();
+    let mut extra: Vec<f32> = Vec::new();
+    for c in &conds {
+        let vals = eval_2d(&c.prog, &gx, &gy);
+        let (lo, hi) = vals.iter().filter(|v| v.is_finite()).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        if !(lo.is_finite() && hi.is_finite()) || hi - lo > 100.0 {
+            continue;
+        }
+        for level in (lo.ceil() as i64)..=(hi.floor() as i64) {
+            let line = implicit_curve_2d_single(&c.prog.level_of(Func::Re, level as f64), dom, (n / 2).max(16));
+            let pos = &line.positions;
+            let verts: Vec<usize> = (0..pos.len() / 3).filter(|&q| pos[3 * q].is_finite()).collect();
+            if verts.is_empty() {
+                continue;
+            }
+            let (mut xs, mut ys): (Vec<f64>, Vec<f64>) = verts.iter().map(|&q| (pos[3 * q] as f64, pos[3 * q + 1] as f64)).unzip();
+            // 頂点を線 s = L の上へ寄せる（線の頂点は、マスの 10⁻⁴ ほどずれているので、整数のすぐ近くかを調べられない）
+            let d = 1e-7 * (dom.hi[0] - dom.lo[0]).abs().max(dom.hi[1] - dom.lo[1]);
+            for _ in 0..4 {
+                let v = eval_2d(&c.prog, &xs, &ys);
+                let px: Vec<f64> = xs.iter().map(|x| x + d).collect();
+                let py: Vec<f64> = ys.iter().map(|y| y + d).collect();
+                let (vx, vy) = (eval_2d(&c.prog, &px, &ys), eval_2d(&c.prog, &xs, &py));
+                for t in 0..xs.len() {
+                    let (gx, gy) = ((vx[t] - v[t]) / d, (vy[t] - v[t]) / d);
+                    let g2 = gx * gx + gy * gy;
+                    if g2 > 0.0 && g2.is_finite() && v[t].is_finite() {
+                        let r = (v[t] - level as f64) / g2;
+                        xs[t] -= r * gx;
+                        ys[t] -= r * gy;
+                    }
+                }
+            }
+            let args: Vec<Vec<f64>> = conds.iter().map(|d| eval_2d(&d.prog, &xs, &ys)).collect();
+            let mut zero = vec![false; pos.len() / 3];
+            for (t, &q) in verts.iter().enumerate() {
+                let tau: Option<Vec<i64>> = (0..sites)
+                    .map(|j| {
+                        let v = args[j][t];
+                        v.is_finite().then(|| snap(v, kinds[j] == Some(true)) as i64)
+                    })
+                    .collect();
+                let Some(tau) = tau else { continue };
+                let f = frozen.entry(tau.clone()).or_insert_with(|| prog.frozen(&tau.iter().map(|&v| v as f64).collect::<Vec<_>>()));
+                let v = eval_2d(f, &[xs[t]], &[ys[t]])[0];
+                zero[q] = v.abs() <= 1e-9;
+            }
+            // 両端が 0 になる線分だけ（線分は 2 点と NaN の組）
+            for seg in (0..pos.len() / 3).collect::<Vec<_>>().chunks(3) {
+                if seg.len() == 3 && pos[3 * seg[0]].is_finite() && pos[3 * seg[1]].is_finite() && zero[seg[0]] && zero[seg[1]] {
+                    extra.extend_from_slice(&pos[3 * seg[0]..3 * seg[0] + 3]);
+                    extra.extend_from_slice(&pos[3 * seg[1]..3 * seg[1] + 3]);
+                    extra.extend_from_slice(&[f32::NAN; 3]);
+                }
+            }
+        }
+    }
+    if !extra.is_empty() {
+        if !mesh.positions.is_empty() {
+            mesh.positions.extend_from_slice(&[f32::NAN; 3]);
+        }
+        mesh.positions.extend(extra);
+    }
+    mesh
+}
+
+/// 曲線（因数 `factor` = 0。NaN で区切った点の列）のうち、元の式 `prog` の零点でない頂点を含む区切りを捨てる。
+/// 頂点を因数の零点へ寄せ（ニュートン法 1 歩）、因数の勾配の向きにほんの少し（マスの 10⁻⁵）ずらした両側で元の式を調べ、
+/// どちらかで値が有限で、まわり（マスの 1/4 ずらした所）の値の 1/10 より小さければ残す。
+/// √(x² + y² − 1) = 0 の円（丸めで x² + y² − 1 がわずかに負になり、頂点では値が無い）は残り、
+/// 分母が 0 になる所（(x² − 1)/(x − 1) = 0 の x = 1。近くの値は 2）は捨てる
+fn drop_undefined_2d(mesh: &mut Mesh, prog: &Program, factor: &Program, dom: Domain, n: usize) {
+    let pos = &mesh.positions;
+    let idx: Vec<usize> = (0..pos.len() / 3).filter(|&k| pos[3 * k].is_finite()).collect();
+    if idx.is_empty() {
+        return;
+    }
+    let (xs, ys): (Vec<f64>, Vec<f64>) = idx.iter().map(|&k| (pos[3 * k] as f64, pos[3 * k + 1] as f64)).unzip();
+    let cell = ((dom.hi[0] - dom.lo[0]) / n as f64).min((dom.hi[1] - dom.lo[1]) / n as f64);
+    let d = 1e-6 * cell;
+    let shifted = |dx: f64, dy: f64| eval_2d(factor, &xs.iter().map(|x| x + dx).collect::<Vec<_>>(), &ys.iter().map(|y| y + dy).collect::<Vec<_>>());
+    let (fx1, fx0, fy1, fy0, fv) = (shifted(d, 0.0), shifted(-d, 0.0), shifted(0.0, d), shifted(0.0, -d), shifted(0.0, 0.0));
+    // 点ごとの、寄せた点 q と向き u
+    let mut q: Vec<[f64; 2]> = Vec::with_capacity(xs.len());
+    let mut u: Vec<[f64; 2]> = Vec::with_capacity(xs.len());
+    for t in 0..xs.len() {
+        let g = [(fx1[t] - fx0[t]) / (2.0 * d), (fy1[t] - fy0[t]) / (2.0 * d)];
+        let len = g[0].hypot(g[1]);
+        if len > 0.0 && len.is_finite() && fv[t].is_finite() {
+            let dir = [g[0] / len, g[1] / len];
+            let step = fv[t] / len;
+            q.push([xs[t] - step * dir[0], ys[t] - step * dir[1]]);
+            u.push(dir);
+        } else {
+            q.push([xs[t], ys[t]]);
+            u.push([0.0, 0.0]);
+        }
+    }
+    let at = |r: f64| {
+        let (px, py): (Vec<f64>, Vec<f64>) = q.iter().zip(&u).map(|(p, v)| (p[0] + r * v[0], p[1] + r * v[1])).unzip();
+        eval_2d(prog, &px, &py)
+    };
+    let (tiny_p, tiny_m, wide_p, wide_m) = (at(1e-5 * cell), at(-1e-5 * cell), at(0.25 * cell), at(-0.25 * cell));
+    let here = eval_2d(prog, &xs, &ys);
+    let mut defined = vec![true; pos.len() / 3];
+    for (t, &k) in idx.iter().enumerate() {
+        let side = |tiny: f64, wide: f64| tiny.is_finite() && wide.is_finite() && tiny.abs() <= 0.1 * wide.abs();
+        // 勾配が無い因数（段差だけの式。飛ぶ線の上の解は [`with_jump_lines`] で確かめてある）は、頂点で値があれば残す
+        defined[k] = if u[t] == [0.0, 0.0] { !here[t].is_nan() } else { side(tiny_p[t], wide_p[t]) || side(tiny_m[t], wide_m[t]) };
+    }
+    let mut out: Vec<f32> = Vec::with_capacity(pos.len());
+    let mut run: Vec<f32> = Vec::new();
+    let mut ok = true;
+    for k in 0..=pos.len() / 3 {
+        if k == pos.len() / 3 || !pos[3 * k].is_finite() {
+            if ok && !run.is_empty() {
+                out.extend_from_slice(&run);
+                out.extend_from_slice(&[f32::NAN; 3]);
+            }
+            run.clear();
+            ok = true;
+            continue;
+        }
+        ok &= defined[k];
+        run.extend_from_slice(&pos[3 * k..3 * k + 3]);
+    }
+    mesh.positions = out;
+}
+
+/// 点 p の周りの箱（半径 r）で、F が 0 になりうるか（区間演算。分からなければ true）。
+/// 0 に接するだけの点の候補で、|F| の極小が小さい正の値（(x² + y² − 1)² + 10⁻⁷ = 0）を、零点と取り違えないため（#206）
+fn may_vanish_2d(prog: &Program, p: [f64; 2], r: [f64; 2]) -> bool {
+    use crate::interval::Interval;
+    let mut boxes = vec![Interval::new(p[0] - r[0], p[0] + r[0]), Interval::new(p[1] - r[1], p[1] + r[1])];
+    if prog.vars().len() == 3 {
+        boxes.push(Interval::point(0.0));
+    }
+    prog.eval_interval(&boxes).may_contain_zero()
+}
+
+fn implicit_curve_2d_single(prog: &Program, dom: Domain, n: usize) -> Mesh {
     let n = n.max(2);
     let scale = ((dom.hi[0] - dom.lo[0]) + (dom.hi[1] - dom.lo[1])) as f32;
     let m = n + 1;
@@ -8405,16 +8618,48 @@ pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
         let (i, j) = (cell(0), cell(1));
         (i.saturating_sub(1)..(i + 2).min(n)).any(|a| (j.saturating_sub(1)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
     };
+    let (found_points, loops) = touch_points_2d(prog, &f, &xs, &ys, m, |i, j| {
+        // 格子点 (i, j) の周りのマス（2 マス先まで）に、接するだけの線分があれば調べない
+        (i.saturating_sub(2)..(i + 2).min(n)).any(|a| (j.saturating_sub(2)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
+    });
     let dots: Vec<[f64; 2]> = touch
         .values()
         .map(|&(p, _)| p)
         .filter(|&p| !used.contains(&key(p)))
-        .chain(touch_points_2d(prog, &f, &xs, &ys, m, |i, j| {
-            // 格子点 (i, j) の周りのマス（2 マス先まで）に、接するだけの線分があれば調べない
-            (i.saturating_sub(2)..(i + 2).min(n)).any(|a| (j.saturating_sub(2)..(j + 2).min(n)).any(|b| touch_cell[b * n + a]))
-        }))
+        .chain(found_points)
         .filter(|&p| !near_segment(p))
         .collect();
+    // マスより小さい閉じた曲線（#142）: 中心から 4 つの向きに符号が戻る所を二分法で探し、その大きさの格子で作り直す
+    let (hx, hy) = ((dom.hi[0] - dom.lo[0]) / n as f64, (dom.hi[1] - dom.lo[1]) / n as f64);
+    for (c, sign) in loops {
+        let mut reach = 0.0f64;
+        for dir in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]] {
+            let (mut lo, mut hi) = (0.0f64, 2.0);
+            let at = |t: f64| [c[0] + dir[0] * t * hx, c[1] + dir[1] * t * hy];
+            let end = at(hi);
+            if sign * eval_2d(prog, &[end[0]], &[end[1]])[0] <= 0.0 {
+                reach = reach.max(2.0);
+                continue;
+            }
+            for _ in 0..50 {
+                let mid = 0.5 * (lo + hi);
+                let q = at(mid);
+                if sign * eval_2d(prog, &[q[0]], &[q[1]])[0] < 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            reach = reach.max(hi);
+        }
+        let (rx, ry) = (1.5 * reach * hx, 1.5 * reach * hy);
+        let local = Domain { lo: [c[0] - rx, c[1] - ry, dom.lo[2]], hi: [c[0] + rx, c[1] + ry, dom.hi[2]] };
+        let small = implicit_curve_2d_single(prog, local, 32);
+        if !small.positions.is_empty() {
+            pts.extend_from_slice(&small.positions);
+            pts.extend_from_slice(&[f32::NAN; 3]);
+        }
+    }
     // 同じ点を何度も見つけることがある（格子の縦と横の線・格子点の周りの探索）ので、マスの大きさの半分より近い点はまとめる
     let h = 0.5 * ((dom.hi[0] - dom.lo[0]) / n as f64).min((dom.hi[1] - dom.lo[1]) / n as f64);
     let mut kept: Vec<[f64; 2]> = Vec::new();
@@ -8588,7 +8833,11 @@ fn touches_2d(
         let t = if ts[c].abs() < 1e-6 { 0.0 } else { ts[c] };
         if (0.0..1.0).contains(&t) && vals[c].abs() <= 1e-3 * cand.4 {
             let p = if t == 0.0 { [xs[cand.1], ys[cand.1]] } else { ps[c] };
-            out.insert(cand.0, (p, t));
+            // 三分探索の幅（マスの 2×10⁻⁴ ほど）より広い箱で、本当に 0 になりうるかを確かめる
+            let r = [2e-3 * (xs[1] - xs[0]).abs(), 2e-3 * (ys[m] - ys[0]).abs()];
+            if may_vanish_2d(prog, p, r) {
+                out.insert(cand.0, (p, t));
+            }
         }
     }
     out
@@ -8598,7 +8847,7 @@ fn touches_2d(
 /// 格子点のうち、|F| が周りの 8 点のどれよりも小さく、9 点とも同じ符号のもの（F の極小・極大）の周りで、
 /// x, y の向きに交互に三分探索して |F| の極小を求め、ほぼ 0（周りの平均の 10⁻³ 倍以下）なら点とする。
 /// `skip(i, j)` が true の格子点（接するだけの線の近く）は調べない。候補はまとめて計算する
-fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, skip: impl Fn(usize, usize) -> bool) -> Vec<[f64; 2]> {
+fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, skip: impl Fn(usize, usize) -> bool) -> (Vec<[f64; 2]>, Vec<([f64; 2], f64)>) {
     // 候補: (格子点, 符号, 周りの |F| の平均)
     let mut cands: Vec<(usize, f64, f64)> = Vec::new();
     'outer: for j in 1..m.saturating_sub(1) {
@@ -8620,7 +8869,7 @@ fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, 
         }
     }
     if cands.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     // 格子点の周り（最初は前後1マス）で、x, y の向きに交互に三分探索する。探す幅は1周ごとに半分にする
     let (hx, hy) = (xs[1] - xs[0], ys[m] - ys[0]);
@@ -8660,13 +8909,23 @@ fn touch_points_2d(prog: &Program, f: &[f64], xs: &[f64], ys: &[f64], m: usize, 
         w = [0.5 * w[0], 0.5 * w[1]];
     }
     let v = eval_2d(prog, &pos.iter().map(|p| p[0]).collect::<Vec<_>>(), &pos.iter().map(|p| p[1]).collect::<Vec<_>>());
-    cands
-        .iter()
-        .zip(pos)
-        .zip(v)
-        .filter(|&((&(k, _, mean), p), g)| (p[0] - xs[k]).abs() <= hx && (p[1] - ys[k]).abs() <= hy && g.abs() <= 1e-3 * mean)
-        .map(|((_, p), _)| p)
-        .collect()
+    let mut points = Vec::new();
+    let mut loops = Vec::new();
+    for ((&(k, s, mean), p), g) in cands.iter().zip(pos).zip(v) {
+        if !((p[0] - xs[k]).abs() <= hx && (p[1] - ys[k]).abs() <= hy) {
+            continue;
+        }
+        // 極小で符号が逆になる: マスより小さい閉じた曲線がある（半径 0.01 の円。#142）
+        if s * g < 0.0 {
+            loops.push((p, s));
+            continue;
+        }
+        // 探した位置の誤差（マスの 10⁻³ ほど）より広い箱で、本当に 0 になりうるか（x² + y² + 10⁻⁹ = 0 は点にしない。#206）
+        if g.abs() <= 1e-3 * mean && may_vanish_2d(prog, p, [4e-3 * hx.abs(), 4e-3 * hy.abs()]) {
+            points.push(p);
+        }
+    }
+    (points, loops)
 }
 
 /// 画面の1つの軸の座標を、n 次元の点の1次式 c₀ + Σ cₖ·pₖ で表したもの（回転と射影）

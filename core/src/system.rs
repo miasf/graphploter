@@ -523,8 +523,111 @@ pub fn flat_points(f1: &Program, f2: &Program, dom: Domain, n: usize) -> Vec<[f6
         }
     }
     let h = (0..2).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
-    let seeds = sign_changes(&points, &segs, &values_of(f2)(&points));
-    distinct_inside(newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten(), dom, 2, DISTINCT * h)
+    let g = values_of(f2)(&points);
+    let seeds = sign_changes(&points, &segs, &g);
+    let crossing = newton_onto_in(&[f1, f2], &seeds, h, 2).into_iter().flatten();
+    // 接するだけの交点（y = cos x と y = 1 の (0, 1)。#119）: 符号が変わらないので、上の道では見つからない
+    let touching = tangent_points(f1, f2, &points, &g, h);
+    distinct_inside(crossing.chain(touching), dom, 2, DISTINCT * h)
+}
+
+/// 2D の曲線 F₁ = 0（頂点 `points`、その上での F₂ の値 `g`）の上で、F₂ が符号を変えずに 0 に接する点（#119・#206）。
+/// |F₂| がまわり（1.6h 以内）の頂点より小さく、まわりで符号が変わらない頂点から、曲線に沿って F₂ の極小を三分探索で求め
+/// （1 歩ごとにニュートン法で F₁ = 0 に寄せる）、その点のまわりの小さい箱（半径 10⁻⁶h）で区間演算をして、
+/// F₂ が 0 になりうるときだけ点とする（y = 1 + 10⁻⁶ のように、わずかに離れた曲線は点にしない）。
+/// 区間演算が使えない式は、極小の |F₂| がまわりの値の 10⁻⁹ 倍以下なら点とする
+pub fn tangent_points(f1: &Program, f2: &Program, points: &[[f64; 3]], g: &[f64], h: f64) -> Vec<[f64; 3]> {
+    use crate::interval::{Interval, Range};
+    let r = 1.6 * h;
+    // 格子で近い頂点を探す
+    let mut buckets: crate::adaptive::HashMap<(i64, i64), Vec<usize>> = Default::default();
+    let key = |p: &[f64; 3]| ((p[0] / r).floor() as i64, (p[1] / r).floor() as i64);
+    for (k, p) in points.iter().enumerate() {
+        if g[k].is_finite() {
+            buckets.entry(key(p)).or_default().push(k);
+        }
+    }
+    let mut cands: Vec<(usize, f64, f64)> = Vec::new(); // (頂点, 符号, まわりの |F₂| の最大)
+    for (k, p) in points.iter().enumerate() {
+        if !g[k].is_finite() {
+            continue;
+        }
+        let (bx, by) = key(p);
+        let neighbors: Vec<usize> = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dy| (dx, dy)))
+            .flat_map(|(dx, dy)| buckets.get(&(bx + dx, by + dy)).map(|v| v.as_slice()).unwrap_or(&[]).iter().copied())
+            .filter(|&q| q != k && (points[q][0] - p[0]).powi(2) + (points[q][1] - p[1]).powi(2) <= r * r)
+            .collect();
+        let around = neighbors.iter().fold(0.0f64, |m, &q| m.max(g[q].abs()));
+        if neighbors.is_empty() || around == 0.0 {
+            continue;
+        }
+        // まわりの符号（折れ線の頂点が、接する点のすぐ脇でわずかにはみ出した値 |g| ≤ 10⁻² × まわり は数えない。
+        // 頂点は f32 に丸めてあるので、接する点のそばでは符号が逆の小さい値になることがある）
+        let sign = if neighbors.iter().map(|&q| g[q]).sum::<f64>() < 0.0 { -1.0 } else { 1.0 };
+        let tiny = 1e-2 * around;
+        let smallest = neighbors.iter().all(|&q| g[q].abs() > g[k].abs() || (g[q].abs() == g[k].abs() && q > k));
+        let same = neighbors.iter().chain(std::iter::once(&k)).all(|&q| g[q] * sign > 0.0 || g[q].abs() <= tiny);
+        if smallest && same {
+            cands.push((k, sign, around));
+        }
+    }
+    let eval = |prog: &Program, p: [f64; 2]| values_at(prog, &[vec![p[0]], vec![p[1]], vec![0.0]])[0];
+    let grad = |prog: &Program, p: [f64; 2]| {
+        let d = 1e-6 * h;
+        [(eval(prog, [p[0] + d, p[1]]) - eval(prog, [p[0] - d, p[1]])) / (2.0 * d), (eval(prog, [p[0], p[1] + d]) - eval(prog, [p[0], p[1] - d])) / (2.0 * d)]
+    };
+    // F₁ = 0 への寄せ（勾配の向きにニュートン法）
+    let onto = |mut p: [f64; 2]| -> Option<[f64; 2]> {
+        for _ in 0..30 {
+            let v = eval(f1, p);
+            let gr = grad(f1, p);
+            let n2 = gr[0] * gr[0] + gr[1] * gr[1];
+            if !(v.is_finite() && n2 > 0.0 && n2.is_finite()) {
+                return None;
+            }
+            let step = [v * gr[0] / n2, v * gr[1] / n2];
+            p = [p[0] - step[0], p[1] - step[1]];
+            if step[0].hypot(step[1]) < 1e-12 * h {
+                break;
+            }
+        }
+        Some(p)
+    };
+    let mut out = Vec::new();
+    for (k, sign, around) in cands {
+        let start = [points[k][0], points[k][1]];
+        let Some(start) = onto(start) else { continue };
+        let gr = grad(f1, start);
+        let len = gr[0].hypot(gr[1]);
+        if len == 0.0 || !len.is_finite() {
+            continue;
+        }
+        let t = [-gr[1] / len, gr[0] / len];
+        let along = |s: f64| onto([start[0] + s * t[0], start[1] + s * t[1]]);
+        let value = |s: f64| along(s).map_or(f64::INFINITY, |q| sign * eval(f2, q)).max(f64::MIN);
+        let (mut lo, mut hi) = (-1.5 * h, 1.5 * h);
+        for _ in 0..40 {
+            let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if value(a) > value(b) {
+                lo = a;
+            } else {
+                hi = b;
+            }
+        }
+        let Some(q) = along(0.5 * (lo + hi)) else { continue };
+        let v = eval(f2, q);
+        let rad = 1e-6 * h;
+        let boxes = [Interval::new(q[0] - rad, q[0] + rad), Interval::new(q[1] - rad, q[1] + rad), Interval::point(0.0)];
+        let ok = match f2.eval_interval(&boxes) {
+            Range::Known(i) => i.lo <= 0.0 && 0.0 <= i.hi,
+            Range::Unknown => v.abs() <= 1e-9 * around,
+        };
+        if ok {
+            out.push([q[0], q[1], 0.0]);
+        }
+    }
+    out
 }
 
 /// 数値で探した点に、グレブナー基底で求めた点（`exact`。表示範囲の中のもの）を合わせる。近い点は 1 つにする

@@ -875,6 +875,11 @@ impl Program {
             .collect()
     }
 
+    /// 段差の元ごとに、`round` か（半整数で飛ぶ）
+    pub fn branch_round_sites(&self) -> Vec<bool> {
+        self.branch_site_ops().iter().map(|&i| matches!(self.code.ops[i], Op::Call1(Func::Round, _))).collect()
+    }
+
     /// 段差の元の数（[`Program::eval_branches`]・[`Program::frozen`] で使う）。実数だけで計算できない式では 0
     pub fn branch_sites(&self) -> usize {
         self.branch_site_ops().len()

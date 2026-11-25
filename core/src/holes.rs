@@ -14,6 +14,8 @@ const MAX_MARKS: usize = 128;
 pub(crate) struct Break {
     pub x: f64,
     pub sides: [Option<f64>; 2],
+    /// その点だけで定義された値（場合分けの `x = 0.025` の行。左右の極限のどちらとも違う。#158）。黒丸で描く
+    pub value: Option<f64>,
 }
 
 fn samples(program: &Program, inputs: &[&[f64]]) -> Vec<f64> {
@@ -263,6 +265,8 @@ pub(crate) fn curve(
     candidates.sort_by(f64::total_cmp);
     candidates.dedup();
     let defined = sample(&candidates);
+    // 値がある境目の候補（場合分けの条件の境目など）: その点だけで定義された値かもしれない（下で左右の極限とくらべる。#158）
+    let isolated: Vec<(f64, f64)> = candidates.iter().zip(&defined).filter(|(_, y)| y.is_finite()).map(|(&x, &y)| (x, y)).collect();
     let mut candidates: Vec<_> =
         candidates.into_iter().zip(defined).filter_map(|(x, y)| (!y.is_finite()).then_some(x)).collect();
     approximate.retain(|x| !candidates.iter().any(|y| (x - y).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0)));
@@ -270,14 +274,22 @@ pub(crate) fn curve(
     let undefined = candidates.len();
     corners.retain(|x| !candidates.iter().any(|y| (x - y).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0)));
     candidates.extend(corners);
-    // 折れ目の候補か（並べ替えても分かるように、印を付けて並べる）
-    let mut candidates: Vec<(f64, bool)> = candidates.into_iter().enumerate().map(|(i, x)| (x, i >= undefined)).collect();
+    let undefined_or_corner = candidates.len();
+    candidates.extend(isolated.iter().map(|&(x, _)| x));
+    // 候補の種類（並べ替えても分かるように、印を付けて並べる）: 0 は値の無い点、1 は折れ目、2 は値のある境目。
+    // 同じ点が何度も出たら、番号の小さいほう（値の無い点 > 折れ目 > 値のある境目）
+    let mut candidates: Vec<(f64, u8)> = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| (x, if i < undefined { 0 } else if i < undefined_or_corner { 1 } else { 2 }))
+        .collect();
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
     candidates.dedup_by(|a, b| (a.0 as f32) == (b.0 as f32) && {
-        b.1 &= a.1;
+        b.1 = b.1.min(a.1);
         true
     });
-    let corner: Vec<bool> = candidates.iter().map(|c| c.1).collect();
+    let corner: Vec<bool> = candidates.iter().map(|c| c.1 == 1).collect();
+    let valued: Vec<bool> = candidates.iter().map(|c| c.1 == 2).collect();
     // −0 は 0 にする（白丸の座標）
     let candidates: Vec<f64> = candidates.into_iter().map(|c| c.0 + 0.0).collect();
     candidates
@@ -299,15 +311,22 @@ pub(crate) fn curve(
                     })
                 })
             });
+            let differs = |a: f64, b: f64| (a - b).abs() > 1e-7 * a.abs().max(b.abs()).max(1.0);
+            // 値のある境目: その点の値が、左右の極限のどちらとも違うときだけ（1 点だけ定義された値。白丸の間に黒丸）
+            if valued[i] {
+                let y = isolated.iter().find(|(ix, _)| (*ix as f32) == (x as f32)).map_or(f64::NAN, |c| c.1);
+                let alone = y.is_finite() && sides.iter().all(|s| s.is_none_or(|v| differs(v, y)));
+                return alone.then_some(Break { x, sides, value: Some(y) });
+            }
             if corner[i] {
                 // 折れ目: 左右の極限が違う（片側だけ無い）ときだけ、導関数が無い点として除く
                 let differ = match sides {
-                    [Some(l), Some(r)] => (l - r).abs() > 1e-7 * l.abs().max(r.abs()).max(1.0),
+                    [Some(l), Some(r)] => differs(l, r),
                     [l, r] => l.is_some() != r.is_some(),
                 };
-                return differ.then_some(Break { x, sides });
+                return differ.then_some(Break { x, sides, value: None });
             }
-            sides.iter().any(Option::is_some).then_some(Break { x, sides })
+            sides.iter().any(Option::is_some).then_some(Break { x, sides, value: None })
         })
         .take(MAX_MARKS)
         .collect()
