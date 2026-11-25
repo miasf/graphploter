@@ -40,7 +40,7 @@
     Space,
     RenderMode,
   } from './lib/types'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './lib/types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, curvatureFlag, type CurvatureMode, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './lib/types'
   import { Viewer, type PickResult } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
@@ -499,6 +499,7 @@
       ode: it.ode && (it.ode.init.some((s) => s.trim() !== '') || (it.ode.t0 ?? '').trim() !== '') ? it.ode : undefined,
       layers: it.layers,
       edges: it.edges || undefined,
+      curvature: it.curvature,
       render: it.render && it.render !== 'auto' ? it.render : undefined,
       ranges: it.ranges,
       vertical: it.vertical,
@@ -1207,7 +1208,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | (coarse || !pickValues ? 0 : PLOT_POI) | sequenceTableFlag,
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | curvatureFlag(item.curvature) | (coarse || !pickValues ? 0 : PLOT_POI) | sequenceTableFlag,
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
@@ -1309,6 +1310,7 @@
     item.kind = res.kind
     if (!res.mesh.transformOnly) {
       item.gpuAvailable = !!(res.mesh.gpu3d || res.mesh.gpu2d)
+      item.curvatureAvailable = res.mesh.curvatureAvailable ?? false
       item.gpuReason = res.mesh.gpuReason ?? ''
       // 打ち切りが多くてメッシュに回した式（Viewer が決めた）
       const fb = viewer.gpuFallbackReason(item.id, res.mesh.gpu3d?.glsl)
@@ -2162,6 +2164,12 @@
   /** 描画の方法を変えたとき: 計算し直して、届いた結果で描き方を決め直す */
   function setRender(item: PlotItem, mode: RenderMode) {
     item.render = mode
+    schedule(item, 0)
+  }
+
+  /** 曲率の色分けを変えたとき（頂点の値は計算エンジンが求めるので、計算し直す） */
+  function setCurvature(item: PlotItem, mode: CurvatureMode | undefined) {
+    item.curvature = mode
     schedule(item, 0)
   }
 
@@ -3397,6 +3405,7 @@
             onLayers={(n) => setLayers(item, n)}
             onEdges={(on) => setEdges(item, on)}
             onRender={(mode) => setRender(item, mode)}
+            onCurvature={(mode) => setCurvature(item, mode)}
             onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}

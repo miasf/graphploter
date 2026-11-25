@@ -8539,6 +8539,181 @@ pub fn jump_surfaces(prog: &Program, dom: Domain, n: usize) -> Mesh {
     merge(parts, false)
 }
 
+/// 3D の、段差の枝のうち枝を固定した式が恒等的に 0 になる枝（体積のある解。`floor(x) + floor(y) + floor(z) = 0` の単位立方体の並び）。
+/// 枝ごとに (範囲の不等式, 厳密か, 枝の格子点を囲む箱) を返す。表示範囲の 24³ 点の枝の番号から集める。無ければ空
+pub fn branch_volumes_3d(prog: &Program, dom: Domain) -> Vec<(Vec<Program>, Vec<bool>, Domain)> {
+    let sites = prog.branch_sites();
+    if sites == 0 || sites > 4 || prog.branch_closed_high().iter().any(|k| k.is_none()) || prog.branch_round_sites().iter().any(|&r| r) || prog.vars().len() != 3 {
+        return Vec::new();
+    }
+    let m = 24;
+    let mut cols: [Vec<f64>; 3] = Default::default();
+    for i in 0..m * m * m {
+        let idx = [i % m, i / m % m, i / (m * m)];
+        for c in 0..3 {
+            cols[c].push(dom.lo[c] + (dom.hi[c] - dom.lo[c]) * (idx[c] as f64 + 0.5) / m as f64);
+        }
+    }
+    let tau = prog.eval_branches(&[&cols[0], &cols[1], &cols[2]], cols[0].len());
+    // 枝ごとの、格子点を囲む箱
+    let mut seen: Vec<(Vec<i64>, [f64; 3], [f64; 3])> = Vec::new();
+    for (i, t) in tau.chunks_exact(sites).enumerate() {
+        if t.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let key: Vec<i64> = t.iter().map(|&v| v as i64).collect();
+        let p = [cols[0][i], cols[1][i], cols[2][i]];
+        match seen.iter_mut().find(|e| e.0 == key) {
+            Some(e) => {
+                for c in 0..3 {
+                    e.1[c] = e.1[c].min(p[c]);
+                    e.2[c] = e.2[c].max(p[c]);
+                }
+            }
+            None => {
+                if seen.len() >= 2000 {
+                    return Vec::new();
+                }
+                seen.push((key, p, p));
+            }
+        }
+    }
+    let cell = [0, 1, 2].map(|c| (dom.hi[c] - dom.lo[c]) / m as f64);
+    let mut out = Vec::new();
+    for (key, lo, hi) in seen {
+        let k: Vec<f64> = key.iter().map(|&v| v as f64).collect();
+        let f = prog.frozen(&k);
+        if !f.is_constant() {
+            continue;
+        }
+        let mut val = [C::new(0.0, 0.0)];
+        let zero = [0.0];
+        let at: Vec<&[f64]> = (0..f.vars().len()).map(|_| &zero[..]).collect();
+        f.eval_batch(&at, &mut val);
+        if val[0] != C::new(0.0, 0.0) {
+            continue;
+        }
+        let mut cuts = Vec::new();
+        let mut strict = Vec::new();
+        for c in prog.branch_conds(&k) {
+            if c.lo.is_finite() {
+                cuts.push(c.prog.level_of(crate::functions::Func::Re, c.lo).negated());
+                strict.push(!c.lo_closed);
+            }
+            if c.hi.is_finite() {
+                cuts.push(c.prog.level_of(crate::functions::Func::Re, c.hi));
+                strict.push(!c.hi_closed);
+            }
+        }
+        if cuts.is_empty() {
+            continue;
+        }
+        // 枝の格子点を囲む箱を 1 マス広げた範囲（表示範囲の中）
+        let bx = Domain {
+            lo: [0, 1, 2].map(|c| (lo[c] - cell[c]).max(dom.lo[c])),
+            hi: [0, 1, 2].map(|c| (hi[c] + cell[c]).min(dom.hi[c])),
+        };
+        out.push((cuts, strict, bx));
+    }
+    out
+}
+
+/// 式が座標の 1 次式 n · p + d なら (n, d)（7 点の値が 1 次式に合うかで確かめる）
+pub fn affine_of(g: &Program) -> Option<([f64; 3], f64)> {
+    if g.vars().len() != 3 {
+        return None;
+    }
+    let pts = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.37, -1.3, 2.1], [-2.2, 0.9, -0.4], [3.1, 2.7, 1.9]];
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| pts.iter().map(|p| p[c]).collect());
+    let mut out = vec![C::new(0.0, 0.0); pts.len()];
+    g.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+    let v: Vec<f64> = out.iter().map(|z| as_real(*z)).collect();
+    if v.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    let d = v[0];
+    let n = [v[1] - d, v[2] - d, v[3] - d];
+    let ok = pts.iter().zip(&v).skip(4).all(|(p, &val)| {
+        let pred = n[0] * p[0] + n[1] * p[1] + n[2] * p[2] + d;
+        (pred - val).abs() <= 1e-9 * (1.0 + val.abs() + pred.abs())
+    });
+    (ok && n.iter().any(|&c| c != 0.0)).then_some((n, d))
+}
+
+/// 1 次式の不等式 n_i · p + d_i ≤ 0 の共通部分（凸多面体）と箱 `bx` の、境目の面（各平面の多角形を、ほかの半空間と箱で切ったもの）
+pub fn convex_faces(planes: &[([f64; 3], f64)], bx: Domain) -> Mesh {
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let mut all: Vec<([f64; 3], f64)> = planes.to_vec();
+    for c in 0..3 {
+        let mut e = [0.0; 3];
+        e[c] = 1.0;
+        all.push((e, -bx.hi[c]));
+        all.push(([-e[0], -e[1], -e[2]], bx.lo[c]));
+    }
+    let size = (0..3).map(|c| (bx.hi[c] - bx.lo[c]).powi(2)).sum::<f64>().sqrt() + 1.0;
+    let center = [0, 1, 2].map(|c| 0.5 * (bx.lo[c] + bx.hi[c]));
+    let mut mesh = Mesh::default();
+    for (i, &(n, d)) in planes.iter().enumerate() {
+        let len = dot(n, n).sqrt();
+        let nn = n.map(|v| v / len);
+        // 平面の上の、箱の中心にいちばん近い点と、平面の 2 つの向き
+        let t = (dot(n, center) + d) / (len * len);
+        let p0 = [0, 1, 2].map(|c| center[c] - t * n[c]);
+        let a = if nn[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let u = {
+            let k = dot(a, nn);
+            let w = [0, 1, 2].map(|c| a[c] - k * nn[c]);
+            let l = dot(w, w).sqrt();
+            w.map(|x| x / l)
+        };
+        let v = [nn[1] * u[2] - nn[2] * u[1], nn[2] * u[0] - nn[0] * u[2], nn[0] * u[1] - nn[1] * u[0]];
+        let mut poly: Vec<[f64; 3]> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .iter()
+            .map(|&(s, r)| [0, 1, 2].map(|c| p0[c] + size * (s * u[c] + r * v[c])))
+            .collect();
+        for (j, &(m, e)) in all.iter().enumerate() {
+            if j == i || poly.len() < 3 {
+                continue;
+            }
+            let f = |p: [f64; 3]| dot(m, p) + e;
+            let mut next = Vec::with_capacity(poly.len() + 1);
+            for k in 0..poly.len() {
+                let (a, b) = (poly[k], poly[(k + 1) % poly.len()]);
+                let (fa, fb) = (f(a), f(b));
+                if fa <= 0.0 {
+                    next.push(a);
+                }
+                if (fa <= 0.0) != (fb <= 0.0) {
+                    let s = fa / (fa - fb);
+                    next.push([0, 1, 2].map(|c| a[c] + s * (b[c] - a[c])));
+                }
+            }
+            poly = next;
+        }
+        if poly.len() < 3 {
+            continue;
+        }
+        // 外向き（n の向き）に三角形を並べる
+        let base = (mesh.positions.len() / 3) as u32;
+        for p in &poly {
+            mesh.positions.extend(p.map(|x| x as f32));
+            mesh.normals.extend(nn.map(|x| x as f32));
+        }
+        let e1 = [0, 1, 2].map(|c| poly[1][c] - poly[0][c]);
+        let e2 = [0, 1, 2].map(|c| poly[2][c] - poly[0][c]);
+        let cross = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let flip = dot(cross, nn) < 0.0;
+        for k in 1..poly.len() as u32 - 1 {
+            if flip {
+                mesh.indices.extend([base, base + k + 1, base + k]);
+            } else {
+                mesh.indices.extend([base, base + k, base + k + 1]);
+            }
+        }
+    }
+    mesh
+}
+
 /// 段差の枝のうち、枝を固定した式が恒等的に 0 になる枝の範囲（面積のある解。`floor(x) + floor(y) = 0` の正方形の並び）を塗った領域。
 /// 格子（`n` × `n`）の点の枝の番号から、現れる枝を集めて調べる。無ければ None
 pub fn branch_regions_2d(prog: &Program, dom: Domain, n: usize) -> Option<Mesh> {

@@ -160,8 +160,22 @@ vec3 cmapVivid(float t) {
   if (x < 4.0) return mix(s3, s4, x - 3.0);
   return mix(s4, s5, x - 4.0);
 }
+// 発散型（曲率の色分け。0 が真ん中）: 青 → 白に近い灰 → 赤（Moreland の cool-warm を 5 点で近似）
+vec3 cmapDiverge(float t) {
+  const vec3 s0 = vec3(0.230, 0.299, 0.754);
+  const vec3 s1 = vec3(0.552, 0.690, 0.996);
+  const vec3 s2 = vec3(0.865, 0.865, 0.865);
+  const vec3 s3 = vec3(0.958, 0.604, 0.482);
+  const vec3 s4 = vec3(0.706, 0.016, 0.150);
+  float x = t * 4.0;
+  if (x < 1.0) return mix(s0, s1, x);
+  if (x < 2.0) return mix(s1, s2, x - 1.0);
+  if (x < 3.0) return mix(s2, s3, x - 2.0);
+  return mix(s3, s4, x - 3.0);
+}
 vec3 colormap(float t, float which, vec3 base) {
   t = clamp(t, 0.0, 1.0);
+  if (which > 3.5) return pow(cmapDiverge(t), vec3(2.2));
   if (which > 2.5) return pow(cmapVivid(t), vec3(2.2));
   if (which > 1.5) return cmapShade(t, base);
   vec3 srgb = clamp(which > 0.5 ? cmapTurbo(t) : cmapViridis(t), 0.0, 1.0);
@@ -179,8 +193,17 @@ const VIVID_STOPS = [
   [1.0, 0.08, 0.38],
 ]
 
+/** COLORMAP_GLSL の cmapDiverge の色の点（sRGB） */
+const DIVERGE_STOPS = [
+  [0.23, 0.299, 0.754],
+  [0.552, 0.69, 0.996],
+  [0.865, 0.865, 0.865],
+  [0.958, 0.604, 0.482],
+  [0.706, 0.016, 0.15],
+]
+
 /** 色の対応表の番号（シェーダーの uColormap） */
-export const COLORMAP_INDEX = { viridis: 0, turbo: 1, shade: 2, vivid: 3 } as const
+export const COLORMAP_INDEX = { viridis: 0, turbo: 1, shade: 2, vivid: 3, diverge: 4 } as const
 
 /** COLORMAP_GLSL の colormap と同じ色（JS 版。曲線の頂点の色に使う）。返す色は線形の色空間 */
 /**
@@ -219,11 +242,12 @@ export function colormapColor(t: number, which: keyof typeof COLORMAP_INDEX, bas
   t = Math.min(1, Math.max(0, t))
   if (which === 'shade') return shadeColor(t, base, out)
   let r: number, g: number, b: number
-  if (which === 'vivid') {
-    const x = t * 5
-    const k = Math.min(4, Math.floor(x))
+  if (which === 'vivid' || which === 'diverge') {
+    const stops = which === 'vivid' ? VIVID_STOPS : DIVERGE_STOPS
+    const x = t * (stops.length - 1)
+    const k = Math.min(stops.length - 2, Math.floor(x))
     const f = x - k
-    ;[r, g, b] = [0, 1, 2].map((c) => VIVID_STOPS[k][c] + (VIVID_STOPS[k + 1][c] - VIVID_STOPS[k][c]) * f)
+    ;[r, g, b] = [0, 1, 2].map((c) => stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f)
   } else if (which === 'turbo') {
     const v4 = [1, t, t * t, t * t * t]
     const v2 = [v4[2] * v4[2], v4[3] * v4[2]]
