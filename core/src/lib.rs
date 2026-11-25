@@ -95,6 +95,10 @@ pub struct MeshResult {
     coord: Option<coords::CoordMap>,
     /// 座標系があるとき、`outline` の 2 本の線を移した先
     outline_target: (Vec<f32>, Vec<f32>),
+    /// 添えの線・点（面・領域・曲線と一緒に描く、次元の低い部分。#120 #121 #175）。線分ごとに 2 点と NaN、点は同じ点 2 つと NaN。
+    /// GPU で画素ごとに描くときも、メッシュで重ねて描く
+    extra: Vec<f32>,
+    extra_target: Vec<f32>,
     /// 展開で使った定義の名前と、この行が定義の行ならその名前（[`definitions`]）
     defs: (Vec<String>, Option<String>),
     /// 2D 表示の曲線・不等式の領域を、画素ごとに描くための GLSL（計画 12 章の G4。GPU に移せない式・座標系を使う式では None）
@@ -218,6 +222,14 @@ impl MeshResult {
     /// 同じく点線の分
     pub fn take_outline_dashed_target(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline_target.1)
+    }
+    /// 添えの線・点（Float32Array。無ければ空）。面・曲線と同じ色で、GPU で描くときも重ねて描く
+    pub fn take_extra(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.extra)
+    }
+    /// 同じく、座標系で移した先（座標系が無ければ空）
+    pub fn take_extra_target(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.extra_target)
     }
     /// 実線の点ごとの値（Float32Array。ベクトル場の流線の大きさ。無ければ空）
     pub fn take_outline_values(&mut self) -> Vec<f32> {
@@ -542,6 +554,8 @@ pub fn coord_grid(
         vector_arrows: false,
         vivid: false,
         outline_target: Default::default(),
+        extra: Vec::new(),
+        extra_target: Vec::new(),
         coord: None,
         value_range: None,
         volume: None,
@@ -1019,7 +1033,16 @@ pub fn plot(
     }
     let mut outline_target = (Vec::new(), Vec::new());
     let mut holes_target = Vec::new();
+    let mut extra = built.extra;
+    let has_extra = !extra.is_empty();
+    if flat {
+        for p in extra.chunks_exact_mut(3).filter(|p| p[0].is_finite()) {
+            p[2] = 0.0;
+        }
+    }
+    let mut extra_target = Vec::new();
     if let Some(c) = &coord {
+        extra_target = c.apply_line(&mut extra, flat);
         // 作る範囲からはみ出した所を落とす（媒介変数表示は、範囲が媒介変数で決まるので切らない）
         let parametric = built.shape.is_some() && !built.rotated_explicit;
         if !parametric {
@@ -1030,7 +1053,10 @@ pub fn plot(
         holes_target = c.apply_line(&mut holes, flat);
     }
     // 3D の陰関数（回した陽関数を陰関数にしたものも）を光線で描くための GLSL と、使えないならその理由
-    let gpu3d = gpu3d_of(&plot, &consts, &space, flat, hidden_on, coord.is_some(), built.gpu2d.is_some());
+    let gpu3d = match &built.gpu3d_off {
+        Some(reason) => (None, reason.clone()),
+        None => gpu3d_of(&plot, &consts, &space, flat, hidden_on, coord.is_some(), built.gpu2d.is_some()),
+    };
     let lod_start = timing::now_ms();
     if !curve {
         mesh::add_cluster_lod(&mut inner);
@@ -1047,6 +1073,8 @@ pub fn plot(
         flat_slice: ctx.flat_slice,
         outline,
         outline_target,
+        extra,
+        extra_target,
         outline_values: built.outline_values,
         vector_arrows,
         vivid: built.vivid,
@@ -1054,7 +1082,8 @@ pub fn plot(
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
-        shape: if trimmed || uncached_exclusion || fully_excluded {
+        // 添えの線・点のある式は、回転だけ変わったときも作り直す（射影し直す形を返さない）
+        shape: if trimmed || uncached_exclusion || fully_excluded || has_extra {
             None
         } else {
             built.shape
@@ -1933,6 +1962,10 @@ struct Built {
     local: Option<(mesh::LocalMesh, Vec<String>)>,
     /// 2D 表示の不等式の領域の境目の線（実線, 点線）
     outline: (Vec<f32>, Vec<f32>),
+    /// 添えの線・点（[`MeshResult`] の `extra`）
+    extra: Vec<f32>,
+    /// 光線（GPU）で描けない理由（あれば、GPU の描き方を使わない）
+    gpu3d_off: Option<String>,
     /// 実線の点ごとの値（流線の大きさ ‖F‖。value_range の色の対応表で塗る）。ふつうは空
     outline_values: Vec<f32>,
     /// ベクトル場（矢印・流線を、鮮やかな色の対応表で塗る）
@@ -1985,6 +2018,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             parts.iter().flat_map(|b| b.outline.0.iter().copied()).collect(),
             parts.iter().flat_map(|b| b.outline.1.iter().copied()).collect(),
         );
+        let extra: Vec<f32> = parts.iter().flat_map(|b| b.extra.iter().copied()).collect();
         let mut holes = parts.iter().flat_map(|b| b.holes.iter().copied()).collect();
         let source_holes: Vec<_> = parts.iter().flat_map(|b| b.source_holes.iter().copied()).collect();
         let source_dashed: Vec<_> = parts.iter().flat_map(|b| b.source_dashed.iter().copied()).collect();
@@ -1994,7 +2028,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             if let Some(shape) = mesh::merge_shapes(shapes.clone()) {
                 // 切り口の線にするのは射影した後（plot・Shape::project）なので、ここでは元の種類のままにする
                 let curve = parts_curve_raw;
-                return Ok(Built { shape: Some(shape), source_holes, source_dashed, fields, curve, kind, rotated_explicit, outline, ..Default::default() });
+                return Ok(Built { shape: Some(shape), source_holes, source_dashed, fields, curve, kind, rotated_explicit, outline, extra, ..Default::default() });
             }
             // つなげられない（点の並べ方が違う）ときは、射影してからつなげる
             let meshes = shapes
@@ -2010,7 +2044,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 .collect();
             let marks = source_holes.chunks_exact(ctx.space.dims).map(|p| ctx.view.apply(p));
             append_visible_holes(&mut holes, marks, ctx.dom, ctx.flat, ctx.flat_slice && !parts_curve_raw, ctx.size);
-            return Ok(Built { inner: mesh::merge(meshes, curve), holes, source_dashed, fields, curve, kind, outline, ..Default::default() });
+            return Ok(Built { inner: mesh::merge(meshes, curve), holes, source_dashed, fields, curve, kind, outline, extra, ..Default::default() });
         }
         let meshes = parts
             .into_iter()
@@ -2028,7 +2062,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             .collect();
         let marks = source_holes.chunks_exact(ctx.space.dims).map(|p| ctx.view.apply(p));
         append_visible_holes(&mut holes, marks, ctx.dom, ctx.flat, ctx.flat_slice && !parts_curve_raw, ctx.size);
-        return Ok(Built { inner: mesh::merge(meshes, curve), holes, source_dashed, fields, curve, kind, outline, ..Default::default() });
+        return Ok(Built { inner: mesh::merge(meshes, curve), holes, source_dashed, fields, curve, kind, outline, extra, ..Default::default() });
     }
     if let Some(mut b) = field_built(plot, ctx) {
         if let P::Limit { report, .. } = plot {
@@ -2149,10 +2183,26 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 b.inner = mesh::implicit_solid_opt(&g, dom, ctx.implicit_resolution, &[], 0, ctx.implicit_refine);
                 mesh::color_by_complex(&mut b.inner, prog);
             } else {
-                b.curve = true;
-                b.kind = "複素数の陰関数（Re F = Im F = 0 の曲線）".into();
                 let (re, im) = (prog.part(Func::Re), prog.part(Func::Im));
-                b.inner = system::intersection_curve(&re, &im, dom, ctx.implicit_resolution, ctx.implicit_refine);
+                // Re F と Im F が同じ面になる式（i F = 0、F + i F = 0、F + i F² = 0。#122）: 片方の面の上で、もう片方がどこでもほぼ 0 なら、
+                // その面が解（交わりは線でなく面）
+                let n = ctx.implicit_resolution;
+                let mut done = false;
+                for (first, second) in [(&re, &im), (&im, &re)] {
+                    let surface = mesh::implicit_solid_opt(first, dom, n, &[], 0, ctx.implicit_refine);
+                    if !surface.indices.is_empty() && system::vanishes_on(first, second, &surface, dom) {
+                        b.kind = "複素数の陰関数（Re F と Im F が同じ面になるので、F = 0 の面。数値で判定）".into();
+                        b.inner = surface;
+                        b.fields.push(mesh::Field::new(first, &[], 0, dom));
+                        done = true;
+                        break;
+                    }
+                }
+                if !done {
+                    b.curve = true;
+                    b.kind = "複素数の陰関数（Re F = Im F = 0 の曲線）".into();
+                    b.inner = system::intersection_curve(&re, &im, dom, n, ctx.implicit_refine);
+                }
             }
         }
         // 面にならず、線・点だけになる式（A² + B² = 0 は A = B = 0 の線）: 交わる線・点として描く
@@ -2167,6 +2217,22 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| mesh::implicit_solid_opt(prog, d, ctx.implicit_resolution, &[], 0, ctx.implicit_refine));
             b.kind.push_str(&b.inner.note);
             b.fields.push(mesh::Field::new(prog, &[], 0, dom));
+            // 段差の飛ぶ面の上だけの解（floor(x) + floor(-x) = 0 の整数の平面。#175）。光線（GPU）では厚さ 0 の面は描けないので、メッシュで描く
+            let jumps = mesh::jump_surfaces(prog, dom, ctx.implicit_resolution);
+            if !jumps.indices.is_empty() {
+                b.inner = mesh::merge(vec![std::mem::take(&mut b.inner), jumps], false);
+                b.gpu3d_off = Some("段差の飛ぶ面の上だけで成り立つ解があるので、メッシュで描きます".into());
+                // 細い枝として描けなかった所は、飛ぶ面として描いた
+                b.kind = b.kind.replace("（細かすぎて描けない部分あり）", "");
+            }
+            // 面になる因数と混ざった、線・点だけの因数（(x² + y²)(z − 1) = 0 の z 軸。#120）: 添えの線・点として描く
+            if let Some(sets) = prog.lower_dim_parts() {
+                let (m, _) = system::common_zero_sets(&sets, dom, ctx.implicit_resolution, ctx.implicit_refine);
+                b.extra = m.positions;
+                if !b.extra.is_empty() {
+                    b.kind.push_str("（線・点の部分を含む）");
+                }
+            }
         }
         P::Solid { prog, ranges, .. } => {
             b.inner = mesh::implicit_solid(prog, dom, ctx.implicit_resolution, ranges, space.samples);
@@ -2199,7 +2265,7 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // 等式 1 本と不等式: 等式の行を今までの道で描き、できたメッシュを不等式ごとに切り取る（system::trim_mesh）。
         // 回した陽関数の点（shape）は射影してメッシュにする（回転が変わるたびに計算し直す）。切り口のふたは作らない
         // 切り取った後の面が表示範囲に比べて小さければ（x² + y² = 1, 0 ≤ z ≤ 1 を ±6 で）、その周りだけで作り直す（fit_to_shape）
-        P::System { base: Some(base), eqs, cuts, .. } if eqs.len() == 1 => {
+        P::System { base: Some(base), eqs, cuts, strict, .. } if eqs.len() == 1 => {
             let made = std::cell::RefCell::new(None);
             let trimmed = |d: mesh::Domain| -> mesh::Mesh {
                 let c = Ctx { dom: d, ..ctx.clone() };
@@ -2230,6 +2296,33 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             for g in cuts {
                 system::clip_segments(&mut dashed, &mut system::values_of(g), 12);
             }
+            // 等号つきの不等式の境目に面が接するだけの点（x² + y² + z² = 1, z ≥ 1 の (0, 0, 1)。#206）: 切り取ると消えるので、添えの点にする
+            if !curve && !cuts.is_empty() && !ctx.flat {
+                if let P::Implicit { prog, .. } = &**base {
+                    let n = ctx.implicit_resolution;
+                    let surface = mesh::implicit_solid_opt(prog, dom, n, &[], 0, ctx.implicit_refine);
+                    let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
+                    let kept: Vec<[f64; 3]> = m.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+                    let mut pts = Vec::new();
+                    for (i, g) in cuts.iter().enumerate() {
+                        if strict.get(i) == Some(&true) {
+                            continue;
+                        }
+                        for p in system::touching_points(prog, g, &surface, dom, n) {
+                            let inside = cuts.iter().zip(strict.iter()).all(|(c, &st)| {
+                                let v = system::values_of(c)(&[p])[0];
+                                let eps = 1e-3 * strict_margin(c, dom);
+                                if st { v < -eps } else { v <= eps }
+                            });
+                            let near = kept.iter().any(|q| (0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>() < (2.0 * h).powi(2));
+                            if inside && !near {
+                                pts.push(p);
+                            }
+                        }
+                    }
+                    b.extra = system::points_mesh(&pts).positions;
+                }
+            }
             b.inner = m;
             b.outline.1 = dashed;
             b.curve = curve;
@@ -2238,8 +2331,31 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         // 交わる線: 書いた順で 1 本目の等式の面の上で、2 本目の等式の線を取り出し、ニュートン法で寄せる（system.rs）。
         // 不等式があれば、線分を切る
         P::System { eqs, cuts, exact, .. } if eqs.len() == 2 => {
+            let n = ctx.implicit_resolution;
+            // 1 本目と同じ面になる 2 本目（定数倍・恒等式。#206）: 面そのものが解
+            let surface = mesh::implicit_solid_opt(&eqs[0], dom, n, &[], 0, ctx.implicit_refine);
+            for (first, second) in [(0, 1), (1, 0)] {
+                let own = (first == 1).then(|| mesh::implicit_solid_opt(&eqs[1], dom, n, &[], 0, ctx.implicit_refine));
+                let s = own.as_ref().unwrap_or(&surface);
+                if system::vanishes_on(&eqs[first], &eqs[second], s, dom) {
+                    let mut m = own.unwrap_or_else(|| mesh::implicit_solid_opt(&eqs[0], dom, n, &[], 0, ctx.implicit_refine));
+                    for g in cuts {
+                        system::trim_mesh(&mut m, &mut system::values_of(g), 8);
+                    }
+                    b.inner = m;
+                    b.kind = "連立方程式の面（2 本の式が同じ面）".into();
+                    b.fields.push(mesh::Field::new(&eqs[first], &[], 0, dom));
+                    return Ok(b);
+                }
+            }
             b.curve = true;
-            b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, ctx.implicit_resolution, ctx.implicit_refine);
+            b.inner = system::intersection_curve(&eqs[0], &eqs[1], dom, n, ctx.implicit_refine);
+            // 面どうしが接するだけの所（球 2 つが 1 点で、球と円柱が赤道の円で接する。#119・#206）
+            let touch = system::touching_points(&eqs[0], &eqs[1], &surface, dom, n);
+            if !touch.is_empty() {
+                let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
+                b.inner = mesh::merge(vec![std::mem::take(&mut b.inner), system::touching_mesh(&touch, h)], true);
+            }
             // 縦の座標を使わない 2 本の等式で、符号の変わる所が無い（接するだけ: y = x², y = 0 は x = y = 0 の直線）なら、
             // グレブナー基底で求めた平面の解（exact[1]）を縦にのばした直線にする
             if b.inner.positions.is_empty() && !eqs.iter().any(|e| e.uses_var_index(2)) {
@@ -2308,6 +2424,10 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         P::System { eqs, cuts, faces, strict, .. } if eqs.is_empty() => {
             b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| system::region_faces(cuts, faces, d, ctx.implicit_resolution, ctx.resolution, ctx.implicit_refine, ctx.refine));
             b.fields.push(mesh::Field::region_strict(cuts, strict));
+            let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / ctx.implicit_resolution.max(2) as f64).fold(f64::INFINITY, f64::min);
+            if let Some(t) = system::thin_region(cuts, &b.inner, h) {
+                b.kind = format!("{}（厚さ約 {}。格子より薄い）", b.kind, critical::num_text(t));
+            }
         }
         P::SetImage(_) => unreachable!("set images are built before the 2D/3D split"),
         P::System { .. } => return Err("連立方程式・不等式は、まだ描けません".into()),
@@ -2413,14 +2533,35 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.kind = format!("{} = f({})", names[*axis], other);
             let breaks = explicit_curve_breaks(expr, prog, names, *axis, &space.with_hidden(ctx.params), dom);
             (b.inner, b.holes) = mesh::explicit_curve_with_holes(prog, *axis, dom, ctx.size * 1e-4, &breaks);
+            add_narrow_extrema(&mut b.inner.positions, expr, prog, names, *axis, &space.with_hidden(ctx.params), dom, ctx.size * 1e-4);
         }
         // 複素数の陰関数の 2D 表示: Re F = Im F = 0 の交点
         P::Implicit { prog, .. } if system::is_complex_valued(prog, dom) => {
             let (re, im) = (prog.part(functions::Func::Re), prog.part(functions::Func::Im));
-            let pts = system::flat_points(&re, &im, dom, res2);
             b.curve = true;
+            // Re F と Im F が同じ曲線になる式（#122 の 2D）: その曲線が解
+            for (first, second) in [(&re, &im), (&im, &re)] {
+                let line = mesh::implicit_curve_2d(first, dom, res2);
+                if !line.positions.is_empty() && system::vanishes_on(first, second, &line, dom) {
+                    b.kind = "複素数の陰関数（Re F と Im F が同じ曲線になるので、F = 0 の曲線。数値で判定）".into();
+                    b.inner = line;
+                    return Ok(b);
+                }
+            }
+            let pts = system::flat_points(&re, &im, dom, res2);
             b.kind = format!("複素数の陰関数（Re F = Im F = 0 の点、{} 個）", pts.len());
             b.inner = system::points_mesh(&pts);
+        }
+        // 段差の枝の中で恒等的に成り立つ解（floor(x) + floor(y) = 0 の正方形の並び。面積がある）: その範囲を塗り、曲線の部分は添えの線にする
+        P::Implicit { prog, from: None, .. } if mesh::branch_regions_2d(prog, dom, res2 / 2).is_some() => {
+            b.kind = "陰関数（面積のある解を含む）".into();
+            b.inner = mesh::branch_regions_2d(prog, dom, res2 / 2).unwrap_or_default();
+            b.extra = mesh::implicit_curve_2d(prog, dom, res2).positions;
+        }
+        // 恒等式（√x = √x・(x − 1)/(x − 1) = 1）: 定義される所の全体が解なので、領域として塗る（#206）
+        P::Implicit { prog, from: None, .. } if identically_zero_2d(prog, dom) => {
+            b.kind = "陰関数（恒等式: 定義される所の全体）".into();
+            b.inner = mesh::Field::region_strict(std::slice::from_ref(prog), &[false]).cap(dom, 2, 0.0, true, res2 / 2);
         }
         P::Implicit { prog, from, gpu, .. } => {
             b.curve = true;
@@ -2429,7 +2570,7 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
                 Some(f) => format!("{f} を回したものの切り口"),
                 None => "陰関数の曲線".into(),
             };
-            b.inner = mesh::implicit_curve_2d(prog, dom, res2);
+            (b.inner, b.extra) = mesh::implicit_curve_2d_parts(prog, dom, res2);
             // 回転・断面・パラメータを uniform で渡せる形（元の座標の式）があればそれ、無ければ畳み込んだ式
             b.gpu2d = match gpu {
                 Some(g) => gpu2d::scene_affine(Some(&g.prog), &[], &[], g.dims, g.params.len()).ok().map(|s| with_affine(s, space, &g.params)),
@@ -2502,16 +2643,45 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             1 => {
                 b.curve = true;
                 b.kind = "陰関数の曲線（不等式で切り取り）".into();
-                b.inner = mesh::implicit_curve_2d(&eqs[0], dom, res2);
+                (b.inner, b.extra) = mesh::implicit_curve_2d_parts(&eqs[0], dom, res2);
                 b.gpu2d = match gpu {
                     Some(g) => gpu2d::scene_affine(g.eqs.first(), &g.cuts, strict, g.dims, g.params.len()).ok().map(|s| with_affine(s, space, &g.params)),
                     None => gpu2d::scene(Some(&eqs[0]), cuts, strict).ok(),
                 };
+                let whole = b.inner.positions.clone();
                 for g in cuts {
                     system::clip_segments(&mut b.inner.positions, &mut system::values_of(g), 12);
+                    system::clip_segments(&mut b.extra, &mut system::values_of(g), 12);
+                }
+                // 切り取りで残った、マスの 1/100 より短い切れ端（接する点のすぐ脇で、折れ線が境目を少しはみ出した所）は捨てる
+                let h = (0..2).map(|a| (dom.hi[a] - dom.lo[a]) / res2.max(2) as f64).fold(f64::INFINITY, f64::min);
+                drop_slivers(&mut b.inner.positions, 1e-2 * h);
+                // 等号つきの不等式の境目に、曲線が接するだけの点（x² + y² = 1, x ≥ 1 の (1, 0)。#206）: 切り取ると長さが無くなって消える。
+                // 境目の線と接する点のうち、残った曲線から離れていて、ほかの不等式も満たすものを点として足す
+                let touches = inequality_touches_2d(&eqs[0], cuts, strict, &whole, &b.inner.positions, dom, res2);
+                if !touches.is_empty() {
+                    if !b.extra.is_empty() {
+                        b.extra.extend_from_slice(&[f32::NAN; 3]);
+                    }
+                    b.extra.extend(system::points_mesh(&touches).positions);
                 }
             }
             2 => {
+                // 2 本の式が同じ曲線になる（定数倍・恒等式）: その曲線が解
+                for (first, second) in [(0, 1), (1, 0)] {
+                    let (mut line, mut extra) = mesh::implicit_curve_2d_parts(&eqs[first], dom, res2);
+                    let whole = mesh::Mesh { positions: [line.positions.clone(), extra.clone()].concat(), ..Default::default() };
+                    if !whole.positions.is_empty() && system::vanishes_on(&eqs[first], &eqs[second], &whole, dom) {
+                        for g in cuts {
+                            system::clip_segments(&mut line.positions, &mut system::values_of(g), 12);
+                            system::clip_segments(&mut extra, &mut system::values_of(g), 12);
+                        }
+                        b.curve = true;
+                        b.kind = "連立方程式の曲線（2 本の式が同じ曲線）".into();
+                        (b.inner, b.extra) = (line, extra);
+                        return Ok(b);
+                    }
+                }
                 let pts = system::with_exact(system::flat_points(&eqs[0], &eqs[1], dom, res2), exact[1].as_deref(), dom, 2);
                 let pts = system::points_inside(pts, cuts);
                 b.curve = true;
@@ -2522,6 +2692,134 @@ fn build_2d(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
         },
     }
     Ok(b)
+}
+
+/// 標本の間に隠れた細い山・谷（y = 1/(1 + 10²⁰ (x − 0.234567)²) の高さ 1 の山。幅 10⁻¹⁰ で、どの標本にも乗らない。#206）を曲線に足す。
+/// 導関数 f′ を記号微分して 1,000 点で調べ（符号の変わる所が 200 を超える波打つ式は調べない）、符号が変わる所を二分法で詰めて極値の点 x* を求める。そこでの f(x*) が、
+/// 曲線（両隣の頂点を結んだ線分）から `tol` より離れていれば、頂点 (x*, f(x*)) を曲線に差し込む
+fn add_narrow_extrema(positions: &mut Vec<f32>, expr: &parser::Expr, prog: &eval::Program, names: &[String; 3], axis: usize, params: &eval::Params, dom: mesh::Domain, tol: f64) {
+    let free = usize::from(axis == 0);
+    let var = &names[free];
+    let section = expr.substitute(&|name| (name == names[2]).then_some(parser::Expr::Num(0.0)));
+    let Ok(d) = diff::diff(&section, var) else { return };
+    let Ok(dp) = eval::Program::compile_with(&d, &[var.as_str()], params) else { return };
+    let (lo, hi) = (dom.lo[free], dom.hi[free]);
+    let n = 1000;
+    let xs: Vec<f64> = (0..=n).map(|k| lo + (hi - lo) * k as f64 / n as f64).collect();
+    let eval_d = |pts: &[f64]| {
+        let mut out = vec![num_complex::Complex64::new(0.0, 0.0); pts.len()];
+        dp.eval_batch(&[pts], &mut out);
+        out.iter().map(|v| eval::as_real(*v)).collect::<Vec<f64>>()
+    };
+    let ds = eval_d(&xs);
+    // 符号が変わる所（多すぎる式は、細い山を探すまでもなく波打っているので調べない）
+    let brackets: Vec<(f64, f64, bool)> = (0..n)
+        .filter(|&k| ds[k].is_finite() && ds[k + 1].is_finite() && ds[k] != 0.0 && ds[k + 1] != 0.0 && (ds[k] < 0.0) != (ds[k + 1] < 0.0))
+        .map(|k| (xs[k], xs[k + 1], ds[k] < 0.0))
+        .collect();
+    if brackets.is_empty() || brackets.len() > 200 {
+        return;
+    }
+    // 二分法（まとめて計算する）
+    let (mut l, mut r): (Vec<f64>, Vec<f64>) = brackets.iter().map(|b| (b.0, b.1)).unzip();
+    for _ in 0..60 {
+        let mids: Vec<f64> = l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect();
+        let dm = eval_d(&mids);
+        for (k, (&m, v)) in mids.iter().zip(dm).enumerate() {
+            if !v.is_finite() {
+                continue;
+            }
+            if (v < 0.0) == brackets[k].2 {
+                l[k] = m;
+            } else {
+                r[k] = m;
+            }
+        }
+    }
+    let extrema: Vec<f64> = l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect();
+    let ys = holes::curve_samples(prog, &extrema);
+    for (x, y) in extrema.into_iter().zip(ys) {
+        if !y.is_finite() || y < dom.lo[axis] - (dom.hi[axis] - dom.lo[axis]) || y > dom.hi[axis] + (dom.hi[axis] - dom.lo[axis]) {
+            continue;
+        }
+        // 曲線の頂点の列（NaN で区切る）のうち、x を挟む隣り合った頂点
+        let count = positions.len() / 3;
+        let at = |k: usize, c: usize| positions[3 * k + c] as f64;
+        let Some(k) = (0..count.saturating_sub(1)).find(|&k| {
+            at(k, 0).is_finite() && at(k + 1, 0).is_finite() && at(k, free) <= x && x <= at(k + 1, free) && at(k, free) < at(k + 1, free)
+        }) else {
+            continue;
+        };
+        let t = (x - at(k, free)) / (at(k + 1, free) - at(k, free));
+        let line = at(k, axis) + t * (at(k + 1, axis) - at(k, axis));
+        if (y - line).abs() <= tol {
+            continue;
+        }
+        let mut p = [0.0f32; 3];
+        p[free] = x as f32;
+        p[axis] = y as f32;
+        positions.splice(3 * (k + 1)..3 * (k + 1), p);
+    }
+}
+
+/// 曲線（2 点と NaN の組の列）のうち、長さが `min` より短い線分を捨てる（長さ 0 の点はそのまま）
+fn drop_slivers(pos: &mut Vec<f32>, min: f64) {
+    let mut out = Vec::with_capacity(pos.len());
+    for seg in pos.chunks(9) {
+        if seg.len() == 9 && seg[..6].iter().all(|v| v.is_finite()) {
+            let len = ((seg[3] - seg[0]) as f64).hypot((seg[4] - seg[1]) as f64);
+            if len > 0.0 && len < min {
+                continue;
+            }
+        }
+        out.extend_from_slice(seg);
+    }
+    *pos = out;
+}
+
+/// 2D の式が、表示範囲の格子（41 × 41 点と、ずらした 40 × 40 点）の定義される点の全部で 0（|F| ≤ 10⁻¹³）か（恒等式）
+fn identically_zero_2d(prog: &eval::Program, dom: mesh::Domain) -> bool {
+    let n = 41;
+    let mut pts = Vec::with_capacity(2 * n * n);
+    for k in 0..n * n {
+        let (i, j) = ((k % n) as f64, (k / n) as f64);
+        let at = |a: usize, t: f64| dom.lo[a] + (dom.hi[a] - dom.lo[a]) * t;
+        pts.push([at(0, i / (n - 1) as f64), at(1, j / (n - 1) as f64), 0.0]);
+        pts.push([at(0, (i + 0.37) / n as f64), at(1, (j + 0.61) / n as f64), 0.0]);
+    }
+    let vals = system::values_of(prog)(&pts);
+    let defined: Vec<f64> = vals.into_iter().filter(|v| v.is_finite()).collect();
+    !defined.is_empty() && defined.iter().all(|v| v.abs() <= 1e-13)
+}
+
+/// 2D の曲線 F = 0（切り取る前の線 `whole`、切り取った後の線 `kept`）が、等号つきの不等式 G ≤ 0 の境目 G = 0 に接するだけの点
+/// （[`system::tangent_points`]）のうち、ほかの不等式も満たし、残った曲線から 2 マスより離れたもの
+fn inequality_touches_2d(eq: &eval::Program, cuts: &[eval::Program], strict: &[bool], whole: &[f32], kept: &[f32], dom: mesh::Domain, n: usize) -> Vec<[f64; 3]> {
+    let points: Vec<[f64; 3]> = whole.chunks_exact(3).filter(|p| p[0].is_finite()).map(|p| [p[0] as f64, p[1] as f64, 0.0]).collect();
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let h = (0..2).map(|a| (dom.hi[a] - dom.lo[a]) / n.max(2) as f64).fold(f64::INFINITY, f64::min);
+    let rest: Vec<[f64; 2]> = kept.chunks_exact(3).filter(|p| p[0].is_finite()).map(|p| [p[0] as f64, p[1] as f64]).collect();
+    let mut out: Vec<[f64; 3]> = Vec::new();
+    for (g, &s) in cuts.iter().zip(strict) {
+        if s {
+            continue;
+        }
+        let gv = system::values_of(g)(&points);
+        for p in system::tangent_points(eq, g, &points, &gv, h) {
+            let inside = cuts.iter().zip(strict).all(|(c, &cs)| {
+                let v = system::values_of(c)(&[p])[0];
+                let eps = 1e-3 * strict_margin(c, dom);
+                if cs { v < -eps } else { v <= eps }
+            });
+            let near = rest.iter().any(|q| (q[0] - p[0]).hypot(q[1] - p[1]) < 2.0 * h);
+            if inside && !near && !out.iter().any(|q| (q[0] - p[0]).hypot(q[1] - p[1]) < 0.25 * h) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 /// 境目の線を切るとき、厳密な不等式 G < 0 を G ≤ −ε として扱う ε（表示範囲の z = 0 の 33 × 33 点での |G| の最大の 10⁻⁶ 倍。#139）。
@@ -2932,6 +3230,8 @@ impl Shape {
             vector_arrows: false,
             vivid: false,
             outline_target: Default::default(),
+            extra: Vec::new(),
+            extra_target: Vec::new(),
             coord: None,
             value_range: None,
             volume: None,
@@ -3055,6 +3355,8 @@ impl CapSource {
             vector_arrows: false,
             vivid: false,
             outline_target: Default::default(),
+            extra: Vec::new(),
+            extra_target: Vec::new(),
             coord: None,
             value_range: None,
             volume: None,

@@ -1881,7 +1881,8 @@ fn image_sets_share_one_path_for_ranges_logic_and_discontinuities() {
 
     let mut both = run("⦃(s,s^2,0)∣-1<=s<=1⦄ ∪ ⦃(u,v,2+u^2-v^2)∣u^2+v^2<=1⦄", "", &[]).unwrap();
     assert!(!both.indices().is_empty());
-    assert!(both.take_outline().chunks_exact(3).any(|q| q[0].is_finite() && q[2] == 0.0));
+    // 曲線の部分は、面と一緒に描く添えの線（#121）
+    assert!(both.take_extra().chunks_exact(3).any(|q| q[0].is_finite() && q[2] == 0.0));
 }
 
 #[test]

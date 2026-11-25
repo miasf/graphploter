@@ -465,6 +465,12 @@ export interface MeshData {
   /** outline・outlineDashed を座標系で移した先 */
   outlineTarget?: Float32Array
   outlineDashedTarget?: Float32Array
+  /**
+   * 添えの線・点（面・領域・曲線と一緒に描く、次元の低い部分。`(x^2+y^2)(z-1)=0` の z 軸、集合の和の点・線、段差の飛ぶ線の上の解）。
+   * 式の色で描き、GPU で画素ごとに描くときも重ねる
+   */
+  extra?: Float32Array
+  extraTarget?: Float32Array
 }
 
 // ---- Web Worker とのやりとり ----

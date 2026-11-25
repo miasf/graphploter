@@ -79,7 +79,8 @@ fn ordinary_curves_mark_finite_limits_at_undefined_points() {
         ("y = @cases(-1, x < 0.31; 1, x > 0.31)", vec![[0.31, -1.0], [0.31, 1.0]]),
         ("y = @cases(2, x > 0.31)", vec![[0.31, 2.0]]),
         ("y = @cases(2, x ≥ 0.31)", vec![]),
-        ("y = @cases(2, x = 0; sin(x)/x)", vec![]),
+        // 1 点だけ定義した値は、極限の所に白丸（その点の値は黒丸。#158）
+        ("y = @cases(2, x = 0; sin(x)/x)", vec![[0.0, 1.0]]),
         ("y = 1/x", vec![]),
         ("y = sin(1/x)", vec![]),
     ] {
@@ -215,7 +216,7 @@ fn extruded_holes_separate_distinct_limits_and_skip_poles() {
     for (line, y) in branches.into_iter().zip([-1.0, 1.0]) {
         assert!(line.iter().all(|p| p[0] == 0.0 && p[1] == y));
     }
-    for src in ["y = 1/x", "y = tan(x)", "y = sin(1/x)", "y = x", "y = @cases(2, x = 0; sin(x)/x)"] {
+    for src in ["y = 1/x", "y = tan(x)", "y = sin(1/x)", "y = x"] {
         assert!(graph(src, false, false).take_outline_dashed().is_empty(), "{src}");
     }
     let (marks, dashed, _) = run("y = tan(x)/x", true);
