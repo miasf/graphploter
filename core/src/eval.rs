@@ -1157,7 +1157,7 @@ fn binop(o: BinOp, a: C, b: C) -> C {
 /// 複素数の割り算。ふつうは (ac + bd + i(bc − ad)) / (c² + d²) のまま（今までと同じ値）。
 /// 割る数の絶対値が 10¹⁵⁴ ほどを超えると c² + d² が桁あふれして、答えが有限なのに 0 や NaN になる
 /// （gamma(160) / gamma(159) が「実数の値になりません」になっていた）ので、そのときだけ Smith の方法で計算し直す
-fn div(a: C, b: C) -> C {
+pub(crate) fn div(a: C, b: C) -> C {
     let q = a / b;
     if q.re.is_finite() && q.im.is_finite() && q != C::new(0.0, 0.0) {
         return q;

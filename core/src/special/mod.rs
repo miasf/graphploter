@@ -102,7 +102,13 @@ pub fn rgamma(z: C) -> C {
     if z.re < 0.5 && z.im == 0.0 && z.re == z.re.round() {
         return C::new(0.0, 0.0);
     }
-    1.0 / gamma(z)
+    // Γ が大きいと、複素数の割り算 1 / Γ が桁あふれで 0 や NaN になる（|Γ| > 10¹⁵⁴）ので、桁あふれしない割り算で。
+    // Γ そのものが桁あふれする所は e^(−ln Γ)
+    let g = gamma(z);
+    if g.re.is_finite() && g.im.is_finite() {
+        return crate::eval::div(C::new(1.0, 0.0), g);
+    }
+    (-gamma_ext::log_gamma(z)).exp()
 }
 
 /// 実数の整数なら、その値を返す
@@ -154,7 +160,7 @@ pub fn binomial(n: C, r: C) -> C {
             return C::new(v, 0.0);
         }
     }
-    gamma(n + 1.0) / (gamma(r + 1.0) * gamma(n - r + 1.0))
+    gamma(n + 1.0) * rgamma(r + 1.0) * rgamma(n - r + 1.0)
 }
 
 /// 順列の数 nPr = n! / (n−r)!。整数なら掛け算で正確に、それ以外はガンマ関数で計算する。
@@ -175,16 +181,35 @@ pub fn permutation(n: C, r: C) -> C {
             return C::new(v, 0.0);
         }
     }
-    gamma(n + 1.0) / gamma(n - r + 1.0)
+    gamma(n + 1.0) * rgamma(n - r + 1.0)
 }
 
 // ---------------------------------------------------------------------------
 // ベータ関数・ディガンマ関数
 // ---------------------------------------------------------------------------
 
-/// ベータ関数 B(a, b) = Γ(a) Γ(b) / Γ(a + b)
+/// ベータ関数 B(a, b) = Γ(a) Γ(b) / Γ(a + b)。
+/// 実数は実数で（Γ(a) / Γ(a + b) を先に割って、桁あふれを避ける）、Γ が桁あふれする所（B(100, 100) = 2.2×10⁻⁶¹）は
+/// exp(ln Γ(a) + ln Γ(b) − ln Γ(a + b))。複素数の割り算は桁あふれしない割り算で（#148。Γ(100) / Γ(101) が NaN になっていた）
 pub fn beta(a: C, b: C) -> C {
-    gamma(a) * gamma(b) / gamma(a + b)
+    if a.im == 0.0 && b.im == 0.0 {
+        let (x, y) = (a.re, b.re);
+        if let (Some(gx), Some(gy), Some(gxy)) = (gamma_real(x), gamma_real(y), gamma_real(x + y)) {
+            let v = if gx.abs() >= gy.abs() { gx / gxy * gy } else { gy / gxy * gx };
+            if v.is_finite() && v != 0.0 {
+                return C::new(v, 0.0);
+            }
+        }
+        if x > 0.0 && y > 0.0 {
+            let l = gamma_ext::log_gamma(a).re + gamma_ext::log_gamma(b).re - gamma_ext::log_gamma(a + b).re;
+            return C::new(l.exp(), 0.0);
+        }
+    }
+    let v = crate::eval::div(gamma(a) * gamma(b), gamma(a + b));
+    if v.re.is_finite() && v.im.is_finite() && v != C::new(0.0, 0.0) {
+        return v;
+    }
+    (gamma_ext::log_gamma(a) + gamma_ext::log_gamma(b) - gamma_ext::log_gamma(a + b)).exp()
 }
 
 /// ディガンマ関数 ψ(z) = Γ'(z) / Γ(z)。
@@ -301,6 +326,11 @@ pub fn zeta(s: C) -> C {
     if s == C::new(0.0, 0.0) {
         return C::new(-0.5, 0.0); // 関数等式では 0 × ∞ になるので、値を直接返す
     }
+    // 虚部が大きい所（臨界線の Im s = 200 など。#150）は、オイラー・マクローリンの和公式（フルヴィッツの ζ(s, 1)）。
+    // ボーウェインの方法は係数が大きくなりすぎて NaN になり、関数等式も sin(πs/2) が桁あふれする
+    if s.im.abs() > 40.0 {
+        return gamma_ext::hurwitz_zeta(s, C::new(1.0, 0.0));
+    }
     if s.re < 0.5 {
         // 負の偶数は自明な零点。Γ(1 − s) が桁あふれする所（s < −170 くらい）でも 0 × ∞ にしない
         if s.im == 0.0 && s.re / 2.0 == (s.re / 2.0).round() {
@@ -366,6 +396,13 @@ pub fn bessel_j(nu: C, z: C) -> C {
 
 /// 第1種変形ベッセル関数 I_ν(z)
 pub fn bessel_i(nu: C, z: C) -> C {
+    // 虚軸の近く（|Im z| > |Re z|）では I は振動する J と同じなので、I_ν(z) = e^(±iνπ/2) J_ν(∓iz)（±Im z > 0）。
+    // 級数は |z| が大きいと e^|z| ほどの項の打ち消し合いになる（I₄₀(−3 + 50i) が 10⁻³ ずれていた）
+    if z.im.abs() > z.re.abs() && z.norm() > 10.0 {
+        let s = z.im.signum();
+        let i = C::new(0.0, 1.0);
+        return (s * i * nu * (PI / 2.0)).exp() * bessel_j(nu, -s * i * z);
+    }
     bessel_series(nu, z, 1.0)
 }
 
@@ -378,6 +415,20 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
         let n = -nu.re;
         let f = if sign < 0.0 && n % 2.0 == 1.0 { -1.0 } else { 1.0 };
         return f * bessel_series(-nu, z, sign);
+    }
+    // 次数が大きく、級数の項がほとんど打ち消し合わない所（J₁₀₀(20)、J₁₀₀(1 + 30i)）は級数（#152）。
+    // シュレーフリの積分は、答え（10⁻⁵⁹ や 10⁻⁴⁰）よりずっと大きい値の打ち消し合いで、丸め誤差だけが残っていた
+    if nu.im == 0.0 && nu.re >= 2.0 && z.norm() <= 4.0 * (nu.re + 1.0).sqrt() + 4.0 {
+        if let Some(v) = checked_series(nu, z, sign) {
+            return v;
+        }
+    }
+    // |z| ≤ ν の J は、ミラーの方法（下向きの漸化式。J は漸化式の劣勢な解なので、下向きは安定）。
+    // 答えが小さい所では、シュレーフリの積分は絶対誤差 10⁻¹⁶ ほどしかない（J₁₀₀(45) ≈ 10⁻¹⁶ の相対誤差が 10⁻¹ だった）
+    if sign < 0.0 && nu.im == 0.0 && nu.re >= 2.0 && nu.re <= 10_000.0 && z.norm() <= nu.re && z != C::new(0.0, 0.0) {
+        if let Some(v) = bessel_j_miller(nu.re, z) {
+            return v;
+        }
     }
     if sign < 0.0 && z.re < 0.0 && z.norm() > 10.0 {
         // J_ν(w e^(iπs)) = e^(iπνs) J_ν(w)
@@ -404,7 +455,7 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
     if nu.im == 0.0 && z.im == 0.0 && z.re > 0.0 {
         let (nu, h) = (nu.re, z.re / 2.0);
         let h2 = sign * h * h;
-        let mut term = h.powf(nu) / gamma(C::new(nu + 1.0, 0.0)).re;
+        let mut term = power_over_gamma(C::new(h, 0.0), C::new(nu, 0.0)).re;
         let mut sum = term;
         for k in 1..500 {
             term *= h2 / (k as f64 * (nu + k as f64));
@@ -419,7 +470,7 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
     }
     let h = z / 2.0;
     let h2 = sign * h * h;
-    let mut term = h.powc(nu) / gamma(nu + 1.0);
+    let mut term = power_over_gamma(h, nu);
     let mut sum = term;
     for k in 1..500 {
         term *= h2 / (k as f64 * (nu + k as f64));
@@ -429,6 +480,76 @@ fn bessel_series(nu: C, z: C, sign: f64) -> C {
         }
     }
     sum
+}
+
+/// ミラーの方法での J_ν(z)（実数の ν ≥ 2）。十分大きい次数 N から J_{k−1} = (2k/z) J_k − J_{k+1} で下げた列を、
+/// μ = ν − ⌊ν⌋ の J_μ(z)・J_{μ+1}(z)（小さい次数なので、ふつうの計算で精度よく求まる）に合わせる
+fn bessel_j_miller(nu: f64, z: C) -> Option<C> {
+    let n = nu.floor();
+    let mu = nu - n;
+    let top = (nu + z.norm() + 30.0 + (40.0 * nu).sqrt()).ceil();
+    let steps = (top - mu) as usize;
+    // 次数 μ + k（k = steps..0）を下げていく。桁あふれしないよう、大きくなったら全体を縮める
+    let (mut next, mut cur) = (C::new(0.0, 0.0), C::new(1e-300, 0.0));
+    let mut at_nu = C::new(0.0, 0.0);
+    let target = n as usize;
+    if steps == target {
+        at_nu = cur;
+    }
+    for k in (1..=steps).rev() {
+        let order = mu + k as f64;
+        let prev = 2.0 * order / z * cur - next;
+        next = cur;
+        cur = prev;
+        if k - 1 == target {
+            at_nu = cur;
+        }
+        if cur.norm() > 1e250 {
+            cur /= 1e250;
+            next /= 1e250;
+            at_nu /= 1e250;
+        }
+    }
+    // cur = 次数 μ、next = 次数 μ + 1 の（定数倍された）値。最小二乗で倍率を決める
+    let (j0, j1) = (bessel_j(C::new(mu, 0.0), z), bessel_j(C::new(mu + 1.0, 0.0), z));
+    let den = cur.norm_sqr() + next.norm_sqr();
+    if !(den.is_finite() && den > 0.0) {
+        return None;
+    }
+    let scale = (j0 * cur.conj() + j1 * next.conj()) / den;
+    let v = scale * at_nu;
+    (v.re.is_finite() && v.im.is_finite()).then_some(v)
+}
+
+/// J_ν（sign = −1）・I_ν（sign = +1）の級数。項の絶対値の和が答えの 10³ 倍を超える（打ち消し合いで桁が消える）なら None
+fn checked_series(nu: C, z: C, sign: f64) -> Option<C> {
+    let h = z / 2.0;
+    let h2 = sign * h * h;
+    let mut term = power_over_gamma(h, nu);
+    let (mut sum, mut size) = (term, term.norm());
+    for k in 1..1000 {
+        term *= h2 / (k as f64 * (nu + k as f64));
+        sum += term;
+        size += term.norm();
+        if term.norm() < 1e-17 * sum.norm() && k > 2 {
+            break;
+        }
+    }
+    (sum.re.is_finite() && sum.im.is_finite() && sum != C::new(0.0, 0.0) && size <= 1e3 * sum.norm()).then_some(sum)
+}
+
+/// h^ν / Γ(ν + 1)（ベッセル関数の級数の最初の項）。どちらかが桁あふれする所（ν = 100、h = 15i）は対数で
+/// （#152。複素数の割り算が桁あふれして、I₁₀₀(1 + 30i) が 0 になっていた）
+fn power_over_gamma(h: C, nu: C) -> C {
+    let p = if nu.im == 0.0 && nu.re.fract() == 0.0 && nu.re.abs() <= 1024.0 { h.powi(nu.re as i32) } else { h.powc(nu) };
+    let v = p * rgamma(nu + 1.0);
+    if v.re.is_finite() && v.im.is_finite() && v != C::new(0.0, 0.0) {
+        return v;
+    }
+    if h == C::new(0.0, 0.0) {
+        return v;
+    }
+    (nu * h.ln() - gamma_ext::log_gamma(nu + 1.0)).exp()
 }
 
 /// J_ν(z) の漸近展開（|z| が大きいとき）

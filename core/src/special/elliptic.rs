@@ -196,8 +196,57 @@ pub fn elliptic_e_inc(phi: C, m: C) -> C {
     }
 }
 
+/// 複素数の振幅 φ の Π(n; φ | m) を、0 から φ への線分に沿う積分 ∫ dt / ((1 − n sin²t) √(1 − m sin²t)) で（#174）。
+/// 平方根は t = 0 の 1 から連続に追う。カールソンの R_J の主値は、この経路の解析接続と枝が合わないことがあった
+fn elliptic_pi_path(n: C, phi: C, m: C) -> C {
+    let integrate = |panels: usize| {
+        let mut sum = C::new(0.0, 0.0);
+        let mut root = C::new(1.0, 0.0);
+        let width = 1.0 / panels as f64;
+        for p in 0..panels {
+            let mid = (p as f64 + 0.5) * width;
+            // 節点を小さい順に（平方根の枝を追うため）
+            let mut nodes: Vec<(f64, f64)> = Vec::with_capacity(10);
+            for (x, w) in GL_X.iter().zip(GL_W.iter()) {
+                nodes.push((mid - width / 2.0 * x, *w));
+                nodes.push((mid + width / 2.0 * x, *w));
+            }
+            nodes.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (s, w) in nodes {
+                let t = phi * s;
+                let sin2 = t.sin() * t.sin();
+                let mut r = (1.0 - m * sin2).sqrt();
+                if (r - root).norm() > (r + root).norm() {
+                    r = -r;
+                }
+                root = r;
+                sum += w * width / 2.0 / ((1.0 - n * sin2) * r);
+            }
+        }
+        sum * phi
+    };
+    let mut panels = 8;
+    let mut last = integrate(panels);
+    while panels < 8192 {
+        panels *= 2;
+        let next = integrate(panels);
+        if (next - last).norm() <= 1e-14 * next.norm() {
+            return next;
+        }
+        last = next;
+    }
+    last
+}
+
+/// 10 点ガウス・ルジャンドル則（正の側の節点と重み）
+const GL_X: [f64; 5] = [0.148_874_338_981_631_22, 0.433_395_394_129_247_2, 0.679_409_568_299_024_4, 0.865_063_366_688_984_5, 0.973_906_528_517_171_7];
+const GL_W: [f64; 5] = [0.295_524_224_714_752_8, 0.269_266_719_309_996_5, 0.219_086_362_515_982, 0.149_451_349_150_580_4, 0.066_671_344_308_688_14];
+
 /// 第3種不完全楕円積分 Π(n; φ | m)
 pub fn elliptic_pi_inc(n: C, phi: C, m: C) -> C {
+    if phi.im != 0.0 && n != C::new(0.0, 0.0) {
+        return elliptic_pi_path(n, phi, m);
+    }
     let (k, phi) = reduce(phi);
     let (s, c) = (phi.sin(), phi.cos());
     let (x, y, one) = (c * c, 1.0 - m * s * s, C::new(1.0, 0.0));
@@ -209,10 +258,66 @@ pub fn elliptic_pi_inc(n: C, phi: C, m: C) -> C {
     }
 }
 
+/// 複素数の母数 m の (sn, cn, dn) をテータ関数で（#156）。u を周期 4K・2iK′ で基本の平行四辺形に寄せてから
+/// sn = θ₃(0)/θ₂(0) · θ₁(v)/θ₄(v)、cn = θ₄(0)/θ₂(0) · θ₂(v)/θ₄(v)、dn = θ₄(0)/θ₃(0) · θ₃(v)/θ₄(v)（v = πu / (2K)）。
+/// 降下ランデン変換は、複素数の母数では arcsin の枝を追えず、sn(2 + 4i | 0.5 + 0.2i) が 5 倍ずれていた。
+/// ノーム q = e^(iπτ)（τ = iK′/K）が小さくなければ None
+fn jacobi_theta(u: C, m: C) -> Option<(C, C, C)> {
+    let k = elliptic_k(m);
+    let kp = elliptic_k(1.0 - m);
+    let i = C::new(0.0, 1.0);
+    let tau = i * kp / k;
+    if tau.im <= 0.0 {
+        return None;
+    }
+    let q = (i * PI * tau).exp();
+    if q.norm() > 0.6 {
+        return None;
+    }
+    // v = πu/(2K) を、周期 2π（u の 4K）と πτ（u の 2iK′）の格子で寄せる。πτ だけずらすたびに cn・dn の符号が変わる
+    let mut v = PI * u / (2.0 * k);
+    let (w1, w2) = (C::new(2.0 * PI, 0.0), PI * tau);
+    // v = x w1 + y w2（x, y は実数）を解く
+    let det = w1.re * w2.im - w1.im * w2.re;
+    let y = (w1.re * v.im - w1.im * v.re) / det;
+    let x = (v.re * w2.im - v.im * w2.re) / det;
+    let (nx, ny) = (x.round(), y.round());
+    v -= nx * w1 + ny * w2;
+    let flip = if ny.rem_euclid(2.0) == 1.0 { -1.0 } else { 1.0 };
+    // θ 関数の級数（θ₁・θ₂ の q^(1/4) は比で消えるので省く）
+    let (mut t1, mut t2, mut t3, mut t4) = (C::new(0.0, 0.0), C::new(0.0, 0.0), C::new(1.0, 0.0), C::new(1.0, 0.0));
+    let (mut t20, mut t30, mut t40) = (C::new(0.0, 0.0), C::new(1.0, 0.0), C::new(1.0, 0.0));
+    for n in 0..60 {
+        let nf = n as f64;
+        let half = q.powf(nf * nf + nf); // q^((n+1/2)² − 1/4)
+        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+        let odd = (2.0 * nf + 1.0) * v;
+        t1 += 2.0 * sign * half * odd.sin();
+        t2 += 2.0 * half * odd.cos();
+        t20 += 2.0 * half;
+        if n > 0 {
+            let full = q.powf(nf * nf);
+            let even = (2.0 * nf * v).cos();
+            t3 += 2.0 * full * even;
+            t4 += 2.0 * sign * full * even;
+            t30 += 2.0 * full;
+            t40 += 2.0 * sign * full;
+        }
+        if half.norm() < 1e-18 && n > 2 {
+            break;
+        }
+    }
+    let sn = t30 / t20 * t1 / t4;
+    let cn = flip * t40 / t20 * t2 / t4;
+    let dn = flip * t40 / t30 * t3 / t4;
+    let finite = |z: C| z.re.is_finite() && z.im.is_finite();
+    (finite(sn) && finite(cn) && finite(dn)).then_some((sn, cn, dn))
+}
+
 /// ヤコビの楕円関数 (sn(u | m), cn(u | m), dn(u | m))
 pub fn jacobi_elliptic(u: C, m: C) -> (C, C, C) {
     if m.im != 0.0 {
-        return jacobi_landen(u, m);
+        return jacobi_theta(u, m).unwrap_or_else(|| jacobi_landen(u, m));
     }
     let m = m.re;
     if m < 0.0 {
@@ -285,6 +390,19 @@ pub fn lambert_w(k: f64, z: C) -> C {
         let l2 = l1.ln();
         l1 - l2 + l2 / l1
     };
+    // |z| が大きいと w eʷ が桁あふれする（W(10³⁰⁰) ≈ 684 で e⁶⁸⁴ ≈ 10²⁹⁷、w eʷ − z の途中が NaN。#203）ので、
+    // 対数の形 w + ln w = ln z + 2πik をニュートン法で解く
+    if z.norm() > 1e100 {
+        let target = z.ln() + C::new(0.0, 2.0 * PI * k);
+        for _ in 0..60 {
+            let step = (w + w.ln() - target) / (1.0 + 1.0 / w);
+            w -= step;
+            if step.norm() <= 1e-16 * w.norm() {
+                break;
+            }
+        }
+        return w;
+    }
     // ハレー法
     for _ in 0..60 {
         let ew = w.exp();

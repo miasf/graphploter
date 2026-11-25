@@ -189,6 +189,41 @@ pub fn bessel_y(nu: C, z: C) -> C {
     if z == C::new(0.0, 0.0) {
         return C::new(f64::NEG_INFINITY, 0.0);
     }
+    if nu.im == 0.0 && nu.re < 0.0 {
+        let mu = -nu.re;
+        // Y_{−n} = (−1)ⁿ Yₙ、Y_{−μ} = cos(μπ) Y_μ + sin(μπ) J_μ（sin・cos は整数・半整数でちょうど 0。#203: Y_{−2.5}(0.01) は J_{2.5}(0.01)。
+        // (cos(νπ) J_ν − J_{−ν}) / sin(νπ) では、cos(−2.5π) ≈ 10⁻¹⁶ に大きな J_{2.5} が掛かって相対誤差 10⁻⁴ になっていた）
+        if mu == mu.round() {
+            let f = if mu % 2.0 == 1.0 { -1.0 } else { 1.0 };
+            return f * bessel_y(C::new(mu, 0.0), z);
+        }
+        let (s, c) = (super::sin_pi(C::new(mu, 0.0)).re, super::sin_pi(C::new(mu + 0.5, 0.0)).re);
+        let mut v = c * bessel_y(C::new(mu, 0.0), z);
+        if s != 0.0 {
+            v += s * bessel_j(C::new(mu, 0.0), z);
+        }
+        return v;
+    }
+    // 実数の次数 ν ≥ 2 は、Y_μ・Y_{μ+1}（0 ≤ μ < 1）から漸化式 Y_{k+1} = (2k/z) Y_k − Y_{k−1} で上げる（#153）。
+    // Y は漸化式の優勢な解なので、上げる向きは安定。シュレーフリの積分は、虚部の大きい z で e^|Im z| の打ち消し合いになっていた
+    if nu.im == 0.0 && nu.re >= 2.0 && nu.re <= 100_000.0 {
+        // 虚部が大きい z では、漸化式の優勢な解はハンケル関数 H⁽¹⁾（Im z > 0）で、Y を上げると誤差が e^(2|Im z|) 倍ほどになる。
+        // そこでは Y = ±iJ − (2/π) e^(∓iνπ/2) K_ν(∓iz)（±Im z > 0）。K は K の漸化式で（Y₅₀(1 + 30i) が 10¹⁰ 倍ずれていた）
+        if z.im.abs() > 3.0 {
+            let s = z.im.signum();
+            let i = C::new(0.0, 1.0);
+            return s * i * bessel_j(nu, z) - 2.0 / PI * (-s * i * nu * (PI / 2.0)).exp() * bessel_k(nu, -s * i * z);
+        }
+        let n = nu.re.floor();
+        let mu = nu.re - n;
+        let (mut a, mut b) = (bessel_y(C::new(mu, 0.0), z), bessel_y(C::new(mu + 1.0, 0.0), z));
+        for k in 1..n as usize {
+            let c = 2.0 * (mu + k as f64) / z * b - a;
+            a = b;
+            b = c;
+        }
+        return b;
+    }
     if z.re < 0.0 && z.norm() > 10.0 {
         // Y_ν(w e^(iπs)) = e^(−iπνs) Y_ν(w) + 2is cos(πν) J_ν(w)
         let (w, s) = reflect(z);
@@ -223,6 +258,22 @@ pub fn bessel_k(nu: C, z: C) -> C {
         let (w, s) = reflect(z);
         let i = C::new(0.0, 1.0);
         return (-i * PI * nu * s).exp() * bessel_k(nu, w) - i * PI * s * bessel_i(nu, w);
+    }
+    if nu.im == 0.0 && nu.re < 0.0 {
+        return bessel_k(-nu, z); // K_{−ν} = K_ν
+    }
+    // 実数の次数 ν ≥ 2 は、K_μ・K_{μ+1}（0 ≤ μ < 1）から漸化式 K_{k+1} = K_{k−1} + (2k/z) K_k で上げる（#153。K も優勢な解）。
+    // 台形公式の積分は、次数が大きいと cosh(νt) が大きく、振動する被積分関数の打ち消し合いになっていた
+    if nu.im == 0.0 && nu.re >= 2.0 && nu.re <= 100_000.0 {
+        let n = nu.re.floor();
+        let mu = nu.re - n;
+        let (mut a, mut b) = (bessel_k(C::new(mu, 0.0), z), bessel_k(C::new(mu + 1.0, 0.0), z));
+        for k in 1..n as usize {
+            let c = a + 2.0 * (mu + k as f64) / z * b;
+            a = b;
+            b = c;
+        }
+        return b;
     }
     let theta = z.arg();
     if use_asymptotic(nu, z) {
@@ -287,14 +338,122 @@ const AIRY_C1: f64 = 0.355_028_053_887_817_2;
 /// 1 / (3^(1/3) Γ(1/3))
 const AIRY_C2: f64 = 0.258_819_403_792_806_8;
 
+/// |z| ≤ 5 の級数での (Ai, Bi)
+fn airy_series(z: C) -> (C, C) {
+    let s3 = 3f64.sqrt();
+    let w = z * z * z / 9.0;
+    let f = hyp0f1(C::new(2.0 / 3.0, 0.0), w);
+    let g = z * hyp0f1(C::new(4.0 / 3.0, 0.0), w);
+    (AIRY_C1 * f - AIRY_C2 * g, s3 * (AIRY_C1 * f + AIRY_C2 * g))
+}
+
+/// |z| ≤ 5 の級数での (Ai′, Bi′)
+fn airy_prime_series(z: C) -> (C, C) {
+    let s3 = 3f64.sqrt();
+    let w = z * z * z / 9.0;
+    let fp = z * z / 2.0 * hyp0f1(C::new(5.0 / 3.0, 0.0), w);
+    let gp = hyp0f1(C::new(4.0 / 3.0, 0.0), w) + z * z * z / 4.0 * hyp0f1(C::new(7.0 / 3.0, 0.0), w);
+    (AIRY_C1 * fp - AIRY_C2 * gp, s3 * (AIRY_C1 * fp + AIRY_C2 * gp))
+}
+
+/// 漸近展開を使う |z| の下限（ζ = 2/3 z^(3/2) ≥ 15 で、一番小さい項が 10⁻¹³ ほど）
+const AIRY_FAR: f64 = 8.0;
+
+/// 漸近展開の係数 u_k（derivative なら v_k = −(6k + 1)/(6k − 1) u_k）を、項が一番小さくなる所まで
+fn airy_coefficients(zeta: C, derivative: bool) -> Vec<C> {
+    let mut out = Vec::new();
+    let mut u = 1.0f64;
+    let mut last = f64::INFINITY;
+    for k in 0..80 {
+        if k > 0 {
+            let kf = k as f64;
+            u *= (6.0 * kf - 5.0) * (6.0 * kf - 3.0) * (6.0 * kf - 1.0) / (216.0 * kf * (2.0 * kf - 1.0));
+        }
+        let c = if derivative && k > 0 { -(6.0 * k as f64 + 1.0) / (6.0 * k as f64 - 1.0) * u } else { u };
+        let t = c / zeta.powi(k as i32);
+        if t.norm() > last && k > 2 {
+            break;
+        }
+        last = t.norm();
+        out.push(t);
+        if last < 1e-17 {
+            break;
+        }
+    }
+    out
+}
+
+/// |z| ≥ [`AIRY_FAR`] の Ai(z)（derivative なら Ai′(z)）の漸近展開（DLMF 9.7.5–9.7.10）。
+/// |arg z| ≤ 2π/3 は e^(−ζ) の形、それより負の実軸に近い所は Ai(−w) の振動の形
+fn airy_far(z: C, derivative: bool) -> C {
+    let sqrt_pi = PI.sqrt();
+    if z.arg().abs() <= 2.0 * PI / 3.0 {
+        let zeta = 2.0 / 3.0 * z.powf(1.5);
+        let terms = airy_coefficients(zeta, derivative);
+        let sum: C = terms.iter().enumerate().map(|(k, t)| if k % 2 == 0 { *t } else { -*t }).sum();
+        let q = z.powf(0.25);
+        return if derivative { -q * (-zeta).exp() / (2.0 * sqrt_pi) * sum } else { (-zeta).exp() / (2.0 * sqrt_pi * q) * sum };
+    }
+    let w = -z;
+    let zeta = 2.0 / 3.0 * w.powf(1.5);
+    let terms = airy_coefficients(zeta, derivative);
+    let (mut even, mut odd) = (C::new(0.0, 0.0), C::new(0.0, 0.0));
+    for (k, t) in terms.iter().enumerate() {
+        let sign = if (k / 2) % 2 == 0 { 1.0 } else { -1.0 };
+        if k % 2 == 0 {
+            even += sign * t;
+        } else {
+            odd += sign * t;
+        }
+    }
+    let (s, c) = ((zeta - PI / 4.0).sin(), (zeta - PI / 4.0).cos());
+    let q = w.powf(0.25);
+    if derivative {
+        q / sqrt_pi * (s * even - c * odd)
+    } else {
+        (c * even + s * odd) / (sqrt_pi * q)
+    }
+}
+
+/// 複素数の z の Ai(z)（derivative なら Ai′(z)）。|z| ≥ 8 は漸近展開、5 < |z| < 8 は |arg z| < 0.95 で K_{1/3}・K_{2/3}、
+/// それ以外は級数（虚軸の近くでは Ai が大きくなるので、級数の打ち消し合いは小さい）
+fn airy_ai_complex(z: C, derivative: bool) -> C {
+    if z.norm() >= AIRY_FAR {
+        return airy_far(z, derivative);
+    }
+    if z.norm() > 3.0 && z.arg().abs() < 0.95 {
+        let zeta = 2.0 / 3.0 * z.powf(1.5);
+        return if derivative {
+            -z / (PI * 3f64.sqrt()) * bessel_k(C::new(2.0 / 3.0, 0.0), zeta)
+        } else {
+            (z / 3.0).sqrt() / PI * bessel_k(C::new(1.0 / 3.0, 0.0), zeta)
+        };
+    }
+    if derivative { airy_prime_series(z).0 } else { airy_series(z).0 }
+}
+
+/// 複素数の z の Bi(z)（derivative なら Bi′(z)）: Bi(z) = e^(iπ/6) Ai(zω) + e^(−iπ/6) Ai(zω̄)（ω = e^(2πi/3)）、
+/// Bi′(z) = e^(5iπ/6) Ai′(zω) + e^(−5iπ/6) Ai′(zω̄)
+fn airy_bi_complex(z: C, derivative: bool) -> C {
+    let omega = C::from_polar(1.0, 2.0 * PI / 3.0);
+    let phase = C::from_polar(1.0, if derivative { 5.0 * PI / 6.0 } else { PI / 6.0 });
+    phase * airy_ai_complex(z * omega, derivative) + phase.conj() * airy_ai_complex(z * omega.conj(), derivative)
+}
+
 /// エアリー関数の組 (Ai(z), Bi(z))
 pub fn airy(z: C) -> (C, C) {
-    let s3 = 3f64.sqrt();
+    // 減衰する向き（|arg z| < 0.95）で |z| > 3 は、級数だと Ai が小さく項が打ち消し合うので、K_{1/3} で（Bi は級数のまま）
     if z.norm() <= 5.0 {
-        let w = z * z * z / 9.0;
-        let f = hyp0f1(C::new(2.0 / 3.0, 0.0), w);
-        let g = z * hyp0f1(C::new(4.0 / 3.0, 0.0), w);
-        return (AIRY_C1 * f - AIRY_C2 * g, s3 * (AIRY_C1 * f + AIRY_C2 * g));
+        let (ai, bi) = airy_series(z);
+        if z.norm() > 3.0 && z.arg().abs() < 0.95 {
+            return (airy_ai_complex(z, false), bi);
+        }
+        return (ai, bi);
+    }
+    // 複素数の z（#151）: 漸近展開と接続公式。K_{1/3}(ζ) は虚軸の近く（arg ζ が π/2 を超える所）で、
+    // I_ν の大きな値との打ち消し合いになり、Ai(0.5 + 50i) が 10¹⁴ 倍ずれていた
+    if z.im != 0.0 {
+        return (airy_ai_complex(z, false), airy_bi_complex(z, false));
     }
     let third = C::new(1.0 / 3.0, 0.0);
     if z.re >= 0.0 {
@@ -315,10 +474,14 @@ pub fn airy(z: C) -> (C, C) {
 pub fn airy_prime(z: C) -> (C, C) {
     let s3 = 3f64.sqrt();
     if z.norm() <= 5.0 {
-        let w = z * z * z / 9.0;
-        let fp = z * z / 2.0 * hyp0f1(C::new(5.0 / 3.0, 0.0), w);
-        let gp = hyp0f1(C::new(4.0 / 3.0, 0.0), w) + z * z * z / 4.0 * hyp0f1(C::new(7.0 / 3.0, 0.0), w);
-        return (AIRY_C1 * fp - AIRY_C2 * gp, s3 * (AIRY_C1 * fp + AIRY_C2 * gp));
+        let (ai, bi) = airy_prime_series(z);
+        if z.norm() > 3.0 && z.arg().abs() < 0.95 {
+            return (airy_ai_complex(z, true), bi);
+        }
+        return (ai, bi);
+    }
+    if z.im != 0.0 {
+        return (airy_ai_complex(z, true), airy_bi_complex(z, true));
     }
     let two_thirds = C::new(2.0 / 3.0, 0.0);
     if z.re >= 0.0 {

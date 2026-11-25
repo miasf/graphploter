@@ -74,7 +74,43 @@ pub fn expint_e(n: C, z: C) -> C {
     if nonnegative_int(n) == Some(1) {
         return e1(z);
     }
+    // Re z > 0、|z| > 1 は Eₙ の連分数 e^(−z) / (z + n − 1·n / (z + n + 2 − 2(n + 1) / (z + n + 4 − …)))（#155）。
+    // z^(n−1) Γ(1 − n, z) は、n が整数だと Γ(0, z) = E₁(z) から漸化式で上げていき、桁が消えていた（E₂₀(100) が 18 万倍）
+    if z.re > 0.0 && z.norm() > 1.0 {
+        if let Some(v) = en_cf(n, z) {
+            return v;
+        }
+    }
     z.powc(n - 1.0) * gamma_upper(1.0 - n, z)
+}
+
+/// Eₙ(z) の連分数（Lentz の方法。収束しなければ None）
+pub(super) fn en_cf(n: C, z: C) -> Option<C> {
+    let tiny = 1e-300;
+    let mut b = z + n;
+    let mut c = C::new(1.0 / tiny, 0.0);
+    let mut d = 1.0 / b;
+    let mut h = d;
+    for i in 1..5000 {
+        let fi = i as f64;
+        let an = -fi * (n - 1.0 + fi);
+        b += 2.0;
+        d = an * d + b;
+        if d.norm() < tiny {
+            d = C::new(tiny, 0.0);
+        }
+        c = b + an / c;
+        if c.norm() < tiny {
+            c = C::new(tiny, 0.0);
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).norm() < 1e-16 {
+            return Some(h * (-z).exp());
+        }
+    }
+    None
 }
 
 /// 指数積分 Ei(z) = −PV∫_{−z}^∞ e^(−t) / t dt
