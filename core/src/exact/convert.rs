@@ -27,6 +27,10 @@ pub struct Converter<'a> {
     depth: usize,
     /// 入力に小数の字句があった（答えも小数で出す。計画の 2.7）
     pub decimal: bool,
+    /// 四則と整数の関数以外の規則（極限・積分など）を使った。照らし合わせの相手が無いとき、答えを捨てる（計画の 2.4）
+    pub analytic: bool,
+    /// 入力に自然対数 `ln` があった（D5: 書き出しは `\ln`）
+    pub uses_ln: bool,
 }
 
 /// 記法の厳密な計算（文書 8 の各ステップが 1 つずつ足す）
@@ -43,7 +47,7 @@ fn handler(op: &str) -> Option<Handler> {
 
 impl<'a> Converter<'a> {
     pub fn new(defs: &'a Defs, params: &'a Params) -> Self {
-        Converter { defs, params, frames: Vec::new(), depth: 0, decimal: false }
+        Converter { defs, params, frames: Vec::new(), depth: 0, decimal: false, analytic: false, uses_ln: false }
     }
 
     fn lookup(&self, name: &str) -> Option<Term> {
@@ -93,6 +97,9 @@ impl<'a> Converter<'a> {
                 }
             }
             Expr::Call(f, args) => {
+                if *f == crate::functions::Func::Ln {
+                    self.uses_ln = true;
+                }
                 let args = args.iter().map(|a| self.term(a)).collect::<Result<Vec<_>, _>>()?;
                 call(*f, args)
             }

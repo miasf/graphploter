@@ -3316,6 +3316,20 @@ pub fn eval_values_with(source: &str, params: &Params) -> Result<(Vec<f64>, Vec<
     Ok((vals, used))
 }
 
+/// 定数の式の複素数の値（厳密値の道の照らし合わせの相手。計画 `docs/plan-exact-core.md` の 2.4）。
+/// [`eval_constant_with`] と同じ道で計算し、実数にしないで返す
+pub fn eval_constant_complex(source: &str, params: &Params) -> Result<C, String> {
+    let e = parse_at(source, 0, params)?;
+    let prog = Program::compile_with(&e, &[], params).map_err(|_| "数値と、pi などの定数・パラメータだけで書いてください".to_string())?;
+    let mut out = [C::new(0.0, 0.0)];
+    prog.eval_batch(&[], &mut out);
+    if out[0].re.is_finite() && out[0].im.is_finite() {
+        Ok(out[0])
+    } else {
+        Err("値が有限ではありません".into())
+    }
+}
+
 /// パラメータを使ってよい式の値を計算する（媒介変数の範囲 0 ≤ t ≤ b など）。
 /// 値と、使ったパラメータの名前を返す
 pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<String>), String> {

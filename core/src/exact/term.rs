@@ -404,10 +404,25 @@ pub fn rational_power(b: &Rat, e: &Rat) -> Term {
         let s = reduce_mod_two(e);
         let mag = rational_power(&b.clone().abs(), e);
         let unit = match minus_one_power(&s) {
-            Some(u) => u,
+            Some(u) => return mul(vec![mag, u]),
             None => Term::Pow(Box::new(Term::int(-1)), Box::new(Term::Num(s))),
         };
-        return mul(vec![mag, unit]);
+        // 表に無い (−1)^s はそのまま因子にする（mul に渡すと、また (−1)^s を作ろうとして戻ってくる）
+        if mag.is_one() {
+            return unit;
+        }
+        let (c, rest) = split_coeff(&mag);
+        let mut fs: Vec<Term> = match rest {
+            Term::Mul(v) => v,
+            r if r.is_one() => Vec::new(),
+            r => vec![r],
+        };
+        fs.push(unit);
+        fs.sort();
+        if c != Rat::ONE {
+            fs.insert(0, Term::Num(c));
+        }
+        return if fs.len() == 1 { fs.pop().unwrap() } else { Term::Mul(fs) };
     }
     // b > 0、e = m/n（n > 1）。b^{m/n} = (x/y)^{1/n}（m < 0 なら分子と分母を入れ替える）
     let m = e.numerator().clone();

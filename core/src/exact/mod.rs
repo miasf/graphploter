@@ -5,7 +5,11 @@
 //!
 //! - [`num`]: 大きな整数・分数（dashu）と、整数の計算（EX1）
 //! - [`term`]: 式の形と自動の正規化、[`convert`]: 展開の前の構文木からの変換（EX2）
+//! - [`ball`]: 誤差の幅つきの高い精度の値・0 の判定、[`consts`]: 定数と特殊関数の値（EX3）
 
+pub mod ball;
+pub mod check;
+pub mod consts;
 pub mod convert;
 pub mod num;
 pub mod term;
@@ -57,21 +61,120 @@ pub fn with_work_limit<T>(limit: u64, f: impl FnOnce() -> T) -> (T, u64) {
 /// 既定の仕事の量の上限（EX5 で、ふつうの PC で約 2 秒になる数に決め直す。計画の D7）
 pub const DEFAULT_WORK: u64 = 50_000_000;
 
-/// 式の文字列を、厳密値の道の式にする（照らし合わせ・書き出しの前の段階）。定義は今入っているもの（`expand::install`）。
-/// 戻り値の 2 つ目は、入力に小数があったか
-pub fn evaluate_term(source: &str, params: &Params) -> Result<(Term, bool), Stop> {
+/// 変換の結果と、その途中で分かったこと
+#[derive(Debug, Clone)]
+pub struct Converted {
+    pub term: Term,
+    pub decimal: bool,
+    pub analytic: bool,
+    pub uses_ln: bool,
+}
+
+/// 式の文字列を、厳密値の道の式にする（照らし合わせ・書き出しの前の段階）。定義は今入っているもの（`expand::install`）
+pub fn convert_source(source: &str, params: &Params) -> (Result<Converted, Stop>, u64) {
     let defs = crate::expand::current_defs();
     let names = defs.names();
-    let e = crate::parser::parse_with(source, &names).map_err(|e| Stop::NotFound(format!("式を読めません: {e}")))?;
-    let (r, _) = with_work_limit(DEFAULT_WORK, || {
+    let e = match crate::parser::parse_with(source, &names) {
+        Ok(e) => e,
+        Err(e) => return (Err(Stop::NotFound(format!("式を読めません: {e}"))), 0),
+    };
+    with_work_limit(DEFAULT_WORK, || {
         let mut c = convert::Converter::new(&defs, params);
         let t = c.term(&e)?;
         if exhausted() {
             return Err(Stop::TimeUp);
         }
-        Ok((t, c.decimal))
-    });
-    r
+        Ok(Converted { term: t, decimal: c.decimal, analytic: c.analytic, uses_ln: c.uses_ln })
+    })
+}
+
+/// [`convert_source`] の式と、入力に小数があったか
+pub fn evaluate_term(source: &str, params: &Params) -> Result<(Term, bool), Stop> {
+    convert_source(source, params).0.map(|c| (c.term, c.decimal))
+}
+
+/// 厳密値の道の結果（計画の 2.3）
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    /// 見つかった（照らし合わせに通った）
+    Found(Term),
+    /// 推定（EX11）
+    Guess(Term),
+    /// 見つからない（理由つき）
+    NotFound(String),
+    /// 照らし合わせで食い違ったので捨てた（理由つき。画面では「見つからない」と同じ）
+    Rejected(String),
+    /// 存在しないと示せた（理由つき）
+    NotExist(String),
+}
+
+/// 厳密値の道の答え
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub outcome: Outcome,
+    /// 答えの値を f64 に丸めたもの（実部, 虚部）
+    pub approx: Option<(f64, f64)>,
+    /// 答えの値の 10 進 50 桁（D9）
+    pub digits: Option<String>,
+    /// 入力に小数があった（答えも小数で出す）
+    pub decimal: bool,
+    /// 入力に自然対数 `ln` があった
+    pub uses_ln: bool,
+    /// 使った規則の名前（将来の途中式のため。D4）
+    pub rules: Vec<&'static str>,
+    /// 使った仕事の量
+    pub work: u64,
+}
+
+impl Report {
+    fn new(outcome: Outcome) -> Report {
+        Report { outcome, approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0 }
+    }
+}
+
+/// 式の文字列の厳密値を求め、照らし合わせてから返す（計画の 2.4）
+pub fn evaluate(source: &str, params: &Params) -> Report {
+    let (r, work) = convert_source(source, params);
+    let c = match r {
+        Ok(c) => c,
+        Err(Stop::NotFound(s)) => return Report { work, ..Report::new(Outcome::NotFound(s)) },
+        Err(Stop::NotExist(s)) => return Report { work, ..Report::new(Outcome::NotExist(s)) },
+        Err(Stop::TimeUp) => return Report { work, ..Report::new(Outcome::NotFound("時間切れ".into())) },
+    };
+    let mut rep = Report { decimal: c.decimal, uses_ln: c.uses_ln, work, ..Report::new(Outcome::NotFound(String::new())) };
+    let t = c.term;
+    if !t.is_number() {
+        rep.outcome = Outcome::NotFound("座標を含む式・組・リストの厳密値はまだ出しません".into());
+        return rep;
+    }
+    match check::against_f64(&t, source, params) {
+        check::Check::Agree => {}
+        check::Check::Disagree { exact, other } => {
+            rep.rules.push("照らし合わせで食い違った");
+            rep.outcome = Outcome::Rejected(format!("照らし合わせで食い違いました（厳密値の道 {exact:?}、今の道 {other:?}）"));
+            return rep;
+        }
+        check::Check::NoPartner(e) => {
+            if c.analytic {
+                rep.outcome = Outcome::NotFound(format!("照らし合わせの相手がありません（{e}）"));
+                return rep;
+            }
+            rep.rules.push("四則と整数の関数だけなので、相手なしで採った");
+        }
+        check::Check::NoValue(e) => {
+            rep.outcome = Outcome::NotFound(format!("値を確かめられません（{e}）"));
+            return rep;
+        }
+    }
+    if let Ok(b) = ball::value(&t, 64) {
+        rep.approx = Some(b.to_f64());
+    }
+    if let Ok(b) = ball::value(&t, 180) {
+        let re = ball::to_decimal(&b.re, 50);
+        rep.digits = Some(if b.is_real() { re } else { format!("{re} + ({}) i", ball::to_decimal(&b.im, 50)) });
+    }
+    rep.outcome = Outcome::Found(t);
+    rep
 }
 
 /// 時間切れ（仕事の量が予算を超えた）。同じ入力なら同じ所で止まる（計画の 2.5）
