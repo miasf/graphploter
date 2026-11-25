@@ -944,6 +944,28 @@ fn gradients(g: &Program, pts: &[[f64; 3]], delta: f64) -> Vec<[f64; 3]> {
 }
 
 /// 面 G = 0 の上の点を、G < 0 の側へ 10⁻³ マスだけずらす（勾配が 0・計算できない所は、ずらさない）
+/// 点を面 G = 0 の上へ寄せる（ニュートン法を 2 回。勾配が無い・値が無い点はそのまま）
+fn onto_surface(g: &Program, pts: &[[f64; 3]], h: f64) -> Vec<[f64; 3]> {
+    let mut out = pts.to_vec();
+    for _ in 0..2 {
+        let v = values_at(g, &cols_of(&out));
+        let d = gradients(g, &out, 1e-6 * h);
+        for (p, (f, gr)) in out.iter_mut().zip(v.iter().zip(&d)) {
+            let n2 = gr[0] * gr[0] + gr[1] * gr[1] + gr[2] * gr[2];
+            if f.is_finite() && n2 > 0.0 && n2.is_finite() {
+                let step = [0, 1, 2].map(|a| f * gr[a] / n2);
+                // 寄せる量はマスの 1/2 まで（遠い点を別の面へ飛ばさない）
+                if (step[0] * step[0] + step[1] * step[1] + step[2] * step[2]).sqrt() <= 0.5 * h {
+                    for a in 0..3 {
+                        p[a] -= step[a];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 fn shift_inward(g: &Program, pts: &[[f64; 3]], h: f64) -> Vec<[f64; 3]> {
     let eps = 1e-3 * h;
     gradients(g, pts, 1e-4 * h)
@@ -970,13 +992,23 @@ fn drop_outside(m: &mut Mesh, g: &Program, cuts: &[Program], i: usize, h: f64) {
     if centers.is_empty() {
         return;
     }
-    let pts = shift_inward(g, &centers, h);
+    // 重心を面の上へ寄せてから、中身の側へずらす（ずらす量は 10⁻³・10⁻⁵・10⁻⁷ マスのうち、いちばん中の値。格子より薄い領域。#143）
+    let on = onto_surface(g, &centers, h);
+    let pts = shift_inward(g, &on, h);
+    let shifted: Vec<Vec<[f64; 3]>> = [1e-2, 1e-4].iter().map(|&k| shift_inward(g, &on, k * h)).collect();
     let mut out = vec![false; pts.len()];
     for (j, other) in cuts.iter().enumerate() {
         if j == i {
             continue;
         }
-        let vals = values_at(other, &cols_of(&pts));
+        let mut vals = values_at(other, &cols_of(&pts));
+        for more in &shifted {
+            for (v, w) in vals.iter_mut().zip(values_at(other, &cols_of(more))) {
+                if w < *v {
+                    *v = w;
+                }
+            }
+        }
         let grads = gradients(other, &pts, 1e-4 * h);
         for (k, o) in out.iter_mut().enumerate() {
             let d = grads[k];
@@ -1058,23 +1090,25 @@ fn drop_off_surface(m: &mut Mesh, g: &Program) {
     m.lod_mesh = None;
 }
 
-/// 重心が面 G = 0 の上（距離の見積もり |G| / |∇G| が 10⁻³ マスより近い）にある三角形を消す
-fn drop_on_surface(m: &mut Mesh, g: &Program, h: f64) {
+/// 面 `own` = 0 の三角形のうち、ほかの面 G = 0 と重なるもの（重心を `own` = 0 の上へ寄せた点で、G = 0 からの距離の見積もり
+/// |G| / |∇G| が 10⁻⁹ マスより近い）を消す。寄せてから比べるので、すぐ近くの別の面（厚さ 5×10⁻⁵ の殻の外側。#143）は消さない
+fn drop_on_surface(m: &mut Mesh, own: &Program, g: &Program, h: f64) {
     if let Some(l) = m.lod_mesh.as_deref_mut() {
-        drop_on_surface(l, g, h);
+        drop_on_surface(l, own, g, h);
     }
     let p = &m.positions;
     let at = |k: u32, c: usize| p[k as usize * 3 + c] as f64;
-    let centers: Vec<[f64; 3]> = m.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|c| (at(t[0], c) + at(t[1], c) + at(t[2], c)) / 3.0)).collect();
+    let mut centers: Vec<[f64; 3]> = m.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|c| (at(t[0], c) + at(t[1], c) + at(t[2], c)) / 3.0)).collect();
     if centers.is_empty() {
         return;
     }
+    centers = onto_surface(own, &centers, h);
     let vals = values_at(g, &cols_of(&centers));
-    let grads = gradients(g, &centers, 1e-4 * h);
+    let grads = gradients(g, &centers, 1e-6 * h);
     let on = |k: usize| {
         let d = grads[k];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        vals[k].is_finite() && len.is_finite() && vals[k].abs() <= 1e-3 * h * len
+        vals[k].is_finite() && len.is_finite() && vals[k].abs() <= 1e-9 * h * len.max(f64::MIN_POSITIVE)
     };
     if !(0..centers.len()).any(on) {
         return;
@@ -1124,7 +1158,23 @@ pub fn region_faces(cuts: &[Program], faces: &[Vec<(usize, Program)>], dom: Doma
                 // ほかの G_j は、面 G_i = 0 から中身の側（G_i < 0 の側）へ少しずらした点で計算する。
                 // 面の上で G_j もちょうど 0 になる所（0 ≤ xy ≤ x の x = 0 の面では、xy も x − xy も 0）は、面の上の値では
                 // 中か外かが丸めの誤差で決まり、面がまだらに残る。ずらした点なら、面の中身の側に領域があるか（その面が領域の境目か）で決まる
-                let mut inward = |pts: &[[f64; 3]]| values_at(other, &cols_of(&shift_inward(g, pts, h)));
+                // 領域が格子より薄い（1 ≤ x² + y² + z² ≤ 1.0001。#143）と、10⁻³ マスずらした点が反対側の境目を越える。
+                // 頂点を自分の面の上へ寄せ（マーチングキューブの頂点は面から少しずれている）、その点でほかの式がはっきり負
+                // （−10⁻⁹ マス × 勾配より小さい）なら、ずらした点で外でも中とする。厚さ 0 の壁（0 ≤ xy ≤ x の x = 0 の y < 0）は、
+                // 面の上の値がちょうど 0 なので、今までどおりずらした点で決まる
+                let mut inward = |pts: &[[f64; 3]]| {
+                    let on = onto_surface(g, pts, h);
+                    let mut vals = values_at(other, &cols_of(&shift_inward(g, &on, h)));
+                    let here = values_at(other, &cols_of(&on));
+                    let grads = gradients(other, &on, 1e-6 * h);
+                    for ((v, w), d) in vals.iter_mut().zip(&here).zip(&grads) {
+                        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                        if w.is_finite() && len.is_finite() && *w < -1e-9 * h * len {
+                            *v = v.min(*w);
+                        }
+                    }
+                    vals
+                };
                 trim_mesh(&mut m, &mut inward, 8);
             }
         }
@@ -1133,7 +1183,7 @@ pub fn region_faces(cuts: &[Program], faces: &[Vec<(usize, Program)>], dom: Doma
         drop_outside(&mut m, g, cuts, i, h);
         // ほかの面 G_j = 0（j < i）と重なる所は、その面で描いてあるので消す（重ねると、半透明の濃さが変わる）
         for other in &cuts[..i] {
-            drop_on_surface(&mut m, other, h);
+            drop_on_surface(&mut m, g, other, h);
         }
         lods.push(m.lod_mesh.take());
         parts.push(m);
@@ -1272,4 +1322,257 @@ mod tests {
             assert!((p[0].abs() - 2f64.sqrt()).abs() < 1e-5 && (p[0] - p[1]).abs() < 1e-5 && p[2].abs() < 1e-5, "{p:?}");
         }
     }
+}
+
+/// 3D の 2 つの式 F₁ = F₂ = 0 の、面どうしが接するだけの所（#119・#206）。F₁ = 0 の面の上で F₂ が符号を変えない（または変えても
+/// わずかな）とき、F₂ の値が両隣より小さい「谷」の頂点から、F₁ = F₂ = 0 へ寄せる（ガウス・ニュートン法。接する所では
+/// ヤコビ行列の階数が落ちるので、λ を足した最小二乗の一歩を 60 回まで）。寄った点のまわりの小さい箱（半径 10⁻⁶ h）で区間演算をして、
+/// F₂ が 0 になりうる点だけを残す（中心の距離 2.00001 の球 2 つは残らない）。戻り値は、互いに 0.25h より離れた点
+pub fn touching_points(f1: &Program, f2: &Program, surface: &Mesh, dom: Domain, n: usize) -> Vec<[f64; 3]> {
+    use crate::interval::{Interval, Range};
+    let pos: Vec<[f64; 3]> = surface.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    if pos.is_empty() || surface.indices.is_empty() {
+        return Vec::new();
+    }
+    let h = cell(dom, n);
+    let cols: [Vec<f64>; 3] = [0, 1, 2].map(|c| pos.iter().map(|p| p[c]).collect());
+    let g = values_at(f2, &cols);
+    let scale = g.iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+    if scale == 0.0 {
+        return Vec::new();
+    }
+    // 符号が変わる（交わる線がある）なら、接するだけの所ではない（わずかな丸めの値 |F₂| ≤ 10⁻⁹ × 最大 は数えない）
+    let tiny = 1e-9 * scale;
+    let (pos_n, neg_n) = g.iter().filter(|v| v.is_finite()).fold((0, 0), |(p, q), &v| (p + (v > tiny) as usize, q + (v < -tiny) as usize));
+    let sign = if pos_n >= neg_n { 1.0 } else { -1.0 };
+    if pos_n.min(neg_n) > 0 {
+        return Vec::new();
+    }
+    // 頂点の隣（三角形の辺）
+    let mut nbr: Vec<Vec<u32>> = vec![Vec::new(); pos.len()];
+    for t in surface.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if !nbr[a as usize].contains(&b) {
+                nbr[a as usize].push(b);
+            }
+            if !nbr[b as usize].contains(&a) {
+                nbr[b as usize].push(a);
+            }
+        }
+    }
+    // 谷の頂点: 値 a = sign·F₂ が、向かい合う 2 つの隣（間の向きが 120° より開いた組）のどちらよりも小さい
+    let a = |k: usize| sign * g[k];
+    let mut seeds: Vec<[f64; 3]> = Vec::new();
+    for k in 0..pos.len() {
+        if !g[k].is_finite() {
+            continue;
+        }
+        let around = &nbr[k];
+        let valley = around.iter().enumerate().any(|(i, &p)| {
+            around[i + 1..].iter().any(|&q| {
+                let (p, q) = (p as usize, q as usize);
+                let (u, v) = ([0, 1, 2].map(|c| pos[p][c] - pos[k][c]), [0, 1, 2].map(|c| pos[q][c] - pos[k][c]));
+                let dot = u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+                let len = (u.iter().map(|x| x * x).sum::<f64>() * v.iter().map(|x| x * x).sum::<f64>()).sqrt();
+                dot < -0.5 * len && a(p) > a(k) && a(q) > a(k)
+            })
+        });
+        if valley && a(k) <= 0.25 * scale {
+            seeds.push(pos[k]);
+        }
+        if seeds.len() > 20_000 {
+            break;
+        }
+    }
+    // ガウス・ニュートン法（まとめて計算する）
+    let d = 1e-6 * h;
+    let mut cur = seeds;
+    let mut alive = vec![true; cur.len()];
+    for _ in 0..60 {
+        let mut c: [Vec<f64>; 3] = Default::default();
+        for p in &cur {
+            for s in 0..7 {
+                for (axis, col) in c.iter_mut().enumerate() {
+                    let off = if s > 0 && (s - 1) / 2 == axis { if s % 2 == 1 { d } else { -d } } else { 0.0 };
+                    col.push(p[axis] + off);
+                }
+            }
+        }
+        let (v1, v2) = (values_at(f1, &c), values_at(f2, &c));
+        for (k, p) in cur.iter_mut().enumerate() {
+            if !alive[k] {
+                continue;
+            }
+            let f = [v1[7 * k], v2[7 * k]];
+            let grad = |v: &[f64]| [0, 1, 2].map(|axis| (v[7 * k + 1 + 2 * axis] - v[7 * k + 2 + 2 * axis]) / (2.0 * d));
+            let (j1, j2) = (grad(&v1), grad(&v2));
+            if f.iter().chain(&j1).chain(&j2).any(|x| !x.is_finite()) {
+                alive[k] = false;
+                continue;
+            }
+            let dot = |x: &[f64; 3], y: &[f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+            let (a11, a12, a22) = (dot(&j1, &j1), dot(&j1, &j2), dot(&j2, &j2));
+            let lambda = 1e-10 * (a11 + a22);
+            let (b11, b22) = (a11 + lambda, a22 + lambda);
+            let det = b11 * b22 - a12 * a12;
+            if det == 0.0 || !det.is_finite() {
+                alive[k] = false;
+                continue;
+            }
+            let y = [(b22 * f[0] - a12 * f[1]) / det, (b11 * f[1] - a12 * f[0]) / det];
+            let mut step = [0, 1, 2].map(|axis| j1[axis] * y[0] + j2[axis] * y[1]);
+            let len = dot(&step, &step).sqrt();
+            if len > h {
+                step = step.map(|s| s * h / len);
+            }
+            for axis in 0..3 {
+                p[axis] -= step[axis];
+            }
+        }
+    }
+    let rad = 1e-6 * h;
+    let mut out: Vec<[f64; 3]> = Vec::new();
+    for (k, p) in cur.into_iter().enumerate() {
+        if !alive[k] || (0..3).any(|c| p[c] < dom.lo[c] - 1e-9 || p[c] > dom.hi[c] + 1e-9) {
+            continue;
+        }
+        let boxes: Vec<Interval> = (0..3).map(|c| Interval::new(p[c] - rad, p[c] + rad)).collect();
+        let may = |f: &Program| match f.eval_interval(&boxes) {
+            Range::Known(i) => i.lo <= 0.0 && 0.0 <= i.hi,
+            Range::Unknown => {
+                let v = values_at(f, &[vec![p[0]], vec![p[1]], vec![p[2]]])[0];
+                v.abs() <= 1e-9 * scale.max(1.0)
+            }
+        };
+        if may(f1) && may(f2) && !out.iter().any(|q| (0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>() < (0.25 * h).powi(2)) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// 接する所の点（[`touching_points`]）を、1 か所に集まっていれば 1 点、そうでなければ近い点（1.6h 以内）どうしを結んだ線にする
+pub fn touching_mesh(points: &[[f64; 3]], h: f64) -> Mesh {
+    if points.is_empty() {
+        return Mesh::default();
+    }
+    let center = [0, 1, 2].map(|c| points.iter().map(|p| p[c]).sum::<f64>() / points.len() as f64);
+    let spread = points.iter().map(|p| (0..3).map(|c| (p[c] - center[c]).powi(2)).sum::<f64>().sqrt()).fold(0.0f64, f64::max);
+    if spread < h {
+        return points_mesh(&[center]);
+    }
+    let mut out = Vec::new();
+    for (i, p) in points.iter().enumerate() {
+        // いちばん近い 2 点（向きが反対のもの）と結ぶ
+        let mut near: Vec<(f64, usize)> = points
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| j > i)
+            .map(|(j, q)| ((0..3).map(|c| (q[c] - p[c]).powi(2)).sum::<f64>().sqrt(), j))
+            .filter(|&(dd, _)| dd < 1.6 * h)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for &(_, j) in near.iter().take(2) {
+            out.extend(p.map(|v| v as f32));
+            out.extend(points[j].map(|v| v as f32));
+            out.extend([f32::NAN; 3]);
+        }
+    }
+    Mesh { positions: out, ..Default::default() }
+}
+
+/// F₂ が F₁ = 0 の面（`surface`）の上でどこでもほぼ 0（|F₂| ≤ 10⁻⁷ × 表示範囲での |F₂| の最大）か。
+/// 1 本目と同じ面になる 2 本目の式（2x² + 2y² + 2z² = 2）・恒等式（z = z）（#206）
+pub fn vanishes_on(f1: &Program, f2: &Program, surface: &Mesh, dom: Domain) -> bool {
+    // 頂点（多くても 2,000 個）を、F₁ = 0 の上へ寄せてから調べる（メッシュの頂点は面から少しずれている）
+    let all: Vec<[f64; 3]> =
+        surface.positions.chunks_exact(3).filter(|p| p.iter().all(|v| v.is_finite())).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+    if all.is_empty() {
+        return false;
+    }
+    let step = (all.len() / 2000).max(1);
+    let mut pos: Vec<[f64; 3]> = all.into_iter().step_by(step).collect();
+    let h = (0..3).map(|a| dom.hi[a] - dom.lo[a]).fold(f64::INFINITY, f64::min) * 1e-7;
+    for _ in 0..4 {
+        let mut c: [Vec<f64>; 3] = Default::default();
+        for p in &pos {
+            for s in 0..4 {
+                for (axis, col) in c.iter_mut().enumerate() {
+                    col.push(p[axis] + if s > 0 && s - 1 == axis { h } else { 0.0 });
+                }
+            }
+        }
+        let v = values_at(f1, &c);
+        for (k, p) in pos.iter_mut().enumerate() {
+            let f = v[4 * k];
+            let g = [0, 1, 2].map(|a| (v[4 * k + 1 + a] - f) / h);
+            let n2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+            if f.is_finite() && n2 > 0.0 && n2.is_finite() {
+                for a in 0..3 {
+                    p[a] -= f * g[a] / n2;
+                }
+            }
+        }
+    }
+    let k = 9;
+    let mut grid: Vec<[f64; 3]> = Vec::with_capacity(k * k * k);
+    for i in 0..k * k * k {
+        let idx = [i % k, i / k % k, i / (k * k)];
+        grid.push([0, 1, 2].map(|c| dom.lo[c] + (dom.hi[c] - dom.lo[c]) * (idx[c] as f64 + 0.5) / k as f64));
+    }
+    let scale = values_of(f2)(&grid).into_iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+    let on = values_of(f2)(&pos);
+    on.iter().all(|v| v.is_finite() && v.abs() <= 1e-7 * scale.max(f64::MIN_POSITIVE))
+}
+
+/// 不等式の領域の境目の面どうしの間の、ふつうの厚さ（面ごとの重心から、ほかの面 G_j = 0 までの距離の見積もり |G_j| / |∇G_j| の
+/// いちばん近いものの中央値）。格子のマスの 1/10 より薄ければその値（説明に出す。#143）
+pub fn thin_region(cuts: &[Program], mesh: &Mesh, h: f64) -> Option<f64> {
+    if cuts.len() < 2 {
+        return None;
+    }
+    let p = &mesh.positions;
+    let at = |k: u32, c: usize| p[k as usize * 3 + c] as f64;
+    let centers: Vec<[f64; 3]> = mesh.indices.chunks_exact(3).step_by((mesh.indices.len() / 3 / 2000).max(1)).map(|t| [0, 1, 2].map(|c| (at(t[0], c) + at(t[1], c) + at(t[2], c)) / 3.0)).collect();
+    if centers.is_empty() {
+        return None;
+    }
+    // 重心ごとの、各面までの距離の見積もり
+    let estimate = |pts: &[[f64; 3]]| -> Vec<Vec<f64>> {
+        cuts.iter()
+            .map(|g| {
+                let v = values_at(g, &cols_of(pts));
+                let d = gradients(g, pts, 1e-6 * h);
+                (0..pts.len())
+                    .map(|k| {
+                        let len = (d[k][0] * d[k][0] + d[k][1] * d[k][1] + d[k][2] * d[k][2]).sqrt();
+                        if v[k].is_finite() && len > 0.0 && len.is_finite() { v[k].abs() / len } else { f64::INFINITY }
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let first = estimate(&centers);
+    // いちばん近い面（自分の面）の上へ寄せてから、ほかの面までの距離を測る
+    let own: Vec<usize> = (0..centers.len()).map(|k| (0..cuts.len()).min_by(|&a, &b| first[a][k].total_cmp(&first[b][k])).unwrap_or(0)).collect();
+    let mut moved = centers.clone();
+    for (j, g) in cuts.iter().enumerate() {
+        let idx: Vec<usize> = (0..centers.len()).filter(|&k| own[k] == j).collect();
+        let pts: Vec<[f64; 3]> = idx.iter().map(|&k| centers[k]).collect();
+        for (&k, p) in idx.iter().zip(onto_surface(g, &pts, h)) {
+            moved[k] = p;
+        }
+    }
+    let second = estimate(&moved);
+    // 同じ面（距離がほぼ 0）は数えない
+    let dists: Vec<f64> = (0..centers.len())
+        .map(|k| (0..cuts.len()).filter(|&j| j != own[k]).map(|j| second[j][k]).filter(|&d| d > 1e-9 * h).fold(f64::INFINITY, f64::min))
+        .collect();
+    let mut finite: Vec<f64> = dists.into_iter().filter(|d| d.is_finite()).collect();
+    if finite.is_empty() {
+        return None;
+    }
+    finite.sort_by(f64::total_cmp);
+    let median = finite[finite.len() / 2];
+    (median < 0.1 * h).then_some(median)
 }

@@ -8260,44 +8260,106 @@ pub(crate) fn sampled_limit_curve(points: &[[f64; 2]], report: &crate::limit::Re
 /// 2D 表示の陰関数の曲線 F(横, 奥, 0) = 0（マーチング・スクエア法）。
 /// `prog` の変数は (横, 奥, 縦) の3つか、縦の無い (横, 奥) の2つ（`z = f(x, y)` の切り口 f = 0 など）
 pub fn implicit_curve_2d(prog: &Program, dom: Domain, n: usize) -> Mesh {
+    let (mut curve, extra) = implicit_curve_2d_parts(prog, dom, n);
+    if !extra.is_empty() {
+        if !curve.positions.is_empty() {
+            curve.positions.extend_from_slice(&[f32::NAN; 3]);
+        }
+        curve.positions.extend(extra);
+    }
+    curve
+}
+
+/// [`implicit_curve_2d`] の曲線を、ふつうの曲線と、添えの線・点（段差の飛ぶ線の上だけの解と、長さの無い点）に分けたもの。
+/// 添えの部分は、GPU で画素ごとに描くときも（画素の中で面積が 0 なので塗れない）メッシュで重ねて描く（#175）
+pub fn implicit_curve_2d_parts(prog: &Program, dom: Domain, n: usize) -> (Mesh, Vec<f32>) {
+    let (mut curve, mut extra) = implicit_curve_2d_raw(prog, dom, n);
+    let dots = take_dots(&mut curve.positions);
+    if !dots.is_empty() {
+        if !extra.is_empty() {
+            extra.extend_from_slice(&[f32::NAN; 3]);
+        }
+        extra.extend(dots);
+    }
+    (curve, extra)
+}
+
+/// 曲線（NaN で区切った点の列）から、長さの無い部分（同じ点だけの一続き）を取り出す（点 2 つと NaN の列にして返す）
+pub fn take_dots(pos: &mut Vec<f32>) -> Vec<f32> {
+    let mut keep = Vec::with_capacity(pos.len());
+    let mut dots = Vec::new();
+    let mut run: Vec<f32> = Vec::new();
+    let flush = |run: &mut Vec<f32>, keep: &mut Vec<f32>, dots: &mut Vec<f32>| {
+        if run.is_empty() {
+            return;
+        }
+        let first = [run[0], run[1], run[2]];
+        let same = run.chunks_exact(3).all(|p| p[0] == first[0] && p[1] == first[1] && p[2] == first[2]);
+        if same {
+            dots.extend_from_slice(&first);
+            dots.extend_from_slice(&first);
+            dots.extend_from_slice(&[f32::NAN; 3]);
+        } else {
+            keep.extend_from_slice(run);
+            keep.extend_from_slice(&[f32::NAN; 3]);
+        }
+        run.clear();
+    };
+    for p in pos.chunks_exact(3) {
+        if p[0].is_finite() && p[1].is_finite() && p[2].is_finite() {
+            run.extend_from_slice(p);
+        } else {
+            flush(&mut run, &mut keep, &mut dots);
+        }
+    }
+    flush(&mut run, &mut keep, &mut dots);
+    if dots.is_empty() {
+        return dots;
+    }
+    *pos = keep;
+    dots
+}
+
+fn implicit_curve_2d_raw(prog: &Program, dom: Domain, n: usize) -> (Mesh, Vec<f32>) {
     // 因数に分ける（#140・#120）: A B = 0 は A = 0 と B = 0、|A| = 0・√A = 0・Aⁿ = 0・A/B = 0 は A = 0（3D の部品と同じ。
     // `Program::zero_factors`）。|A| や √|A| は符号が変わらず、0 に接するだけの所として探すしかなかった（√|x² + y² − 1| = 0 は何も描かなかった）。
     // 因数の零点のうち、元の式が定義されない所（分母が 0 など）は切り落とす
     let (factors, changed) = prog.zero_factors();
     if changed {
-        let parts: Vec<Mesh> = factors
-            .iter()
-            .filter(|f| !f.is_constant())
-            .map(|f| {
-                let mut m = with_jump_lines(f, implicit_curve_2d_single(f, dom, n), dom, n);
-                drop_undefined_2d(&mut m, prog, f, dom, n);
-                m
-            })
-            .collect();
-        return merge(parts, true);
+        let mut curves = Vec::new();
+        let mut extras = Vec::new();
+        for f in factors.iter().filter(|f| !f.is_constant()) {
+            let mut m = implicit_curve_2d_single(f, dom, n);
+            let mut e = Mesh { positions: jump_lines(f, dom, n), ..Default::default() };
+            drop_undefined_2d(&mut m, prog, f, dom, n);
+            drop_undefined_2d(&mut e, prog, f, dom, n);
+            curves.push(m);
+            extras.push(e);
+        }
+        return (merge(curves, true), merge(extras, true).positions);
     }
-    with_jump_lines(prog, implicit_curve_2d_single(prog, dom, n), dom, n)
+    (implicit_curve_2d_single(prog, dom, n), jump_lines(prog, dom, n))
 }
 
-/// 段差（`floor`・`ceil`・`mod`）の飛ぶ線の上だけで成り立つ解を足す（#175）。`floor(x) + floor(−x) = 0` の解は整数の x の縦線で、
+/// 段差（`floor`・`ceil`・`mod`）の飛ぶ線の上だけで成り立つ解（#175。線分の列）。`floor(x) + floor(−x) = 0` の解は整数の x の縦線で、
 /// 線の外では値が −1 なので、格子の上の符号からは見つからない（格子が整数に乗るときだけ描けていた）。
 /// 段差の元の引数 s が整数 L になる線 s = L を作り、その頂点で「引数が整数のすぐ近くにある段差」を、その整数の枝に固定した式
 /// （[`Program::frozen`]）の値を調べ、0 になる線分だけを残す
-fn with_jump_lines(prog: &Program, mut mesh: Mesh, dom: Domain, n: usize) -> Mesh {
+fn jump_lines(prog: &Program, dom: Domain, n: usize) -> Vec<f32> {
     use crate::functions::Func;
     let sites = prog.branch_sites();
     if sites == 0 || sites > 4 {
-        return mesh;
+        return Vec::new();
     }
     let kinds = prog.branch_closed_high();
     // sign の段（境目そのものが別の枝）と round（半整数で飛ぶ）は扱わない
     if kinds.iter().any(|k| k.is_none()) {
-        return mesh;
+        return Vec::new();
     }
     let conds = prog.branch_conds(&vec![0.0; sites]);
     let rounds = prog.branch_round_sites();
     if rounds.iter().any(|&r| r) {
-        return mesh;
+        return Vec::new();
     }
     // 表示範囲での、段差の元の引数の範囲（41 × 41 点）
     let k = 41;
@@ -8375,13 +8437,188 @@ fn with_jump_lines(prog: &Program, mut mesh: Mesh, dom: Domain, n: usize) -> Mes
             }
         }
     }
-    if !extra.is_empty() {
-        if !mesh.positions.is_empty() {
-            mesh.positions.extend_from_slice(&[f32::NAN; 3]);
-        }
-        mesh.positions.extend(extra);
+    extra
+}
+
+/// 3D の、段差（`floor`・`ceil`・`mod`）の飛ぶ面の上だけで成り立つ解（#175。`floor(x) + floor(-x) = 0` の整数の x の平面）。
+/// 2D の [`jump_lines`] と同じく、段差の元の引数が整数 L になる面 s = L を作り、頂点を面の上へ寄せて、引数が整数のすぐ近くの段差を
+/// その整数に固定した式が 0 になる三角形だけを残す
+pub fn jump_surfaces(prog: &Program, dom: Domain, n: usize) -> Mesh {
+    use crate::functions::Func;
+    let sites = prog.branch_sites();
+    if sites == 0 || sites > 4 || prog.branch_closed_high().iter().any(|k| k.is_none()) || prog.branch_round_sites().iter().any(|&r| r) {
+        return Mesh::default();
     }
-    mesh
+    let conds = prog.branch_conds(&vec![0.0; sites]);
+    let kinds = prog.branch_closed_high();
+    let k = 13;
+    let mut grid: [Vec<f64>; 3] = Default::default();
+    for i in 0..k * k * k {
+        let idx = [i % k, i / k % k, i / (k * k)];
+        for c in 0..3 {
+            grid[c].push(dom.lo[c] + (dom.hi[c] - dom.lo[c]) * idx[c] as f64 / (k - 1) as f64);
+        }
+    }
+    let eval3 = |p: &Program, cols: &[Vec<f64>; 3]| {
+        let mut out = vec![C::new(0.0, 0.0); cols[0].len()];
+        p.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut out);
+        out.iter().map(|v| as_real(*v)).collect::<Vec<f64>>()
+    };
+    let snap = |s: f64, high: bool| {
+        let r = s.round();
+        if (s - r).abs() <= 1e-9 * s.abs().max(1.0) {
+            r
+        } else if high {
+            s.floor()
+        } else {
+            s.ceil()
+        }
+    };
+    let mut frozen: crate::adaptive::HashMap<Vec<i64>, Program> = Default::default();
+    let mut parts = Vec::new();
+    let res = (n / 2).max(12);
+    let h = (0..3).map(|a| (dom.hi[a] - dom.lo[a]) / res as f64).fold(f64::INFINITY, f64::min);
+    for c in &conds {
+        let vals = eval3(&c.prog, &grid);
+        let (lo, hi) = vals.iter().filter(|v| v.is_finite()).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        if !(lo.is_finite() && hi.is_finite()) || hi - lo > 40.0 {
+            continue;
+        }
+        for level in (lo.ceil() as i64)..=(hi.floor() as i64) {
+            let g = c.prog.level_of(Func::Re, level as f64);
+            let mut m = implicit_solid_opt(&g, dom, res, &[], 0, Refine::Light);
+            if m.indices.is_empty() {
+                continue;
+            }
+            m.lod_mesh = None;
+            m.lod.clear();
+            let mut pts: [Vec<f64>; 3] = [0, 1, 2].map(|c| m.positions.chunks_exact(3).map(|p| p[c] as f64).collect());
+            // 面 s = L の上へ寄せる（ニュートン法 3 回）
+            let d = 1e-6 * h;
+            for _ in 0..3 {
+                let v = eval3(&g, &pts);
+                let grads: Vec<[f64; 3]> = (0..3)
+                    .map(|axis| {
+                        let mut q = pts.clone();
+                        q[axis].iter_mut().for_each(|x| *x += d);
+                        eval3(&g, &q)
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .enumerate()
+                    .fold(vec![[0.0; 3]; v.len()], |mut acc, (axis, w)| {
+                        for (k, a) in acc.iter_mut().enumerate() {
+                            a[axis] = (w[k] - v[k]) / d;
+                        }
+                        acc
+                    });
+                for (k, gr) in grads.iter().enumerate() {
+                    let n2 = gr[0] * gr[0] + gr[1] * gr[1] + gr[2] * gr[2];
+                    if v[k].is_finite() && n2 > 0.0 && n2.is_finite() {
+                        for axis in 0..3 {
+                            pts[axis][k] -= v[k] * gr[axis] / n2;
+                        }
+                    }
+                }
+            }
+            let args: Vec<Vec<f64>> = conds.iter().map(|d| eval3(&d.prog, &pts)).collect();
+            let mut zero = vec![false; pts[0].len()];
+            for (t, z) in zero.iter_mut().enumerate() {
+                let tau: Option<Vec<i64>> = (0..sites).map(|j| args[j][t].is_finite().then(|| snap(args[j][t], kinds[j] == Some(true)) as i64)).collect();
+                let Some(tau) = tau else { continue };
+                let f = frozen.entry(tau.clone()).or_insert_with(|| prog.frozen(&tau.iter().map(|&v| v as f64).collect::<Vec<_>>()));
+                let v = eval3(f, &[vec![pts[0][t]], vec![pts[1][t]], vec![pts[2][t]]])[0];
+                *z = v.abs() <= 1e-9;
+            }
+            m.indices = m.indices.chunks_exact(3).filter(|t| t.iter().all(|&k| zero[k as usize])).flatten().copied().collect();
+            if !m.indices.is_empty() {
+                parts.push(m);
+            }
+        }
+    }
+    merge(parts, false)
+}
+
+/// 段差の枝のうち、枝を固定した式が恒等的に 0 になる枝の範囲（面積のある解。`floor(x) + floor(y) = 0` の正方形の並び）を塗った領域。
+/// 格子（`n` × `n`）の点の枝の番号から、現れる枝を集めて調べる。無ければ None
+pub fn branch_regions_2d(prog: &Program, dom: Domain, n: usize) -> Option<Mesh> {
+    let sites = prog.branch_sites();
+    if sites == 0 || sites > 4 || prog.branch_closed_high().iter().any(|k| k.is_none()) || prog.branch_round_sites().iter().any(|&r| r) {
+        return None;
+    }
+    let m = n + 1;
+    let (mut xs, mut ys) = (Vec::with_capacity(m * m), Vec::with_capacity(m * m));
+    for j in 0..m {
+        for i in 0..m {
+            xs.push(dom.at(0, i as f64 + 0.5, n + 1));
+            ys.push(dom.at(1, j as f64 + 0.5, n + 1));
+        }
+    }
+    let zs = vec![0.0; xs.len()];
+    let inputs: Vec<&[f64]> = if prog.vars().len() == 2 { vec![&xs, &ys] } else { vec![&xs, &ys, &zs] };
+    let tau = prog.eval_branches(&inputs, xs.len());
+    let mut seen: Vec<Vec<i64>> = Vec::new();
+    for t in tau.chunks_exact(sites) {
+        if t.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let key: Vec<i64> = t.iter().map(|&v| v as i64).collect();
+        if !seen.contains(&key) {
+            seen.push(key);
+            if seen.len() > 400 {
+                return None;
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    for key in seen {
+        let k: Vec<f64> = key.iter().map(|&v| v as f64).collect();
+        let f = prog.frozen(&k);
+        if !f.is_constant() {
+            continue;
+        }
+        let mut out = [C::new(0.0, 0.0)];
+        let zero = [0.0];
+        let at: Vec<&[f64]> = (0..f.vars().len()).map(|_| &zero[..]).collect();
+        f.eval_batch(&at, &mut out);
+        if out[0] != C::new(0.0, 0.0) {
+            continue;
+        }
+        // 枝の範囲: 段差の元の引数 s が lo ≤ s < hi（端を含むかは段差の種類による）
+        let mut cuts = Vec::new();
+        let mut strict = Vec::new();
+        for c in prog.branch_conds(&k) {
+            if c.lo.is_finite() {
+                cuts.push(c.prog.level_of(crate::functions::Func::Re, c.lo).negated());
+                strict.push(!c.lo_closed);
+            }
+            if c.hi.is_finite() {
+                cuts.push(c.prog.level_of(crate::functions::Func::Re, c.hi));
+                strict.push(!c.hi_closed);
+            }
+        }
+        if cuts.is_empty() {
+            continue;
+        }
+        let region = Field::region_strict(&cuts, &strict).cap(dom, 2, 0.0, true, n);
+        // 面積がほとんど無い枝（floor(x) + floor(−x) = 0 の x = 0 の線。飛ぶ線の上の解として描く）は塗らない
+        let p = &region.positions;
+        let area: f64 = region
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                let at = |k: u32, c: usize| p[3 * k as usize + c] as f64;
+                let (ux, uy) = (at(t[1], 0) - at(t[0], 0), at(t[1], 1) - at(t[0], 1));
+                let (vx, vy) = (at(t[2], 0) - at(t[0], 0), at(t[2], 1) - at(t[0], 1));
+                0.5 * (ux * vy - uy * vx).abs()
+            })
+            .sum();
+        let whole = (dom.hi[0] - dom.lo[0]) * (dom.hi[1] - dom.lo[1]);
+        if area > 1e-6 * whole {
+            parts.push(region);
+        }
+    }
+    (!parts.is_empty()).then(|| merge(parts, false))
 }
 
 /// 曲線（因数 `factor` = 0。NaN で区切った点の列）のうち、元の式 `prog` の零点でない頂点を含む区切りを捨てる。

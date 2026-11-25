@@ -174,6 +174,14 @@ impl Program {
         Program { code: Code::new(b, vec![root]), vars: self.vars.clone(), used_params: self.used_params.clone() }
     }
 
+    /// −F（領域の不等式の向きを変える）
+    pub fn negated(&self) -> Program {
+        let mut b = Builder::default();
+        let at = b.append(&self.code.ops, &Op::Var);
+        let root = b.push(Op::Neg(at[self.code.outs[0]]));
+        Program { code: Code::new(b, vec![root]), vars: self.vars.clone(), used_params: self.used_params.clone() }
+    }
+
     /// 実数の定数の命令なら、その値
     fn real_const(&self, i: usize) -> Option<f64> {
         match self.code.ops[i] {
@@ -198,19 +206,30 @@ impl Program {
     /// 命令 i を、符号 `sign` を付けた項の和に分けて、どの項も 0 以上の形（[`Program::nonneg_base`]）なら、
     /// (項の A, 符号) を `out` に足す。0 以上の形でない項・0 でない定数の項があれば false
     fn nonneg_terms(&self, i: usize, sign: f64, out: &mut Vec<(usize, f64)>) -> bool {
+        // 定数の項は、符号を付けて足し合わせ、合計が 0 なら認める（4 次元の断面で w = 1 を入れた x² + y² + z² + 1 − 1。#134）
+        let mut consts = (0.0f64, 0.0f64);
+        self.nonneg_terms_with(i, sign, out, &mut consts) && consts.0.abs() <= 1e-14 * consts.1
+    }
+
+    /// [`Program::nonneg_terms`] の本体。`consts` は（定数の項の符号つきの和, 絶対値の和）
+    fn nonneg_terms_with(&self, i: usize, sign: f64, out: &mut Vec<(usize, f64)>, consts: &mut (f64, f64)) -> bool {
         match &self.code.ops[i] {
-            Op::Bin(BinOp::Add, a, b) => self.nonneg_terms(*a, sign, out) && self.nonneg_terms(*b, sign, out),
-            Op::Bin(BinOp::Sub, a, b) => self.nonneg_terms(*a, sign, out) && self.nonneg_terms(*b, -sign, out),
-            Op::Neg(a) => self.nonneg_terms(*a, -sign, out),
-            Op::Const(c) => c.re == 0.0 && c.im == 0.0,
+            Op::Bin(BinOp::Add, a, b) => self.nonneg_terms_with(*a, sign, out, consts) && self.nonneg_terms_with(*b, sign, out, consts),
+            Op::Bin(BinOp::Sub, a, b) => self.nonneg_terms_with(*a, sign, out, consts) && self.nonneg_terms_with(*b, -sign, out, consts),
+            Op::Neg(a) => self.nonneg_terms_with(*a, -sign, out, consts),
+            Op::Const(c) => {
+                consts.0 += sign * c.re;
+                consts.1 += c.re.abs();
+                c.im == 0.0
+            }
             Op::Bin(BinOp::Mul, a, b) if self.real_const(*a).is_some_and(|c| c != 0.0) => {
-                self.nonneg_terms(*b, sign * self.real_const(*a).unwrap().signum(), out)
+                self.nonneg_terms_with(*b, sign * self.real_const(*a).unwrap().signum(), out, consts)
             }
             Op::Bin(BinOp::Mul, a, b) if self.real_const(*b).is_some_and(|c| c != 0.0) => {
-                self.nonneg_terms(*a, sign * self.real_const(*b).unwrap().signum(), out)
+                self.nonneg_terms_with(*a, sign * self.real_const(*b).unwrap().signum(), out, consts)
             }
             Op::Bin(BinOp::Div, a, b) if self.real_const(*b).is_some_and(|c| c != 0.0) => {
-                self.nonneg_terms(*a, sign * self.real_const(*b).unwrap().signum(), out)
+                self.nonneg_terms_with(*a, sign * self.real_const(*b).unwrap().signum(), out, consts)
             }
             _ => match self.nonneg_base(i) {
                 Some(base) => {
@@ -251,6 +270,37 @@ impl Program {
             out.push(parts);
         }
         (!out.is_empty()).then_some(out)
+    }
+
+    /// 面になる因数と、線・点だけになる因数（0 以上の項の和）が混ざる式（`(x^2 + y^2)(z - 1) = 0`）なら、線・点だけの因数ごとの
+    /// 「同時に 0 になる式の組」（[`Program::common_zero_sets`] と同じ形）。面だけ・線と点だけの式は None（#120）
+    pub fn lower_dim_parts(&self) -> Option<Vec<Vec<Program>>> {
+        if !self.code.real {
+            return None;
+        }
+        let (factors, changed) = self.zero_factors();
+        if !changed {
+            return None;
+        }
+        let mut out = Vec::new();
+        let mut surfaces = 0;
+        for f in factors.iter().filter(|f| !f.is_constant()) {
+            let mut terms = Vec::new();
+            let sum_of_squares = f.nonneg_terms(f.code.outs[0], 1.0, &mut terms) && terms.iter().all(|t| t.1 == terms[0].1);
+            let mut bases: Vec<usize> = Vec::new();
+            for (b, _) in &terms {
+                if !bases.contains(b) {
+                    bases.push(*b);
+                }
+            }
+            let parts: Vec<Program> = bases.into_iter().map(|b| f.sub_program(b)).filter(|p| !p.is_constant()).collect();
+            if sum_of_squares && parts.len() >= 2 {
+                out.push(parts);
+            } else {
+                surfaces += 1;
+            }
+        }
+        (surfaces > 0 && !out.is_empty()).then_some(out)
     }
 
     /// F を分数 N/D の形に直す（通分）。F = 0 は「N = 0 で、D ≠ 0」と同じで、N には D の極（符号は変わるが零点でない所）が無い。

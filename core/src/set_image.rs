@@ -465,6 +465,19 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
             Some(sh) => mesh::project(sh, &source_ctx.view, dom),
             None => source.inner,
         };
+        // 枝の添えの線・点（2D の陰関数の点 (x − 3)² + y² = 0 など）も、曲線として写す
+        if !source.extra.is_empty() && image.arity > 1 {
+            let values = evaluate_map(&set, &source.extra);
+            let bounds = [0, 1, 2].map(|axis| Interval::new(dom.lo[axis], dom.hi[axis]));
+            let guards: Vec<_> = image
+                .maps
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.supports_interval() && p.eval_interval_dec(&bounds).dec < Dec::Dac)
+                .collect();
+            let mapped = project(&values, image.arity, ctx);
+            outline.push(Mesh { positions: mapped_curve(mapped, &source.extra, &values, image.arity, &guards), ..Default::default() });
+        }
         if inner.positions.is_empty() {
             continue;
         }
@@ -563,10 +576,11 @@ pub(super) fn build(image: &Image, ctx: &Ctx) -> Result<Built, String> {
         curve |= slice;
     }
     let lines = if ctx.flat { crate::flat_finish(lines, true, false) } else { lines };
+    // 面積の無い枝（点・線）は、領域と一緒に添えの線・点として描く（#121。点は長さの無い線分のままだと描かれなかった）
     Ok(Built {
         inner,
         curve,
-        outline: (lines.positions, Vec::new()),
+        extra: if surface { lines.positions } else { Vec::new() },
         kind: image.label().into(),
         ..Default::default()
     })
@@ -602,6 +616,10 @@ pub(super) fn merge_union(parts: Vec<Built>, ctx: &Ctx) -> Built {
         }
         out.outline.0.append(&mut part.outline.0);
         out.outline.1.append(&mut part.outline.1);
+        if !out.extra.is_empty() && !part.extra.is_empty() {
+            out.extra.extend_from_slice(&[f32::NAN; 3]);
+        }
+        out.extra.append(&mut part.extra);
         out.holes.append(&mut part.holes);
         out.source_holes.append(&mut part.source_holes);
         out.source_dashed.append(&mut part.source_dashed);
@@ -612,9 +630,10 @@ pub(super) fn merge_union(parts: Vec<Built>, ctx: &Ctx) -> Built {
         out.inner = mesh::merge(curves, true);
     } else {
         out.inner = mesh::merge(surfaces, false);
-        out.outline.0 = mesh::merge(
+        // 曲線・点の部分は、添えの線・点にする（#121）
+        out.extra = mesh::merge(
             std::iter::once(Mesh {
-                positions: out.outline.0,
+                positions: std::mem::take(&mut out.extra),
                 ..Default::default()
             })
             .chain(curves)

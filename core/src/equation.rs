@@ -2784,7 +2784,7 @@ fn compile_pair(l: Expr, r: Expr, params: &Params, space: &Space) -> Result<Plot
     let f = Expr::Bin(BinOp::Sub, Box::new(l), Box::new(r));
     let prog = Program::compile_with(&f, &shown_refs, &consts)?;
     // 線・点だけの解として描く式・複素数の陰関数（i を含む式）は、回す前の形（面のメッシュを 3D オブジェクトとして回す）を使わない
-    let local = local.filter(|_| prog.common_zero_sets().is_none() && !prog.has_complex_const());
+    let local = local.filter(|_| prog.common_zero_sets().is_none() && prog.lower_dim_parts().is_none() && !prog.has_complex_const());
     // GPU の描き方の F: 回転・断面を入れる前の、元の座標 x, y, z, w, … の式。実数のスライダーのパラメータも変数として残す
     // （複素数のパラメータは定数のまま）。範囲で重ねる名前を使う式は、上で立体になっているので、ここには来ない
     let gpu = {

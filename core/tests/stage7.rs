@@ -17,7 +17,13 @@ fn draw(src: &str, d: f64, ires: u32) -> Out {
     graph_core::definitions("");
     let mut m = plot(src, &[-d, d, -d, d, -d, d], 64, ires, "", &[], "", &[], "", 3, &[0, 1, 2], &[0.0; 3], &[f64::NAN; 6], "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, true, 1, false, 0)
         .unwrap_or_else(|_| panic!("{src} が描けない"));
-    let pos = m.positions();
+    // 添えの線・点（点・段差の飛ぶ線の上の解）も合わせて見る
+    let mut pos = m.positions();
+    let extra = m.take_extra();
+    if !extra.is_empty() {
+        pos.extend_from_slice(&[f32::NAN; 3]);
+        pos.extend(extra);
+    }
     let v: Vec<&[f32]> = pos.chunks_exact(3).collect();
     let dots = (0..v.len().saturating_sub(1))
         .filter(|&k| v[k][0].is_finite() && v[k] == v[k + 1] && (k == 0 || v[k - 1][0].is_nan()) && v.get(k + 2).is_none_or(|n| n[0].is_nan()))
@@ -153,4 +159,130 @@ fn narrow_peaks_are_kept() {
     assert!(near(&o.verts, [0.234567, 1.0], 1e-5), "最大 {:?}", o.verts.iter().map(|p| p[1]).fold(f32::MIN, f32::max));
     let o = draw("y=-1/(1+10^(16)(x+1.5)^2)", 5.0, 40);
     assert!(near(&o.verts, [-1.5, -1.0], 1e-5));
+}
+
+/// 3D・4D の描画の結果（頂点・三角形・添えの線と点・説明・GPU を使わない理由）
+struct Out3 {
+    kind: String,
+    verts: Vec<[f32; 3]>,
+    tris: usize,
+    extra: Vec<[f32; 3]>,
+    extra_dots: Vec<[f32; 3]>,
+    gpu_reason: String,
+}
+
+fn draw3(src: &str, d: f64, ires: u32, dims: u32, slice: &[f64], flat: bool) -> Out3 {
+    graph_core::definitions("");
+    let coord = vec![f64::NAN; 2 * dims as usize];
+    let mut m = plot(src, &[-d, d, -d, d, -d, d], 64, ires, "", &[], "", &[], "", dims, &[0, 1, 2], slice, &coord, "", &[], 16, &[0.0; 10], &[0.0; 5], 0.0, 0, false, flat, 1, false, 0)
+        .unwrap_or_else(|_| panic!("{src} が描けない"));
+    let verts = m.positions().chunks_exact(3).filter(|p| p[0].is_finite()).map(|p| [p[0], p[1], p[2]]).collect();
+    let ex = m.take_extra();
+    let v: Vec<&[f32]> = ex.chunks_exact(3).collect();
+    let extra_dots = (0..v.len().saturating_sub(1))
+        .filter(|&k| v[k][0].is_finite() && v[k] == v[k + 1] && (k == 0 || v[k - 1][0].is_nan()) && v.get(k + 2).is_none_or(|n| n[0].is_nan()))
+        .map(|k| [v[k][0], v[k][1], v[k][2]])
+        .collect();
+    let extra = v.iter().filter(|p| p[0].is_finite()).map(|p| [p[0], p[1], p[2]]).collect();
+    Out3 { kind: m.kind(), verts, tris: m.indices().len() / 3, extra, extra_dots, gpu_reason: m.gpu_reason() }
+}
+
+fn near3(ps: &[[f32; 3]], q: [f32; 3], tol: f32) -> bool {
+    ps.iter().any(|p| (0..3).all(|c| (p[c] - q[c]).abs() <= tol))
+}
+
+/// 4 次元の超球の断面が 1 点に接する（#134）: 球面 → 点 → 空
+#[test]
+fn hypersphere_slice_point() {
+    let o = draw3("x^2+y^2+z^2+w^2=1", 6.0, 48, 4, &[0.0, 0.0, 0.0, 1.0], false);
+    assert_eq!(o.verts.len(), 2, "{}", o.kind);
+    assert!(near3(&o.verts, [0.0; 3], 1e-5));
+    assert!(draw3("x^2+y^2+z^2+w^2=1", 6.0, 48, 4, &[0.0, 0.0, 0.0, 1.01], false).verts.is_empty());
+    assert!(draw3("x^2+y^2+z^2+w^2=1", 6.0, 48, 4, &[0.0, 0.0, 0.0, 0.99], false).tris > 1000);
+}
+
+/// 面と線・点が 1 つの式・集合に混ざる（#120・#121）: 線・点は添えの線・点
+#[test]
+fn mixed_dimensions_are_kept() {
+    let o = draw3("(x^2+y^2)(z-1)=0", 6.0, 48, 3, &[0.0; 3], false);
+    assert!(o.tris > 1000 && o.verts.iter().all(|p| (p[2] - 1.0).abs() < 1e-4), "平面 z = 1");
+    assert!(o.extra.len() > 10 && o.extra.iter().all(|p| p[0].abs() < 1e-4 && p[1].abs() < 1e-4), "z 軸");
+    assert!(o.extra.iter().any(|p| p[2] < -5.0) && o.extra.iter().any(|p| p[2] > 5.0));
+    // 集合の和: 円板と、点 (3, 0)・縦線 x = 3・横線 y = 0。写像 (x², y) の像では縦線が x = 9
+    for flat in [true, false] {
+        let o = draw3("⦃(x,y)∣x^(2)+y^(2)<=1∨(x-3)^(2)+y^(2)=0⦄", 6.0, 48, 3, &[0.0; 3], flat);
+        assert!(o.tris > 1000 && near3(&o.extra_dots, [3.0, 0.0, 0.0], 1e-4), "点 (3, 0): {:?}", o.extra_dots);
+        let o = draw3("⦃(x,y)∣x^(2)+y^(2)<=1∨x=3⦄", 6.0, 48, 3, &[0.0; 3], flat);
+        assert!(o.tris > 1000 && o.extra.len() > 10 && o.extra.iter().all(|p| (p[0] - 3.0).abs() < 1e-4));
+        let o = draw3("⦃(x^(2),y)∣x^(2)+y^(2)<=1∨x=3⦄", 9.5, 48, 3, &[0.0; 3], flat);
+        assert!(o.extra.len() > 10 && o.extra.iter().all(|p| (p[0] - 9.0).abs() < 1e-3));
+    }
+}
+
+/// 複素数の陰関数で Re F と Im F が同じ面（曲線）になる（#122）
+#[test]
+fn dependent_complex_parts() {
+    for src in ["i(x^2+y^2+z^2-1)=0", "(x^2+y^2+z^2-1)+i(x^2+y^2+z^2-1)=0", "(x^2+y^2+z^2-1)+i(x^2+y^2+z^2-1)^2=0"] {
+        let o = draw3(src, 5.0, 40, 3, &[0.0; 3], false);
+        assert!(o.tris > 1000, "{src}: {}", o.kind);
+        assert!(o.verts.iter().all(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs() < 0.01), "{src}");
+    }
+    // 今までどおり: 交わりの曲線
+    let o = draw3("(x^2+y^2+z^2-1)+i z=0", 5.0, 40, 3, &[0.0; 3], false);
+    assert!(o.tris == 0 && o.verts.iter().all(|p| p[2].abs() < 1e-4));
+    // 2D
+    let o = draw3("i(x^2+y^2-1)=0", 5.0, 40, 3, &[0.0; 3], true);
+    assert!(o.verts.len() > 100 && o.verts.iter().all(|p| (p[0].hypot(p[1]) - 1.0).abs() < 1e-3));
+}
+
+/// 格子より薄い領域の境目は 2 枚とも描き、厚さを説明に出す（#143）
+#[test]
+fn thin_shells_keep_both_sides() {
+    let one = draw3("x^2+y^2+z^2<=1", 5.0, 48, 3, &[0.0; 3], false).tris;
+    let o = draw3("1<=x^2+y^2+z^2<=1.0001", 5.0, 48, 3, &[0.0; 3], false);
+    assert!(o.tris >= 2 * one - 10, "{} 三角形（球 1 枚は {one}）", o.tris);
+    assert!(o.kind.contains("厚さ約 0.00005"), "{}", o.kind);
+    // 同じ面の不等式 2 本は 1 枚・説明なし
+    let o = draw3("x^2+y^2+z^2<=1, 2x^2+2y^2+2z^2<=2", 5.0, 48, 3, &[0.0; 3], false);
+    assert!(o.tris <= one + 10 && !o.kind.contains("厚さ"), "{}", o.kind);
+}
+
+/// 3D の連立方程式: 接する点・接する線・同じ面・恒等式・不等式の境目に接する点（#119・#206）
+#[test]
+fn touching_systems_in_3d() {
+    let o = draw3("x^2+y^2+z^2=1, (x-2)^2+y^2+z^2=1", 5.0, 40, 3, &[0.0; 3], false);
+    assert_eq!(o.verts.len(), 2);
+    assert!(near3(&o.verts, [1.0, 0.0, 0.0], 1e-4), "{:?}", o.verts);
+    assert!(draw3("x^2+y^2+z^2=1, (x-2.00001)^2+y^2+z^2=1", 5.0, 40, 3, &[0.0; 3], false).verts.is_empty());
+    // 球と円柱は赤道の円で接する
+    let o = draw3("x^2+y^2+z^2=1, x^2+y^2=1", 5.0, 40, 3, &[0.0; 3], false);
+    assert!(o.verts.len() > 50 && o.verts.iter().all(|p| p[2].abs() < 1e-3 && (p[0].hypot(p[1]) - 1.0).abs() < 1e-3));
+    for src in ["x^2+y^2+z^2=1, 2x^2+2y^2+2z^2=2", "x^2+y^2+z^2=1, z=z"] {
+        let o = draw3(src, 5.0, 40, 3, &[0.0; 3], false);
+        assert!(o.tris > 1000, "{src}: {}", o.kind);
+    }
+    let o = draw3("x^2+y^2+z^2=1, z>=1", 5.0, 40, 3, &[0.0; 3], false);
+    assert!(near3(&o.extra_dots, [0.0, 0.0, 1.0], 1e-4) && o.extra_dots.len() == 1, "{:?}", o.extra_dots);
+    assert!(draw3("x^2+y^2+z^2=1, z>1", 5.0, 40, 3, &[0.0; 3], false).extra.is_empty());
+    // ふつうに交わる式は今までどおり
+    let o = draw3("x^2+y^2+z^2=1, (x-1)^2+y^2+z^2=1", 5.0, 40, 3, &[0.0; 3], false);
+    assert!(o.verts.len() > 100 && o.verts.iter().all(|p| (p[0] - 0.5).abs() < 1e-3));
+}
+
+/// 段差の枝の中で恒等的に成り立つ解は塗る。3D の飛ぶ面の上の解は面（GPU は使わない）。2D の飛ぶ線は添えの線（GPU でも重ねる）
+#[test]
+fn step_function_solutions() {
+    let o = draw3("floor(x)=2", 5.0, 40, 3, &[0.0; 3], true);
+    assert!(o.tris > 100 && o.verts.iter().all(|p| p[0] >= 2.0 - 1e-5 && p[0] <= 3.0 + 1e-5), "{}", o.kind);
+    let o = draw3("floor(x)+floor(y)=0", 5.0, 40, 3, &[0.0; 3], true);
+    assert!(o.tris > 100 && o.verts.iter().all(|p| p[0].floor() + p[1].floor() == 0.0 || (p[0] - p[0].round()).abs() < 1e-4 || (p[1] - p[1].round()).abs() < 1e-4));
+    let o = draw3("floor(x)+floor(-x)=0", 5.3, 48, 3, &[0.0; 3], false);
+    for k in -5..=5 {
+        assert!(o.verts.iter().any(|p| (p[0] - k as f32).abs() < 1e-4), "平面 x = {k}");
+    }
+    assert!(!o.gpu_reason.is_empty() && !o.kind.contains("細かすぎて"), "{} / {}", o.kind, o.gpu_reason);
+    let o = draw3("floor(x)+floor(-x)=0", 5.3, 40, 3, &[0.0; 3], true);
+    for k in -5..=5 {
+        assert!(o.extra.iter().any(|p| (p[0] - k as f32).abs() < 1e-4), "2D の添えの線 x = {k}");
+    }
 }

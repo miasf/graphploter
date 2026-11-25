@@ -1085,6 +1085,7 @@ export class Viewer {
       else for (const l of p.outlines) (l.material as LineMaterial).resolution.set(w, h)
     }
     for (const { line } of this.limitSources.values()) line.material.resolution.set(w, h)
+    for (const { line } of this.extras.values()) (line.material as LineMaterial).resolution.set(w, h)
     this.updateProjection()
   }
 
@@ -1508,6 +1509,7 @@ export class Viewer {
       if (p.kind === 'surface') p.grid.uHeatRange.value.set(d.zmin, d.zmax)
       else this.placeDots(p.dots)
     }
+    for (const e of this.extras.values()) this.placeDots(e.dots)
 
     this.buildFrame(d)
     if (first || resetCamera) this.resetCamera()
@@ -1938,6 +1940,7 @@ export class Viewer {
       lod,
       outline: mix(mesh.outline, mesh.outlineTarget),
       outlineDashed: mix(mesh.outlineDashed, mesh.outlineDashedTarget),
+      extra: mix(mesh.extra, mesh.extraTarget),
       holes: mix(mesh.holes, mesh.holesTarget),
       limitPoint: mix(mesh.limitPoint, mesh.limitPointTarget),
       limitSource: mix(mesh.limitSource, mesh.limitSourceTarget),
@@ -1987,6 +1990,7 @@ export class Viewer {
     this.updateStencil(id)
     this.setLimitSource(id, mesh.limitSource)
     this.setHoles(id, mesh)
+    this.setExtras(id, mesh.extra)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
     this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'), style.render === 'gpu')
@@ -2355,6 +2359,10 @@ export class Viewer {
   private applyClipping() {
     this.clipPlanes = this.cutPlane ? [...this.boxPlanes, this.cutPlane] : this.boxPlanes
     for (const g of this.gpu3d.values()) this.applyRayCut(g.ray)
+    for (const e of this.extras.values()) {
+      ;(e.line.material as THREE.Material).clippingPlanes = this.clipPlanes
+      ;(e.dots.material as THREE.Material).clippingPlanes = this.clipPlanes
+    }
     for (const p of this.plots.values()) {
       if (p.kind === 'curve') {
         ;(p.line.material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -2939,6 +2947,33 @@ export class Viewer {
 
   /** 穴と定義値の丸印（式ごと）。曲線を GPU で描くときも見えるよう、図形とは別に置く */
   private holeMarks = new Map<number, THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>>()
+  /** 添えの線・点（[`MeshData.extra`]。線と、長さの無い所の球）。GPU で描く式でも隠さない */
+  private extras = new Map<number, { line: LineSegments2; dots: THREE.InstancedMesh }>()
+
+  /** 添えの線・点を作り直す（無ければ消す） */
+  private setExtras(id: number, pts?: Float32Array) {
+    const old = this.extras.get(id)
+    if (old) {
+      this.scene.remove(old.line)
+      old.line.geometry.dispose()
+      ;(old.line.material as THREE.Material).dispose()
+      old.dots.dispose()
+      ;(old.dots.material as THREE.Material).dispose()
+      this.extras.delete(id)
+    }
+    if (!pts || pts.length === 0) return
+    const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
+    mat.resolution.set(this.viewW, this.viewH)
+    const line = new LineSegments2(this.curveGeometry(pts), mat)
+    line.frustumCulled = false
+    line.raycast = () => {}
+    const dotMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05, clippingPlanes: this.clipPlanes })
+    const dots = this.makeDots(pts, dotMat)
+    line.add(dots)
+    this.extras.set(id, { line, dots })
+    this.scene.add(line)
+    this.dirty = true
+  }
 
   /** 穴には白丸、極限の近づく点での定義値には塗りつぶした丸を置く（画面の上の大きさは一定） */
   private setHoles(id: number, mesh: MeshData) {
@@ -3048,6 +3083,16 @@ export class Viewer {
       trail.lines.material.color.copy(c)
       trail.dots.material.color.copy(c)
     }
+    const extra = this.extras.get(id)
+    if (extra) {
+      extra.line.visible = style.visible
+      const m = extra.line.material as LineMaterial
+      m.color.copy(c)
+      m.linewidth = style.lineWidth
+      ;(extra.dots.material as THREE.MeshStandardMaterial).color.copy(c)
+      extra.dots.userData.scale = Math.max(0.7, style.lineWidth / 3)
+      this.placeDots(extra.dots)
+    }
     const holes = this.holeMarks.get(id)
     const showLimitSource = style.visible && !style.limitSourceHidden
     const source = this.limitSources.get(id)
@@ -3152,6 +3197,7 @@ export class Viewer {
     this.clearRotationTrail(id)
     this.setLimitSource(id)
     this.setHoles(id, { holes: undefined } as MeshData)
+    this.setExtras(id)
     this.setPoi(id, undefined)
     this.curvePts.delete(id)
     if (this.pickFor === id) this.showPick(null)

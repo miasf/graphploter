@@ -569,6 +569,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const vivid = r.vivid
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
+    const extra = r.take_extra()
+    const extraTarget = r.take_extra_target()
     const outlineDashedTarget = r.take_outline_dashed_target()
     const g3 = r.gpu3d_glsl()
     const gpu3d = g3
@@ -615,6 +617,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(target.length > 0 ? { target } : {}),
       ...(outlineTarget.length > 0 ? { outlineTarget } : {}),
       ...(outlineDashedTarget.length > 0 ? { outlineDashedTarget } : {}),
+      ...(extra.length > 0 ? { extra } : {}),
+      ...(extraTarget.length > 0 ? { extraTarget } : {}),
       positions: g.take_positions(),
       normals: g.take_normals(),
       indices: g.take_indices(),
@@ -690,6 +694,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         ...(res.mesh.target ? [res.mesh.target.buffer] : []),
         ...(res.mesh.outlineTarget ? [res.mesh.outlineTarget.buffer] : []),
         ...(res.mesh.outlineDashedTarget ? [res.mesh.outlineDashedTarget.buffer] : []),
+        ...(res.mesh.extra ? [res.mesh.extra.buffer] : []),
+        ...(res.mesh.extraTarget ? [res.mesh.extraTarget.buffer] : []),
         ...capTransfer(res.mesh.lod),
         ...capTransfer(res.cap),
       ]
