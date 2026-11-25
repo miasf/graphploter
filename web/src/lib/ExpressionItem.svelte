@@ -12,7 +12,7 @@
   import SequenceTable from './SequenceTable.svelte'
   import { calledAsFunction, coordName, missingParam, neededDims, prettyName } from './params'
   import { prettyCoordName } from './coords'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type LimitBehavior, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, OWN_GROUP, type ComplexMode, type CoordSystem, type CurvatureMode, type Domain, type HiddenStyle, type Folder, type GridStyle, type IntegralViewInfo, type LimitBehavior, type PlotItem, type RenderMode, type RotationGroup, type SliderStyle } from './types'
   import { gpuByDefault } from './renderMode'
 
   interface Props {
@@ -73,6 +73,8 @@
     onEdges: (on: boolean) => void
     /** 描画の方法を変えたとき（計画 12 章の G7） */
     onRender: (mode: RenderMode) => void
+    /** 曲率の色分けを変えたとき（計画 N2。undefined はしない） */
+    onCurvature?: (mode: CurvatureMode | undefined) => void
     /** 次元を n にする（「次元を 5 にする」ボタン・成分を足したとき） */
     onSetDims: (n: number) => void
     onLineWidth: (width: number) => void
@@ -174,6 +176,7 @@
     onLayers,
     onEdges,
     onRender,
+    onCurvature,
     onSetDims,
     onLineWidth,
     onRange,
@@ -1108,6 +1111,33 @@
               <input type="checkbox" checked={item.walls ?? false} onchange={(e) => onWalls(e.currentTarget.checked)} />
               値が飛ぶ所（floor の段差など）に壁を描く
             </label>
+          {/if}
+          {#if onCurvature && !flatView && (item.curvatureAvailable || item.curvature)}
+            <div class="complex-mode">
+              <span class="label">曲率で色分け</span>
+              <select
+                value={item.curvature ?? 'off'}
+                aria-label="曲率で色分け"
+                onchange={(e) => {
+                  const v = e.currentTarget.value
+                  onCurvature(v === 'gauss' || v === 'mean' ? v : undefined)
+                }}
+              >
+                <option value="off">しない</option>
+                <option value="gauss">ガウス曲率 K</option>
+                <option value="mean">平均曲率 H</option>
+              </select>
+            </div>
+            {#if item.curvature && item.curvatureAvailable}
+              <p class="hint">
+                {#if item.curvature === 'gauss'}
+                  赤は K &gt; 0（球のようにどの向きにも同じ側へ曲がる）、青は K &lt; 0（鞍のように向きで曲がる側が変わる）、白は K = 0（平面・円柱）。
+                {:else}
+                  赤は H &gt; 0、青は H &lt; 0、白は H = 0（極小曲面）。陰関数は F &lt; 0 の側へ曲がると正、z = f(x, y) は下に凸で正、媒介変数の曲面は法線 r_u × r_v の向きで符号が決まります。
+                {/if}
+                色の範囲は |値| の 95 % が入る ±q（説明の欄に出ます）。曲率の色分けをしている式はメッシュで描きます
+              </p>
+            {/if}
           {/if}
           {#if item.gpuAvailable || item.gpuReason}
             <div class="complex-mode">

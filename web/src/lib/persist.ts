@@ -39,6 +39,8 @@ export interface SavedItem {
   layers?: number
   /** 媒介変数が3つ以上の図形を辺だけで描くか（古い保存データには無い。無ければ面） */
   edges?: boolean
+  /** 曲率の色分け（古い保存データには無い。無ければしない） */
+  curvature?: 'gauss' | 'mean'
   /** 描画の方法（古い保存データには無い。無ければ自動） */
   render?: 'auto' | 'mesh' | 'gpu'
   /** 入っているフォルダの番号（古い保存データには無い） */

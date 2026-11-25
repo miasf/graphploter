@@ -126,6 +126,8 @@ type PlotObject =
       outlines: LineSegments2[]
       /** ベクトル場（矢印・流線を、鮮やかな色の対応表で塗る） */
       vivid: boolean
+      /** 曲率の色分け（0 を中心にした発散型の色の対応表で塗る。計画 N2） */
+      diverging: boolean
       /** 伝達関数（表示範囲の箱。group の子）と、その材質の値 */
       volume: { box: THREE.Mesh; u: VolumeUniforms } | null
     }
@@ -1973,6 +1975,7 @@ export class Viewer {
         old.uvSpan = mesh.params.length >= 2 ? mesh.paramSpan : null
         old.solid = mesh.solid
         old.vivid = mesh.vivid === true
+        old.diverging = mesh.diverging === true
         this.applyValueRange(old.grid, mesh)
         old.grid.uHeat.value = mesh.heat ? 1 : 0
         if (old.stencil) old.stencil.inc.geometry = old.stencil.dec.geometry = old.geo
@@ -2616,6 +2619,7 @@ export class Viewer {
       order: this.nextOrder++,
       outlines: [],
       vivid: mesh.vivid === true,
+      diverging: mesh.diverging === true,
       volume: null,
     })
     this.applyLod(this.plots.get(id)!)
@@ -3122,8 +3126,9 @@ export class Viewer {
     p.group.visible = style.visible
     const [mesh0] = p.group.children as THREE.Mesh[]
     ;(mesh0.material as THREE.MeshStandardMaterial).color.copy(c)
-    p.grid.uColormap.value = COLORMAP_INDEX[p.vivid ? 'vivid' : (style.hidden?.colormap ?? 'viridis')]
-    p.grid.uValueLog.value = style.hidden?.log ? 1 : 0
+    p.grid.uColormap.value = COLORMAP_INDEX[p.vivid ? 'vivid' : p.diverging ? 'diverge' : (style.hidden?.colormap ?? 'viridis')]
+    // 曲率の色は 0 を中心に等間隔（表示していない座標の対数の目盛りは使わない）
+    p.grid.uValueLog.value = style.hidden?.log && !p.diverging ? 1 : 0
     if (p.volume) applyVolumeStyle(p.volume.u, style.hidden, c, style.opacity)
     const opacity = Math.min(1, Math.max(0, style.opacity))
     // 境目の線・流線を塗る。列ベクトルと固有ベクトルの軸は矢じりと同じ不透明度にする。

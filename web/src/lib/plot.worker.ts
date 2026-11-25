@@ -29,7 +29,7 @@ import init, {
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, LimitBehavior, LimitResult, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_CURVATURE_GAUSS, PLOT_CURVATURE_MEAN, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -133,7 +133,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & PLOT_EDGES, req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit, req.odeStart]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & (PLOT_EDGES | PLOT_CURVATURE_GAUSS | PLOT_CURVATURE_MEAN), req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit, req.odeStart]
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -567,6 +567,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const holesTarget = r.take_holes_target()
     const limitPointTarget = limit ? r.take_limit_point_target() : undefined
     const vivid = r.vivid
+    const diverging = r.diverging
+    const curvatureAvailable = r.curvature_available
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
     const extra = r.take_extra()
@@ -614,6 +616,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(holesTarget?.length ? { holesTarget } : {}),
       ...(limitPointTarget?.length ? { limitPointTarget } : {}),
       ...(vivid ? { vivid } : {}),
+      ...(diverging ? { diverging } : {}),
+      ...(curvatureAvailable ? { curvatureAvailable } : {}),
       ...(target.length > 0 ? { target } : {}),
       ...(outlineTarget.length > 0 ? { outlineTarget } : {}),
       ...(outlineDashedTarget.length > 0 ? { outlineDashedTarget } : {}),

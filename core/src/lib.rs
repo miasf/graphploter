@@ -15,6 +15,7 @@ pub mod adaptive;
 pub mod coords;
 pub mod accurate;
 pub mod critical;
+pub mod curvature;
 pub mod diff;
 pub mod equation;
 pub mod eval;
@@ -86,6 +87,10 @@ pub struct MeshResult {
     vector_arrows: bool,
     /// ベクトル場なら true（描画側で鮮やかな色の対応表を使う）
     vivid: bool,
+    /// 曲率で色分けしたなら true（描画側で 0 を中心にした発散型の色の対応表を使う。計画 N2）
+    diverging: bool,
+    /// 曲率の色分け（`flags` のビット 6・7）を使える図形か（画面の ⚙ に選ぶ欄を出す）
+    curvature_available: bool,
     /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
     value_range: Option<(f64, f64)>,
     /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）。
@@ -291,6 +296,18 @@ impl MeshResult {
     #[wasm_bindgen(getter)]
     pub fn vivid(&self) -> bool {
         self.vivid
+    }
+
+    /// 曲率で色分けしたか（0 を中心にした発散型の色の対応表で塗る。計画 N2）
+    #[wasm_bindgen(getter)]
+    pub fn diverging(&self) -> bool {
+        self.diverging
+    }
+
+    /// 曲率の色分けを使える図形か（画面の ⚙ に選ぶ欄を出す）
+    #[wasm_bindgen(getter)]
+    pub fn curvature_available(&self) -> bool {
+        self.curvature_available
     }
     pub fn take_outline_dashed(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.outline.1)
@@ -553,6 +570,8 @@ pub fn coord_grid(
         outline_values: Vec::new(),
         vector_arrows: false,
         vivid: false,
+        diverging: false,
+        curvature_available: false,
         outline_target: Default::default(),
         extra: Vec::new(),
         extra_target: Vec::new(),
@@ -883,12 +902,27 @@ pub fn plot(
     if coord.is_some() && hidden_on && hidden.first().is_some_and(|&m| m == 3.0 || m == 5.0 || m == 6.0) {
         return Err(err("座標系を使う式では、伝達関数・霧の見せ方は使えません"));
     }
-    let built = if hidden_on {
+    let mut built = if hidden_on {
         build_hidden(&hidden, source, &consts, &plot, &ctx)
     } else {
         build(&plot, &ctx)
     }
     .map_err(|e| JsError::new(&e))?;
+    // 曲率の色分け（計画 N2）: 3D の曲面（陽関数・陰関数・媒介変数の曲面）の頂点に、ガウス曲率・平均曲率を付ける
+    let curvature_available = !flat
+        && !hidden_on
+        && coord.is_none()
+        && n == 3
+        && flags & FLAG_LOCAL == 0
+        && curvature_target(&plot, ctx.complex_mode, dom);
+    let mut curvature_on = false;
+    if let Some(which) = curvature::Which::from_flags(flags) {
+        if curvature_available {
+            curvature_on = apply_curvature(&plot, &mut built, which, &ctx);
+        } else if !flat {
+            expand::add_note("曲率の色分けは、この式では使えません");
+        }
+    }
     let mut inner = match &built.shape {
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
@@ -1078,17 +1112,20 @@ pub fn plot(
         outline_values: built.outline_values,
         vector_arrows,
         vivid: built.vivid,
+        diverging: built.diverging,
+        curvature_available,
         value_range: built.value_range,
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
         // 添えの線・点のある式は、回転だけ変わったときも作り直す（射影し直す形を返さない）
-        shape: if trimmed || uncached_exclusion || fully_excluded || has_extra {
+        // 曲率で色分けした式も（射影し直すと、頂点の値と色の範囲が付かない）
+        shape: if trimmed || uncached_exclusion || fully_excluded || has_extra || curvature_on {
             None
         } else {
             built.shape
         },
-        local: if coord.is_some() || uncached_exclusion { None } else { built.local },
+        local: if coord.is_some() || uncached_exclusion || curvature_on { None } else { built.local },
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
@@ -1126,6 +1163,7 @@ pub fn plot(
         },
         local_available: !flat
             && !hidden_on
+            && !curvature_on
             && !uncached_exclusion
             && coord.is_none()
             && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
@@ -1970,6 +2008,8 @@ struct Built {
     outline_values: Vec<f32>,
     /// ベクトル場（矢印・流線を、鮮やかな色の対応表で塗る）
     vivid: bool,
+    /// 0 を中心にした発散型の色の対応表で塗る（曲率の色分け。計画 N2）
+    diverging: bool,
     /// 表示していない座標の値で色を付けるなら、その範囲
     value_range: Option<(f64, f64)>,
     /// 伝達関数の格子の値と、1 辺の点の数
@@ -1983,6 +2023,92 @@ impl Built {
     fn settle(mut self) -> Built {
         self.local = None;
         self
+    }
+}
+
+/// 曲率の色分けを使える図形か: 3D の陽関数（複素数の色分けをしないもの）・ふつうの陰関数（値が実数で、面になる式）・
+/// 成分が 3 つの媒介変数の曲面 1 枚
+fn curvature_target(plot: &equation::Plot, complex_mode: mesh::ComplexMode, dom: mesh::Domain) -> bool {
+    use equation::Plot as P;
+    match plot {
+        P::Explicit { .. } => complex_mode == mesh::ComplexMode::Off,
+        P::Implicit { prog, .. } => !system::is_complex_valued(prog, dom) && prog.common_zero_sets().is_none(),
+        P::Surface { sets, .. } => sets.len() == 1 && sets[0].len() == 3,
+        _ => false,
+    }
+}
+
+/// 頂点（媒介変数の曲面・回した陽関数は、射影する前の点）に曲率を付けて、色の範囲を [−q, q]（[`curvature::color_range`]）にする。
+/// 付けられたら true。GPU の光線は曲率を求めないので、この式はメッシュで描く
+fn apply_curvature(plot: &equation::Plot, b: &mut Built, which: curvature::Which, ctx: &Ctx) -> bool {
+    use equation::Plot as P;
+    let scale = ctx.size;
+    let values = match plot {
+        P::Explicit { axis, prog, rotated: false, .. } => {
+            let (ua, va) = equation::others(*axis);
+            let uv: Vec<[f64; 2]> = b.inner.positions.chunks_exact(3).map(|p| [p[ua] as f64, p[va] as f64]).collect();
+            let v = curvature::graph(prog, &uv, scale, which);
+            b.inner.complex = curvature::as_vertex_values(&v);
+            v
+        }
+        P::Explicit { axis, prog, rotated: true, .. } => {
+            let Some(shape) = b.shape.as_mut() else { return false };
+            let (ua, va) = equation::others(*axis);
+            let ax = ctx.space.axes;
+            let d = shape.dims;
+            let uv: Vec<[f64; 2]> = shape.points.chunks_exact(d).map(|p| [p[ax[ua]], p[ax[va]]]).collect();
+            let v = curvature::graph(prog, &uv, scale, which);
+            shape.complex = curvature::as_vertex_values(&v);
+            v
+        }
+        P::Implicit { prog, .. } => {
+            let of = |m: &mesh::Mesh| -> Vec<f64> {
+                let pts: Vec<[f64; 3]> = m.positions.chunks_exact(3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+                curvature::implicit(prog, &pts, scale, which)
+            };
+            let v = of(&b.inner);
+            b.inner.complex = curvature::as_vertex_values(&v);
+            if let Some(l) = b.inner.lod_mesh.as_deref_mut() {
+                let lv = of(l);
+                l.complex = curvature::as_vertex_values(&lv);
+            }
+            v
+        }
+        P::Surface { sets, vars } if sets.len() == 1 && sets[0].len() == 3 => {
+            let Some(shape) = b.shape.as_mut() else { return false };
+            let Some((_, grid)) = &shape.grid else { return false };
+            let count = shape.points.len() / shape.dims.max(1);
+            if grid.len() != 2 * count {
+                return false;
+            }
+            let (u, v) = ((ctx.range)(&vars[0]), (ctx.range)(&vars[1]));
+            let uv: Vec<[f64; 2]> = grid.chunks_exact(2).map(|g| [g[0] as f64 + u.0, g[1] as f64 + v.0]).collect();
+            let vals = curvature::parametric(&eval::ProgramSet::new(&sets[0]), &uv, [u.1 - u.0, v.1 - v.0], which);
+            shape.complex = curvature::as_vertex_values(&vals);
+            vals
+        }
+        _ => return false,
+    };
+    let q = curvature::color_range(&values);
+    b.value_range = Some((-q, q));
+    b.diverging = true;
+    b.gpu3d_off = Some("曲率の色分けはメッシュで描きます".into());
+    expand::add_note(&format!("色は{}: 青 −{} 〜 白 0 〜 赤 {}", which.label(), sig3(q), sig3(q)));
+    true
+}
+
+/// 有効数字 3 桁の文字列（色の範囲の説明）
+fn sig3(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return format!("{x}");
+    }
+    let e = x.abs().log10().floor() as i32;
+    if (-3..4).contains(&e) {
+        let digits = (2 - e).max(0) as usize;
+        let s = format!("{x:.digits$}");
+        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+    } else {
+        format!("{x:.2e}")
     }
 }
 
@@ -3249,6 +3375,8 @@ impl Shape {
             outline_values: Vec::new(),
             vector_arrows: false,
             vivid: false,
+        diverging: false,
+        curvature_available: false,
             outline_target: Default::default(),
             extra: Vec::new(),
             extra_target: Vec::new(),
@@ -3374,6 +3502,8 @@ impl CapSource {
             outline_values: Vec::new(),
             vector_arrows: false,
             vivid: false,
+        diverging: false,
+        curvature_available: false,
             outline_target: Default::default(),
             extra: Vec::new(),
             extra_target: Vec::new(),

@@ -308,6 +308,10 @@ export interface PlotItem extends PlotStyle {
   layers?: number
   /** 媒介変数が3つ以上の図形を、面ではなく辺だけで描くか（無ければ面） */
   edges?: boolean
+  /** 曲面を曲率で色分けするか（計画 N2。無ければしない） */
+  curvature?: CurvatureMode
+  /** 最後の結果で、曲率の色分けを使える図形だったか（計算エンジンが返したもの。保存しない） */
+  curvatureAvailable?: boolean
   /** 最後の結果で、GPU の描き方を使えたか・使えない理由（計算エンジンが返したもの。保存しない） */
   gpuAvailable?: boolean
   gpuReason?: string
@@ -458,6 +462,10 @@ export interface MeshData {
   limitPointTarget?: Float32Array
   /** ベクトル場なら true（矢印・流線を、鮮やかな色の対応表 vivid で塗る） */
   vivid?: boolean
+  /** 曲率で色分けしたなら true（0 を中心にした発散型の色の対応表 diverge で塗る。計画 N2） */
+  diverging?: boolean
+  /** 曲率の色分けを使える図形か（式の ⚙ に選ぶ欄を出す） */
+  curvatureAvailable?: boolean
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
   outlineDashed?: Float32Array
   /** 座標系で移した先 T(q)（頂点ごとに 3 つ。座標系を使う式だけ。無ければ省略）。描画側が移行のスライダーで positions と混ぜる */
@@ -569,6 +577,15 @@ export const PLOT_EDGES = 4
 /** ビット 4: 陽関数の注目する点（極値・零点など）も求める（点を押すと値が出る機能。止まっているときだけ） */
 export const PLOT_POI = 16
 export const PLOT_SEQUENCE_TABLE = 32
+/** ビット 6・7: 曲面をガウス曲率 K・平均曲率 H で色分けする（計画 N2） */
+export const PLOT_CURVATURE_GAUSS = 64
+export const PLOT_CURVATURE_MEAN = 128
+/** 曲率の色分け: gauss はガウス曲率 K、mean は平均曲率 H */
+export type CurvatureMode = 'gauss' | 'mean'
+/** 曲率の色分けのビット（無ければ 0） */
+export function curvatureFlag(mode: CurvatureMode | undefined): number {
+  return mode === 'gauss' ? PLOT_CURVATURE_GAUSS : mode === 'mean' ? PLOT_CURVATURE_MEAN : 0
+}
 
 /** 切り口の位置だけが変わったときの依頼: 覚えておいた中身から、ふただけを作り直す */
 export interface CapRequest {
