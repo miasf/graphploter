@@ -11,6 +11,7 @@ pub mod ball;
 pub mod check;
 pub mod consts;
 pub mod convert;
+pub mod latex;
 pub mod num;
 pub mod term;
 
@@ -112,6 +113,10 @@ pub enum Outcome {
 #[derive(Debug, Clone)]
 pub struct Report {
     pub outcome: Outcome,
+    /// 答えの LaTeX（見つかったとき・推定のとき）
+    pub latex: String,
+    /// 答えのエンジンの文字列（「行に追加」に使う）
+    pub engine: String,
     /// 答えの値を f64 に丸めたもの（実部, 虚部）
     pub approx: Option<(f64, f64)>,
     /// 答えの値の 10 進 50 桁（D9）
@@ -128,7 +133,7 @@ pub struct Report {
 
 impl Report {
     fn new(outcome: Outcome) -> Report {
-        Report { outcome, approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0 }
+        Report { outcome, latex: String::new(), engine: String::new(), approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0 }
     }
 }
 
@@ -173,6 +178,8 @@ pub fn evaluate(source: &str, params: &Params) -> Report {
         let re = ball::to_decimal(&b.re, 50);
         rep.digits = Some(if b.is_real() { re } else { format!("{re} + ({}) i", ball::to_decimal(&b.im, 50)) });
     }
+    rep.latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal });
+    rep.engine = latex::to_engine(&t);
     rep.outcome = Outcome::Found(t);
     rep
 }

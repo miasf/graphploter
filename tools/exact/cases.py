@@ -322,8 +322,8 @@ for m in (10, 15, 20, 25, 30):
     add("離散", f"{m}!", factorial(m))
 for a, b in ((10, 3), (20, 10), (30, 15), (50, 25), (60, 30), (100, 50), (40, 7), (64, 32)):
     add("離散", f"nCr({a},{b})", binomial(a, b))
-for a, b in ((12, 18), (2**60 + 1, 3**40), (123456789, 987654321), (2**40, 6**20), (1001, 7007)):
-    add("離散", f"gcd({a},{b})", Integer(igcd(a, b)))
+for a, b, text in ((12, 18, None), (2**60 + 1, 3**40, "gcd(2^60+1, 3^40)"), (123456789, 987654321, None), (2**40, 6**20, "gcd(2^40, 6^20)"), (1001, 7007, None)):
+    add("離散", text or f"gcd({a},{b})", Integer(igcd(a, b)))
 for a, b in ((12, 18), (2**20, 3**10), (21, 6)):
     add("離散", f"lcm({a},{b})", Integer(ilcm(a, b)))
 for inp, v in [("2^64", 2**64), ("3^40", 3**40), ("2^100", 2**100), ("7^30", 7**30), ("2^64-1", 2**64 - 1),
@@ -518,9 +518,19 @@ for area, inp, v, ans, latex in [
     add(area, inp, v, S(ans), latex=latex)
 
 
+REQUIRED_FILE = Path(__file__).with_name("required.txt")
+
+
 def write():
+    # 厳密値の道で正しい形が出るようになった行は「必須」（外れたらテストが落ちる）。一覧は core/tests/exact.rs が書き出す（EXACT_DUMP）
+    required = set(REQUIRED_FILE.read_text().splitlines()) if REQUIRED_FILE.exists() else set()
+    rows = []
+    for area, inp, latex, approx, source, mark in CASES:
+        if inp in required and mark == "目標":
+            mark = "必須"
+        rows.append((area, inp, latex, approx, source, mark))
     by_area = {}
-    for row in CASES:
+    for row in rows:
         by_area.setdefault(row[0], []).append(row)
     names = {"学校": "school", "複素": "complex", "離散": "discrete", "線形": "linear", "微分": "derivative",
              "極限": "limits", "級数": "series", "積分": "integrals", "不定積分": "antiderivatives"}

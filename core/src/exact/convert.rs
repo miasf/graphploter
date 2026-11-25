@@ -74,6 +74,10 @@ impl<'a> Converter<'a> {
                 if v.is_infinite() {
                     return Err(Stop::NotFound("∞ を含む式はまだ厳密に計算できません".into()));
                 }
+                // 2^53 以上の整数の字句は、f64 になった時点で下の桁が丸められているかもしれない（字句の文字は構文木に残らない）
+                if v.fract() == 0.0 && v.abs() >= 9007199254740992.0 {
+                    return Err(Stop::NotFound("16 桁を超える整数の字句は厳密に扱えません（2^60+1 のように式で書いてください）".into()));
+                }
                 Term::Num(num::rat_of_literal(*v).ok_or_else(|| Stop::NotFound("数が有限ではありません".into()))?)
             }
             Expr::Const(Constant::Pi) => Term::Atom(Atom::Pi),

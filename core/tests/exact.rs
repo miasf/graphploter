@@ -45,16 +45,28 @@ const VERDICTS: [(Verdict, &str); 6] = [
     (Verdict::Wrong, "間違い"),
 ];
 
-/// 厳密値の道の答え（厳密値の道ができるまでの仮の形）
-#[allow(dead_code)]
+/// 厳密値の道の答え（判定に使う形）
 enum Answer {
-    Found { latex: String, approx: Option<(f64, f64)> },
+    Found { latex: String, approx: Option<(f64, f64)>, engine: String },
+    Guess,
     NotFound,
+    Rejected,
+    NotExist,
 }
 
-/// 厳密値の道（EX1 以降で `graph_core::exact::evaluate` に替える）
-fn evaluate(_input: &str) -> Answer {
-    Answer::NotFound
+/// 厳密値の道
+fn evaluate(input: &str) -> Answer {
+    use graph_core::exact::Outcome;
+    let params = graph_core::eval::Params::new();
+    let _d = graph_core::expand::install(graph_core::expand::Defs::parse("", &params));
+    let r = graph_core::exact::evaluate(input, &params);
+    match r.outcome {
+        Outcome::Found(_) => Answer::Found { latex: r.latex, approx: r.approx, engine: r.engine },
+        Outcome::Guess(_) => Answer::Guess,
+        Outcome::NotFound(_) => Answer::NotFound,
+        Outcome::Rejected(_) => Answer::Rejected,
+        Outcome::NotExist(_) => Answer::NotExist,
+    }
 }
 
 fn parse_approx(s: &str) -> Option<(f64, f64)> {
@@ -137,7 +149,16 @@ fn close(a: (f64, f64), b: (f64, f64)) -> bool {
 fn judge(c: &Case, a: &Answer) -> Verdict {
     match a {
         Answer::NotFound => Verdict::NotFound,
-        Answer::Found { latex, approx } => {
+        Answer::Guess => Verdict::Guess,
+        Answer::Rejected => Verdict::Rejected,
+        Answer::NotExist => {
+            if c.mark == Mark::NotExist {
+                Verdict::Exact
+            } else {
+                Verdict::Wrong
+            }
+        }
+        Answer::Found { latex, approx, .. } => {
             if c.mark == Mark::NotExist {
                 return Verdict::Wrong;
             }
@@ -174,14 +195,29 @@ fn table() {
     let mut f64_differs = Vec::new();
     let start = std::time::Instant::now();
     let mut times = Vec::new();
+    let mut verdicts = Vec::new();
     for c in &cases {
         let t0 = std::time::Instant::now();
         let a = evaluate(&c.input);
         times.push(t0.elapsed().as_secs_f64());
         let v = judge(c, &a);
+        verdicts.push(v);
+        if v == Verdict::WrongForm && std::env::var("EXACT_SHOW").is_ok() {
+            if let Answer::Found { latex, .. } = &a {
+                println!("形が違う: {} → {} （表: {}）", c.input, latex, c.latex);
+            }
+        }
         *counts.entry(c.area.clone()).or_default().entry(v).or_default() += 1;
         if v == Verdict::Wrong {
             failures.push(format!("間違い: {}", c.input));
+        }
+        // 「行に追加」のエンジンの文字列が、同じ値に戻る（EX4）
+        if let Answer::Found { engine, approx: Some(want), .. } = &a {
+            let params = graph_core::eval::Params::new();
+            match std::panic::catch_unwind(|| graph_core::equation::eval_constant_complex(engine, &params)) {
+                Ok(Ok(z)) if close((z.re, z.im), *want) || ((z.re - want.0).abs() + (z.im - want.1).abs()) <= 1e-9 * want.0.abs().max(want.1.abs()).max(1.0) => {}
+                other => failures.push(format!("エンジンの文字列が戻らない: {} → {engine}（{other:?}）", c.input)),
+            }
         }
         if c.mark == Mark::Required && v != Verdict::Exact {
             failures.push(format!("必須の行が {v:?}: {}", c.input));
@@ -195,6 +231,11 @@ fn table() {
                 Err(_) => f64_differs.push(format!("{}: 今の道でパニック", c.input)),
             }
         }
+    }
+    // 正しい形で出た行の入力を書き出す（tools/exact/required.txt を作り直すとき: EXACT_DUMP=パス）
+    if let Ok(path) = std::env::var("EXACT_DUMP") {
+        let list: Vec<&str> = cases.iter().zip(&verdicts).filter(|(_, v)| **v == Verdict::Exact).map(|(c, _)| c.input.as_str()).collect();
+        std::fs::write(path, list.join("\n") + "\n").unwrap();
     }
     println!("分野        | {}", VERDICTS.iter().map(|v| v.1).collect::<Vec<_>>().join(" | "));
     let mut total: BTreeMap<Verdict, usize> = BTreeMap::new();
