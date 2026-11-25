@@ -20,6 +20,7 @@ pub mod geodesic;
 pub mod diff;
 pub mod equation;
 pub mod eval;
+pub mod exact;
 pub mod expand;
 pub mod field;
 pub mod integrate;

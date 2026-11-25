@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasm-bindgen = "0.2"
 num-complex = "0.4"
+# 大きな整数・分数・高い精度の小数（厳密値の道。計画 docs/plan-exact-core.md の D1。MIT / Apache-2.0）
+dashu = { version = "0.6.2", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = 3
