@@ -281,6 +281,11 @@ fn step_function_solutions() {
         assert!(o.verts.iter().any(|p| (p[0] - k as f32).abs() < 1e-4), "平面 x = {k}");
     }
     assert!(!o.gpu_reason.is_empty() && !o.kind.contains("細かすぎて"), "{} / {}", o.kind, o.gpu_reason);
+    // 体積のある解（floor(x) + floor(y) + floor(z) = 0 の単位立方体 73 個）: メッシュでも描き（スマートフォンの「自動」はメッシュ）、
+    // 光線（GPU）も使える（飛ぶ面の解があるからと止めない）
+    let o = draw3("floor(x)+floor(y)+floor(z)=0", 5.0, 48, 3, &[0.0; 3], false);
+    assert!(o.gpu_reason.is_empty(), "{}", o.gpu_reason);
+    assert!(o.tris > 0 && o.verts.iter().all(|p| (0..3).any(|a| (p[a] - p[a].round()).abs() < 1e-4)), "{}", o.kind);
     let o = draw3("floor(x)+floor(-x)=0", 5.3, 40, 3, &[0.0; 3], true);
     for k in -5..=5 {
         assert!(o.extra.iter().any(|p| (p[0] - k as f32).abs() < 1e-4), "2D の添えの線 x = {k}");

@@ -2214,11 +2214,31 @@ fn build(plot: &equation::Plot, ctx: &Ctx) -> Result<Built, String> {
             b.curve = true;
         }
         P::Implicit { prog, .. } => {
-            b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| mesh::implicit_solid_opt(prog, d, ctx.implicit_resolution, &[], 0, ctx.implicit_refine));
-            b.kind.push_str(&b.inner.note);
-            b.fields.push(mesh::Field::new(prog, &[], 0, dom));
-            // 段差の飛ぶ面の上だけの解（floor(x) + floor(-x) = 0 の整数の平面。#175）。光線（GPU）では厚さ 0 の面は描けないので、メッシュで描く
-            let jumps = mesh::jump_surfaces(prog, dom, ctx.implicit_resolution);
+            // 段差の枝の中で恒等的に成り立つ解（体積がある）は、下で枝の範囲から作るので、ふつうの面は作らない
+            let volumes = mesh::branch_volumes_3d(prog, dom);
+            if volumes.is_empty() {
+                b.inner = fit_to_shape(dom, ctx.implicit_resolution, |d| mesh::implicit_solid_opt(prog, d, ctx.implicit_resolution, &[], 0, ctx.implicit_refine));
+                b.kind.push_str(&b.inner.note);
+                b.fields.push(mesh::Field::new(prog, &[], 0, dom));
+            }
+            // 段差の枝の中で恒等的に成り立つ解（floor(x) + floor(y) + floor(z) = 0 の単位立方体の並び。体積がある）: 枝の範囲の境目の面を、
+            // 枝ごとに小さい箱の中で作る（メッシュでも体積の解を描く。スマートフォンの「自動」はメッシュ）。光線（GPU）はそのまま使える
+            if !volumes.is_empty() {
+                // 枝の範囲は、段差の元の引数が 1 次式なら凸多面体（平面の多角形を切るだけで正確）。そうでなければ領域の面の道
+                let parts: Vec<mesh::Mesh> = volumes
+                    .iter()
+                    .map(|(cuts, _strict, bx)| match cuts.iter().map(mesh::affine_of).collect::<Option<Vec<_>>>() {
+                        Some(planes) => mesh::convex_faces(&planes, *bx),
+                        None => system::region_faces(cuts, &[], *bx, 8, 8, mesh::Refine::Light, false),
+                    })
+                    .collect();
+                b.inner = mesh::merge(parts, false);
+                b.kind = "陰関数（体積のある解）".into();
+                b.fields.clear();
+            }
+            // 段差の飛ぶ面の上だけの解（floor(x) + floor(-x) = 0 の整数の平面。#175）。光線（GPU）では厚さ 0 の面は描けないので、メッシュで描く。
+            // 体積のある解の式では、飛ぶ面はその境目なので足さない
+            let jumps = if volumes.is_empty() { mesh::jump_surfaces(prog, dom, ctx.implicit_resolution) } else { mesh::Mesh::default() };
             if !jumps.indices.is_empty() {
                 b.inner = mesh::merge(vec![std::mem::take(&mut b.inner), jumps], false);
                 b.gpu3d_off = Some("段差の飛ぶ面の上だけで成り立つ解があるので、メッシュで描きます".into());
