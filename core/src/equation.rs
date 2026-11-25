@@ -3288,6 +3288,34 @@ pub fn eval_constant(source: &str) -> Result<f64, String> {
     eval_constant_with(source, &Params::new()).map(|(v, _)| v)
 }
 
+/// パラメータを使ってよい式、またはそのリスト `[a, b, …]`（64 個まで）の値を計算する（測地線の欄。計画 N3）。値と、使ったパラメータの名前を返す
+pub fn eval_values_with(source: &str, params: &Params) -> Result<(Vec<f64>, Vec<String>), String> {
+    let items = match parse_at(source, 0, params)? {
+        Expr::List(items) => items,
+        e => vec![e],
+    };
+    if items.len() > 64 {
+        return Err("リストは 64 個までにしてください".into());
+    }
+    let (mut vals, mut used) = (Vec::new(), Vec::new());
+    for it in &items {
+        let prog = Program::compile_with(it, &[], params).map_err(|_| "数値と、pi などの定数・パラメータだけで書いてください".to_string())?;
+        let mut out = [C::new(0.0, 0.0)];
+        prog.eval_batch(&[], &mut out);
+        let v = crate::eval::as_real(out[0]);
+        if !v.is_finite() {
+            return Err("実数の値になりません".into());
+        }
+        vals.push(v);
+        for n in prog.used_params() {
+            if !used.contains(n) {
+                used.push(n.clone());
+            }
+        }
+    }
+    Ok((vals, used))
+}
+
 /// パラメータを使ってよい式の値を計算する（媒介変数の範囲 0 ≤ t ≤ b など）。
 /// 値と、使ったパラメータの名前を返す
 pub fn eval_constant_with(source: &str, params: &Params) -> Result<(f64, Vec<String>), String> {

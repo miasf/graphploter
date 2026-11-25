@@ -75,6 +75,8 @@
     onRender: (mode: RenderMode) => void
     /** 曲率の色分けを変えたとき（計画 N2。undefined はしない） */
     onCurvature?: (mode: CurvatureMode | undefined) => void
+    /** 測地線の欄を変えたとき（計画 N3。undefined は描かない） */
+    onGeodesic?: (g: PlotItem['geodesic']) => void
     /** 次元を n にする（「次元を 5 にする」ボタン・成分を足したとき） */
     onSetDims: (n: number) => void
     onLineWidth: (width: number) => void
@@ -177,6 +179,7 @@
     onEdges,
     onRender,
     onCurvature,
+    onGeodesic,
     onSetDims,
     onLineWidth,
     onRange,
@@ -1136,6 +1139,51 @@
                   赤は H &gt; 0、青は H &lt; 0、白は H = 0（極小曲面）。陰関数は F &lt; 0 の側へ曲がると正、z = f(x, y) は下に凸で正、媒介変数の曲面は法線 r_u × r_v の向きで符号が決まります。
                 {/if}
                 色の範囲は |値| の 95 % が入る ±q（説明の欄に出ます）。曲率の色分けをしている式はメッシュで描きます
+              </p>
+            {/if}
+          {/if}
+          {#if onGeodesic && !flatView && (item.geodesicVars?.length || item.geodesic)}
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={!!item.geodesic}
+                onchange={(e) => onGeodesic(e.currentTarget.checked ? { start: [], theta: '', length: '' } : undefined)}
+              />
+              曲面の上の測地線を描く
+            </label>
+            {#if item.geodesic}
+              {@const g = item.geodesic}
+              {#each item.geodesicVars ?? [] as name, k (name)}
+                <div class="param-range">
+                  <span>始点 {prettyName(name)}₀ =</span>
+                  <MathInput
+                    small
+                    value={g.start[k] ?? ''}
+                    placeholder="中央"
+                    label="測地線の始点の {name}"
+                    onInput={(v) => {
+                      const start = [...g.start]
+                      while (start.length <= k) start.push('')
+                      start[k] = v
+                      onGeodesic({ ...g, start })
+                    }}
+                  />
+                </div>
+              {/each}
+              <div class="param-range">
+                <span>向き θ =</span>
+                <MathInput small value={g.theta} placeholder="0" label="測地線の向き" onInput={(v) => onGeodesic({ ...g, theta: v })} />
+              </div>
+              <div class="param-range">
+                <span>長さ L =</span>
+                <MathInput small value={g.length} placeholder="対角線" label="測地線の長さ" onInput={(v) => onGeodesic({ ...g, length: v })} />
+              </div>
+              <p class="hint">
+                始点から、接平面の中の向き θ（{(item.geodesicVars?.length ?? 0) === 3
+                  ? 'x 軸を接平面に映した向きから、法線 ∇F のまわりに反時計回り'
+                  : `${prettyName(item.geodesicVars?.[0] ?? 'u')} が増える向きから反時計回り`}）へ、曲がらずに進む曲線を、弧長 L まで描きます。
+                欄にリスト [0, π/4, π/2] を書くと何本も描けます（64 本まで）。空欄は既定の値（始点は面の中央、θ = 0、L は表示範囲の対角線）。
+                媒介変数の範囲の端で止まります（両端で面がつながる向きは、つないで続けます）
               </p>
             {/if}
           {/if}

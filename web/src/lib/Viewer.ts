@@ -1088,6 +1088,7 @@ export class Viewer {
     }
     for (const { line } of this.limitSources.values()) line.material.resolution.set(w, h)
     for (const { line } of this.extras.values()) (line.material as LineMaterial).resolution.set(w, h)
+    for (const line of this.geodesics.values()) (line.material as LineMaterial).resolution.set(w, h)
     this.updateProjection()
   }
 
@@ -1994,6 +1995,7 @@ export class Viewer {
     this.setLimitSource(id, mesh.limitSource)
     this.setHoles(id, mesh)
     this.setExtras(id, mesh.extra)
+    this.setGeodesics(id, mesh.geodesic)
     // 描画の方法（式の ⚙。自動なら端末で決める）で、GPU の描き方を使うか
     this.syncGpu2d(id, mesh, wantGpu(style.render, '2d'))
     this.syncGpu3d(id, mesh, wantGpu(style.render, '3d'), style.render === 'gpu')
@@ -2362,6 +2364,7 @@ export class Viewer {
   private applyClipping() {
     this.clipPlanes = this.cutPlane ? [...this.boxPlanes, this.cutPlane] : this.boxPlanes
     for (const g of this.gpu3d.values()) this.applyRayCut(g.ray)
+    for (const g of this.geodesics.values()) (g.material as THREE.Material).clippingPlanes = this.clipPlanes
     for (const e of this.extras.values()) {
       ;(e.line.material as THREE.Material).clippingPlanes = this.clipPlanes
       ;(e.dots.material as THREE.Material).clippingPlanes = this.clipPlanes
@@ -2979,6 +2982,53 @@ export class Viewer {
     this.dirty = true
   }
 
+  /** 曲面の上の測地線（[`MeshData.geodesic`]。計画 N3）。式の色を暗くした色の線。GPU で描く式でも隠さない */
+  private geodesics = new Map<number, LineSegments2>()
+
+  /** 測地線を作り直す（無ければ消す） */
+  private setGeodesics(id: number, pts?: Float32Array) {
+    const old = this.geodesics.get(id)
+    if (old) {
+      this.scene.remove(old)
+      old.geometry.dispose()
+      ;(old.material as THREE.Material).dispose()
+      this.geodesics.delete(id)
+    }
+    if (!pts || pts.length === 0) return
+    const mat = new LineMaterial({ linewidth: 3, clippingPlanes: this.clipPlanes })
+    mat.resolution.set(this.viewW, this.viewH)
+    const line = new LineSegments2(this.curveGeometry(pts), mat)
+    line.frustumCulled = false
+    line.raycast = () => {}
+    this.geodesics.set(id, line)
+    this.scene.add(line)
+    const style = this.styles.get(id)
+    if (style) this.styleGeodesic(id, style)
+    this.dirty = true
+  }
+
+  /**
+   * 測地線の色: 式の色を暗くした色（面と同じ色だと見えない）。もともと暗い色なら明るくする。
+   * 曲率で色分けしている面（青・白・赤）の上では、黒に近い灰
+   */
+  private styleGeodesic(id: number, style: PlotStyle) {
+    const line = this.geodesics.get(id)
+    if (!line) return
+    line.visible = style.visible
+    const m = line.material as LineMaterial
+    const p = this.plots.get(id)
+    const c = new THREE.Color(style.color)
+    if (p?.kind === 'surface' && p.diverging) {
+      m.color.setRGB(0.04, 0.04, 0.05)
+    } else {
+      const hsl = { h: 0, s: 0, l: 0 }
+      // 明るさは sRGB で見る（three.js の既定の線形の色空間だと、ふつうの色も「暗い」側に入る）
+      c.getHSL(hsl, THREE.SRGBColorSpace)
+      m.color.setHSL(hsl.h, hsl.s, hsl.l > 0.3 ? hsl.l * 0.4 : Math.min(0.85, hsl.l + 0.45), THREE.SRGBColorSpace)
+    }
+    m.linewidth = Math.max(2, style.lineWidth)
+  }
+
   /** 穴には白丸、極限の近づく点での定義値には塗りつぶした丸を置く（画面の上の大きさは一定） */
   private setHoles(id: number, mesh: MeshData) {
     const old = this.holeMarks.get(id)
@@ -3087,6 +3137,7 @@ export class Viewer {
       trail.lines.material.color.copy(c)
       trail.dots.material.color.copy(c)
     }
+    this.styleGeodesic(id, style)
     const extra = this.extras.get(id)
     if (extra) {
       extra.line.visible = style.visible
@@ -3203,6 +3254,7 @@ export class Viewer {
     this.setLimitSource(id)
     this.setHoles(id, { holes: undefined } as MeshData)
     this.setExtras(id)
+    this.setGeodesics(id)
     this.setPoi(id, undefined)
     this.curvePts.delete(id)
     if (this.pickFor === id) this.showPick(null)

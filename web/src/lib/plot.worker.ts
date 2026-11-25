@@ -11,6 +11,7 @@ import init, {
   hidden_style,
   field_style,
   ode_init,
+  geodesic_spec,
   ode_start,
   complex_coords,
   coord_system,
@@ -133,7 +134,7 @@ function shapeKey(req: PlotRequest, view: boolean, slice: number[], coordRanges:
   const { source, domain, ranges, params, stacks, space } = req
   // 回す前の形で作った陰関数（rigid）は、陽関数・媒介変数表示の細かさによらない（再生中は細かさが下がるので、入れると使い回せない）
   const resolution = rigid ? 0 : req.resolution
-  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & (PLOT_EDGES | PLOT_CURVATURE_GAUSS | PLOT_CURVATURE_MEAN), req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit, req.odeStart]
+  const base = [source, domain, resolution, ranges, params, stacks, space.dims, req.complexMode, req.flat, req.flatSlice, req.walls, req.layers, req.flags & (PLOT_EDGES | PLOT_CURVATURE_GAUSS | PLOT_CURVATURE_MEAN), req.hidden, req.complexCoords, req.coord, req.definitions, req.arrows, req.odeInit, req.odeStart, req.geodesic ?? '']
   return JSON.stringify(view ? [...base, space.axes, slice, coordRanges, space.center] : base)
 }
 
@@ -363,6 +364,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       field_style(req.arrows?.count ?? 0, req.arrows?.unit ?? false, req.arrows?.stream ?? 0)
       ode_init((req.odeInit ?? []).join('\n'))
       ode_start(req.odeStart?.src ?? '', req.odeStart?.legacy ?? false)
+      geodesic_spec(req.geodesic ?? '')
       complex_coords(req.complexCoords)
       coord_system(req.coord?.map ?? '', req.coord?.names ?? '')
       // ほかの行の定義と、この式そのもの（定義の行なら、自分の定義が要る）
@@ -569,6 +571,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     const vivid = r.vivid
     const diverging = r.diverging
     const curvatureAvailable = r.curvature_available
+    const geodesic = r.take_geodesic()
+    const geodesicVars = r.geodesic_vars
     const target = g.take_target()
     const outlineTarget = r.take_outline_target()
     const extra = r.take_extra()
@@ -618,6 +622,8 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       ...(vivid ? { vivid } : {}),
       ...(diverging ? { diverging } : {}),
       ...(curvatureAvailable ? { curvatureAvailable } : {}),
+      ...(geodesic.length > 0 ? { geodesic } : {}),
+      ...(geodesicVars ? { geodesicVars: geodesicVars.split(',') } : {}),
       ...(target.length > 0 ? { target } : {}),
       ...(outlineTarget.length > 0 ? { outlineTarget } : {}),
       ...(outlineDashedTarget.length > 0 ? { outlineDashedTarget } : {}),
@@ -700,6 +706,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
         ...(res.mesh.outlineDashedTarget ? [res.mesh.outlineDashedTarget.buffer] : []),
         ...(res.mesh.extra ? [res.mesh.extra.buffer] : []),
         ...(res.mesh.extraTarget ? [res.mesh.extraTarget.buffer] : []),
+        ...(res.mesh.geodesic ? [res.mesh.geodesic.buffer] : []),
         ...capTransfer(res.mesh.lod),
         ...capTransfer(res.cap),
       ]

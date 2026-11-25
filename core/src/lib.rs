@@ -16,6 +16,7 @@ pub mod coords;
 pub mod accurate;
 pub mod critical;
 pub mod curvature;
+pub mod geodesic;
 pub mod diff;
 pub mod equation;
 pub mod eval;
@@ -89,8 +90,12 @@ pub struct MeshResult {
     vivid: bool,
     /// 曲率で色分けしたなら true（描画側で 0 を中心にした発散型の色の対応表を使う。計画 N2）
     diverging: bool,
-    /// 曲率の色分け（`flags` のビット 6・7）を使える図形か（画面の ⚙ に選ぶ欄を出す）
+    /// 曲率の色分け（`flags` のビット 6・7）を使える図形か（画面の ⚙ に選ぶ欄を出す）。測地線（計画 N3）も同じ図形で使える
     curvature_available: bool,
+    /// 測地線の線（点の列。線の切れ目は NaN。面の両側に少し浮かせた 2 本ずつ）。描画側は式の色を暗くした色で描く
+    geodesic: Vec<f32>,
+    /// 測地線の始点の欄の名前（`u,v`・`x,y`・`x,y,z`。使えない図形なら空）
+    geodesic_vars: String,
     /// 表示していない座標の値で色を付けるなら、その値の範囲（[`hidden_style`]）。値は頂点ごとの complex の 1 つ目
     value_range: Option<(f64, f64)>,
     /// 伝達関数で描くなら、格子（1 辺 n 点。x が最も速く変わる順）での値と n（[`hidden_style`]）。
@@ -302,6 +307,17 @@ impl MeshResult {
     #[wasm_bindgen(getter)]
     pub fn diverging(&self) -> bool {
         self.diverging
+    }
+
+    /// 測地線の線（計画 N3）
+    pub fn take_geodesic(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.geodesic)
+    }
+
+    /// 測地線の始点の欄の名前（カンマ区切り。使えない図形なら空）
+    #[wasm_bindgen(getter)]
+    pub fn geodesic_vars(&self) -> String {
+        self.geodesic_vars.clone()
     }
 
     /// 曲率の色分けを使える図形か（画面の ⚙ に選ぶ欄を出す）
@@ -572,6 +588,8 @@ pub fn coord_grid(
         vivid: false,
         diverging: false,
         curvature_available: false,
+        geodesic: Vec::new(),
+        geodesic_vars: String::new(),
         outline_target: Default::default(),
         extra: Vec::new(),
         extra_target: Vec::new(),
@@ -825,6 +843,7 @@ pub fn plot(
     let _ = equation::take_last_explicit();
     expand::set_ode_init(ODE_INIT_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())).split('\n').map(String::from).collect());
     expand::set_ode_start_from(ODE_START_SRC.with(|s| std::mem::take(&mut *s.borrow_mut())));
+    let geodesic_src = GEODESIC_SRC.with(|s| std::mem::take(&mut *s.borrow_mut()));
     // 原点を通る直線・平面（ker・Im）を、表示範囲の箱を覆う長さで作るための、原点から箱のいちばん遠い角までの距離
     expand::set_view_x(domain[0], domain[1]);
     expand::set_view_box([domain[0], domain[1], domain[2], domain[3], domain[4], domain[5]]);
@@ -923,6 +942,17 @@ pub fn plot(
             expand::add_note("曲率の色分けは、この式では使えません");
         }
     }
+    // 測地線（計画 N3）: 曲率の色分けと同じ図形で使える。欄の誤りは説明に出して、図形は描く
+    let geodesic_vars = if curvature_available { geodesic_names(&plot, &space, &ctx) } else { String::new() };
+    let geodesic_on = curvature_available && !geodesic_src.is_empty();
+    let geodesic = if geodesic_on {
+        trace_geodesics(&plot, &built, &geodesic_src, &consts, &ctx).unwrap_or_else(|e| {
+            expand::add_note(&e);
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
     let mut inner = match &built.shape {
         Some(sh) => {
             let mut m = mesh::project(sh, &ctx.view, dom);
@@ -1114,18 +1144,20 @@ pub fn plot(
         vivid: built.vivid,
         diverging: built.diverging,
         curvature_available,
+        geodesic,
+        geodesic_vars,
         value_range: built.value_range,
         volume: built.volume,
         // 座標系を使う式では、切り口のふたの元と立体の印を返さない（座標の値の空間の平らなふたは、移した後の切り口に合わない）
         solid: built.shape.as_ref().is_some_and(|s| s.solid) && !flat && coord.is_none(),
         // 添えの線・点のある式は、回転だけ変わったときも作り直す（射影し直す形を返さない）
         // 曲率で色分けした式も（射影し直すと、頂点の値と色の範囲が付かない）
-        shape: if trimmed || uncached_exclusion || fully_excluded || has_extra || curvature_on {
+        shape: if trimmed || uncached_exclusion || fully_excluded || has_extra || curvature_on || geodesic_on {
             None
         } else {
             built.shape
         },
-        local: if coord.is_some() || uncached_exclusion || curvature_on { None } else { built.local },
+        local: if coord.is_some() || uncached_exclusion || curvature_on || geodesic_on { None } else { built.local },
         transform: None,
         field: (!built.fields.is_empty() && coord.is_none()).then_some((built.fields, dom)),
         explicit_used,
@@ -1164,6 +1196,7 @@ pub fn plot(
         local_available: !flat
             && !hidden_on
             && !curvature_on
+            && !geodesic_on
             && !uncached_exclusion
             && coord.is_none()
             && (matches!(&plot, equation::Plot::Implicit { local: Some(_), .. }) || matches!(&plot, equation::Plot::System { eqs, local: Some(_), .. } if eqs.is_empty())),
@@ -1206,6 +1239,19 @@ thread_local! {
 #[wasm_bindgen]
 pub fn coord_system(map: &str, names: &str) {
     COORD_MAP.with(|c| *c.borrow_mut() = (map.to_string(), names.to_string()));
+}
+
+// ---- 測地線（計画 N3） ----
+
+thread_local! {
+    static GEODESIC_SRC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// 次の [`plot`] だけに効く、測地線の欄（始点の座標の式（`geodesic_vars` の数）・向き θ・長さ L を `\n` でつないだもの。
+/// 空の行は既定の値。空の文字列なら描かない）。どの欄もリスト `[a, b, …]` にでき、組み合わせの数だけ描く（64 本まで）
+#[wasm_bindgen]
+pub fn geodesic_spec(src: &str) {
+    GEODESIC_SRC.with(|s| *s.borrow_mut() = src.to_string());
 }
 
 // ---- 常微分方程式の初期値（計画 M9） ----
@@ -2024,6 +2070,163 @@ impl Built {
         self.local = None;
         self
     }
+}
+
+/// 測地線の始点の欄の名前（カンマ区切り）
+fn geodesic_names(plot: &equation::Plot, space: &equation::Space, ctx: &Ctx) -> String {
+    use equation::Plot as P;
+    let _ = ctx;
+    match plot {
+        P::Surface { vars, .. } => vars.join(","),
+        P::Explicit { axis, names, .. } => {
+            let (ua, va) = equation::others(*axis);
+            format!("{},{}", names[ua], names[va])
+        }
+        P::Implicit { .. } => (0..3).map(|k| equation::coord_name(space.axes[k])).collect::<Vec<_>>().join(","),
+        _ => String::new(),
+    }
+}
+
+/// 測地線を描く（計画 N3。[`geodesic`]）。線は面の両側に、表示範囲の 1.5 × 10⁻³ 倍だけ浮かせた 2 本ずつ（面に埋もれないように）
+fn trace_geodesics(plot: &equation::Plot, b: &Built, src: &str, params: &eval::Params, ctx: &Ctx) -> Result<Vec<f32>, String> {
+    use equation::Plot as P;
+    use geodesic::{Path, Stop, V3};
+    let lines: Vec<&str> = src.split('\n').collect();
+    if lines.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let (start_src, rest) = lines.split_at(lines.len() - 2);
+    let field = |s: &str, what: &str| -> Result<Option<Vec<f64>>, String> {
+        if s.trim().is_empty() {
+            return Ok(None);
+        }
+        let (v, used) = equation::eval_values_with(s, params).map_err(|e| format!("測地線の{what}: {e}"))?;
+        expand::note_params(&used);
+        Ok(Some(v))
+    };
+    let thetas = field(rest[0], "向き θ")?.unwrap_or_else(|| vec![0.0]);
+    let lengths = field(rest[1], "長さ L")?.unwrap_or_else(|| vec![ctx.size]);
+    if lengths.iter().any(|l| *l <= 0.0) {
+        return Err("測地線の長さ L は正の数にしてください".into());
+    }
+    let starts: Vec<Option<Vec<f64>>> =
+        start_src.iter().enumerate().map(|(k, s)| field(s, &format!("始点の {} 番目の座標", k + 1))).collect::<Result<_, _>>()?;
+    let chord = ctx.size / 400.0;
+    let dom = ctx.dom;
+    // 始点の欄の組み合わせ（空の欄は既定の値 def[k]）
+    let combos = |def: &[f64]| -> Vec<Vec<f64>> {
+        let mut out: Vec<Vec<f64>> = vec![Vec::new()];
+        for (k, d) in def.iter().enumerate() {
+            let choices = starts.get(k).cloned().flatten().unwrap_or_else(|| vec![*d]);
+            out = out.iter().flat_map(|p| choices.iter().map(move |c| [p.clone(), vec![*c]].concat())).collect();
+        }
+        out
+    };
+    let mut paths: Vec<Path> = Vec::new();
+    let to_display: Box<dyn Fn(V3) -> V3> = match plot {
+        P::Surface { sets, vars } if sets.len() == 1 && sets[0].len() == 3 => {
+            let set = eval::ProgramSet::new(&sets[0]);
+            let r = |uv: &[[f64; 2]]| -> Vec<V3> {
+                let us: Vec<f64> = uv.iter().map(|p| p[0]).collect();
+                let vs: Vec<f64> = uv.iter().map(|p| p[1]).collect();
+                let mut out = Vec::new();
+                set.eval_points(&[&us, &vs], uv.len(), &mut out);
+                out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+            };
+            let range = [(ctx.range)(&vars[0]), (ctx.range)(&vars[1])];
+            let pd = geodesic::ParamDomain { range, periodic: geodesic::periodic_dirs(&r, range, 1e-7 * ctx.size) };
+            let def = [(range[0].0 + range[0].1) / 2.0, (range[1].0 + range[1].1) / 2.0];
+            for s in combos(&def) {
+                for &th in &thetas {
+                    for &len in &lengths {
+                        paths.push(geodesic::on_parametric(&r, [s[0], s[1]], th, len, &pd, chord));
+                    }
+                }
+            }
+            let view = ctx.view.clone();
+            Box::new(move |p: V3| view.apply(&p))
+        }
+        P::Explicit { axis, prog, rotated, .. } => {
+            let (ua, va) = equation::others(*axis);
+            let ax = if *rotated { ctx.space.axes } else { [0, 1, 2] };
+            let ext = if *rotated { rotated_domain(ctx.space, dom) } else { dom };
+            let r = |uv: &[[f64; 2]]| -> Vec<V3> {
+                let us: Vec<f64> = uv.iter().map(|p| p[0]).collect();
+                let vs: Vec<f64> = uv.iter().map(|p| p[1]).collect();
+                let z = curvature::eval_real(prog, &[us.clone(), vs.clone()]);
+                (0..uv.len())
+                    .map(|k| {
+                        let mut p = [0.0; 3];
+                        p[ax[ua]] = us[k];
+                        p[ax[va]] = vs[k];
+                        p[ax[*axis]] = z[k];
+                        p
+                    })
+                    .collect()
+            };
+            let range = [(ext.lo[ua], ext.hi[ua]), (ext.lo[va], ext.hi[va])];
+            let pd = geodesic::ParamDomain { range, periodic: [false, false] };
+            let def = [(range[0].0 + range[0].1) / 2.0, (range[1].0 + range[1].1) / 2.0];
+            for s in combos(&def) {
+                for &th in &thetas {
+                    for &len in &lengths {
+                        paths.push(geodesic::on_parametric(&r, [s[0], s[1]], th, len, &pd, chord));
+                    }
+                }
+            }
+            if *rotated {
+                let view = ctx.view.clone();
+                Box::new(move |p: V3| view.apply(&p))
+            } else {
+                Box::new(|p: V3| p)
+            }
+        }
+        P::Implicit { prog, .. } => {
+            // 始点の既定: 表示範囲の中心に一番近い頂点
+            let c = [0, 1, 2].map(|a| (dom.lo[a] + dom.hi[a]) / 2.0);
+            let nearest = b.inner.positions.chunks_exact(3).filter(|p| p[0].is_finite()).min_by(|p, q| {
+                let d = |v: &[f32]| (0..3).map(|a| (v[a] as f64 - c[a]).powi(2)).sum::<f64>();
+                d(p).total_cmp(&d(q))
+            });
+            let Some(def) = nearest.map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]) else { return Ok(Vec::new()) };
+            for s in combos(&def) {
+                for &th in &thetas {
+                    for &len in &lengths {
+                        paths.push(geodesic::on_implicit(prog, [s[0], s[1], s[2]], th, len, dom, ctx.size, chord));
+                    }
+                }
+            }
+            Box::new(|p: V3| p)
+        }
+        _ => return Ok(Vec::new()),
+    };
+    if paths.len() > 64 {
+        return Err("測地線は 64 本までにしてください（欄のリストの組み合わせの数）".into());
+    }
+    let eps = 1.5e-3 * ctx.size;
+    let mut out: Vec<f32> = Vec::new();
+    for p in &paths {
+        match p.stop {
+            Stop::Singular => expand::add_note("測地線が座標の特異点（法線が求まらない所）で止まりました"),
+            Stop::NoSurface => expand::add_note("測地線の始点の近くに面がありません"),
+            Stop::Undefined => expand::add_note("測地線が、曲面の定義されない所で止まりました"),
+            Stop::Steps => expand::add_note("測地線の計算を、歩数の上限で打ち切りました"),
+            Stop::Length | Stop::Edge => {}
+        }
+        if p.points.len() < 2 {
+            continue;
+        }
+        for side in [1.0, -1.0] {
+            if !out.is_empty() {
+                out.extend_from_slice(&[f32::NAN; 3]);
+            }
+            for (q, n) in p.points.iter().zip(&p.normals) {
+                let d = to_display([0, 1, 2].map(|a| q[a] + side * eps * n[a]));
+                out.extend(d.map(|v| v as f32));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 曲率の色分けを使える図形か: 3D の陽関数（複素数の色分けをしないもの）・ふつうの陰関数（値が実数で、面になる式）・
@@ -3377,6 +3580,8 @@ impl Shape {
             vivid: false,
         diverging: false,
         curvature_available: false,
+        geodesic: Vec::new(),
+        geodesic_vars: String::new(),
             outline_target: Default::default(),
             extra: Vec::new(),
             extra_target: Vec::new(),
@@ -3504,6 +3709,8 @@ impl CapSource {
             vivid: false,
         diverging: false,
         curvature_available: false,
+        geodesic: Vec::new(),
+        geodesic_vars: String::new(),
             outline_target: Default::default(),
             extra: Vec::new(),
             extra_target: Vec::new(),

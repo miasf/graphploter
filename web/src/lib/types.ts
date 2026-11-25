@@ -312,6 +312,13 @@ export interface PlotItem extends PlotStyle {
   curvature?: CurvatureMode
   /** 最後の結果で、曲率の色分けを使える図形だったか（計算エンジンが返したもの。保存しない） */
   curvatureAvailable?: boolean
+  /**
+   * 曲面の上の測地線（計画 N3。無ければ描かない）。start は始点の座標の欄（geodesicVars の順）、theta は向き、length は弧長（どれも LaTeX。
+   * 空欄は既定の値。リスト [a, b] なら何本も描く）
+   */
+  geodesic?: { start: string[]; theta: string; length: string }
+  /** 最後の結果の、測地線の始点の欄の名前（u, v・x, y・x, y, z。使えない図形なら空。保存しない） */
+  geodesicVars?: string[]
   /** 最後の結果で、GPU の描き方を使えたか・使えない理由（計算エンジンが返したもの。保存しない） */
   gpuAvailable?: boolean
   gpuReason?: string
@@ -466,6 +473,10 @@ export interface MeshData {
   diverging?: boolean
   /** 曲率の色分けを使える図形か（式の ⚙ に選ぶ欄を出す） */
   curvatureAvailable?: boolean
+  /** 測地線の線（点の列、切れ目は NaN。計画 N3）。式の色を暗くした色で描く */
+  geodesic?: Float32Array
+  /** 測地線の始点の欄の名前（使えない図形なら省略） */
+  geodesicVars?: string[]
   /** 同じく、厳密な不等式（`<`・`>`）の境目の線（点線で描く） */
   outlineDashed?: Float32Array
   /** 座標系で移した先 T(q)（頂点ごとに 3 つ。座標系を使う式だけ。無ければ省略）。描画側が移行のスライダーで positions と混ぜる */
@@ -525,6 +536,8 @@ export interface PlotRequest {
   odeInit?: string[]
   /** 常微分方程式の初期時刻（計算エンジン用の式。空なら 0）と、前の保存データか（#131） */
   odeStart?: { src: string; legacy: boolean }
+  /** 測地線の欄（計算エンジン用の式を改行でつないだもの。空の文字列なら描かない。計画 N3） */
+  geodesic?: string
   /**
    * 座標系（計算エンジン用の式。無ければ直交座標）。map は組 (X, Y, Z) の式、ranges は作る範囲 [最小, 最大] × 3（式）、
    * names は座標の名前 3 つ（カンマ区切り。r,theta,phi など。空なら x, y, z だけ）。
