@@ -851,7 +851,7 @@ V は全部の土台（値の書式は W・X のパネルでも使う）。X2・
 
 | 計画 | 関係 |
 |---|---|
-| 厳密値 | **将来の別計画**（利用者が自分のアルゴリズムで作る）。V0 の `Shown::exact` と V1 の `ShownValue.exact` を埋めれば画面に出る |
+| 厳密値 | **文書 7（`plan-exact-core.md`）・文書 8（`plan-exact-areas.md`）で計画した**（数のライブラリは dashu、アルゴリズムは自分で作る）。厳密値は別の Worker で計算し、V1 の値の場所に画面で重ねる（文書 7 の EX5。V1 が先）。X3 の「判定の目安」は文書 8 の SR0 で「判定（証明つき）」になる |
 | `plan-math-notation.md` 7.3 の N4（点を押すと値・極値に印） | 値の書式（V1 の `valueText.ts`）を使う。文書 6 で軌跡の L2 と一緒のステップになる |
 | `plan-locus-complex-integral.md` の Z（複素積分・留数） | 留数・積分の値の表示に V（複素数の書式）を使う |
 | `plan-stage2b-integrals.md`（広義積分）・`core/tests/improper.rs` | X3 は `eval_constant` の誤りを変えず、1 行だけの式の `plot` の道で判定を足す |
