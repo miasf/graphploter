@@ -494,6 +494,8 @@ pub struct Raster { pub w: usize, pub h: usize, pub rect: [f64; 4], pub nu: Vec<
 - **担当**: B（理由: 四則の正しさは乱数のテストで確かめられる。表示の状態は App の作りに沿う）
 - **平たい説明**（README の「深い拡大」）: ふつうの数（倍精度）は 16 桁ほどしか持てないので、幅 $10^{-13}$ より細かく拡大すると、隣の画素の座標が同じ数になって絵が崩れる。
   深い拡大では、表示範囲の中心を何百桁の数で持つ
+- **文書 7 との関係（2026-11-25 に決定）**: 高い精度の数は自作せず、文書 7（`plan-exact-core.md`）の D1 のとおり **dashu-float の `FBig`** を使う。
+  下の `BigFloat` は `FBig` を包む薄い型にしてよい。dashu を入れるのが文書 7 の EX1 より先なら、このステップで入れて WASM の大きさを測る
 - **触るファイル**: `core/src/bigfloat.rs`（新規）、`lib.rs`（`deep_move`・`deep_format`）、`web/src/lib/deepView.ts`（新規）、`App.svelte`（2D の表示範囲）、`persist.ts`（共有リンク）、`core/tests/deep_zoom.rs`（新規）
 - **やること**
   1. 高い精度の浮動小数点数: 符号・指数（`i64`）・仮数（`u32` の並び。上位から）。足し算・引き算・掛け算・2 乗・比べる・10 進の文字列との変換・f64 への変換（指数を分けた形 $(m, e)$ も）。
