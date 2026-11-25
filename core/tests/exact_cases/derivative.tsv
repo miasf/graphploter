@@ -1,0 +1,26 @@
+# 入力	期待する答え（LaTeX）	近似値	分野	出典	印  （tools/exact/cases.py が作る。手で直さない）
+@at(@diff(x) x^3 sin(x), x, π/3)	\frac{\pi^{3}}{54}+\frac{\sqrt{3}\pi^{2}}{6}	3.423299687776469	微分	自作	目標
+@at(@diff(x) sqrt(x), x, 4)	\frac{1}{4}	0.25	微分	自作	目標
+@at(@diff(x) ln(x), x, 2)	\frac{1}{2}	0.5	微分	自作	目標
+@at(@diff(x) arctan(x), x, 1)	\frac{1}{2}	0.5	微分	自作	目標
+@at(@diff(x) x^x, x, 1)	1	1.0	微分	自作	目標
+@at(@diff(x) sin(2x), x, π/6)	1	1.0	微分	自作	目標
+@at(@diff(x) tan(x), x, π/4)	2	2.0	微分	自作	目標
+@at(@diff(x) 1/(1+x^2), x, 1)	-\frac{1}{2}	-0.5	微分	自作	目標
+@at(@diff(x) e^(x^2), x, 1)	2e	5.43656365691809	微分	自作	目標
+@at(@diff(x) x^2 e^x, x, 1)	3e	8.154845485377136	微分	自作	目標
+@at(@diff(x) cos(x)^2, x, π/4)	-1	-1.0	微分	自作	目標
+@at(@diff(x) (x^2+1)/(x-1), x, 2)	-1	-1.0	微分	自作	目標
+@at(@diff(x) arcsin(x), x, 1/2)	\frac{2\sqrt{3}}{3}	1.1547005383792515	微分	自作	目標
+@at(@diff(x) sqrt(1+x^2), x, sqrt(3))	\frac{\sqrt{3}}{2}	0.8660254037844386	微分	自作	目標
+@at(@diff(x) x ln(x), x, e)	2	2.0	微分	自作	目標
+@at(@diff(x) sin(x)/x, x, π)	-\frac{1}{\pi}	-0.3183098861837907	微分	自作	目標
+@at(@diff(x) 2^x, x, 0)	\ln 2	0.6931471805599453	微分	自作	目標
+@at(@diff(x) (2x+1)^5, x, 0)	10	10.0	微分	自作	目標
+@at(@diff(x, 2) e^x cos(x), x, 0)	0	0.0	微分	自作	目標
+@at(@diff(x, 2) x^4, x, 1)	12	12.0	微分	自作	目標
+@at(@diff(x, 3) sin(x), x, π)	1	1.0	微分	自作	目標
+@at(@diff(x) abs(x), x, 0)		-	微分	自作	存在しない
+@at(@diff(x) x^3-3x, x, 1)	0	0.0	微分	自作	目標
+@at(@diff(x) cos(x), x, π/3)	-\frac{\sqrt{3}}{2}	-0.8660254037844386	微分	自作	目標
+@at(@diff(x) e^(-x), x, 0)	-1	-1.0	微分	自作	目標

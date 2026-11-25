@@ -1,0 +1,21 @@
+# 入力	期待する答え（LaTeX）	近似値	分野	出典	印  （tools/exact/cases.py が作る。手で直さない）
+@int(x) x^2	\frac{x^{3}}{3}+C	-	不定積分	自作	目標
+@int(x) 1/x	\ln\left|x\right|+C	-	不定積分	自作	目標
+@int(x) e^(2x)	\frac{e^{2x}}{2}+C	-	不定積分	自作	目標
+@int(x) sin(3x)	-\frac{\cos 3x}{3}+C	-	不定積分	自作	目標
+@int(x) x^2 e^x	\left(x^{2}-2x+2\right)e^{x}+C	-	不定積分	自作	目標
+@int(x) x ln(x)	\frac{x^{2}\ln x}{2}-\frac{x^{2}}{4}+C	-	不定積分	自作	目標
+@int(x) sin(x)^3	\frac{\cos^{3}x}{3}-\cos x+C	-	不定積分	自作	目標
+@int(x) e^x sin(x)	\frac{e^{x}\left(\sin x-\cos x\right)}{2}+C	-	不定積分	自作	目標
+@int(x) sqrt(1-x^2)	\frac{x\sqrt{1-x^{2}}+\arcsin x}{2}+C	-	不定積分	自作	目標
+@int(x) 1/sqrt(x^2+1)	\ln\left(x+\sqrt{x^{2}+1}\right)+C	-	不定積分	自作	目標
+@int(x) x sqrt(x^2+1)	\frac{\left(x^{2}+1\right)^{\frac{3}{2}}}{3}+C	-	不定積分	自作	目標
+@int(x) 1/(x ln(x))	\ln\left|\ln x\right|+C	-	不定積分	自作	目標
+@int(x) 1/(1+x^2)	\arctan x+C	-	不定積分	自作	目標
+@int(x) x/(x^2-3x+2)	2\ln\left|x-2\right|-\ln\left|x-1\right|+C	-	不定積分	自作	目標
+@int(x) 1/(x^2-1)	\frac{1}{2}\ln\left|\frac{x-1}{x+1}\right|+C	-	不定積分	自作	目標
+@int(x) cos(x)^2	\frac{x}{2}+\frac{\sin 2x}{4}+C	-	不定積分	自作	目標
+@int(x) tan(x)	-\ln\left|\cos x\right|+C	-	不定積分	自作	目標
+@int(x) x cos(x)	x\sin x+\cos x+C	-	不定積分	自作	目標
+@int(x) ln(x)	x\ln x-x+C	-	不定積分	自作	目標
+@int(x) arctan(x)	x\arctan x-\frac{\ln\left(x^{2}+1\right)}{2}+C	-	不定積分	自作	目標
