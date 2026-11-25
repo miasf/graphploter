@@ -8555,10 +8555,14 @@ pub fn branch_volumes_3d(prog: &Program, dom: Domain) -> Vec<(Vec<Program>, Vec<
         }
     }
     let tau = prog.eval_branches(&[&cols[0], &cols[1], &cols[2]], cols[0].len());
+    // 式の値が 0 でない点の枝は、恒等的に 0 にはならないので数えない（枝の数そのものは多くてよい:
+    // 表示範囲の floor(x) + floor(y) + floor(z) は約 4,800 枝あり、前は上限 2,000 で諦めて飛ぶ面の道に回っていた）
+    let mut vals = vec![C::new(0.0, 0.0); cols[0].len()];
+    prog.eval_batch(&[&cols[0], &cols[1], &cols[2]], &mut vals);
     // 枝ごとの、格子点を囲む箱
     let mut seen: Vec<(Vec<i64>, [f64; 3], [f64; 3])> = Vec::new();
     for (i, t) in tau.chunks_exact(sites).enumerate() {
-        if t.iter().any(|v| !v.is_finite()) {
+        if t.iter().any(|v| !v.is_finite()) || !(vals[i].norm() <= 1e-9) {
             continue;
         }
         let key: Vec<i64> = t.iter().map(|&v| v as i64).collect();

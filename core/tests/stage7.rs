@@ -286,6 +286,12 @@ fn step_function_solutions() {
     let o = draw3("floor(x)+floor(y)+floor(z)=0", 5.0, 48, 3, &[0.0; 3], false);
     assert!(o.gpu_reason.is_empty(), "{}", o.gpu_reason);
     assert!(o.tris > 0 && o.verts.iter().all(|p| (0..3).any(|a| (p[a] - p[a].round()).abs() < 1e-4)), "{}", o.kind);
+    // 枝が 2,000 より多い広い範囲（±10 で 8,000 枝）でも体積のある解として描く。前は枝の数の上限で諦めて、
+    // 飛ぶ面の道（各立方体の下側 3 面だけ）に回り、GPU も止めていた（粗い計算では GPU、細かい計算でメッシュに戻る）
+    for ires in [40, 80] {
+        let o = draw3("floor(x)+floor(y)+floor(z)=0", 10.0, ires, 3, &[0.0; 3], false);
+        assert!(o.gpu_reason.is_empty() && o.kind.contains("体積のある解"), "{ires}: {} / {}", o.kind, o.gpu_reason);
+    }
     let o = draw3("floor(x)+floor(-x)=0", 5.3, 40, 3, &[0.0; 3], true);
     for k in -5..=5 {
         assert!(o.extra.iter().any(|p| (p[0] - k as f32).abs() < 1e-4), "2D の添えの線 x = {k}");
