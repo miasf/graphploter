@@ -1022,6 +1022,13 @@ fn note_param(name: &str) {
     });
 }
 
+/// パラメータを「使った」に数える（測地線の欄など、式の外で使ったもの。値が変わったら計算し直す）
+pub fn note_params(names: &[String]) {
+    for n in names {
+        note_param(n);
+    }
+}
+
 fn note_used(name: &str) {
     USED.with(|u| {
         let mut u = u.borrow_mut();

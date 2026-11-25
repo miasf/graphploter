@@ -44,7 +44,7 @@ impl Which {
     }
 }
 
-fn eval_real(prog: &Program, cols: &[Vec<f64>]) -> Vec<f64> {
+pub(crate) fn eval_real(prog: &Program, cols: &[Vec<f64>]) -> Vec<f64> {
     let n = cols.first().map_or(0, Vec::len);
     let mut out = vec![C::new(0.0, 0.0); n];
     let inputs: Vec<&[f64]> = cols.iter().map(Vec::as_slice).collect();
@@ -53,7 +53,7 @@ fn eval_real(prog: &Program, cols: &[Vec<f64>]) -> Vec<f64> {
 }
 
 /// 3 変数の中心差分の点のずらし方（中心・各軸の ±・2 軸の組の ±±）。19 点
-const STENCIL3: [[i8; 3]; 19] = [
+pub(crate) const STENCIL3: [[i8; 3]; 19] = [
     [0, 0, 0],
     [1, 0, 0],
     [-1, 0, 0],
@@ -76,10 +76,10 @@ const STENCIL3: [[i8; 3]; 19] = [
 ];
 
 /// 2 変数の中心差分の点のずらし方。9 点
-const STENCIL2: [[i8; 2]; 9] = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+pub(crate) const STENCIL2: [[i8; 2]; 9] = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
 /// 点ごとに、ずらし方 `stencil` の点を並べた列（変数ごと）
-fn stencil_cols<const D: usize>(points: &[[f64; D]], stencil: &[[i8; D]], step: [f64; D]) -> Vec<Vec<f64>> {
+pub(crate) fn stencil_cols<const D: usize>(points: &[[f64; D]], stencil: &[[i8; D]], step: [f64; D]) -> Vec<Vec<f64>> {
     let mut cols = vec![Vec::with_capacity(points.len() * stencil.len()); D];
     for p in points {
         for s in stencil {
@@ -92,7 +92,7 @@ fn stencil_cols<const D: usize>(points: &[[f64; D]], stencil: &[[i8; D]], step: 
 }
 
 /// 19 点の値から、勾配とヘッセ行列（中心差分）
-fn derivatives3(f: &[f64], d: f64) -> ([f64; 3], [[f64; 3]; 3]) {
+pub(crate) fn derivatives3(f: &[f64], d: f64) -> ([f64; 3], [[f64; 3]; 3]) {
     let g = [(f[1] - f[2]) / (2.0 * d), (f[3] - f[4]) / (2.0 * d), (f[5] - f[6]) / (2.0 * d)];
     let dd = d * d;
     let mut h = [[0.0; 3]; 3];

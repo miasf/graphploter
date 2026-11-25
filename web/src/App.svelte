@@ -500,6 +500,7 @@
       layers: it.layers,
       edges: it.edges || undefined,
       curvature: it.curvature,
+      geodesic: it.geodesic,
       render: it.render && it.render !== 'auto' ? it.render : undefined,
       ranges: it.ranges,
       vertical: it.vertical,
@@ -1216,6 +1217,7 @@
       { count: item.field?.count ?? 0, unit: item.field?.unit ?? false, stream: item.field?.stream ?? 0 },
       odeInitFor(item),
       { src: (item.ode?.t0 ?? '').trim() === '' ? '' : latexToText(item.ode?.t0 ?? ''), legacy: item.odeLegacy ?? false },
+      geodesicFor(item),
     )
     // 計算担当が返事を送ってから受け取るまで（受け渡し）
     const transfer = res.ok ? performance.timeOrigin + performance.now() - res.timing.sentAt : 0
@@ -1311,6 +1313,7 @@
     if (!res.mesh.transformOnly) {
       item.gpuAvailable = !!(res.mesh.gpu3d || res.mesh.gpu2d)
       item.curvatureAvailable = res.mesh.curvatureAvailable ?? false
+      item.geodesicVars = res.mesh.geodesicVars
       item.gpuReason = res.mesh.gpuReason ?? ''
       // 打ち切りが多くてメッシュに回した式（Viewer が決めた）
       const fb = viewer.gpuFallbackReason(item.id, res.mesh.gpu3d?.glsl)
@@ -2164,6 +2167,22 @@
   /** 描画の方法を変えたとき: 計算し直して、届いた結果で描き方を決め直す */
   function setRender(item: PlotItem, mode: RenderMode) {
     item.render = mode
+    schedule(item, 0)
+  }
+
+  /** 測地線の欄を計算エンジン用にする（描かないなら空の文字列。空欄は既定の値。計画 N3） */
+  function geodesicFor(item: PlotItem): string {
+    const g = item.geodesic
+    if (!g) return ''
+    const text = (s: string | undefined) => (!s || s.trim() === '' ? '' : latexToText(s))
+    const n = item.geodesicVars?.length ?? g.start.length
+    const start = Array.from({ length: n }, (_, k) => text(g.start[k]))
+    return [...start, text(g.theta), text(g.length)].join('\n')
+  }
+
+  /** 測地線を描く・やめる、欄を変えたとき（計算し直す） */
+  function setGeodesic(item: PlotItem, g: PlotItem['geodesic']) {
+    item.geodesic = g
     schedule(item, 0)
   }
 
@@ -3406,6 +3425,7 @@
             onEdges={(on) => setEdges(item, on)}
             onRender={(mode) => setRender(item, mode)}
             onCurvature={(mode) => setCurvature(item, mode)}
+            onGeodesic={(g) => setGeodesic(item, g)}
             onSetDims={(n) => { if (n > space.dims) setLayout(resizeSpace(space, n)) }}
           onLineWidth={(w) => setLineWidth(item, w)}
           onRange={(name, side, v) => setRange(item, name, side, v)}

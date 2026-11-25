@@ -161,6 +161,24 @@ export const SAMPLE_GROUPS: SampleGroup[] = [
           },
         ],
       },
+      {
+        label: 'トーラスの上の測地線（向きを 4 つ。⚙ で始点・向き・長さ）',
+        items: [
+          {
+            latex: '\\left(\\left(3+\\cos v\\right)\\cos u,\\left(3+\\cos v\\right)\\sin u,\\sin v\\right)',
+            options: { color: '#6042a6', geodesic: { start: ['0', '0'], theta: '\\left[0.3,0.6,0.9,1.2\\right]', length: '40' } },
+          },
+        ],
+      },
+      {
+        label: '鞍 z = (x² − y²)/4 の曲率（ガウス曲率 K）と測地線',
+        items: [
+          {
+            latex: 'z=\\frac{x^2-y^2}{4}',
+            options: { color: '#2d70b3', curvature: 'gauss', geodesic: { start: ['0', '0'], theta: '\\left[0,\\frac{\\pi}{6},\\frac{\\pi}{3},\\frac{\\pi}{2}\\right]', length: '' } },
+          },
+        ],
+      },
     ],
   },
   {

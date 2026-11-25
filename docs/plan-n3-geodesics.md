@@ -1,6 +1,6 @@
 # 計画: 曲面の上の測地線（計画 N3）
 
-`docs/plan-math-notation.md` の 7.3 の N3。曲率の色分け（N2）の次。決めてもらうことは 3 章。
+`docs/plan-math-notation.md` の 7.3 の N3。曲率の色分け（N2）の次。決めてもらうことは 3 章。**実装済み**（4 つともおすすめの案。6 章）。
 
 ## 1. 何を描くか
 
@@ -81,3 +81,12 @@ N2 の `core/src/curvature.rs` の中心差分と、M9 の `core/src/ode.rs`（�
 - 計算エンジン: `core/src/geodesic.rs`（新しい）、`lib.rs`（測地線の欄の受け渡し・添えの線）
 - 画面: `ExpressionItem.svelte`（欄）、`App.svelte`・`persist.ts`・`types.ts`（保存）、`plot.worker.ts`（受け渡し）。描画は今の添えの線を使う
 - README・サンプル（球・トーラス・鞍の上の測地線）
+
+## 6. 実装（決めたこと: 1〜4 とも案 A）
+
+- 計算エンジン: `core/src/geodesic.rs`（`on_parametric`・`on_implicit`・`periodic_dirs`）。`lib.rs` の `geodesic_spec`（欄）・`trace_geodesics`・`MeshResult::take_geodesic`・`geodesic_vars`
+- 画面: `ExpressionItem.svelte`（欄）、`App.svelte`（`geodesicFor`）、`Viewer.ts`（`geodesics`。式の色を sRGB で暗くした色）、`persist.ts`（保存）
+- 2 章との違い: 陰関数のずれは、歩ごとではなく出力の点を面の上へ寄せ直して直す。座標の特異点は、面積の要素（始点の $10^{-3}$ 倍）と速さのずれ（$2 \times 10^{-3}$）で見つける
+  （$EG - F^2$ を $EG$ と比べると、直交する座標では特異点の近くでも比が 1 のままで、球の極で止まらなかった）
+- サンプル: 「曲面・曲線」に、トーラスの上の測地線・鞍の曲率と測地線
+- テスト: `core/tests/geodesic.rs`（6 個）、`geodesic.rs` の中（5 個）。時間は 1 本 1 ms ほど（陰関数の球・陽関数・トーラス・ジャイロイドで、測地線を足しても計算の時間はほぼ変わらない）

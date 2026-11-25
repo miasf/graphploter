@@ -41,6 +41,8 @@ export interface SavedItem {
   edges?: boolean
   /** 曲率の色分け（古い保存データには無い。無ければしない） */
   curvature?: 'gauss' | 'mean'
+  /** 曲面の上の測地線の欄（LaTeX。古い保存データには無い。無ければ描かない） */
+  geodesic?: { start: string[]; theta: string; length: string }
   /** 描画の方法（古い保存データには無い。無ければ自動） */
   render?: 'auto' | 'mesh' | 'gpu'
   /** 入っているフォルダの番号（古い保存データには無い） */
