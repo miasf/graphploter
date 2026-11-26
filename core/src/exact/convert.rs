@@ -337,8 +337,15 @@ const MAX_FINITE_TERMS: i64 = 10_000;
 
 fn finite_sum_or_prod(c: &mut Converter, var: &str, args: &[Expr], body: &Expr, sum: bool) -> Result<Term, Stop> {
     let [lo, hi] = args else { return Err(Stop::NotFound("Σ・Π の範囲の書き方はまだ厳密に計算できません".into())) };
-    if matches!(hi, Expr::Num(v) if v.is_infinite()) {
-        return Err(Stop::NotFound("∞ までの和・積はまだ厳密に計算できません".into()));
+    if matches!(hi, Expr::Num(v) if v.is_infinite() && *v > 0.0) {
+        if !sum {
+            return Err(Stop::NotFound("∞ までの積はまだ厳密に計算できません".into()));
+        }
+        // ∞ までの和（文書 8 の SR1）
+        let a = c.integer(lo, "Σ の下端")?;
+        let t = c.with_bound(var, Term::Sym(var.to_string()), |c| c.term(body))?;
+        c.analytic = true;
+        return super::infinite_sum::infinite_sum(&t, var, &a);
     }
     let a = c.integer(lo, "Σ・Π の下端")?;
     let b = c.integer(hi, "Σ・Π の上端")?;

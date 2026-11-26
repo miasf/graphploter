@@ -256,37 +256,7 @@ pub fn special(f: Func, args: &[Term]) -> Option<Term> {
             let c = if (k / 2) % 2 == 0 { -c } else { c };
             Some(mul(vec![Term::Num(c), pow(Term::Atom(Atom::Pi), Term::int(n))]))
         }
-        Func::Digamma => {
-            let q = one(args)?.as_rat()?.clone();
-            let gamma = Term::Atom(Atom::EulerGamma);
-            if let Some(n) = num::as_int(&q) {
-                // ψ(n) = H_{n−1} − γ（n ≥ 1）
-                let n = i64::try_from(&n).ok()?;
-                if !(1..=10_000).contains(&n) {
-                    return None;
-                }
-                let mut h = Rat::ZERO;
-                for k in 1..n {
-                    h += Rat::from_parts(Int::ONE, Nat::from(k as u64));
-                }
-                return Some(add(vec![Term::Num(h), neg(gamma)]));
-            }
-            if *q.denominator() == Nat::from(2u8) {
-                // ψ(m + 1/2) = −γ − 2 ln 2 + Σ_{k=1}^{m} 2/(2k−1)（m ≥ 0）
-                let m = (q.clone() - Rat::from_parts(Int::ONE, Nat::from(2u8))).floor();
-                let m = i64::try_from(&m).ok()?;
-                if !(0..=10_000).contains(&m) {
-                    return None;
-                }
-                let mut sum = Rat::ZERO;
-                for k in 1..=m {
-                    sum += Rat::from_parts(Int::from(2), Nat::from((2 * k - 1) as u64));
-                }
-                let ln2 = super::term::call(Func::Ln, vec![Term::int(2)]);
-                return Some(add(vec![Term::Num(sum), neg(gamma), mul(vec![Term::int(-2), ln2])]));
-            }
-            None
-        }
+        Func::Digamma => digamma_rational(one(args)?.as_rat()?),
         _ => None,
     }
 }
@@ -319,4 +289,114 @@ pub fn fold_log10(items: &[(Rat, Rat)]) -> Option<Rat> {
         m -= 1;
     }
     (r == Rat::ONE).then(|| Rat::from(Int::from(m)))
+}
+
+/// $\psi(b)$（$b$ は有理数で、分母が 1, 2, 3, 4, 6。ガウスの定理の値と、反射公式 $\psi(1-x) = \psi(x) + \pi\cot\pi x$、漸化式 $\psi(x+1) = \psi(x) + \frac1x$）
+pub fn digamma_rational(b: &Rat) -> Option<Term> {
+    if let Some(n) = num::as_int(b) {
+        if n <= Int::ZERO {
+            return None; // 極
+        }
+    }
+    // b = n + f（0 < f ≤ 1）
+    let n = (b.clone() - Rat::ONE).ceil();
+    let f = b.clone() - Rat::from(n.clone());
+    let n = i64::try_from(&n).ok()?;
+    if n.abs() > 10_000 {
+        return None;
+    }
+    let gamma = || Term::Atom(Atom::EulerGamma);
+    let ln = |k: i64| super::term::call(Func::Ln, vec![Term::int(k)]);
+    let pi = || Term::Atom(Atom::Pi);
+    let base_small = |f: &Rat| -> Option<Term> {
+        let d = u64::try_from(f.denominator()).ok()?;
+        let nn = i64::try_from(f.numerator()).ok()?;
+        Some(match (nn, d) {
+            (1, 1) => neg(gamma()),
+            (1, 2) => add(vec![neg(gamma()), mul(vec![Term::int(-2), ln(2)])]),
+            // ψ(1/4) = −γ − π/2 − 3 ln 2
+            (1, 4) => add(vec![neg(gamma()), mul(vec![Term::rat(-1, 2), pi()]), mul(vec![Term::int(-3), ln(2)])]),
+            // ψ(1/3) = −γ − π/(2√3) − (3/2) ln 3
+            (1, 3) => add(vec![neg(gamma()), mul(vec![Term::rat(-1, 6), s(3), pi()]), mul(vec![Term::rat(-3, 2), ln(3)])]),
+            // ψ(1/6) = −γ − (√3/2) π − 2 ln 2 − (3/2) ln 3
+            (1, 6) => add(vec![neg(gamma()), mul(vec![Term::rat(-1, 2), s(3), pi()]), mul(vec![Term::int(-2), ln(2)]), mul(vec![Term::rat(-3, 2), ln(3)])]),
+            _ => return None,
+        })
+    };
+    let half = Rat::from_parts(Int::ONE, Nat::from(2u8));
+    let base = if f > half && f != Rat::ONE {
+        // ψ(f) = ψ(1 − f) + π cot(π(1 − f))
+        let g = Rat::ONE - f.clone();
+        let cot = special(Func::Cot, &[mul(vec![Term::Num(g.clone()), pi()])])?;
+        add(vec![base_small(&g)?, mul(vec![pi(), cot])])
+    } else {
+        base_small(&f)?
+    };
+    // 漸化式で f から b へ
+    let mut extra = Rat::ZERO;
+    if n >= 0 {
+        for m in 0..n {
+            extra += Rat::ONE / (f.clone() + Rat::from(Int::from(m)));
+        }
+    } else {
+        for m in n..0 {
+            extra -= Rat::ONE / (f.clone() + Rat::from(Int::from(m)));
+        }
+    }
+    Some(add(vec![base, Term::Num(extra)]))
+}
+
+/// ディリクレのベータ関数 $\beta(s) = \sum_{k\ge0}\frac{(-1)^k}{(2k+1)^s}$（$s = 2$ は $G$、奇数はオイラー数で）
+pub fn dirichlet_beta(s_: i64) -> Option<Term> {
+    if s_ == 2 {
+        return Some(Term::Atom(Atom::Catalan));
+    }
+    if s_ < 1 || s_ % 2 == 0 || s_ > 9 {
+        return None;
+    }
+    // β(2m+1) = (−1)^m E_{2m} π^{2m+1} / (4^{m+1} (2m)!)
+    let m = (s_ - 1) / 2;
+    let euler = [1i64, -1, 5, -61, 1385][m as usize];
+    let mut fact = Int::ONE;
+    for j in 2..=2 * m {
+        fact *= Int::from(j);
+    }
+    let sign = if m % 2 == 0 { 1 } else { -1 };
+    let c = Rat::from_parts_signed(Int::from(sign * euler), Int::from(4).pow((m + 1) as usize) * fact);
+    Some(mul(vec![Term::Num(c), pow(Term::Atom(Atom::Pi), Term::int(s_))]))
+}
+
+/// フルヴィッツのゼータ $\zeta(s, b) = \sum_{k\ge0}\frac{1}{(k+b)^s}$（$s \ge 2$ の整数、$b > 0$ の有理数で、分母が 1, 2, 4）
+pub fn hurwitz(s_: i64, b: &Rat) -> Option<Term> {
+    if s_ < 2 || num::sign(b) <= 0 {
+        return None;
+    }
+    let n = (b.clone() - Rat::ONE).ceil();
+    let f = b.clone() - Rat::from(n.clone());
+    let n = i64::try_from(&n).ok()?;
+    if n > 100_000 {
+        return None;
+    }
+    let zeta = super::term::call(Func::Zeta, vec![Term::int(s_)]);
+    let two_s = Rat::from(Int::from(2).pow(s_ as usize));
+    let four_s = Rat::from(Int::from(4).pow(s_ as usize));
+    let d = u64::try_from(f.denominator()).ok()?;
+    let nn = i64::try_from(f.numerator()).ok()?;
+    let base = match (nn, d) {
+        (1, 1) => zeta,
+        (1, 2) => mul(vec![Term::Num(two_s - Rat::ONE), zeta]),
+        (1, 4) | (3, 4) => {
+            let beta = dirichlet_beta(s_)?;
+            let sym = mul(vec![Term::Num((four_s.clone() - two_s) * Rat::from_parts(Int::ONE, Nat::from(2u8))), zeta]);
+            let anti = mul(vec![Term::Num(four_s * Rat::from_parts(Int::from(if nn == 1 { 1 } else { -1 }), Nat::from(2u8))), beta]);
+            add(vec![sym, anti])
+        }
+        _ => return None,
+    };
+    // ζ(s, f + n) = ζ(s, f) − Σ_{m=0}^{n−1} (f + m)^{−s}
+    let mut head = Rat::ZERO;
+    for m in 0..n.max(0) {
+        head += (f.clone() + Rat::from(Int::from(m))).pow(-(s_ as isize));
+    }
+    Some(add(vec![base, Term::Num(-head)]))
 }
