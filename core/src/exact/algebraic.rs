@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 pub struct QRad(BTreeMap<Vec<u64>, Rat>);
 
 impl QRad {
-    fn rational(q: Rat) -> QRad {
+    pub fn rational(q: Rat) -> QRad {
         let mut m = BTreeMap::new();
         if !q.is_zero() {
             m.insert(Vec::new(), q);
@@ -24,7 +24,7 @@ impl QRad {
         QRad(m)
     }
 
-    fn add(&self, o: &QRad) -> QRad {
+    pub fn add(&self, o: &QRad) -> QRad {
         let mut m = self.0.clone();
         for (k, v) in &o.0 {
             let e = m.entry(k.clone()).or_insert(Rat::ZERO);
@@ -34,7 +34,7 @@ impl QRad {
         QRad(m)
     }
 
-    fn mul(&self, o: &QRad) -> QRad {
+    pub fn mul(&self, o: &QRad) -> QRad {
         let mut m: BTreeMap<Vec<u64>, Rat> = BTreeMap::new();
         for (ka, va) in &self.0 {
             for (kb, vb) in &o.0 {
@@ -54,6 +54,24 @@ impl QRad {
         }
         m.retain(|_, v| !v.is_zero());
         QRad(m)
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// 有理数なら、その値
+    pub fn as_rational(&self) -> Option<Rat> {
+        match self.0.len() {
+            0 => Some(Rat::ZERO),
+            1 => self.0.get(&Vec::new()).cloned(),
+            _ => None,
+        }
+    }
+
+    /// f64 の近似値（並べるため）
+    pub fn approx(&self) -> f64 {
+        self.0.iter().map(|(k, v)| v.to_f64().value() * (k.iter().product::<u64>() as f64).sqrt()).sum()
     }
 
     /// $\sqrt p \mapsto -\sqrt p$
