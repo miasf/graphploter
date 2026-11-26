@@ -208,7 +208,8 @@ fn real_number(t: &Term, style: &Style) -> String {
         for it in &items {
             den = num::lcm(&den, &Int::from(it.c.denominator().clone()));
         }
-        let neg = items.iter().all(|it| num::sign(&it.c) < 0);
+        // 全部の項が負なら、符号を分数線の前に出す（$-\frac{3+\sqrt{33}}{2}$）。分母が無いときは出さない（$-3-\sqrt{33}$）
+        let neg = den != Int::ONE && items.iter().all(|it| num::sign(&it.c) < 0);
         let mut s = String::new();
         for (i, it) in items.iter().enumerate() {
             let m = num::as_int(&(it.c.clone() * Rat::from(den.clone()))).unwrap();

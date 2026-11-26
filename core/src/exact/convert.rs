@@ -151,6 +151,18 @@ impl<'a> Converter<'a> {
         if let Some(t) = self.lookup(name) {
             return Ok(t);
         }
+        // 引数の無い定義（行列・ベクトル `A = ⟦…⟧`）は、その右辺（文書 8 の LA1。今の道の `Def::Value` と同じ）
+        if let Some(Def::Value(body)) = self.defs.get(name).cloned() {
+            if self.depth >= 32 {
+                return Err(Stop::NotFound("定義の呼び出しが深すぎます".into()));
+            }
+            self.frames.push(Frame { vars: Vec::new(), barrier: true });
+            self.depth += 1;
+            let r = self.term(&body);
+            self.depth -= 1;
+            self.frames.pop();
+            return r;
+        }
         if let Some(c) = self.params.get(name) {
             let re = num::rat_of_literal(c.re).ok_or_else(|| Stop::NotFound(format!("{name} の値が有限ではありません")))?;
             if c.re.fract() != 0.0 {

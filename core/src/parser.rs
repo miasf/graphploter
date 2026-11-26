@@ -353,6 +353,8 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         "logbase" => OpKind::Func,
         // ベクトルと行列（計画 M6・M7）
         "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" | "eig" => OpKind::Func,
+        // 対角化・ジョルダン標準形・グラム・シュミット（1 行にそれだけ。文書 8 の LA1）
+        "diagonalize" | "jordan" | "gramschmidt" => OpKind::Func,
         // テイラー多項式 @taylor(f, x, a, n)
         "taylor" => OpKind::Func,
         // 形を指定する命令 @factor(式)・@expand・@apart（文書 8 の SC2。今の道では中身そのもの）
@@ -1131,7 +1133,7 @@ impl Parser<'_> {
             }
             Some(OpKind::Prefix) => Ok(Expr::Op { op: name, args: vec![self.term()?] }),
             // 行列の演算子は、括弧が無ければ直後の 1 つに掛かる（det A・dim ker A。sin x と同じ読み方）
-            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank" | "eig" | "crit") && *self.peek() != Tok::LParen => {
+            Some(OpKind::Func) if matches!(name.as_str(), "det" | "tr" | "ker" | "im" | "dim" | "rank" | "eig" | "diagonalize" | "jordan" | "crit") && *self.peek() != Tok::LParen => {
                 Ok(Expr::Op { op: name, args: vec![self.power()?] })
             }
             Some(OpKind::Func) => {

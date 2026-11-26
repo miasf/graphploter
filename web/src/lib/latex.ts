@@ -891,6 +891,11 @@ class Converter {
           this.out += ' @taylor '
           return
         }
+        // 対角化・ジョルダン標準形・グラム・シュミット（文書 8 の LA1。1 行にそれだけ。今の道では固有値・固有空間・正規直交にしたベクトルを描く）
+        if (name === 'operatorname' && ['diagonalize', 'jordan', 'gramschmidt'].includes(s)) {
+          this.out += ` @${s} `
+          return
+        }
         // 形を指定する命令（文書 8 の SC2）: factor(…)・expand(…)・apart(…)。グラフは中身そのもの、厳密値の道が形を変えて出す
         if (name === 'operatorname' && ['factor', 'expand', 'apart'].includes(s)) {
           this.out += ` @${s} `

@@ -239,6 +239,120 @@ pub fn real_poly_roots(p: &Poly, budget: &Budget) -> Result<Vec<Term>, Stop> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------- 複素数の根（固有値。文書 8 の LA1）
+
+/// 2 次式 $y^2 + b y + c$（係数は実数の数の式）の 2 つの根。判別式が負なら共役な複素数の組（虚部が負の方が先）
+fn quadratic_all(b: &Term, c: &Term) -> Option<[Term; 2]> {
+    let d = add(vec![mul(vec![b.clone(), b.clone()]), mul(vec![Term::int(-4), c.clone()])]);
+    let hb = mul(vec![Term::rat(-1, 2), b.clone()]);
+    let r = match sign(&d)? {
+        s if s < 0 => mul(vec![Term::Atom(Atom::I), sqrt(neg(d))]),
+        _ => sqrt(d),
+    };
+    let hr = mul(vec![Term::rat(1, 2), r]);
+    Some([add(vec![hb.clone(), neg(hr.clone())]), add(vec![hb, hr])])
+}
+
+/// 既約な 3 次式（モニック）の 3 つの根。実根が 1 つなら、カルダノの形の実根と共役な複素数の組
+fn cubic_all(c: &[Rat]) -> Option<Vec<Term>> {
+    let (c0, c1, c2) = (&c[0], &c[1], &c[2]);
+    let three = Rat::from(Int::from(3));
+    let p = c1.clone() - c2.clone() * c2 / &three;
+    let q = Rat::from(Int::from(2)) * c2 * c2 * c2 / Rat::from(Int::from(27)) - c2.clone() * c1 / &three + c0;
+    let disc = -(Rat::from(Int::from(4)) * &p * &p * &p + Rat::from(Int::from(27)) * &q * &q);
+    if num::sign(&disc) > 0 {
+        return cubic_roots(c);
+    }
+    // t³ + p t + q の実根 u + v と、ω u + ω² v = −(u + v)/2 ± (√3/2)(u − v) i
+    let d = q.clone() * &q / Rat::from(Int::from(4)) + p.clone() * &p * &p / Rat::from(Int::from(27));
+    let s = sqrt(Term::Num(d));
+    let hq = Term::Num(-q.clone() * half());
+    let u = real_cbrt(add(vec![hq.clone(), s.clone()]))?;
+    let v = real_cbrt(add(vec![hq, neg(s)]))?;
+    let shift = Term::Num(-c2.clone() / &three);
+    let re = add(vec![mul(vec![Term::rat(-1, 2), add(vec![u.clone(), v.clone()])]), shift.clone()]);
+    let im = mul(vec![Term::rat(1, 2), sqrt(Term::int(3)), add(vec![u.clone(), neg(v.clone())]), Term::Atom(Atom::I)]);
+    let real = add(vec![u, v, shift]);
+    let (lo, hi) = (add(vec![re.clone(), neg(im.clone())]), add(vec![re, im]));
+    // 虚部が負の方を先に
+    let lo_first = ball::value(&lo, 64).map(|b| b.to_f64().1 < 0.0).unwrap_or(true);
+    Some(if lo_first { vec![real, lo, hi] } else { vec![real, hi, lo] })
+}
+
+/// 既約な 4 次式（モニック）の 4 つの根。複 2 次式で $z$ が実数のときと、分解方程式に正の有理数の根があるとき（フェラーリ）だけ
+fn quartic_all(c: &[Rat], budget: &Budget) -> Result<Option<Vec<Term>>, Stop> {
+    let four = Rat::from(Int::from(4));
+    let s = c[3].clone() / &four;
+    let sh = Poly::new(vec![-s.clone(), Rat::ONE]);
+    let f = Poly::new(c.iter().cloned().chain([Rat::ONE]).collect());
+    let mut g = Poly::zero();
+    for ck in f.0.iter().rev() {
+        g = g.mul(&sh).add(&Poly::constant(ck.clone()));
+    }
+    let get = |k: usize| g.0.get(k).cloned().unwrap_or(Rat::ZERO);
+    let (r, q, p) = (get(0), get(1), get(2));
+    let shift = Term::Num(-s);
+    let mut ys: Vec<Term> = Vec::new();
+    if q.is_zero() {
+        // y⁴ + p y² + r: z = y² の 2 次式。z が実数のときだけ（z < 0 なら y = ±√(−z) i）
+        let dz = p.clone() * &p - four.clone() * &r;
+        if num::sign(&dz) < 0 {
+            return Ok(None);
+        }
+        let Some(zs) = quadratic_all(&Term::Num(p), &Term::Num(r)) else { return Ok(None) };
+        for z in zs {
+            let w = match sign(&z) {
+                Some(s) if s < 0 => mul(vec![Term::Atom(Atom::I), sqrt(neg(z))]),
+                Some(_) => sqrt(z),
+                None => return Ok(None),
+            };
+            ys.push(neg(w.clone()));
+            ys.push(w);
+        }
+    } else {
+        let res = Poly::new(vec![-q.clone() * &q, Rat::from(Int::from(2)) * &p * &p - Rat::from(Int::from(8)) * &r, Rat::from(Int::from(8)) * &p, Rat::from(Int::from(8))]);
+        let roots = poly::rational_roots(&res, budget).map_err(|_| Stop::TimeUp)?;
+        let Some(m) = roots.into_iter().find(|m| num::sign(m) > 0) else { return Ok(None) };
+        let sq = sqrt(Term::Num(Rat::from(Int::from(2)) * &m));
+        let base = Term::Num(p * half() + &m);
+        let qq = term::div(Term::Num(q), mul(vec![Term::int(2), sq.clone()]));
+        for (b, cc) in [(neg(sq.clone()), add(vec![base.clone(), qq.clone()])), (sq.clone(), add(vec![base, neg(qq)]))] {
+            let Some(two) = quadratic_all(&b, &cc) else { return Ok(None) };
+            ys.extend(two);
+        }
+    }
+    Ok(Some(ys.into_iter().map(|y| add(vec![y, shift.clone()])).collect()))
+}
+
+/// 既約な多項式の複素数の根の全部（4 次まで。根号で表せなければ None）。並びは、実数（小さい順）→ 実数でないもの（実部、虚部の順）
+pub fn irreducible_roots(f: &Poly, budget: &Budget) -> Result<Option<Vec<Term>>, Stop> {
+    let f = f.monic();
+    let c = &f.0;
+    let mut out = match f.deg() {
+        1 => vec![Term::Num(-c[0].clone())],
+        2 => match quadratic_all(&Term::Num(c[1].clone()), &Term::Num(c[0].clone())) {
+            Some(v) => v.to_vec(),
+            None => return Ok(None),
+        },
+        3 => match cubic_all(c) {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+        4 => match quartic_all(c, budget)? {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let key = |t: &Term| ball::value(t, 64).map(|b| b.to_f64()).unwrap_or((f64::NAN, f64::NAN));
+    out.sort_by(|a, b| {
+        let (ka, kb) = (key(a), key(b));
+        let real = |k: (f64, f64)| k.1.abs() <= 1e-12 * (1.0 + k.0.abs());
+        real(kb).cmp(&real(ka)).then(ka.0.total_cmp(&kb.0)).then(ka.1.total_cmp(&kb.1))
+    });
+    Ok(Some(out))
+}
+
 fn sort_points(v: &mut Vec<Term>) {
     v.sort_by(|a, b| approx(a).unwrap_or(f64::NAN).total_cmp(&approx(b).unwrap_or(f64::NAN)));
     v.dedup_by(|a, b| match (approx(a), approx(b)) {

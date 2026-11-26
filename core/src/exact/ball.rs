@@ -76,6 +76,17 @@ impl Mag {
         self.mul(Mag::from_f64(k))
     }
 
+    /// 上向きの割り算 self / o（o は 0 でない下限として使う）
+    pub fn div(self, o: Mag) -> Mag {
+        if self.is_zero() {
+            return Mag::ZERO;
+        }
+        if o.is_zero() {
+            return Mag { m: 0.75, e: i64::MAX / 4 };
+        }
+        Mag::norm(self.m / o.m, self.e - o.e)
+    }
+
     /// 下向きの比べ: self < o
     pub fn lt(&self, o: &Mag) -> bool {
         if self.is_zero() {
@@ -198,11 +209,11 @@ impl Ball {
         mag_of(&self.re).add(mag_of(&self.im))
     }
 
-    /// 中心の大きさの下限（おおよそ、半径を引く前）
-    fn mag_lower(&self) -> f64 {
-        let a = self.re.to_f64().value().abs();
-        let b = self.im.to_f64().value().abs();
-        a.max(b)
+    /// 中心の大きさの下限（半径を引く前）: max(|re|, |im|) ≤ |中心|。mag_of は上向きなので 1 段下げる。
+    /// f64 にしないのは、高い精度（1000 ビット超）で 2^{−1022} より小さい値が 0 になり、半径が消えるため
+    fn mag_lower(&self) -> Mag {
+        let (mr, mi) = (mag_of(&self.re), mag_of(&self.im));
+        (if mr.lt(&mi) { mi } else { mr }).scale(0.5)
     }
 
     pub fn is_real(&self) -> bool {
@@ -262,21 +273,14 @@ pub fn inv(a: &Ball) -> Result<Ball, Undecided> {
     let n2 = &a.re * &a.re + &a.im * &a.im;
     let re = &a.re / &n2;
     let im = -(&a.im / &n2);
-    // |1/(m+δ) − 1/m| ≤ r / (|m|(|m| − r))。|m| ≥ max(|re|, |im|)
+    // |1/(m+δ) − 1/m| ≤ r / (|m|(|m| − r)) ≤ 2r / |m|²（r ≤ |m|/2）。|m| ≥ lower。半径は Mag のまま計算する
     let lower = a.mag_lower();
-    let r = a.rad.to_f64();
     let rad = if a.rad.is_zero() {
         Mag::ZERO
-    } else if lower > 0.0 && lower.is_finite() && r.is_finite() && r < lower * 0.5 {
-        Mag::from_f64(2.0 * r / (lower * lower))
+    } else if a.rad.lt(&lower.scale(0.5)) {
+        a.rad.scale(2.0).div(lower.mul(lower))
     } else {
-        // 小さい値・大きい値は Mag で: r / (lower²/2)
-        let low = mag_of(&a.re).add(mag_of(&a.im)).scale(0.35);
-        if !a.rad.lt(&low) {
-            return Err(Undecided::Precision);
-        }
-        let inv_low2 = Mag { m: 0.5, e: 1 - 2 * low.e + 2 };
-        a.rad.mul(inv_low2)
+        return Err(Undecided::Precision);
     };
     let back = Ball { re: re.clone(), im: im.clone(), rad: Mag::ZERO, p };
     let rounding = back.mag().mul(Mag::pow2(4 - p as i64));
@@ -335,8 +339,8 @@ pub fn ln(z: &Ball) -> Result<Ball, Undecided> {
     let lower = z.mag_lower();
     if z.is_real() && z.re.sign() == Sign::Positive {
         let x = z.re.ln();
-        let r = z.rad.to_f64();
-        let rad = if z.rad.is_zero() { Mag::ZERO } else if lower.is_finite() && lower > 0.0 && r < lower * 0.5 { Mag::from_f64(2.0 * r / lower) } else { return Err(Undecided::Precision) };
+        // |ln(m+δ) − ln m| ≤ 2r/|m|（r ≤ |m|/2）
+        let rad = if z.rad.is_zero() { Mag::ZERO } else if z.rad.lt(&lower.scale(0.5)) { z.rad.scale(2.0).div(lower) } else { return Err(Undecided::Precision) };
         let rad = rad.add(round_err(&x, p).scale(2.0)).add(Mag::pow2(2 - p as i64));
         return Ok(Ball::real(x, rad, p));
     }
@@ -351,11 +355,10 @@ pub fn ln(z: &Ball) -> Result<Ball, Undecided> {
     let half = fl_rat(&Rat::from_parts(Int::ONE, dashu::integer::UBig::from(2u8)), p);
     let re = n2.ln() * half;
     let im = z.im.atan2(&z.re);
-    let r = z.rad.to_f64();
-    if !(lower.is_finite() && lower > 0.0 && r < lower * 0.5) {
+    if !z.rad.lt(&lower.scale(0.5)) {
         return Err(Undecided::Precision);
     }
-    let rad = Mag::from_f64(2.0 * r / lower).add(Mag::pow2(4 - p as i64));
+    let rad = z.rad.scale(2.0).div(lower).add(Mag::pow2(4 - p as i64));
     Ok(Ball { re, im, rad, p })
 }
 

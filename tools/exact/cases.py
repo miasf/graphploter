@@ -26,7 +26,7 @@ from pathlib import Path
 from sympy import (
     Abs, Add, Catalan, E, EulerGamma, I, Integer, Matrix, Mul, Pow, Rational, S, Symbol, atan, acos, asin, binomial, cos,
     diff, exp, factorial, gcd, ilcm, igcd, integrate, limit, log, nsimplify, oo, pi, sin, sqrt, symbols, tan, zeta, N,
-    Sum, cbrt, harmonic,
+    Sum, cbrt, harmonic, zeros,
 )
 
 x, k, n = symbols("x k n")
@@ -135,7 +135,8 @@ def fmt_real(v):
         den = 1
         for c, *_ in infos:
             den = ilcm(den, c.q)
-        neg = all(c < 0 for c, *_ in infos)
+        # 全部の項が負なら符号を分数線の前に（分母が無いときは項ごとの符号のまま: -3-\sqrt{33}）
+        neg = den != 1 and all(c < 0 for c, *_ in infos)
         parts = []
         for i, (c, _, lx, _) in enumerate(infos):
             m = int(c * den) * (-1 if neg else 1)
@@ -353,6 +354,286 @@ for inp, m in [
     inv = m.inv()
     CASES.append(("線形", inp, fmt_matrix(inv), "-", "自作", "目標"))
 CASES.append(("線形", "⟦1,2;3,4⟧⟦0,1;1,0⟧", fmt_matrix(Matrix([[1, 2], [3, 4]]) * Matrix([[0, 1], [1, 0]])), "-", "自作", "目標"))
+
+
+# 固有値・対角化・ジョルダン標準形・グラム・シュミット（文書 8 の LA1）。
+# 答えの形は厳密値の道（core/src/exact/eigen.rs）と同じ決まりでここで作り、値は SymPy で確かめる:
+# - 固有ベクトルは A − λI の簡約された行列の核の基底（自由変数の 1 つを 1。基底は一意）を、和の項の係数が互いに素な整数になる正の数で割ったもの
+# - 固有値の並びは、実数（小さい順）→ 実数でないもの（実部、虚部の順）。固有多項式はモニックの因数を、次数の低い順・根の小さい順に
+# - ジョルダン鎖は、ker N^j の基底から ker N^{j-1} と既に選んだ鎖に 1 次独立なものを順に頭に選ぶ（長い鎖から）。鎖ごとに係数をそろえる
+lam = Symbol("lambda")
+
+
+def poly_text_lam(coeffs):
+    """core/src/exact/commands.rs の poly_text（係数は高い次数から。変数は λ）"""
+    deg = len(coeffs) - 1
+    out = ""
+    for i, c in enumerate(coeffs):
+        k = deg - i
+        c = Rational(c)
+        if c == 0:
+            continue
+        neg = c < 0
+        a = -c if neg else c
+        if neg:
+            out += "-"
+        elif out:
+            out += "+"
+        xs = "" if k == 0 else (r"\lambda" if k == 1 else r"\lambda^{%d}" % k)
+        if a == 1 and k > 0:
+            out += xs
+        elif a.q == 1:
+            out += f"{a.p}{xs}"
+        else:
+            top = xs if (k > 0 and a.p == 1) else f"{a.p}{xs}"
+            out += r"\frac{%s}{%d}" % (top, a.q)
+    return out or "0"
+
+
+def canon(vs):
+    """ベクトルの並びを、同じ正の有理数倍で、和の項の係数が互いに素な整数にする"""
+    from sympy import expand as sp_expand, expand_complex, radsimp
+    vs = [[sp_expand(radsimp(expand_complex(c))) for c in v] for v in vs]
+    coeffs = [Rational(t.as_coeff_Mul()[0]) for v in vs for c in v for t in Add.make_args(c) if c != 0]
+    den = 1
+    for q in coeffs:
+        den = ilcm(den, q.q)
+    g = 0
+    for q in coeffs:
+        g = igcd(g, int(q * den))
+    f = Rational(den, g) if g else Rational(1)
+    return [[sp_expand(c * f) for c in v] for v in vs]
+
+
+def root_key(r):
+    v = complex(N(r, 30))
+    return (abs(v.imag) > 1e-20, v.real, v.imag)
+
+
+def eigen_groups(M):
+    """[(モニックの既約因数, 重なり, [根（並び）])]、全部の根の並び [(根, 因数の番号)]"""
+    from sympy import factor_list, Poly as SPoly, roots as sp_roots
+    cp = M.charpoly(lam).as_expr()
+    _, fl = factor_list(cp, lam)
+    groups = []
+    for f, k in fl:
+        fp = SPoly(f, lam).monic()
+        rs = sorted(sp_roots(fp.as_expr(), lam).keys(), key=root_key)
+        assert len(rs) == fp.degree() <= 2, (M, f)
+        groups.append((fp, k, rs))
+    order = sorted([(r, gi) for gi, g in enumerate(groups) for r in g[2]], key=lambda t: root_key(t[0]))
+    return groups, order
+
+
+def charpoly_latex(groups):
+    def key(g):
+        return (g[0].degree(), complex(N(g[2][0], 30)).real)
+    gs = sorted(groups, key=key)
+    one = len(gs) == 1 and gs[0][1] == 1
+    out = ""
+    for fp, k, rs in gs:
+        if fp.degree() == 1:
+            r = -fp.all_coeffs()[1]
+            body = r"\lambda" if r == 0 else (r"\lambda-" + fmt(r) if r > 0 else r"\lambda+" + fmt(-r))
+        else:
+            body = poly_text_lam(fp.all_coeffs())
+        paren = not one and sum(1 for c in fp.all_coeffs() if c != 0) > 1
+        b = r"\left(%s\right)" % body if paren else body
+        out += (b + "^{%d}" % k) if k > 1 else b
+    return out
+
+
+def col(v):
+    return r"\begin{pmatrix}" + r"\\".join(fmt(c) for c in v) + r"\end{pmatrix}"
+
+
+def eigvecs(M, r):
+    from sympy import simplify, eye as sp_eye
+    ns = (M - r * sp_eye(M.rows)).applyfunc(simplify).nullspace(simplify=True)
+    out = []
+    for v in ns:
+        c = canon([[simplify(x) for x in v]])[0]
+        assert (M * Matrix(c) - r * Matrix(c)).applyfunc(simplify) == zeros(M.rows, 1)
+        out.append(c)
+    return out
+
+
+def mult_text(k):
+    return r"\ \left(\text{重複度 }%d\right)" % k if k > 1 else ""
+
+
+def eig_case(inp, M, latex=None):
+    from sympy import zeros as _z
+    groups, order = eigen_groups(M)
+    # 固有値の重なりが SymPy と同じ
+    ev = M.eigenvals()
+    for fp, k, rs in groups:
+        for r in rs:
+            assert any(abs(complex(N(r - e, 30))) < 1e-25 and m == k for e, m in ev.items()), (inp, r)
+    items = [r"\text{固有多項式 }" + charpoly_latex(groups)]
+    for r, gi in order:
+        vs = eigvecs(M, r)
+        items.append(r"\lambda=%s%s:\ %s" % (fmt(r), mult_text(groups[gi][1]), r",\ ".join(col(v) for v in vs)))
+    CASES.append(("固有値", inp, latex or r",\quad ".join(items), "-", "自作", "目標"))
+
+
+def mat_tex(rows):
+    return r"\begin{pmatrix}" + r"\\".join(" & ".join(fmt(c) for c in row) for row in rows) + r"\end{pmatrix}"
+
+
+def similar_check(inp, M, P, J):
+    from sympy import simplify
+    P, J = Matrix(P), Matrix(J)
+    assert simplify(P.det()) != 0, inp
+    assert (M * P - P * J).applyfunc(simplify) == zeros(M.rows, M.cols), inp
+
+
+def diag_case(inp, M):
+    groups, order = eigen_groups(M)
+    for r, gi in order:
+        k = groups[gi][1]
+        if len(eigvecs(M, r)) < k:
+            assert not M.is_diagonalizable(), inp
+            latex = r"\text{対角化できません（固有値 }\lambda=%s\text{ の重複度は %d、固有ベクトルは %d 本）}" % (fmt(r), k, len(eigvecs(M, r)))
+            CASES.append(("固有値", inp, latex, "-", "自作", "目標"))
+            return
+    cols, ds = [], []
+    for r, gi in order:
+        for v in eigvecs(M, r):
+            cols.append(v)
+            ds.append(r)
+    n = M.rows
+    P = [[cols[j][i] for j in range(n)] for i in range(n)]
+    D = [[ds[i] if i == j else 0 for j in range(n)] for i in range(n)]
+    similar_check(inp, M, P, D)
+    CASES.append(("固有値", inp, r"P=%s,\ D=%s\quad\left(P^{-1}AP=D\right)" % (mat_tex(P), mat_tex(D)), "-", "自作", "目標"))
+
+
+def jordan_case(inp, M):
+    from sympy import eye as sp_eye
+    n = M.rows
+    groups, order = eigen_groups(M)
+    chains_of = {}
+    for r, gi in order:
+        k = groups[gi][1]
+        Nm = M - r * sp_eye(n)
+        kers = [[], Nm.nullspace()]
+        Pw = Nm
+        while len(kers[-1]) < k:
+            Pw = Pw * Nm
+            kers.append(Pw.nullspace())
+        m = len(kers) - 1
+        levels = [[] for _ in range(m + 1)]
+        chains = []
+        for j in range(m, 0, -1):
+            base = list(kers[j - 1]) + levels[j]
+            rk = Matrix.hstack(*base).rank() if base else 0
+            for c in kers[j]:
+                trial = base + [c]
+                r2 = Matrix.hstack(*trial).rank()
+                if r2 <= rk:
+                    continue
+                base, rk = trial, r2
+                chain = [c]
+                for _ in range(1, j):
+                    chain.append(Nm * chain[-1])
+                for t in range(1, j):
+                    levels[j - t].append(chain[t])
+                chain.reverse()
+                chains.append(canon([list(v) for v in chain]))
+        chains_of[r] = chains
+    cols, blocks = [], []
+    for r, gi in order:
+        for ch in chains_of[r]:
+            cols.extend(ch)
+            blocks.append((r, len(ch)))
+    P = [[cols[j][i] for j in range(n)] for i in range(n)]
+    J = [[0] * n for _ in range(n)]
+    at = 0
+    for r, ln in blocks:
+        for t in range(ln):
+            J[at + t][at + t] = r
+            if t + 1 < ln:
+                J[at + t][at + t + 1] = 1
+        at += ln
+    similar_check(inp, M, P, J)
+    # 細胞の大きさが SymPy のジョルダン標準形と同じ
+    _, Js = M.jordan_form()
+    def cells(Jm):
+        out, i = [], 0
+        while i < n:
+            ln = 1
+            while i + ln < n and Jm[i + ln - 1, i + ln] == 1:
+                ln += 1
+            out.append((str(Jm[i, i]), ln))
+            i += ln
+        return sorted(out)
+    assert cells(Matrix(J)) == cells(Js), (inp, cells(Matrix(J)), cells(Js))
+    CASES.append(("固有値", inp, r"P=%s,\ J=%s\quad\left(P^{-1}AP=J\right)" % (mat_tex(P), mat_tex(J)), "-", "自作", "目標"))
+
+
+def gs_case(inp, vecs):
+    from sympy import GramSchmidt, factorint, simplify
+    ws, units, parts = [], [], []
+    for v in vecs:
+        v = [Rational(c) for c in v]
+        u = list(v)
+        for w in ws:
+            c = Rational(sum(a * b for a, b in zip(v, w)), sum(b * b for b in w))
+            u = [a - c * b for a, b in zip(u, w)]
+        w = canon([u])[0]
+        n2 = int(sum(c * c for c in w))
+        a, b = 1, 1
+        for p_, e in factorint(n2).items():
+            a *= p_ ** (e // 2)
+            b *= p_ ** (e % 2)
+        coef = "" if (a, b) == (1, 1) else (r"\frac{1}{%d}" % a if b == 1 else (r"\frac{1}{\sqrt{%d}}" % b if a == 1 else r"\frac{1}{%d\sqrt{%d}}" % (a, b)))
+        parts.append(r"\mathbf{u}_{%d}=%s%s" % (len(ws) + 1, coef, col(w)))
+        ws.append(w)
+        units.append([c / sqrt(n2) for c in w])
+    theirs = GramSchmidt([Matrix(v) for v in vecs], True)
+    for u, t in zip(units, theirs):
+        assert all(simplify(a - b) == 0 for a, b in zip(u, t)), inp
+    CASES.append(("固有値", inp, r",\ ".join(parts), "-", "自作", "目標"))
+
+
+for inp, m in [
+    ("@eig(⟦2,1;1,2⟧)", [[2, 1], [1, 2]]), ("@eig(⟦4,1;2,3⟧)", [[4, 1], [2, 3]]), ("@eig(⟦1,2;2,1⟧)", [[1, 2], [2, 1]]),
+    ("@eig(⟦4,-2;1,1⟧)", [[4, -2], [1, 1]]), ("@eig(⟦5,-2;-2,2⟧)", [[5, -2], [-2, 2]]), ("@eig(⟦1,2;3,4⟧)", [[1, 2], [3, 4]]),
+    ("@eig(⟦1,1;1,0⟧)", [[1, 1], [1, 0]]), ("@eig(⟦0,-1;1,0⟧)", [[0, -1], [1, 0]]), ("@eig(⟦1,-1;1,1⟧)", [[1, -1], [1, 1]]),
+    ("@eig(⟦3,1;-1,1⟧)", [[3, 1], [-1, 1]]), ("@eig(⟦0,1,0;0,0,1;2,-5,4⟧)", [[0, 1, 0], [0, 0, 1], [2, -5, 4]]),
+    ("@eig(⟦2,0,0;0,2,0;0,0,3⟧)", [[2, 0, 0], [0, 2, 0], [0, 0, 3]]), ("@eig(⟦2,-1,0;-1,2,-1;0,-1,2⟧)", [[2, -1, 0], [-1, 2, -1], [0, -1, 2]]),
+    ("@eig(⟦0,0,1;1,0,0;0,1,0⟧)", [[0, 0, 1], [1, 0, 0], [0, 1, 0]]), ("@eig(⟦3,-2,4;-2,6,2;4,2,3⟧)", [[3, -2, 4], [-2, 6, 2], [4, 2, 3]]),
+    ("@eig(⟦1,1,1;1,1,1;1,1,1⟧)", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]), ("@eig(⟦1,1,0;0,1,0;0,0,2⟧)", [[1, 1, 0], [0, 1, 0], [0, 0, 2]]),
+    ("@eig(⟦2,0,0,0;0,3,4,0;0,4,9,0;0,0,0,1⟧)", [[2, 0, 0, 0], [0, 3, 4, 0], [0, 4, 9, 0], [0, 0, 0, 1]]),
+]:
+    eig_case(inp, Matrix(m))
+# 小数の入力は小数で出す（固有ベクトルの成分は整数）
+eig_case("@eig(⟦0.5,0.2;0.5,0.8⟧)", Matrix([[Rational(1, 2), Rational(1, 5)], [Rational(1, 2), Rational(4, 5)]]),
+         latex=r"\text{固有多項式 }\left(\lambda-0.3\right)\left(\lambda-1\right),\quad \lambda=0.3:\ \begin{pmatrix}-1\\1\end{pmatrix},\quad \lambda=1:\ \begin{pmatrix}2\\5\end{pmatrix}")
+for inp, m in [
+    ("@diagonalize(⟦4,1;2,3⟧)", [[4, 1], [2, 3]]), ("@diagonalize(⟦2,1;1,2⟧)", [[2, 1], [1, 2]]), ("@diagonalize(⟦1,2;2,1⟧)", [[1, 2], [2, 1]]),
+    ("@diagonalize(⟦0,-1;1,0⟧)", [[0, -1], [1, 0]]), ("@diagonalize(⟦1,1;1,0⟧)", [[1, 1], [1, 0]]), ("@diagonalize(⟦3,1;-1,1⟧)", [[3, 1], [-1, 1]]),
+    ("@diagonalize(⟦3,-2,4;-2,6,2;4,2,3⟧)", [[3, -2, 4], [-2, 6, 2], [4, 2, 3]]), ("@diagonalize(⟦1,1,1;1,1,1;1,1,1⟧)", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]),
+    ("@diagonalize(⟦0,1,0;0,0,1;2,-5,4⟧)", [[0, 1, 0], [0, 0, 1], [2, -5, 4]]), ("@diagonalize(⟦2,0,0;0,2,0;0,0,3⟧)", [[2, 0, 0], [0, 2, 0], [0, 0, 3]]),
+]:
+    diag_case(inp, Matrix(m))
+for inp, m in [
+    ("@jordan(⟦0,1,0;0,0,1;2,-5,4⟧)", [[0, 1, 0], [0, 0, 1], [2, -5, 4]]), ("@jordan(⟦3,1;-1,1⟧)", [[3, 1], [-1, 1]]),
+    ("@jordan(⟦1,1;0,1⟧)", [[1, 1], [0, 1]]), ("@jordan(⟦2,-1;1,0⟧)", [[2, -1], [1, 0]]), ("@jordan(⟦1,1,0;0,1,1;0,0,1⟧)", [[1, 1, 0], [0, 1, 1], [0, 0, 1]]),
+    ("@jordan(⟦2,1,0;0,2,0;0,0,3⟧)", [[2, 1, 0], [0, 2, 0], [0, 0, 3]]), ("@jordan(⟦4,1;2,3⟧)", [[4, 1], [2, 3]]),
+    ("@jordan(⟦5,4,2,1;0,1,-1,-1;-1,-1,3,0;1,1,-1,2⟧)", [[5, 4, 2, 1], [0, 1, -1, -1], [-1, -1, 3, 0], [1, 1, -1, 2]]),
+    ("@jordan(⟦2,1,0,0;0,2,0,0;0,0,2,1;0,0,0,2⟧)", [[2, 1, 0, 0], [0, 2, 0, 0], [0, 0, 2, 1], [0, 0, 0, 2]]),
+    ("@jordan(⟦1,-1,0;-1,2,-1;0,-1,1⟧)", [[1, -1, 0], [-1, 2, -1], [0, -1, 1]]),
+]:
+    jordan_case(inp, Matrix(m))
+for inp, vs in [
+    ("@gramschmidt((1,1,0),(1,0,1),(0,1,1))", [(1, 1, 0), (1, 0, 1), (0, 1, 1)]), ("@gramschmidt((1,0),(1,1))", [(1, 0), (1, 1)]),
+    ("@gramschmidt((3,4),(1,0))", [(3, 4), (1, 0)]), ("@gramschmidt((1,2,2),(2,1,-2),(1,1,1))", [(1, 2, 2), (2, 1, -2), (1, 1, 1)]),
+    ("@gramschmidt((1,1,1),(0,1,1),(0,0,1))", [(1, 1, 1), (0, 1, 1), (0, 0, 1)]), ("@gramschmidt((1,0,1),(1,1,0))", [(1, 0, 1), (1, 1, 0)]),
+    ("@gramschmidt((1,1,0,0),(1,0,1,0),(1,0,0,1))", [(1, 1, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1)]),
+]:
+    gs_case(inp, vs)
 
 # 微分係数
 for inp, f, a in [
@@ -761,7 +1042,8 @@ def write():
     for row in rows:
         by_area.setdefault(row[0], []).append(row)
     names = {"学校": "school", "複素": "complex", "離散": "discrete", "線形": "linear", "微分": "derivative",
-             "極限": "limits", "級数": "series", "積分": "integrals", "不定積分": "antiderivatives", "方程式": "equations", "命令": "commands"}
+             "極限": "limits", "級数": "series", "積分": "integrals", "不定積分": "antiderivatives", "方程式": "equations", "命令": "commands",
+             "固有値": "eigen"}
     files = {}
     for area, rows in by_area.items():
         lines = ["# 入力\t期待する答え（LaTeX）\t近似値\t分野\t出典\t印  （tools/exact/cases.py が作る。手で直さない）"]

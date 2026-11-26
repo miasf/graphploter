@@ -95,7 +95,7 @@ pub fn expand(t: &Term) -> Term {
 }
 
 /// 1 変数の多項式を、次数の高い順の LaTeX とエンジンの文字列に（$x^{2}+x+1$）
-fn poly_text(p: &Poly, x: &str, st: &Style) -> (String, String) {
+pub(crate) fn poly_text(p: &Poly, x: &str, st: &Style) -> (String, String) {
     let mut l = String::new();
     let mut e = String::new();
     for (k, c) in p.0.iter().enumerate().rev() {
@@ -177,7 +177,7 @@ impl AbsInt for Int {
 }
 
 /// 1 変数の多項式の因数分解の積（LaTeX、エンジンの文字列）
-fn poly_factors(p: &Poly, x: &str, st: &Style, budget: &Budget) -> Result<(String, String), Stop> {
+pub(crate) fn poly_factors(p: &Poly, x: &str, st: &Style, budget: &Budget) -> Result<(String, String), Stop> {
     let fac = poly::factor(p, budget);
     if !fac.complete {
         return Err(Stop::TimeUp);
