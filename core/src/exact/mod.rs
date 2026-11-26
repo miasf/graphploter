@@ -16,6 +16,7 @@ pub mod convert;
 pub mod definite;
 pub mod diff;
 pub mod eigen;
+pub mod expression;
 pub mod infinite_sum;
 pub mod integrate;
 pub mod latex;
@@ -177,6 +178,9 @@ pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
         return rep;
     }
     if let Some(rep) = eigen::report(source, params, work_limit) {
+        return rep;
+    }
+    if let Some(rep) = expression::report(source, params, work_limit) {
         return rep;
     }
     let (r, work) = convert_source_with(source, params, work_limit);
