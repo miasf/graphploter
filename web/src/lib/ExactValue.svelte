@@ -16,6 +16,8 @@
   const digitsText = $derived.by(() => {
     if (exact.kind !== 'found' && exact.kind !== 'guess') return ''
     const [re, im] = exact.approx
+    // 答えが文字を含む（不定積分の原始関数など）なら近似値は無い
+    if (!Number.isFinite(re)) return ''
     if (level === 2 && exact.kind === 'found' && exact.digits) return exact.digits
     return formatApprox(re, im, level === 1 ? 17 : 10)
   })
