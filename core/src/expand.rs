@@ -1436,6 +1436,8 @@ impl<'a> Expander<'a> {
                 self.check_kinks_at(&body, &names, &values)?;
                 Val::S(body.substitute(&|v: &str| names.iter().position(|n| n == v).map(|k| values[k].clone())))
             }
+            // 形を指定する命令 `@factor(式)`・`@expand`・`@apart`（文書 8 の SC2）: 今の道では中身そのもの（形は厳密値の道が変える）
+            Expr::Op { op, args } if matches!(op.as_str(), "factor" | "expand" | "apart") && args.len() == 1 => self.val(&args[0])?,
             // テイラー多項式 `@taylor(f, x, a, n)`・`@taylor(f, (x, y), (a, b), n)`
             Expr::Op { op, args } if op == "taylor" => Val::S(self.taylor(args)?),
             Expr::Op { op, args } if op == "compose" => {

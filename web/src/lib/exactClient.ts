@@ -36,6 +36,8 @@ function toState(r: ExactReply): ExactState {
   const approx: [number, number] = r.approx.length === 2 ? [r.approx[0], r.approx[1]] : [NaN, NaN]
   switch (r.status) {
     case 1:
+      // 方程式の行の解は「x = …」をそのまま出す（前に「=」を付けない・近似値と「行に追加」は出さない）
+      if (r.equation) return { kind: 'found', latex: r.latex, inputLatex: '', engine: r.engine, approx: [NaN, NaN], digits: '', addable: false, equation: true }
       return { kind: 'found', latex: r.latex, inputLatex: r.inputLatex, engine: r.engine, approx, digits: r.digits, addable: /[a-z]/.test(r.engine.replace(/\b(pi|eulergamma|catalan|sqrt|ln|log|sin|cos|tan|arcsin|arccos|arctan|sinh|cosh|tanh|exp|gamma|zeta|digamma|abs|e|i)\b/g, '')) }
     case 2:
       return { kind: 'guess', latex: r.latex, inputLatex: r.inputLatex, engine: r.engine, approx }

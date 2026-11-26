@@ -1,6 +1,7 @@
 <script lang="ts">
   // 式の行の右下の厳密値（計画 docs/plan-exact-core.md の EX5）。
   // 見つかった: 「= 厳密値」と小さく「≈ 近似値」（押すと 10 → 17 → 50 桁。D9）。答えが文字を含むなら「行に追加」（D2）。
+  // 方程式の行の解（文書 8 の SC1）: 「x = ±√2」をそのまま（前に「=」を付けない）。
   // 推定: 「= 式 ？（推定）」を薄く（D8）。存在しない: 理由。見つからない: 何も出さない（近似値は今までどおり説明の行）
   import { convertLatexToMarkup } from 'mathlive'
   import 'mathlive/static.css'
@@ -31,7 +32,7 @@
   <p class="exact computing" aria-live="polite">厳密値を計算中…</p>
 {:else if exact.kind === 'found' || exact.kind === 'guess'}
   <div class="exact" class:guess={exact.kind === 'guess'} aria-live="polite">
-    <span class="rel">=</span>
+    {#if !(exact.kind === 'found' && exact.equation)}<span class="rel">=</span>{/if}
     <span class="exact-math" role="math" aria-label={`厳密値 ${exact.latex}`}>{@html markup}</span>
     {#if exact.kind === 'guess'}
       <span class="guess-mark" title="数値から推定した形です。証明ではありません">？（推定）</span>

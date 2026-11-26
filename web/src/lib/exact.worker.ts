@@ -22,6 +22,7 @@ self.onmessage = async (ev: MessageEvent<{ id: number; job: ExactJob; budget: nu
       digits: r.digits(),
       reason: r.reason(),
       work: r.work(),
+      equation: r.equation(),
     }
     r.free()
   } catch (e) {

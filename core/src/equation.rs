@@ -3335,6 +3335,20 @@ pub fn eval_constant_items(source: &str, params: &Params) -> Result<Vec<C>, Stri
     Ok(out)
 }
 
+/// x の式の、点 `xs` での実部（テスト用。命令の行の今の道が中身と同じかを比べる）
+pub fn eval_batch_check(source: &str, xs: &[f64]) -> Vec<f64> {
+    let prog = compile_1var(source, "x", &Params::new()).unwrap_or_else(|e| panic!("{source}: {e}"));
+    let mut out = vec![C::new(0.0, 0.0); xs.len()];
+    prog.eval_batch(&[xs], &mut out);
+    out.iter().map(|c| c.re).collect()
+}
+
+/// 1 つの文字 `var` を含む式を、値を計算する命令列にする（厳密値の道の、方程式の解の取りこぼしの確かめ）
+pub fn compile_1var(source: &str, var: &str, params: &Params) -> Result<Program, String> {
+    let e = parse_at(source, 0, params)?;
+    Program::compile_with(&e, &[var], params)
+}
+
 /// 定数の式の複素数の値（厳密値の道の照らし合わせの相手。計画 `docs/plan-exact-core.md` の 2.4）。
 /// [`eval_constant_with`] と同じ道で計算し、実数にしないで返す
 pub fn eval_constant_complex(source: &str, params: &Params) -> Result<C, String> {

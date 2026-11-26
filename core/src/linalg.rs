@@ -151,7 +151,7 @@ impl Matrix {
             for k in 0..n {
                 a.swap(r * n + k, p * n + k);
             }
-            let d = a[r * n + c];
+            let d = a[r * n + c].clone();
             for k in 0..n {
                 a[r * n + k] /= d;
             }
@@ -243,7 +243,7 @@ impl Matrix {
         orthonormalize(self.pivot_columns())
     }
 
-    /// 有理数で掃き出す（成分が全部、有限桁の小数か分母の小さい分数のときだけ。途中であふれたら None）。
+    /// 有理数で掃き出す（成分が全部、有限桁の小数か分母の小さい分数のときだけ。係数が大きすぎたら None）。
     /// `1 + 10⁻¹²` も 0 でないピボットになる（#124）
     pub fn reduce_exact(&self) -> Option<Reduced> {
         use crate::groebner::Rat;
@@ -255,21 +255,21 @@ impl Matrix {
             if r >= m {
                 break;
             }
-            let Some(p) = (r..m).find(|&i| a[i * n + c].n != 0) else { continue };
+            let Some(p) = (r..m).find(|&i| !a[i * n + c].is_zero()) else { continue };
             for k in 0..n {
                 a.swap(r * n + k, p * n + k);
             }
-            let d = a[r * n + c];
+            let d = a[r * n + c].clone();
             for k in 0..n {
-                a[r * n + k] = a[r * n + k].div(d)?;
+                a[r * n + k] = a[r * n + k].div(&d)?;
             }
             for i in 0..m {
-                let f = a[i * n + c];
-                if i == r || f.n == 0 {
+                let f = a[i * n + c].clone();
+                if i == r || f.is_zero() {
                     continue;
                 }
                 for k in 0..n {
-                    a[i * n + k] = a[i * n + k].add(f.mul(a[r * n + k])?.neg())?;
+                    a[i * n + k] = a[i * n + k].add(&f.mul(&a[r * n + k])?.neg())?;
                 }
             }
             pivots.push(c);

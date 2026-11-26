@@ -22,6 +22,8 @@ struct Case {
     input: String,
     latex: String,
     approx: Option<(f64, f64)>,
+    /// 方程式の行の解の値（連立方程式は点の座標を順に）
+    points: Option<Vec<f64>>,
     area: String,
     mark: Mark,
 }
@@ -47,7 +49,7 @@ const VERDICTS: [(Verdict, &str); 6] = [
 
 /// 厳密値の道の答え（判定に使う形）
 enum Answer {
-    Found { latex: String, approx: Option<(f64, f64)>, engine: String },
+    Found { latex: String, approx: Option<(f64, f64)>, engine: String, points: Option<Vec<f64>> },
     Guess,
     NotFound,
     Rejected,
@@ -61,7 +63,24 @@ fn evaluate(input: &str) -> Answer {
     let _d = graph_core::expand::install(graph_core::expand::Defs::parse("", &params));
     let r = graph_core::exact::evaluate(input, &params);
     match r.outcome {
-        Outcome::Found(_) => Answer::Found { latex: r.latex, approx: r.approx, engine: r.engine },
+        Outcome::Found(t) => {
+            // 方程式の行: 解（組は座標を順に）の値
+            let points = r.equation.then(|| {
+                let items = match &t {
+                    graph_core::exact::term::Term::List(v) => v.clone(),
+                    _ => Vec::new(),
+                };
+                items
+                    .iter()
+                    .flat_map(|p| match p {
+                        graph_core::exact::term::Term::Tuple(c) => c.clone(),
+                        other => vec![other.clone()],
+                    })
+                    .map(|c| graph_core::exact::ball::value(&c, 64).map(|b| b.to_f64().0).unwrap_or(f64::NAN))
+                    .collect()
+            });
+            Answer::Found { latex: r.latex, approx: r.approx, engine: r.engine, points }
+        }
         Outcome::Guess(_) => Answer::Guess,
         Outcome::NotFound(_) => Answer::NotFound,
         Outcome::Rejected(_) => Answer::Rejected,
@@ -97,7 +116,10 @@ fn load() -> Vec<Case> {
                 "存在しない" => Mark::NotExist,
                 m => panic!("{}: 知らない印 {m}", f.display()),
             };
-            out.push(Case { input: cols[0].into(), latex: cols[1].into(), approx: parse_approx(cols[2]), area: cols[3].into(), mark });
+            let equation = cols[3] == "方程式";
+            let points = equation.then(|| if cols[2] == "-" { Vec::new() } else { cols[2].split(' ').map(|v| v.parse().unwrap()).collect() });
+            let approx = if equation { None } else { parse_approx(cols[2]) };
+            out.push(Case { input: cols[0].into(), latex: cols[1].into(), approx, points, area: cols[3].into(), mark });
         }
     }
     out
@@ -158,9 +180,15 @@ fn judge(c: &Case, a: &Answer) -> Verdict {
                 Verdict::Wrong
             }
         }
-        Answer::Found { latex, approx, .. } => {
+        Answer::Found { latex, approx, points, .. } => {
             if c.mark == Mark::NotExist {
                 return Verdict::Wrong;
+            }
+            // 方程式: 解の値の並びが表と同じ（一般解・解なしは表の並びが空）
+            if let (Some(want), Some(got)) = (&c.points, points) {
+                if want.len() != got.len() || want.iter().zip(got).any(|(a, b)| !close((*b, 0.0), (*a, 0.0))) {
+                    return Verdict::Wrong;
+                }
             }
             if let (Some(want), Some(got)) = (c.approx, *approx) {
                 if !close(got, want) {
