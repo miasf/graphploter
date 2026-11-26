@@ -36,7 +36,14 @@ pub fn as_int(r: &Rat) -> Option<Int> {
     (*r.denominator() == Nat::ONE).then(|| r.numerator().clone())
 }
 
+/// 最大公約数（0 以上。gcd(0, 0) = 0、gcd(a, 0) = |a|）
 pub fn gcd(a: &Int, b: &Int) -> Int {
+    if a.is_zero() {
+        return b.clone().abs();
+    }
+    if b.is_zero() {
+        return a.clone().abs();
+    }
     Int::from(a.clone().gcd(b.clone()))
 }
 

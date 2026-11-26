@@ -537,13 +537,16 @@ pub fn pow(b: Term, e: Term) -> Term {
                 return mul(out);
             }
         }
+        (Term::Add(_), Term::Num(qe)) if b.is_number() && *qe == Rat::from_parts(Int::ONE, Nat::from(2u8)) && super::algebraic::denest_sqrt(&b).is_some() => {
+            return super::algebraic::denest_sqrt(&b).unwrap();
+        }
         (Term::Add(_), Term::Num(qe)) if b.is_number() => {
             if let Some(k) = num::as_int(qe).and_then(|k| i64::try_from(&k).ok()) {
                 if k > 0 && k <= 64 {
                     return expand_product(Rat::ONE, vec![b.clone(); k as usize]);
                 }
                 if k < 0 && k >= -64 {
-                    if let Some(inv) = conjugate_inverse(&b) {
+                    if let Some(inv) = conjugate_inverse(&b).or_else(|| super::algebraic::inverse(&b)) {
                         return pow(inv, Term::int(-k));
                     }
                 }

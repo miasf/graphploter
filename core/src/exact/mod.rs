@@ -7,6 +7,7 @@
 //! - [`term`]: 式の形と自動の正規化、[`convert`]: 展開の前の構文木からの変換（EX2）
 //! - [`ball`]: 誤差の幅つきの高い精度の値・0 の判定、[`consts`]: 定数と特殊関数の値（EX3）
 
+pub mod algebraic;
 pub mod ball;
 pub mod check;
 pub mod consts;
@@ -16,6 +17,7 @@ pub mod latex;
 pub mod limit;
 pub mod matrix;
 pub mod num;
+pub mod poly;
 pub mod series;
 pub mod term;
 pub mod values;
