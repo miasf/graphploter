@@ -83,6 +83,8 @@ impl<'a> Converter<'a> {
             Expr::Const(Constant::Pi) => Term::Atom(Atom::Pi),
             Expr::Const(Constant::E) => Term::Atom(Atom::E),
             Expr::Const(Constant::I) => Term::Atom(Atom::I),
+            Expr::Const(Constant::EulerGamma) => Term::Atom(Atom::EulerGamma),
+            Expr::Const(Constant::Catalan) => Term::Atom(Atom::Catalan),
             Expr::Var(name) => self.var(name)?,
             Expr::Neg(a) => neg(self.term(a)?),
             Expr::Bin(op, a, b) => {

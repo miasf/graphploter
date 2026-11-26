@@ -21,6 +21,8 @@ use dashu::base::{Abs, BitTest};
 pub struct Style {
     /// 入力に小数があった（有限小数で書ける値は小数で出す）
     pub decimal: bool,
+    /// 行として読める形にする（γ・G を `\\operatorname{eulergamma}`・`\\operatorname{catalan}` にする。D10）
+    pub input: bool,
 }
 
 const KINDS: [&str; 9] = ["rational", "sqrt", "pi", "e", "ln", "gamma", "catalan", "zeta", "other"];
@@ -75,8 +77,8 @@ fn atom(t: &Term, style: &Style) -> (String, Kind) {
         Term::Atom(Atom::Pi) => ("\\pi".into(), k("pi", 1.0)),
         Term::Atom(Atom::E) => ("e".into(), k("e", 1.0)),
         Term::Atom(Atom::I) => ("i".into(), k("other", 0.0)),
-        Term::Atom(Atom::EulerGamma) => ("\\gamma".into(), k("gamma", 0.0)),
-        Term::Atom(Atom::Catalan) => ("G".into(), k("catalan", 0.0)),
+        Term::Atom(Atom::EulerGamma) => (if style.input { "\\operatorname{eulergamma}".into() } else { "\\gamma".into() }, k("gamma", 0.0)),
+        Term::Atom(Atom::Catalan) => (if style.input { "\\operatorname{catalan}".into() } else { "G".into() }, k("catalan", 0.0)),
         Term::Pow(b, e) => {
             if let (Term::Num(r), Term::Num(q)) = (&**b, &**e) {
                 if let (Some(r), true) = (num::as_int(r), *q.numerator() == Int::ONE) {

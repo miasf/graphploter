@@ -678,6 +678,91 @@ pub fn last_used_defs() -> String {
     LAST_USED_DEFS.with(|u| u.borrow().clone())
 }
 
+/// 厳密値の道の結果（計画 `docs/plan-exact-core.md` の EX5。画面では厳密値の Worker が呼ぶ）
+#[wasm_bindgen]
+pub struct ExactResult {
+    status: u8,
+    latex: String,
+    input_latex: String,
+    engine: String,
+    approx: Vec<f64>,
+    digits: String,
+    reason: String,
+    decimal: bool,
+    work: f64,
+}
+
+#[wasm_bindgen]
+impl ExactResult {
+    /// 0: 見つからない、1: 見つかった、2: 推定、3: 存在しない、4: 照らし合わせで捨てた
+    pub fn status(&self) -> u8 {
+        self.status
+    }
+    /// 画面に出す LaTeX
+    pub fn latex(&self) -> String {
+        self.latex.clone()
+    }
+    /// 行として読める LaTeX（「行に追加」）
+    pub fn input_latex(&self) -> String {
+        self.input_latex.clone()
+    }
+    pub fn engine(&self) -> String {
+        self.engine.clone()
+    }
+    /// 答えの値（実部, 虚部）。無ければ空
+    pub fn approx(&self) -> Vec<f64> {
+        self.approx.clone()
+    }
+    /// 答えの値の 10 進 50 桁（無ければ空）
+    pub fn digits(&self) -> String {
+        self.digits.clone()
+    }
+    /// 見つからない・存在しない理由
+    pub fn reason(&self) -> String {
+        self.reason.clone()
+    }
+    /// 入力に小数があった
+    pub fn decimal(&self) -> bool {
+        self.decimal
+    }
+    /// 使った仕事の量
+    pub fn work(&self) -> f64 {
+        self.work
+    }
+}
+
+/// 式の厳密値を求める（計画 `docs/plan-exact-core.md` の EX5）。`defs` は [`definitions`] と同じ行の一覧、
+/// `names` はスライダーの名前（カンマ区切り）、`values` はその値（実部と虚部の組を順に）。`budget` は仕事の量の上限（0 なら既定）
+#[wasm_bindgen]
+pub fn exact_eval(source: &str, defs: &str, names: &str, values: &[f64], budget: f64) -> ExactResult {
+    let mut params = eval::Params::new();
+    for (k, name) in names.split(',').filter(|n| !n.is_empty()).enumerate() {
+        let (re, im) = (values.get(2 * k).copied().unwrap_or(0.0), values.get(2 * k + 1).copied().unwrap_or(0.0));
+        params.insert(name.to_string(), num_complex::Complex64::new(re, im));
+    }
+    let _defs = expand::install(expand::Defs::parse(defs, &params));
+    let limit = if budget > 0.0 { budget as u64 } else { exact::DEFAULT_WORK };
+    let r = exact::evaluate_with(source, &params, limit);
+    let (status, reason) = match &r.outcome {
+        exact::Outcome::NotFound(s) => (0, s.clone()),
+        exact::Outcome::Found(_) => (1, String::new()),
+        exact::Outcome::Guess(_) => (2, String::new()),
+        exact::Outcome::NotExist(s) => (3, s.clone()),
+        exact::Outcome::Rejected(s) => (4, s.clone()),
+    };
+    ExactResult {
+        status,
+        latex: r.latex,
+        input_latex: r.input_latex,
+        engine: r.engine,
+        approx: r.approx.map(|(a, b)| vec![a, b]).unwrap_or_default(),
+        digits: r.digits.unwrap_or_default(),
+        reason,
+        decimal: r.decimal,
+        work: r.work as f64,
+    }
+}
+
 /// 直前の `eval_range` で使ったパラメータの名前（カンマ区切り）
 #[wasm_bindgen]
 pub fn last_used_params() -> String {

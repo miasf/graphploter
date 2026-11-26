@@ -4,6 +4,6 @@ import type { HTMLAttributes } from 'svelte/elements'
 
 declare module 'svelte/elements' {
   interface SvelteHTMLElements {
-    'math-field': HTMLAttributes<MathfieldElement> & { placeholder?: string }
+    'math-field': HTMLAttributes<MathfieldElement> & { placeholder?: string; 'read-only'?: boolean; value?: string }
   }
 }

@@ -1033,6 +1033,8 @@ impl Compiler<'_> {
             Expr::Num(n) => self.b.push(Op::Const(C::new(*n, 0.0))),
             Expr::Const(c) => self.b.push(Op::Const(match c {
                 Constant::Pi => C::new(PI, 0.0),
+                Constant::EulerGamma => C::new(0.577_215_664_901_532_9, 0.0),
+                Constant::Catalan => C::new(0.915_965_594_177_219, 0.0),
                 Constant::E => C::new(E, 0.0),
                 Constant::I => C::new(0.0, 1.0),
             })),

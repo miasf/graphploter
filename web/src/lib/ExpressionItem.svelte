@@ -7,6 +7,7 @@
   import EditableValue from './EditableValue.svelte'
   import MathInput from './MathInput.svelte'
   import LimitLesson from './LimitLesson.svelte'
+  import ExactValue from './ExactValue.svelte'
   import ParamControl from './ParamControl.svelte'
   import RotationPanel from './RotationPanel.svelte'
   import SequenceTable from './SequenceTable.svelte'
@@ -101,6 +102,8 @@
     onPlayParam: () => void
     /** 「a のスライダーを追加」を押したとき */
     onAddSlider: (name: string) => void
+    /** 厳密値の「行に追加」を押したとき（計画 docs/plan-exact-core.md の D2） */
+    onAddRow?: (latex: string) => void
     /** 式の欄でエンターが押されたとき（この下に新しい式を足す） */
     onEnter: () => void
     /** 並べ替えのつまみをドラッグしたとき */
@@ -197,6 +200,7 @@
     paramPlaying,
     onPlayParam,
     onAddSlider,
+    onAddRow,
     onEnter,
     onDrag,
     dragging,
@@ -955,6 +959,10 @@
             aria-label={item.showSequenceTable ? '項の表を閉じる' : '項の表を開く'} onclick={onToggleSequenceTable}>項の表</button>
         {/if}
       </p>
+    {/if}
+
+    {#if item.exact && !item.error && !item.param}
+      <ExactValue exact={item.exact} {onAddRow} />
     {/if}
 
     {#if hasSequenceTable && item.showSequenceTable}

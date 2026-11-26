@@ -59,8 +59,9 @@ pub fn with_work_limit<T>(limit: u64, f: impl FnOnce() -> T) -> (T, u64) {
     (r, used)
 }
 
-/// 既定の仕事の量の上限（EX5 で、ふつうの PC で約 2 秒になる数に決め直す。計画の D7）
-pub const DEFAULT_WORK: u64 = 50_000_000;
+/// 既定の仕事の量の上限（計画の D7）。EX5 で測った: ネイティブで 1 秒に約 500 万（数の展開）〜 90 万（大きな分数の和）。
+/// WASM はその 1/2〜1/3 なので、500 万でふつうの PC の WASM で約 2 秒
+pub const DEFAULT_WORK: u64 = 5_000_000;
 
 /// 変換の結果と、その途中で分かったこと
 #[derive(Debug, Clone)]
@@ -73,13 +74,18 @@ pub struct Converted {
 
 /// 式の文字列を、厳密値の道の式にする（照らし合わせ・書き出しの前の段階）。定義は今入っているもの（`expand::install`）
 pub fn convert_source(source: &str, params: &Params) -> (Result<Converted, Stop>, u64) {
+    convert_source_with(source, params, DEFAULT_WORK)
+}
+
+/// [`convert_source`] の仕事の量の上限を決めた版
+pub fn convert_source_with(source: &str, params: &Params, work: u64) -> (Result<Converted, Stop>, u64) {
     let defs = crate::expand::current_defs();
     let names = defs.names();
     let e = match crate::parser::parse_with(source, &names) {
         Ok(e) => e,
         Err(e) => return (Err(Stop::NotFound(format!("式を読めません: {e}"))), 0),
     };
-    with_work_limit(DEFAULT_WORK, || {
+    with_work_limit(work, || {
         let mut c = convert::Converter::new(&defs, params);
         let t = c.term(&e)?;
         if exhausted() {
@@ -115,7 +121,9 @@ pub struct Report {
     pub outcome: Outcome,
     /// 答えの LaTeX（見つかったとき・推定のとき）
     pub latex: String,
-    /// 答えのエンジンの文字列（「行に追加」に使う）
+    /// 答えの、行として読める LaTeX（定数は `\\operatorname{eulergamma}` など。「行に追加」に使う）
+    pub input_latex: String,
+    /// 答えのエンジンの文字列
     pub engine: String,
     /// 答えの値を f64 に丸めたもの（実部, 虚部）
     pub approx: Option<(f64, f64)>,
@@ -133,13 +141,18 @@ pub struct Report {
 
 impl Report {
     fn new(outcome: Outcome) -> Report {
-        Report { outcome, latex: String::new(), engine: String::new(), approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0 }
+        Report { outcome, latex: String::new(), input_latex: String::new(), engine: String::new(), approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0 }
     }
 }
 
 /// 式の文字列の厳密値を求め、照らし合わせてから返す（計画の 2.4）
 pub fn evaluate(source: &str, params: &Params) -> Report {
-    let (r, work) = convert_source(source, params);
+    evaluate_with(source, params, DEFAULT_WORK)
+}
+
+/// [`evaluate`] の仕事の量の上限を決めた版
+pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
+    let (r, work) = convert_source_with(source, params, work_limit);
     let c = match r {
         Ok(c) => c,
         Err(Stop::NotFound(s)) => return Report { work, ..Report::new(Outcome::NotFound(s)) },
@@ -178,7 +191,8 @@ pub fn evaluate(source: &str, params: &Params) -> Report {
         let re = ball::to_decimal(&b.re, 50);
         rep.digits = Some(if b.is_real() { re } else { format!("{re} + ({}) i", ball::to_decimal(&b.im, 50)) });
     }
-    rep.latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal });
+    rep.latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal, input: false });
+    rep.input_latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal, input: true });
     rep.engine = latex::to_engine(&t);
     rep.outcome = Outcome::Found(t);
     rep

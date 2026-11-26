@@ -29,3 +29,13 @@ strip = "debuginfo"
 # wasm-opt（追加の最適化ツール）はダウンロードに失敗しやすいので、ひとまず無効にしておく
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
+
+# dashu（厳密値の道だけが使う）は大きさを優先して最適化する（WASM の大きさの予算。計画 docs/plan-exact-core.md の EX5）
+[profile.release.package.dashu-float]
+opt-level = "s"
+[profile.release.package.dashu-int]
+opt-level = "s"
+[profile.release.package.dashu-ratio]
+opt-level = "s"
+[profile.release.package.dashu-base]
+opt-level = "s"
