@@ -11,7 +11,7 @@ fn has(t: &Term, x: &str) -> bool {
     match t {
         Term::Sym(s) => s == x,
         Term::Num(_) | Term::Atom(_) => false,
-        Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) | Term::Tuple(v) | Term::List(v) => v.iter().any(|a| has(a, x)),
+        Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) | Term::Tuple(v) | Term::List(v) | Term::Matrix(_, _, v) => v.iter().any(|a| has(a, x)),
         Term::Pow(b, e) => has(b, x) || has(e, x),
     }
 }
@@ -85,6 +85,7 @@ pub fn diff(t: &Term, x: &str) -> Result<Term, Stop> {
         }
         Term::Tuple(v) => Term::Tuple(v.iter().map(|a| diff(a, x)).collect::<Result<_, _>>()?),
         Term::List(v) => Term::List(v.iter().map(|a| diff(a, x)).collect::<Result<_, _>>()?),
+        Term::Matrix(r, c, v) => Term::Matrix(*r, *c, v.iter().map(|a| diff(a, x)).collect::<Result<_, _>>()?),
         Term::Num(_) | Term::Atom(_) => Term::zero(),
     })
 }
@@ -100,5 +101,6 @@ pub fn subst(t: &Term, x: &str, v: &Term) -> Term {
         Term::Fn(f, a) => call(*f, a.iter().map(|y| subst(y, x, v)).collect()),
         Term::Tuple(a) => Term::Tuple(a.iter().map(|y| subst(y, x, v)).collect()),
         Term::List(a) => Term::List(a.iter().map(|y| subst(y, x, v)).collect()),
+        Term::Matrix(r, c, a) => Term::Matrix(*r, *c, a.iter().map(|y| subst(y, x, v)).collect()),
     }
 }

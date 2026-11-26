@@ -23,6 +23,26 @@ pub enum Check {
 /// f64 の相手との一致の基準: |A − B| ≤ 10^{−8} max(1, |B|)
 pub const F64_TOLERANCE: f64 = 1e-8;
 
+/// 四則と整数の関数だけ（極限・積分・微分などの規則を使わない）の答えの基準。規則の誤りは大きくずれるが、
+/// 今の道の f64 は桁落ち（ヒルベルト行列の逆行列で 4 × 10^{−8}）でずれるので、少し緩める
+pub const F64_TOLERANCE_ARITHMETIC: f64 = 1e-6;
+
+thread_local! {
+    static TOLERANCE: std::cell::Cell<f64> = const { std::cell::Cell::new(F64_TOLERANCE) };
+}
+
+/// 照らし合わせの基準を決めて `f` を動かす
+pub fn with_tolerance<T>(tol: f64, f: impl FnOnce() -> T) -> T {
+    let before = TOLERANCE.with(|t| t.replace(tol));
+    let r = f();
+    TOLERANCE.with(|t| t.set(before));
+    r
+}
+
+fn tolerance() -> f64 {
+    TOLERANCE.with(|t| t.get())
+}
+
 /// 組・リストの答えを、成分ごとに今の f64 の道の値と比べる
 pub fn items_against_f64(items: &[Term], source: &str, params: &Params) -> Check {
     let mut a = Vec::new();
@@ -42,7 +62,7 @@ pub fn items_against_f64(items: &[Term], source: &str, params: &Params) -> Check
     }
     for (x, y) in a.iter().zip(&b) {
         let d = ((x.0 - y.0).powi(2) + (x.1 - y.1).powi(2)).sqrt();
-        if d > F64_TOLERANCE * (y.0 * y.0 + y.1 * y.1).sqrt().max(1.0) {
+        if d > tolerance() * (y.0 * y.0 + y.1 * y.1).sqrt().max(1.0) {
             return Check::Disagree { exact: *x, other: *y };
         }
     }
@@ -62,7 +82,7 @@ pub fn against_f64(t: &Term, source: &str, params: &Params) -> Check {
     };
     let d = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
     let m = (b.0 * b.0 + b.1 * b.1).sqrt().max(1.0);
-    if d <= F64_TOLERANCE * m {
+    if d <= tolerance() * m {
         Check::Agree
     } else {
         Check::Disagree { exact: a, other: b }

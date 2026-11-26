@@ -421,7 +421,7 @@ pub fn eval(t: &Term, p: usize) -> Result<Ball, Undecided> {
         }
         Term::Pow(b, e) => pow(b, e, p),
         Term::Fn(f, args) => call(*f, args, p),
-        Term::Tuple(_) | Term::List(_) => Err(Undecided::Domain("組・リスト".into())),
+        Term::Tuple(_) | Term::List(_) | Term::Matrix(..) => Err(Undecided::Domain("組・リスト・行列".into())),
     }
 }
 

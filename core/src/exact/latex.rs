@@ -368,6 +368,10 @@ fn generic(t: &Term, style: &Style) -> String {
         Term::Fn(f, args) => call_latex(*f, args, None, style),
         Term::Tuple(v) => format!("\\left({}\\right)", v.iter().map(|x| to_latex(x, style)).collect::<Vec<_>>().join(",")),
         Term::List(v) => format!("\\left[{}\\right]", v.iter().map(|x| to_latex(x, style)).collect::<Vec<_>>().join(",")),
+        Term::Matrix(r, c, v) => {
+            let rows: Vec<String> = (0..*r).map(|i| (0..*c).map(|j| to_latex(&v[i * c + j], style)).collect::<Vec<_>>().join(" & ")).collect();
+            format!("\\begin{{pmatrix}}{}\\end{{pmatrix}}", rows.join("\\\\"))
+        }
     }
 }
 
@@ -474,5 +478,9 @@ pub fn to_engine(t: &Term) -> String {
         Term::Fn(f, args) => format!("{}({})", f.names()[0], args.iter().map(to_engine).collect::<Vec<_>>().join(",")),
         Term::Tuple(v) => format!("({})", v.iter().map(to_engine).collect::<Vec<_>>().join(",")),
         Term::List(v) => format!("[{}]", v.iter().map(to_engine).collect::<Vec<_>>().join(",")),
+        Term::Matrix(r, c, v) => {
+            let rows: Vec<String> = (0..*r).map(|i| (0..*c).map(|j| to_engine(&v[i * c + j])).collect::<Vec<_>>().join(",")).collect();
+            format!("⟦{}⟧", rows.join(";"))
+        }
     }
 }

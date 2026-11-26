@@ -13,6 +13,7 @@ pub mod consts;
 pub mod convert;
 pub mod diff;
 pub mod latex;
+pub mod matrix;
 pub mod num;
 pub mod term;
 pub mod values;
@@ -165,17 +166,18 @@ pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
     let t = c.term;
     // 組・リスト（成分が全部数）は成分ごとに照らし合わせる
     let items: Option<Vec<Term>> = match &t {
-        Term::Tuple(v) | Term::List(v) if v.iter().all(Term::is_number) => Some(v.clone()),
+        Term::Tuple(v) | Term::List(v) | Term::Matrix(_, _, v) if v.iter().all(Term::is_number) => Some(v.clone()),
         _ => None,
     };
     if items.is_none() && !t.is_number() {
         rep.outcome = Outcome::NotFound("座標を含む式の厳密値はまだ出しません".into());
         return rep;
     }
-    let verdict = match &items {
+    let tol = if c.analytic { check::F64_TOLERANCE } else { check::F64_TOLERANCE_ARITHMETIC };
+    let verdict = check::with_tolerance(tol, || match &items {
         Some(v) => check::items_against_f64(v, source, params),
         None => check::against_f64(&t, source, params),
-    };
+    });
     match verdict {
         check::Check::Agree => {}
         check::Check::Disagree { exact, other } => {

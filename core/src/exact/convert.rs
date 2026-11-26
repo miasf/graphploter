@@ -90,6 +90,9 @@ impl<'a> Converter<'a> {
             Expr::Neg(a) => neg(self.term(a)?),
             Expr::Bin(op, a, b) => {
                 let (x, y) = (self.term(a)?, self.term(b)?);
+                if let Some(t) = linear_bin(*op, &x, &y)? {
+                    return Ok(t);
+                }
                 match op {
                     BinOp::Add => add(vec![x, y]),
                     BinOp::Sub => sub(x, y),
@@ -118,6 +121,11 @@ impl<'a> Converter<'a> {
                 None => return Err(Stop::NotFound(format!("記法 {op} はまだ厳密に計算できません"))),
             },
             Expr::Op { op, args } if op == "at" => self.at(args)?,
+            Expr::Op { op, args } if matches!(op.as_str(), "det" | "tr" | "inv" | "transpose" | "rank" | "norm" | "dot") => self.matrix_op(op, args)?,
+            Expr::Matrix { rows, cols, items } => {
+                let a = items.iter().map(|x| self.term(x)).collect::<Result<Vec<_>, _>>()?;
+                super::matrix::EMat { rows: *rows, cols: *cols, a }.into_term()
+            }
             Expr::Op { op, args } if matches!(op.as_str(), "grad" | "div" | "rot" | "curl" | "lap") && args.len() == 1 => self.vector_operator(op, &args[0])?,
             Expr::Op { op, .. } => return Err(Stop::NotFound(format!("記法 {op} はまだ厳密に計算できません"))),
             other => return Err(Stop::NotFound(format!("この書き方はまだ厳密に計算できません（{}）", short(other)))),
@@ -215,6 +223,38 @@ impl<'a> Converter<'a> {
         Ok(t)
     }
 
+    /// 行列の演算（文書 8 の LA0）
+    fn matrix_op(&mut self, op: &str, args: &[Expr]) -> Result<Term, Stop> {
+        use super::matrix::{self as m, EMat};
+        let vals = args.iter().map(|a| self.term(a)).collect::<Result<Vec<_>, _>>()?;
+        let mat = |t: &Term| EMat::of_term(t).ok_or_else(|| Stop::NotFound(format!("@{op} は行列かベクトルに使ってください")));
+        Ok(match (op, vals.as_slice()) {
+            ("det", [a]) => m::det(&mat(a)?)?,
+            ("tr", [a]) => {
+                let x = mat(a)?;
+                if x.rows != x.cols {
+                    return Err(Stop::NotFound("トレースは正方行列に使ってください".into()));
+                }
+                add((0..x.rows).map(|i| x.at(i, i).clone()).collect())
+            }
+            ("inv", [a]) => m::inverse(&mat(a)?)?.into_term(),
+            ("transpose", [a]) => mat(a)?.transpose().into_term(),
+            ("rank", [a]) => Term::int(m::rank(&mat(a)?) as i64),
+            ("norm", [a]) => {
+                let x = mat(a)?;
+                pow(add(x.a.iter().map(|t| mul(vec![t.clone(), t.clone()])).collect()), Term::rat(1, 2))
+            }
+            ("dot", [a, b]) => {
+                let (x, y) = (mat(a)?, mat(b)?);
+                if x.a.len() != y.a.len() {
+                    return Err(Stop::NotFound("内積の成分の数が違います".into()));
+                }
+                add(x.a.iter().zip(&y.a).map(|(p, q)| mul(vec![p.clone(), q.clone()])).collect())
+            }
+            _ => return Err(Stop::NotFound(format!("@{op} の書き方はまだ厳密に計算できません"))),
+        })
+    }
+
     /// ∇・∇·・∇×・∇²（座標 x, y, z について。今の道の `vector_operator` と同じ意味。文書 8 の DF0）
     fn vector_operator(&mut self, op: &str, arg: &Expr) -> Result<Term, Stop> {
         use super::diff::diff;
@@ -300,6 +340,37 @@ fn derivative(c: &mut Converter, var: &str, args: &[Expr], body: &Expr) -> Resul
     }
     c.analytic = true;
     Ok(d)
+}
+
+/// 行列・ベクトルの四則（どちらかが行列か組のとき。両方スカラーなら None）
+fn linear_bin(op: BinOp, x: &Term, y: &Term) -> Result<Option<Term>, Stop> {
+    use super::matrix::{self as m, EMat};
+    let (mx, my) = (EMat::of_term(x), EMat::of_term(y));
+    if mx.is_none() && my.is_none() {
+        return Ok(None);
+    }
+    let r = match (op, mx, my) {
+        (BinOp::Add, Some(a), Some(b)) => m::add_m(&a, &b)?,
+        (BinOp::Sub, Some(a), Some(b)) => m::add_m(&a, &m::scale(&Term::int(-1), &b))?,
+        (BinOp::Mul, Some(a), Some(b)) if a.cols == b.rows => m::mul_m(&a, &b)?,
+        (BinOp::Mul, Some(a), None) => m::scale(y, &a),
+        (BinOp::Mul, None, Some(b)) => m::scale(x, &b),
+        (BinOp::Div, Some(a), None) => m::scale(&pow(y.clone(), Term::int(-1)), &a),
+        (BinOp::Pow, Some(a), None) if a.rows == a.cols && a.cols > 1 => {
+            let k = y.as_rat().and_then(super::num::as_int).and_then(|k| i64::try_from(&k).ok()).ok_or_else(|| Stop::NotFound("行列のべきは整数にしてください".into()))?;
+            if k.abs() > 64 {
+                return Err(Stop::NotFound("行列のべきが大きすぎます".into()));
+            }
+            let base = if k < 0 { m::inverse(&a)? } else { a.clone() };
+            let mut acc = EMat::identity(a.rows);
+            for _ in 0..k.unsigned_abs() {
+                acc = m::mul_m(&acc, &base)?;
+            }
+            acc
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(r.into_term()))
 }
 
 fn short(e: &Expr) -> String {

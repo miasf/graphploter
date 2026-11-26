@@ -3319,7 +3319,7 @@ pub fn eval_values_with(source: &str, params: &Params) -> Result<(Vec<f64>, Vec<
 /// 定数の式の値を、組・リストなら成分ごとに（厳密値の道の照らし合わせの相手）。数 1 つなら長さ 1
 pub fn eval_constant_items(source: &str, params: &Params) -> Result<Vec<C>, String> {
     let items = match parse_at(source, 0, params)? {
-        Expr::Tuple(items) | Expr::List(items) => items,
+        Expr::Tuple(items) | Expr::List(items) | Expr::Matrix { items, .. } => items,
         e => vec![e],
     };
     let mut out = Vec::with_capacity(items.len());

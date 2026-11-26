@@ -41,6 +41,8 @@ pub enum Term {
     Fn(Func, Vec<Term>),
     Tuple(Vec<Term>),
     List(Vec<Term>),
+    /// 行列（行の順に並べた成分。文書 8 の LA0）
+    Matrix(usize, usize, Vec<Term>),
 }
 
 impl Term {
@@ -82,7 +84,7 @@ impl Term {
             Term::Sym(_) => false,
             Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) => v.iter().all(Term::is_number),
             Term::Pow(b, e) => b.is_number() && e.is_number(),
-            Term::Tuple(_) | Term::List(_) => false,
+            Term::Tuple(_) | Term::List(_) | Term::Matrix(..) => false,
         }
     }
 
@@ -90,7 +92,7 @@ impl Term {
     pub fn size(&self) -> usize {
         match self {
             Term::Num(_) | Term::Atom(_) | Term::Sym(_) => 1,
-            Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) | Term::Tuple(v) | Term::List(v) => 1 + v.iter().map(Term::size).sum::<usize>(),
+            Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) | Term::Tuple(v) | Term::List(v) | Term::Matrix(_, _, v) => 1 + v.iter().map(Term::size).sum::<usize>(),
             Term::Pow(b, e) => 1 + b.size() + e.size(),
         }
     }
@@ -99,7 +101,7 @@ impl Term {
     pub fn has_division_by_zero(&self) -> bool {
         match self {
             Term::Pow(b, e) => (b.is_zero() && e.as_rat().is_some_and(|q| num::sign(q) < 0)) || b.has_division_by_zero() || e.has_division_by_zero(),
-            Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) | Term::Tuple(v) | Term::List(v) => v.iter().any(Term::has_division_by_zero),
+            Term::Add(v) | Term::Mul(v) | Term::Fn(_, v) | Term::Tuple(v) | Term::List(v) | Term::Matrix(_, _, v) => v.iter().any(Term::has_division_by_zero),
             _ => false,
         }
     }
