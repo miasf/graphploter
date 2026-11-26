@@ -10,6 +10,7 @@
 pub mod algebraic;
 pub mod ball;
 pub mod check;
+pub mod commands;
 pub mod consts;
 pub mod convert;
 pub mod definite;
@@ -23,6 +24,7 @@ pub mod num;
 pub mod poly;
 pub mod roots;
 pub mod series;
+pub mod solve;
 pub mod term;
 pub mod values;
 
@@ -150,11 +152,13 @@ pub struct Report {
     pub rules: Vec<&'static str>,
     /// 使った仕事の量
     pub work: u64,
+    /// 方程式の行の解（`latex` は `x = …` の形。画面では「=」を前に付けず、「行に追加」も出さない）
+    pub equation: bool,
 }
 
 impl Report {
     fn new(outcome: Outcome) -> Report {
-        Report { outcome, latex: String::new(), input_latex: String::new(), engine: String::new(), approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0 }
+        Report { outcome, latex: String::new(), input_latex: String::new(), engine: String::new(), approx: None, digits: None, decimal: false, uses_ln: false, rules: Vec::new(), work: 0, equation: false }
     }
 }
 
@@ -165,6 +169,12 @@ pub fn evaluate(source: &str, params: &Params) -> Report {
 
 /// [`evaluate`] の仕事の量の上限を決めた版
 pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
+    if let Some(rep) = solve::equation_report(source, params, work_limit) {
+        return rep;
+    }
+    if let Some(rep) = command_report(source, params, work_limit) {
+        return rep;
+    }
     let (r, work) = convert_source_with(source, params, work_limit);
     let c = match r {
         Ok(c) => c,
@@ -243,6 +253,67 @@ pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
     rep.engine = latex::to_engine(&t);
     rep.outcome = Outcome::Found(t);
     rep
+}
+
+/// 行がまるごと命令 `@factor(…)`・`@expand(…)`・`@apart(…)` なら、その答え（文書 8 の SC2）。命令の行でなければ None
+fn command_report(source: &str, params: &Params, work_limit: u64) -> Option<Report> {
+    let defs = crate::expand::current_defs();
+    let names = defs.names();
+    let e = crate::parser::parse_with(source, &names).ok()?;
+    let crate::parser::Expr::Op { op, args } = &e else { return None };
+    if !commands::COMMANDS.contains(&op.as_str()) || args.len() != 1 {
+        return None;
+    }
+    let (r, work) = with_work_limit(work_limit, || -> Result<(commands::Shaped, bool, Term), Stop> {
+        let mut c = convert::Converter::new(&defs, params);
+        let t = c.term(&args[0])?;
+        let shaped = commands::run(op, &t, c.decimal, &Budget::new(work_limit))?;
+        Ok((shaped, c.decimal, t))
+    });
+    let (shaped, decimal, inner) = match r {
+        Ok(v) => v,
+        Err(Stop::NotFound(s)) => return Some(Report { work, ..Report::new(Outcome::NotFound(s)) }),
+        Err(Stop::NotExist(s)) => return Some(Report { work, ..Report::new(Outcome::NotExist(s)) }),
+        Err(Stop::TimeUp) => return Some(Report { work, ..Report::new(Outcome::NotFound("時間切れ".into())) }),
+    };
+    let mut rep = Report { decimal, work, ..Report::new(Outcome::NotFound(String::new())) };
+    // 照らし合わせ: 答えのエンジンの文字列を読み直した式が、中身と同じ値（文字の式は 4 つの有理数の点で）
+    let back = match convert_source(&shaped.engine, params).0 {
+        Ok(b) => b.term,
+        Err(_) => {
+            rep.outcome = Outcome::Rejected("答えの式を読み直せません".into());
+            return Some(rep);
+        }
+    };
+    let diff = term::add(vec![back, term::neg(inner.clone())]);
+    let mut vars = Vec::new();
+    solve::collect_syms(&diff, &mut vars);
+    let same = if vars.is_empty() {
+        ball::is_zero(&diff, &mut rep.rules) == Some(true)
+    } else {
+        [(3i64, 7u64), (-5, 3), (11, 4), (2, 9)].iter().all(|&(n, d)| {
+            let mut t = diff.clone();
+            for v in &vars {
+                t = diff::subst(&t, v, &Term::rat(n, d));
+            }
+            ball::is_zero(&t, &mut Vec::new()) == Some(true)
+        })
+    };
+    if !same {
+        rep.outcome = Outcome::Rejected("命令の答えが中身と同じ値になりません".into());
+        return Some(rep);
+    }
+    if inner.is_number() {
+        if let Ok(b) = ball::value(&inner, 64) {
+            rep.approx = Some(b.to_f64());
+        }
+    }
+    rep.latex = shaped.latex;
+    rep.input_latex = shaped.input_latex;
+    rep.engine = shaped.engine;
+    rep.rules.push("命令で形を変え、読み直して中身と同じ値か確かめた");
+    rep.outcome = Outcome::Found(shaped.value);
+    Some(rep)
 }
 
 /// 時間切れ（仕事の量が予算を超えた）。同じ入力なら同じ所で止まる（計画の 2.5）

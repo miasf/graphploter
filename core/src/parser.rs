@@ -355,6 +355,8 @@ pub fn op_kind(name: &str) -> Option<OpKind> {
         "det" | "tr" | "inv" | "transpose" | "norm" | "dot" | "cross" | "angle" | "ker" | "im" | "dim" | "rank" | "eig" => OpKind::Func,
         // テイラー多項式 @taylor(f, x, a, n)
         "taylor" => OpKind::Func,
+        // 形を指定する命令 @factor(式)・@expand・@apart（文書 8 の SC2。今の道では中身そのもの）
+        "factor" | "expand" | "apart" => OpKind::Func,
         // 停留点 @crit f（1 行にそれだけ。equation.rs が行ごと読む）
         "crit" | "cobweb" | "orbit" | "orbitpoints" | "recurrence" | "bifurcation" => OpKind::Func,
         // 点での値 @at(式, x, a, y, b, …)

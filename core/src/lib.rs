@@ -690,10 +690,15 @@ pub struct ExactResult {
     reason: String,
     decimal: bool,
     work: f64,
+    equation: bool,
 }
 
 #[wasm_bindgen]
 impl ExactResult {
+    /// 方程式の行の解（`latex` は `x = …` の形）
+    pub fn equation(&self) -> bool {
+        self.equation
+    }
     /// 0: 見つからない、1: 見つかった、2: 推定、3: 存在しない、4: 照らし合わせで捨てた
     pub fn status(&self) -> u8 {
         self.status
@@ -760,6 +765,7 @@ pub fn exact_eval(source: &str, defs: &str, names: &str, values: &[f64], budget:
         reason,
         decimal: r.decimal,
         work: r.work as f64,
+        equation: r.equation,
     }
 }
 

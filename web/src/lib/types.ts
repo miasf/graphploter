@@ -374,12 +374,14 @@ export interface ExactReply {
   digits: string
   reason: string
   work: number
+  /** 方程式の行の解（latex は「x = …」の形） */
+  equation?: boolean
 }
 
 /** 行の右下に出す厳密値の状態 */
 export type ExactState =
   | { kind: 'computing' }
-  | { kind: 'found'; latex: string; inputLatex: string; engine: string; approx: [number, number]; digits: string; addable: boolean }
+  | { kind: 'found'; latex: string; inputLatex: string; engine: string; approx: [number, number]; digits: string; addable: boolean; equation?: boolean }
   | { kind: 'guess'; latex: string; inputLatex: string; engine: string; approx: [number, number] }
   | { kind: 'notFound'; reason: string }
   | { kind: 'notExist'; reason: string }

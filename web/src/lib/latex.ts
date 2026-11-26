@@ -891,6 +891,11 @@ class Converter {
           this.out += ' @taylor '
           return
         }
+        // 形を指定する命令（文書 8 の SC2）: factor(…)・expand(…)・apart(…)。グラフは中身そのもの、厳密値の道が形を変えて出す
+        if (name === 'operatorname' && ['factor', 'expand', 'apart'].includes(s)) {
+          this.out += ` @${s} `
+          return
+        }
         // 停留点（∇f = 0 の点）を求めて分類する crit f
         if (s === 'crit' || s === 'Crit') {
           this.out += ' @crit '

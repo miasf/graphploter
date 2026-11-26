@@ -518,6 +518,234 @@ for area, inp, v, ans, latex in [
     add(area, inp, v, S(ans), latex=latex)
 
 
+# 方程式（文書 8 の SC1）。期待する答えの LaTeX は手で書き、解の値を SymPy で確かめる。
+# 近似値の列は、有限個の解の値を空白で並べたもの（連立方程式は点の座標を順に）。一般解・解なし・恒等式は「-」
+y_, z_ = symbols("y z")
+
+
+from sympy import im as sp_im
+
+
+def numeric_roots(e, u):
+    """[−30, 30] で e の符号が変わる所を 30 桁で（極は除く）"""
+    import mpmath
+    mpmath.mp.dps = 40
+    f = lambda t: complex(N(e.subs(u, t), 40))
+    pts = [Rational(-30) + Rational(60, 3001) * k + Rational(1, 7919) for k in range(3002)]
+    vals = []
+    for t in pts:
+        try:
+            v = f(t)
+            vals.append(v.real if abs(v.imag) < 1e-30 else None)
+        except Exception:
+            vals.append(None)
+    out = []
+    for a, b, fa, fb in zip(pts, pts[1:], vals, vals[1:]):
+        if fa is None or fb is None or (fa > 0) == (fb > 0):
+            continue
+        lo, hi = a, b
+        for _ in range(110):
+            m = (lo + hi) / 2
+            fm = f(m).real
+            if (fm > 0) == (fa > 0):
+                lo = m
+            else:
+                hi = m
+        r = N((lo + hi) / 2, 30)
+        if abs(f(r)) < 1e-20:
+            out.append(r)
+    return out
+
+
+def eq_check(inp, eqs, unknowns, want, latex, families=None, mark="目標"):
+    """want: 実数の解の並び（1 変数は値、連立は組）。families: 一般解 [(底, 周期)]。want が "all" なら恒等式"""
+    from sympy import solveset, Interval, Reals, FiniteSet, Eq, nsolve
+    if len(unknowns) == 1:
+        u = unknowns[0]
+        e = eqs[0]
+        if want == "all":
+            assert solveset(e, u, Reals) == Reals, inp
+            CASES.append(("方程式", inp, latex, "-", "自作", mark))
+            return
+        if families:
+            # 族の n = −2..2 が解で、[−10, 10] の解が全部どれかの族に入る
+            for b, per in families:
+                for nn in range(-2, 3):
+                    assert abs(N(e.subs(u, b + nn * per), 30)) < 1e-25, (inp, b, nn)
+            sols = solveset(e, u, Interval(-10, 10))
+            assert sols == S.EmptySet or isinstance(sols, FiniteSet), (inp, sols)
+            sols = [] if sols == S.EmptySet else list(sols)
+            for r in sols:
+                rv = N(r, 30)
+                ok = any(abs(N((rv - b) / per, 30) - round(N((rv - b) / per, 30))) < 1e-20 for b, per in families)
+                assert ok, (inp, r)
+            CASES.append(("方程式", inp, latex, "-", "自作", mark))
+            return
+        sols = solveset(e, u, Reals)
+        if not (sols == S.EmptySet or isinstance(sols, FiniteSet)):
+            # 形が複雑な集合（3 次の根など）: 多項式なら実根を、それ以外は [−30, 30] で符号の変わる所を数値で
+            from sympy import together, Poly
+            numer, den = together(e).as_numer_denom()
+            try:
+                sols = FiniteSet(*[r for r in Poly(numer, u).real_roots() if N(den.subs(u, r)) != 0])
+            except Exception:
+                sols = FiniteSet(*numeric_roots(e, u))
+        assert sols == S.EmptySet or isinstance(sols, FiniteSet), (inp, sols)
+        sols = [] if sols == S.EmptySet else list(sols)
+        # SymPy は対数をまとめて定義域の外の解（ln x + ln(x − 1) の −2）を出すことがあるので、元の式で確かめる
+        def holds(r):
+            v = N(e.subs(u, r), 30)
+            return v.is_real is not False and abs(v) < 1e-25 and abs(N(sp_im(v), 30)) < 1e-25
+        sols = [r for r in sols if holds(r)]
+        for w in want:
+            assert abs(N(e.subs(u, w), 30)) < 1e-25, (inp, w)
+        got = sorted(N(r, 30) for r in sols)
+        exp_ = sorted(N(w, 30) for w in want)
+        assert len(got) == len(exp_) and all(abs(a - b) < 1e-25 for a, b in zip(got, exp_)), (inp, got, exp_)
+        approx = " ".join(repr(float(v)) for v in exp_) if exp_ else "-"
+        CASES.append(("方程式", inp, latex, approx, "自作", mark))
+        return
+    from sympy import solve as ssolve
+    sols = ssolve(eqs, unknowns, dict=True)
+    real = sorted(tuple(N(sol[v], 30) for v in unknowns) for sol in sols if all(N(sol[v]).is_real for v in unknowns))
+    exp_ = sorted(tuple(N(c, 30) for c in w) for w in want)
+    assert len(real) == len(exp_) and all(all(abs(a - b) < 1e-25 for a, b in zip(p, q)) for p, q in zip(real, exp_)), (inp, real, exp_)
+    approx = " ".join(repr(float(c)) for w in exp_ for c in w) if exp_ else "-"
+    CASES.append(("方程式", inp, latex, approx, "自作", mark))
+
+
+X = [x]
+XY = [x, y_]
+for inp, e, want, latex in [
+    ("2x + 3 = 7", 2 * x + 3 - 7, [2], "x=2"),
+    ("x^2 = 2", x**2 - 2, [-sqrt(2), sqrt(2)], r"x=\pm\sqrt{2}"),
+    ("x^2 - 5x + 6 = 0", x**2 - 5 * x + 6, [2, 3], r"x=2,\ 3"),
+    ("x^2 + x - 1 = 0", x**2 + x - 1, [(-1 - sqrt(5)) / 2, (-1 + sqrt(5)) / 2], r"x=\frac{-1\pm\sqrt{5}}{2}"),
+    ("x^2 - 2x - 1 = 0", x**2 - 2 * x - 1, [1 - sqrt(2), 1 + sqrt(2)], r"x=1\pm\sqrt{2}"),
+    ("x^2 + 1 = 0", x**2 + 1, [], r"\text{実数の解はありません}"),
+    ("x^2 - 4x + 4 = 0", x**2 - 4 * x + 4, [2], "x=2"),
+    ("3x^2 - 2x - 1 = 0", 3 * x**2 - 2 * x - 1, [Rational(-1, 3), 1], r"x=-\frac{1}{3},\ 1"),
+    ("x^3 - 6x^2 + 11x - 6 = 0", x**3 - 6 * x**2 + 11 * x - 6, [1, 2, 3], r"x=1,\ 2,\ 3"),
+    ("x^3 = 8", x**3 - 8, [2], "x=2"),
+    ("x^3 - 2 = 0", x**3 - 2, [cbrt(2)], r"x=\sqrt[3]{2}"),
+    ("x^3 - 3x + 1 = 0", x**3 - 3 * x + 1, [-2 * cos(pi / 9), 2 * cos(4 * pi / 9), 2 * cos(2 * pi / 9)],
+     r"x=-2\cos\left(\frac{\pi}{9}\right),\ 2\cos\left(\frac{4\pi}{9}\right),\ 2\cos\left(\frac{2\pi}{9}\right)"),
+    ("x^3 + x + 1 = 0", x**3 + x + 1, [cbrt((sqrt(93) - 9) / 18) - cbrt((9 + sqrt(93)) / 18)],
+     r"x=\sqrt[3]{\frac{\sqrt{93}-9}{18}}-\sqrt[3]{\frac{9+\sqrt{93}}{18}}"),
+    ("x^3 - x = 0", x**3 - x, [-1, 0, 1], r"x=0,\ \pm1"),
+    ("x^4 - 10x^2 + 1 = 0", x**4 - 10 * x**2 + 1, [-sqrt(2) - sqrt(3), sqrt(2) - sqrt(3), sqrt(3) - sqrt(2), sqrt(2) + sqrt(3)],
+     r"x=\pm\left(\sqrt{3}-\sqrt{2}\right),\ \pm\left(\sqrt{2}+\sqrt{3}\right)"),
+    ("x^4 - 5x^2 + 4 = 0", x**4 - 5 * x**2 + 4, [-2, -1, 1, 2], r"x=\pm1,\ \pm2"),
+    ("x^4 = 16", x**4 - 16, [-2, 2], r"x=\pm2"),
+    ("x^4 + x + 1 = 0", x**4 + x + 1, [], r"\text{実数の解はありません}"),
+    ("x^4 - 4x^2 + 2 = 0", x**4 - 4 * x**2 + 2, [-sqrt(2 + sqrt(2)), -sqrt(2 - sqrt(2)), sqrt(2 - sqrt(2)), sqrt(2 + sqrt(2))],
+     r"x=\pm\sqrt{2-\sqrt{2}},\ \pm\sqrt{2+\sqrt{2}}"),
+    ("x^4 - 2x^2 - 3 = 0", x**4 - 2 * x**2 - 3, [-sqrt(3), sqrt(3)], r"x=\pm\sqrt{3}"),
+    ("x^4 + 4x - 1 = 0", x**4 + 4 * x - 1, [-(sqrt(2) + sqrt(4 * sqrt(2) - 2)) / 2, (sqrt(4 * sqrt(2) - 2) - sqrt(2)) / 2],
+     r"x=-\frac{\sqrt{2}+\sqrt{4\sqrt{2}-2}}{2},\ \frac{\sqrt{4\sqrt{2}-2}-\sqrt{2}}{2}"),
+    ("(x - 1)(x + 2)(2x - 3) = 0", (x - 1) * (x + 2) * (2 * x - 3), [-2, 1, Rational(3, 2)], r"x=-2,\ 1,\ \frac{3}{2}"),
+    ("1/x + 1/(x - 1) = 2", 1 / x + 1 / (x - 1) - 2, [(2 - sqrt(2)) / 2, (2 + sqrt(2)) / 2], r"x=\frac{2\pm\sqrt{2}}{2}"),
+    ("(x^2 - 1)/(x - 1) = 0", (x**2 - 1) / (x - 1), [-1], "x=-1"),
+    ("x/(x - 2) = 2/(x - 2)", x / (x - 2) - 2 / (x - 2), [], r"\text{実数の解はありません}"),
+    ("(x^2 - 4)/(x + 2) = 1", (x**2 - 4) / (x + 2) - 1, [3], "x=3"),
+    ("sqrt(x + 2) = x", sqrt(x + 2) - x, [2], "x=2"),
+    ("sqrt(2x + 3) = x", sqrt(2 * x + 3) - x, [3], "x=3"),
+    ("sqrt(x) + sqrt(x - 5) = 5", sqrt(x) + sqrt(x - 5) - 5, [9], "x=9"),
+    ("sqrt(x + 3) - sqrt(x) = 1", sqrt(x + 3) - sqrt(x) - 1, [1], "x=1"),
+    ("sqrt(x - 1) = -2", sqrt(x - 1) + 2, [], r"\text{実数の解はありません}"),
+    ("x^(1/3) = 2", cbrt(x) - 2, [8], "x=8"),
+    ("abs(x - 1) = 2", Abs(x - 1) - 2, [-1, 3], r"x=-1,\ 3"),
+    ("abs(2x + 1) = x + 4", Abs(2 * x + 1) - x - 4, [Rational(-5, 3), 3], r"x=-\frac{5}{3},\ 3"),
+    ("2^x = 8", 2**x - 8, [3], "x=3"),
+    ("2^x = 5", 2**x - 5, [log(5) / log(2)], r"x=\frac{\ln 5}{\ln 2}"),
+    ("e^x = 3", exp(x) - 3, [log(3)], r"x=\ln 3"),
+    ("e^(2x) - 3e^x + 2 = 0", exp(2 * x) - 3 * exp(x) + 2, [0, log(2)], r"x=0,\ \ln 2"),
+    ("4^x - 3·2^x + 2 = 0", 4**x - 3 * 2**x + 2, [0, 1], r"x=0,\ 1"),
+    ("9^x - 4·3^x + 3 = 0", 9**x - 4 * 3**x + 3, [0, 1], r"x=0,\ 1"),
+    ("3^(2x - 1) = 27", 3 ** (2 * x - 1) - 27, [2], "x=2"),
+    ("2^(x^2) = 16", 2 ** (x**2) - 16, [-2, 2], r"x=\pm2"),
+    ("2^x = 3^(x - 1)", 2**x - 3 ** (x - 1), [log(3) / (log(3) - log(2))], r"x=\frac{\ln 3}{\ln 3-\ln 2}"),
+    ("ln(x) = 2", log(x) - 2, [exp(2)], "x=e^{2}"),
+    ("log(x) = 3", log(x, 10) - 3, [1000], "x=1000"),
+    ("ln(x) + ln(x - 1) = ln(6)", log(x) + log(x - 1) - log(6), [3], "x=3"),
+    ("log(x) + log(x - 3) = 1", log(x, 10) + log(x - 3, 10) - 1, [5], "x=5"),
+    ("2ln(x) = ln(4)", 2 * log(x) - log(4), [2], "x=2"),
+    ("ln(x^2) = 0", log(x**2), [-1, 1], r"x=\pm1"),
+    ("@logbase(2) x = 5", log(x, 2) - 5, [32], "x=32"),
+    ("x + 1 = x", Integer(1), [], r"\text{実数の解はありません}"),
+]:
+    eq_check(inp, [e], X, want, latex)
+eq_check("x^2 = x^2", [x**2 - x**2], X, "all", r"x\in\mathbb{R}")
+
+P2 = 2 * pi
+for inp, e, fams, latex in [
+    ("sin(x) = 1/2", sin(x) - Rational(1, 2), [(pi / 6, P2), (5 * pi / 6, P2)], r"x=\frac{\pi}{6}+2\pi n,\ \frac{5\pi}{6}+2\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("cos(x) = -1/2", cos(x) + Rational(1, 2), [(2 * pi / 3, P2), (4 * pi / 3, P2)], r"x=\frac{2\pi}{3}+2\pi n,\ \frac{4\pi}{3}+2\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("tan(x) = 1", tan(x) - 1, [(pi / 4, pi)], r"x=\frac{\pi}{4}+\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("tan(x) = sqrt(3)", tan(x) - sqrt(3), [(pi / 3, pi)], r"x=\frac{\pi}{3}+\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("sin(x) = 0", sin(x), [(0, pi)], r"x=\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("cos(2x) = 1/2", cos(2 * x) - Rational(1, 2), [(pi / 6, pi), (5 * pi / 6, pi)], r"x=\frac{\pi}{6}+\pi n,\ \frac{5\pi}{6}+\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("2cos(x)^2 - cos(x) - 1 = 0", 2 * cos(x) ** 2 - cos(x) - 1, [(0, 2 * pi / 3)], r"x=\frac{2\pi n}{3}\quad\left(n\in\mathbb{Z}\right)"),
+    ("2sin(x)^2 + 3sin(x) + 1 = 0", 2 * sin(x) ** 2 + 3 * sin(x) + 1, [(7 * pi / 6, P2), (3 * pi / 2, P2), (11 * pi / 6, P2)],
+     r"x=\frac{7\pi}{6}+2\pi n,\ \frac{3\pi}{2}+2\pi n,\ \frac{11\pi}{6}+2\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("cos(x)^2 + sin(x) = 1", cos(x) ** 2 + sin(x) - 1, [(0, pi), (pi / 2, P2)], r"x=\pi n,\ \frac{\pi}{2}+2\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("sin(x - π/3) = 1", sin(x - pi / 3) - 1, [(5 * pi / 6, P2)], r"x=\frac{5\pi}{6}+2\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("x sin(x) = 0", x * sin(x), [(0, pi)], r"x=\pi n\quad\left(n\in\mathbb{Z}\right)"),
+    ("sin(x) = cos(x)", sin(x) - cos(x), [(pi / 4, pi)], r"x=\frac{\pi}{4}+\pi n\quad\left(n\in\mathbb{Z}\right)"),
+]:
+    eq_check(inp, [e], X, None, latex, families=fams)
+eq_check("sin(x) = 2", [sin(x) - 2], X, [], r"\text{実数の解はありません}")
+
+for inp, eqs, want, latex in [
+    ("x^2 + y^2 = 1, y = x", [x**2 + y_**2 - 1, y_ - x], [(-sqrt(2) / 2, -sqrt(2) / 2), (sqrt(2) / 2, sqrt(2) / 2)],
+     r"\left(x,y\right)=\left(-\frac{\sqrt{2}}{2},-\frac{\sqrt{2}}{2}\right),\ \left(\frac{\sqrt{2}}{2},\frac{\sqrt{2}}{2}\right)"),
+    ("x + y = 3, x y = 2", [x + y_ - 3, x * y_ - 2], [(1, 2), (2, 1)], r"\left(x,y\right)=\left(1,2\right),\ \left(2,1\right)"),
+    ("x^2 + y^2 = 5, x - y = 1", [x**2 + y_**2 - 5, x - y_ - 1], [(-1, -2), (2, 1)], r"\left(x,y\right)=\left(-1,-2\right),\ \left(2,1\right)"),
+    ("x^2 + y^2 = 4, x^2 - y = 2", [x**2 + y_**2 - 4, x**2 - y_ - 2], [(-sqrt(3), 1), (0, -2), (sqrt(3), 1)],
+     r"\left(x,y\right)=\left(-\sqrt{3},1\right),\ \left(0,-2\right),\ \left(\sqrt{3},1\right)"),
+    ("y = x^2, y = 2x + 3", [y_ - x**2, y_ - 2 * x - 3], [(-1, 1), (3, 9)], r"\left(x,y\right)=\left(-1,1\right),\ \left(3,9\right)"),
+]:
+    eq_check(inp, eqs, XY, want, latex)
+eq_check("x + y + z = 6, x - y = 1, z = 2", [x + y_ + z_ - 6, x - y_ - 1, z_ - 2], [x, y_, z_], [(Rational(5, 2), Rational(3, 2), 2)],
+         r"\left(x,y,z\right)=\left(\frac{5}{2},\frac{3}{2},2\right)")
+
+
+# 命令（文書 8 の SC2）。答えの LaTeX は手で書き、値が中身と同じことを SymPy で確かめる（文字の式は 3 点で）
+def cmd_check(inp, inner, shaped, latex, mark="目標"):
+    from sympy import expand as sp_expand
+    for pt in [Rational(3, 7), Rational(-5, 3), Rational(11, 4)]:
+        a, b = N(inner.subs(x, pt), 30), N(shaped.subs(x, pt), 30)
+        assert abs(a - b) < 1e-25 * max(1, abs(a)), (inp, pt, a, b)
+    CASES.append(("命令", inp, latex, "-" if inner.free_symbols else num_text(inner), "自作", mark))
+
+
+for inp, inner, shaped, latex in [
+    ("@factor(x^4 - 1)", x**4 - 1, (x - 1) * (x + 1) * (x**2 + 1), r"\left(x-1\right)\left(x+1\right)\left(x^{2}+1\right)"),
+    ("@factor(x^2 - 5x + 6)", x**2 - 5 * x + 6, (x - 3) * (x - 2), r"\left(x-3\right)\left(x-2\right)"),
+    ("@factor(2x^2 - 8)", 2 * x**2 - 8, 2 * (x - 2) * (x + 2), r"2\left(x-2\right)\left(x+2\right)"),
+    ("@factor(x^3 - 1)", x**3 - 1, (x - 1) * (x**2 + x + 1), r"\left(x-1\right)\left(x^{2}+x+1\right)"),
+    ("@factor(x^4 + 4)", x**4 + 4, (x**2 - 2 * x + 2) * (x**2 + 2 * x + 2), r"\left(x^{2}-2x+2\right)\left(x^{2}+2x+2\right)"),
+    ("@factor(x^2 - 2x + 1)", x**2 - 2 * x + 1, (x - 1) ** 2, r"\left(x-1\right)^{2}"),
+    ("@factor(x^3 + x)", x**3 + x, x * (x**2 + 1), r"x\left(x^{2}+1\right)"),
+    ("@factor(x^2 + 1)", x**2 + 1, x**2 + 1, r"x^{2}+1"),
+    ("@factor((x^2 - 1)/(x^2 + 2x + 1))", (x**2 - 1) / (x**2 + 2 * x + 1), (x - 1) / (x + 1), r"\frac{x-1}{x+1}"),
+    ("@factor(2^32 + 1)", Integer(2**32 + 1), Integer(641 * 6700417), r"641\cdot 6700417"),
+    ("@factor(360)", Integer(360), Integer(360), r"2^{3}\cdot 3^{2}\cdot 5"),
+    ("@factor(1001/12)", Rational(1001, 12), Rational(1001, 12), r"\frac{7\cdot 11\cdot 13}{2^{2}\cdot 3}"),
+    ("@expand((x + 1)^3)", (x + 1) ** 3, x**3 + 3 * x**2 + 3 * x + 1, r"x^{3}+3x^{2}+3x+1"),
+    ("@expand((x - 2)(x + 3))", (x - 2) * (x + 3), x**2 + x - 6, r"x^{2}+x-6"),
+    ("@expand((2x - 1)^2)", (2 * x - 1) ** 2, 4 * x**2 - 4 * x + 1, r"4x^{2}-4x+1"),
+    ("@expand((x^2 + x + 1)(x - 1))", (x**2 + x + 1) * (x - 1), x**3 - 1, r"x^{3}-1"),
+    ("@apart(x/(x^2 - 3x + 2))", x / (x**2 - 3 * x + 2), 2 / (x - 2) - 1 / (x - 1), r"\frac{2}{x-2}-\frac{1}{x-1}"),
+    ("@apart(1/(x^2 - 1))", 1 / (x**2 - 1), 1 / (2 * (x - 1)) - 1 / (2 * (x + 1)), r"\frac{1}{2\left(x-1\right)}-\frac{1}{2\left(x+1\right)}"),
+    ("@apart((x^2 + 1)/(x(x - 1)))", (x**2 + 1) / (x * (x - 1)), 1 + 2 / (x - 1) - 1 / x, r"1+\frac{2}{x-1}-\frac{1}{x}"),
+    ("@apart(1/(x(x^2 + 1)))", 1 / (x * (x**2 + 1)), 1 / x - x / (x**2 + 1), r"\frac{1}{x}-\frac{x}{x^{2}+1}"),
+    ("@apart(1/((x - 1)^2 (x + 1)))", 1 / ((x - 1) ** 2 * (x + 1)), Rational(1, 2) / (x - 1) ** 2 - Rational(1, 4) / (x - 1) + Rational(1, 4) / (x + 1),
+     r"\frac{1}{4\left(x+1\right)}+\frac{1}{2\left(x-1\right)^{2}}-\frac{1}{4\left(x-1\right)}"),
+]:
+    cmd_check(inp, inner, shaped, latex)
+
+
 REQUIRED_FILE = Path(__file__).with_name("required.txt")
 
 
@@ -533,7 +761,7 @@ def write():
     for row in rows:
         by_area.setdefault(row[0], []).append(row)
     names = {"学校": "school", "複素": "complex", "離散": "discrete", "線形": "linear", "微分": "derivative",
-             "極限": "limits", "級数": "series", "積分": "integrals", "不定積分": "antiderivatives"}
+             "極限": "limits", "級数": "series", "積分": "integrals", "不定積分": "antiderivatives", "方程式": "equations", "命令": "commands"}
     files = {}
     for area, rows in by_area.items():
         lines = ["# 入力\t期待する答え（LaTeX）\t近似値\t分野\t出典\t印  （tools/exact/cases.py が作る。手で直さない）"]
