@@ -160,7 +160,7 @@ fn order_does_not_matter() {
 fn not_found_reasons() {
     let params = Params::new();
     let _d = expand::install(expand::Defs::parse("", &params));
-    assert!(matches!(evaluate_term("@int(x,0,1) x^2", &params), Err(Stop::NotFound(_))));
+    assert!(matches!(evaluate_term("@max(x,0,1) x^2", &params), Err(Stop::NotFound(_))));
     assert!(matches!(evaluate_term("a+1", &params), Err(Stop::NotFound(_))));
     assert!(matches!(evaluate_term("1/0", &params), Err(Stop::NotFound(_))));
 }

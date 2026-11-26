@@ -31,6 +31,8 @@ pub struct Converter<'a> {
     pub analytic: bool,
     /// 入力に自然対数 `ln` があった（D5: 書き出しは `\ln`）
     pub uses_ln: bool,
+    /// 行が不定積分だけなら（中身, 変数）。答えは原始関数で、微分して戻ることで確かめ、書き出しで + C を足す
+    pub antiderivative: Option<(Term, String)>,
 }
 
 /// 記法の厳密な計算（文書 8 の各ステップが 1 つずつ足す）
@@ -43,6 +45,7 @@ fn handler(op: &str) -> Option<Handler> {
         "prod" => Some(finite_prod),
         "diff" => Some(derivative),
         "lim" => Some(limit_handler),
+        "int" => Some(integral_handler),
         "seqlim" => Some(seqlimit_handler),
         _ => None,
     }
@@ -50,7 +53,7 @@ fn handler(op: &str) -> Option<Handler> {
 
 impl<'a> Converter<'a> {
     pub fn new(defs: &'a Defs, params: &'a Params) -> Self {
-        Converter { defs, params, frames: Vec::new(), depth: 0, decimal: false, analytic: false, uses_ln: false }
+        Converter { defs, params, frames: Vec::new(), depth: 0, decimal: false, analytic: false, uses_ln: false, antiderivative: None }
     }
 
     fn lookup(&self, name: &str) -> Option<Term> {
@@ -361,6 +364,31 @@ fn finite_sum_or_prod(c: &mut Converter, var: &str, args: &[Expr], body: &Expr, 
         k += Int::ONE;
     }
     Ok(if sum { add(parts) } else { mul(parts) })
+}
+
+/// 積分 `@int(x) 項`（不定積分。IG0）・`@int(x, a, b) 項`（定積分。IG2）
+fn integral_handler(c: &mut Converter, var: &str, args: &[Expr], body: &Expr) -> Result<Term, Stop> {
+    let f = c.with_bound(var, Term::Sym(var.to_string()), |c| c.term(body))?;
+    c.analytic = true;
+    match args {
+        [] => {
+            let g = super::integrate::antiderivative(&f, var)?.ok_or_else(|| Stop::NotFound("原始関数が見つかりません".into()))?;
+            c.antiderivative = Some((f, var.to_string()));
+            Ok(g)
+        }
+        [lo, hi] => {
+            let bound = |c: &mut Converter, e: &Expr| -> Result<super::limit::Point, Stop> {
+                Ok(match e {
+                    Expr::Num(v) if v.is_infinite() => if *v > 0.0 { super::limit::Point::PlusInf } else { super::limit::Point::MinusInf },
+                    Expr::Neg(a) if matches!(&**a, Expr::Num(v) if v.is_infinite()) => super::limit::Point::MinusInf,
+                    other => super::limit::Point::Finite(c.term(other)?),
+                })
+            };
+            let (a, b) = (bound(c, lo)?, bound(c, hi)?);
+            super::definite::definite(&f, var, &a, &b)
+        }
+        _ => Err(Stop::NotFound("積分の書き方はまだ厳密に計算できません".into())),
+    }
 }
 
 /// 極限 `@lim(x, a) 項`・`@lim(x, a, ±1) 項`（片側）（文書 8 の LM1）

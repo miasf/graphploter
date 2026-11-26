@@ -12,8 +12,10 @@ pub mod ball;
 pub mod check;
 pub mod consts;
 pub mod convert;
+pub mod definite;
 pub mod diff;
 pub mod infinite_sum;
+pub mod integrate;
 pub mod latex;
 pub mod limit;
 pub mod matrix;
@@ -78,6 +80,8 @@ pub struct Converted {
     pub decimal: bool,
     pub analytic: bool,
     pub uses_ln: bool,
+    /// 行が不定積分だけなら（中身, 変数）
+    pub antiderivative: Option<(Term, String)>,
 }
 
 /// 式の文字列を、厳密値の道の式にする（照らし合わせ・書き出しの前の段階）。定義は今入っているもの（`expand::install`）
@@ -99,7 +103,7 @@ pub fn convert_source_with(source: &str, params: &Params, work: u64) -> (Result<
         if exhausted() {
             return Err(Stop::TimeUp);
         }
-        Ok(Converted { term: t, decimal: c.decimal, analytic: c.analytic, uses_ln: c.uses_ln })
+        Ok(Converted { term: t, decimal: c.decimal, analytic: c.analytic, uses_ln: c.uses_ln, antiderivative: c.antiderivative.take() })
     })
 }
 
@@ -174,6 +178,23 @@ pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
         Term::Tuple(v) | Term::List(v) | Term::Matrix(_, _, v) if v.iter().all(Term::is_number) => Some(v.clone()),
         _ => None,
     };
+    // 不定積分: 微分して中身に戻ることを、いくつかの点の値で確かめる（計画の 2.4 の 5）
+    if let Some((f, x)) = &c.antiderivative {
+        match check::antiderivative(&t, f, x) {
+            check::Check::Agree => {
+                let st = latex::Style { decimal: c.decimal, input: false };
+                rep.latex = format!("{}+C", latex::to_latex(&t, &st));
+                rep.input_latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal, input: true });
+                rep.engine = latex::to_engine(&t);
+                rep.rules.push("不定積分: 微分して戻ることを確かめた");
+                rep.outcome = Outcome::Found(t);
+            }
+            other => {
+                rep.outcome = Outcome::Rejected(format!("原始関数を微分しても中身に戻りません（{other:?}）"));
+            }
+        }
+        return rep;
+    }
     if items.is_none() && !t.is_number() {
         rep.outcome = Outcome::NotFound("座標を含む式の厳密値はまだ出しません".into());
         return rep;

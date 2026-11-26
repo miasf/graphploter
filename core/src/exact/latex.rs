@@ -334,6 +334,25 @@ fn generic(t: &Term, style: &Style) -> String {
         Term::Atom(_) => atom(t, style).0,
         Term::Sym(s) => s.clone(),
         Term::Add(v) => {
+            // 全部の項に共通の指数関数 e^u があれば、くくり出す: (x² − 2x + 2)e^x
+            if let Some(common) = common_exp(v) {
+                let inv = super::term::pow(common.clone(), Term::int(-1));
+                let rest = super::term::add(v.iter().map(|t| super::term::mul(vec![t.clone(), inv.clone()])).collect());
+                if !matches!(rest, Term::Add(_)) || !common_exp(match &rest { Term::Add(r) => r, _ => unreachable!() }).is_some() {
+                    return generic(&Term::Mul(vec![rest, common]), style);
+                }
+            }
+            // 項の分母（係数の分母）が全部同じ 2 以上なら、1 本の分数線にまとめる: (x√(1 − x²) + arcsin x)/2
+            if v.len() >= 2 && !t.is_number() {
+                let dens: Vec<Int> = v.iter().map(|x| Int::from(split_coeff(x).0.denominator().clone())).collect();
+                if dens[0] > Int::ONE && dens.iter().all(|d| *d == dens[0]) {
+                    let d = Rat::from(dens[0].clone());
+                    let scaled = super::term::add(v.iter().map(|x| super::term::mul(vec![Term::Num(d.clone()), x.clone()])).collect());
+                    let neg_all = v.iter().all(|x| num::sign(&split_coeff(x).0) < 0);
+                    let body = if neg_all { generic(&super::term::neg(scaled), style) } else { generic(&scaled, style) };
+                    return format!("{}\\frac{{{body}}}{{{}}}", if neg_all { "-" } else { "" }, dens[0]);
+                }
+            }
             let mut parts: Vec<String> = v.iter().map(|x| to_latex(x, style)).collect();
             if parts.first().is_some_and(|p| p.starts_with('-')) {
                 if let Some(pos) = parts.iter().position(|p| !p.starts_with('-')) {
@@ -375,6 +394,19 @@ fn generic(t: &Term, style: &Style) -> String {
     }
 }
 
+/// 和の全部の項に共通の e^u（u は文字を含む）
+fn common_exp(v: &[Term]) -> Option<Term> {
+    let exps = |t: &Term| -> Vec<Term> {
+        let fs: Vec<Term> = match t {
+            Term::Mul(f) => f.clone(),
+            other => vec![other.clone()],
+        };
+        fs.into_iter().filter(|f| matches!(f, Term::Pow(b, e) if **b == Term::Atom(Atom::E) && !e.is_number())).collect()
+    };
+    let first = exps(v.first()?);
+    first.into_iter().find(|c| v.iter().all(|t| exps(t).contains(c)))
+}
+
 fn factors(t: &Term, style: &Style) -> String {
     if t.is_one() {
         return String::new();
@@ -383,6 +415,10 @@ fn factors(t: &Term, style: &Style) -> String {
         Term::Mul(v) => v.clone(),
         other => vec![other.clone()],
     };
+    // 掛ける順: 多項式の和（括弧）→ ほかの因子 → 多項式でない和（e^x(\sin x − \cos x)）
+    let is_poly_sum = |f: &Term| matches!(f, Term::Add(_)) && !has_fn(f);
+    let mut fs: Vec<Term> = fs.iter().filter(|f| is_poly_sum(f)).cloned().chain(fs.iter().filter(|f| !matches!(f, Term::Add(_))).cloned()).chain(fs.iter().filter(|f| matches!(f, Term::Add(_)) && !is_poly_sum(f)).cloned()).collect();
+    let _ = &mut fs;
     let mut s = String::new();
     for f in fs {
         let p = match &f {
@@ -407,6 +443,12 @@ fn call_latex(f: Func, args: &[Term], power: Option<&Term>, style: &Style) -> St
     };
     if f == Func::Abs && args.len() == 1 && power.is_none() {
         return format!("\\left|{}\\right|", to_latex(&args[0], style));
+    }
+    // ln|u| は括弧を重ねない
+    if let [Term::Fn(Func::Abs, inner)] = args {
+        if inner.len() == 1 && matches!(f, Func::Ln | Func::Log10) {
+            return format!("{name}\\left|{}\\right|", to_latex(&inner[0], style));
+        }
     }
     if let [a] = args {
         let short = match a {
@@ -482,5 +524,15 @@ pub fn to_engine(t: &Term) -> String {
             let rows: Vec<String> = (0..*r).map(|i| (0..*c).map(|j| to_engine(&v[i * c + j])).collect::<Vec<_>>().join(",")).collect();
             format!("⟦{}⟧", rows.join(";"))
         }
+    }
+}
+
+/// 関数（sin・ln など）や e^u を含むか
+fn has_fn(t: &Term) -> bool {
+    match t {
+        Term::Fn(..) => true,
+        Term::Pow(b, e) => **b == Term::Atom(Atom::E) || has_fn(b) || has_fn(e),
+        Term::Add(v) | Term::Mul(v) => v.iter().any(has_fn),
+        _ => false,
     }
 }

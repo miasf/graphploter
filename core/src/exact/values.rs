@@ -124,6 +124,20 @@ pub fn real_sign(t: &Term) -> Option<i32> {
 /// 特別な値（無ければ None）
 pub fn special(f: Func, args: &[Term]) -> Option<Term> {
     let one = |v: &[Term]| if v.len() == 1 { Some(v[0].clone()) } else { None };
+    // 偶関数・奇関数: 引数の係数が負なら符号を外に出す（cos(−x) = cos x、sin(−x) = −sin x）
+    if let [a] = args {
+        let (c, _) = super::term::split_coeff(a);
+        if num::sign(&c) < 0 && !a.is_number() {
+            let m = neg(a.clone());
+            match f {
+                Func::Sin | Func::Tan | Func::Cot | Func::Csc | Func::Asin | Func::Atan | Func::Sinh | Func::Tanh | Func::Asinh => {
+                    return Some(neg(super::term::call(f, vec![m])));
+                }
+                Func::Cos | Func::Sec | Func::Cosh => return Some(super::term::call(f, vec![m])),
+                _ => {}
+            }
+        }
+    }
     match f {
         Func::Sin | Func::Cos | Func::Tan | Func::Sec | Func::Csc | Func::Cot => {
             let r = as_pi_multiple(&one(args)?)?;

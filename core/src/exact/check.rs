@@ -88,3 +88,39 @@ pub fn against_f64(t: &Term, source: &str, params: &Params) -> Check {
         Check::Disagree { exact: a, other: b }
     }
 }
+
+/// 原始関数 g を微分した式と、中身 f の差が、いくつかの点で 0 か（値が計算できる点が 3 つ以上要る）
+pub fn antiderivative(g: &Term, f: &Term, x: &str) -> Check {
+    let d = match super::diff::diff(g, x) {
+        Ok(d) => super::term::add(vec![d, super::term::neg(f.clone())]),
+        Err(e) => return Check::NoValue(format!("{e:?}")),
+    };
+    let mut ok = 0;
+    for (n, dd) in [(3i64, 7u64), (5, 8), (4, 5), (7, 5), (11, 5), (13, 4), (-2, 3), (-9, 4)] {
+        let v = Term::rat(n, dd);
+        let Ok(t) = super::diff::subst_checked(&d, x, &v) else { continue };
+        if !t.is_number() {
+            return Check::NoValue("文字が残ります".into());
+        }
+        let Ok(b) = ball::value(&t, 128) else { continue };
+        // 実数の点で中身が複素数になる所（定義域の外）は数えない
+        let fv = super::diff::subst(f, x, &v);
+        if let Ok(fb) = ball::value(&fv, 64) {
+            if !fb.is_real() {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if !b.contains_zero() {
+            let (re, im) = b.to_f64();
+            return Check::Disagree { exact: (re, im), other: (0.0, 0.0) };
+        }
+        ok += 1;
+    }
+    if ok >= 3 {
+        Check::Agree
+    } else {
+        Check::NoValue("確かめられる点が足りません".into())
+    }
+}

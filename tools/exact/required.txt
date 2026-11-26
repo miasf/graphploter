@@ -1,3 +1,22 @@
+@int(x) x^2
+@int(x) 1/x
+@int(x) e^(2x)
+@int(x) sin(3x)
+@int(x) x^2 e^x
+@int(x) x ln(x)
+@int(x) sin(x)^3
+@int(x) e^x sin(x)
+@int(x) sqrt(1-x^2)
+@int(x) 1/sqrt(x^2+1)
+@int(x) x sqrt(x^2+1)
+@int(x) 1/(x ln(x))
+@int(x) 1/(1+x^2)
+@int(x) x/(x^2-3x+2)
+@int(x) cos(x)^2
+@int(x) tan(x)
+@int(x) x cos(x)
+@int(x) ln(x)
+@int(x) arctan(x)
 (1+i)^2
 (1+i)(1-i)
 1/(1+i)
@@ -75,6 +94,44 @@ gcd(462,1071)
 100!/98!
 @sum(k,1,50) k
 @prod(k,1,5) (2k-1)
+@int(x,0,1) x^2
+@int(x,0,π) sin(x)
+@int(x,1,e) 1/x
+@int(x,0,1) e^x
+@int(x,0,π/2) cos(x)
+@int(x,0,1) 1/(1+x^2)
+@int(x,0,1) x e^x
+@int(x,0,1) sqrt(1-x^2)
+@int(x,0,1) 1/sqrt(1-x^2)
+@int(x,0,π) x sin(x)
+@int(x,0,1) ln(x)
+@int(x,0,∞) e^(-x)
+@int(x,1,∞) 1/x^2
+@int(x,0,∞) 1/(1+x^2)
+@int(x,0,π) sin(x)^2
+@int(x,1,2) ln(x)
+@int(x,0,∞) e^(-x^2)
+@int(x,0,∞) x^3 e^(-x)
+@int(x,-∞,∞) 1/(x^2+1)
+@int(x,0,1) x^2(1-x)^3
+@int(x,0,∞) 1/(1+x^4)
+@int(x,0,∞) e^(-x) ln(x)
+@int(x,0,π/2) sin(x)^4 cos(x)^2
+@int(x,0,1) 1/sqrt(x)
+@int(x,-∞,∞) 1/(x^2+2x+5)
+@int(x,0,2π) 1/(2+cos(x))
+@int(x,0,1) x/(1+x^2)
+@int(x,0,π/4) tan(x)
+@int(x,0,1) x^3
+@int(x,-1,1) x^5 cos(x)
+@int(x,0,2) abs(x-1)
+@int(x,0,∞) sin(x)/x
+@int(x,0,1) arctan(x)/x
+@int(x,-1,1) 1/x
+@int(x,1,∞) 1/x
+@int(x,0,π) cos(x)^2
+@int(x,0,1) 1/(1+x)
+@int(x,0,1) x^2 e^x
 @lim(x,0) sin(x)/x
 @lim(x,0) (1-cos(x))/x^2
 @lim(x,0) (tan(x)-sin(x))/x^3
