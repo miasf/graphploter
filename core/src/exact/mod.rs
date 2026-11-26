@@ -14,6 +14,7 @@ pub mod convert;
 pub mod latex;
 pub mod num;
 pub mod term;
+pub mod values;
 
 use crate::eval::Params;
 use std::cell::Cell;

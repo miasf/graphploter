@@ -162,6 +162,23 @@ pub fn add(terms: Vec<Term>) -> Term {
     for t in terms {
         push(t, &mut constant, &mut map);
     }
+    // 常用対数の和が 10 の整数乗の対数になれば整数にする（log 2 + log 5 = 1。文書 8 の SC0）
+    let logs: Vec<(Term, Rat, Rat)> = map
+        .iter()
+        .filter_map(|(r, c)| match r {
+            Term::Fn(Func::Log10, a) if a.len() == 1 => a[0].as_rat().filter(|q| num::sign(q) > 0).map(|q| (r.clone(), c.clone(), q.clone())),
+            _ => None,
+        })
+        .collect();
+    if logs.len() >= 2 {
+        let items: Vec<(Rat, Rat)> = logs.iter().map(|(_, c, a)| (c.clone(), a.clone())).collect();
+        if let Some(m) = super::values::fold_log10(&items) {
+            for (r, _, _) in &logs {
+                map.remove(r);
+            }
+            constant += m;
+        }
+    }
     spend(map.len() as u64 + 1);
     let mut out: Vec<Term> = map.into_iter().filter(|(_, c)| !c.is_zero()).map(|(r, c)| with_coeff(c, r)).collect();
     if !constant.is_zero() {
@@ -341,46 +358,10 @@ fn minus_one_power(s: &Rat) -> Option<Term> {
     Some(add(vec![c, mul(vec![sn, Term::Atom(Atom::I)])]))
 }
 
-/// $(\cos\frac{p\pi}{q}, \sin\frac{p\pi}{q})$（$q \in \{1, 2, 3, 4, 6\}$）。文書 8 の SC0 で表を広げる
+/// $(\cos\frac{p\pi}{q}, \sin\frac{p\pi}{q})$（表は `values.rs`。分母 1, 2, 3, 4, 5, 6, 8, 10, 12）
 pub(crate) fn trig_pi(p: i64, q: u64) -> Option<(Term, Term)> {
-    if ![1, 2, 3, 4, 6].contains(&q) {
-        return None;
-    }
-    // 12 等分の角の番号（0..24）
-    let k = (p * (12 / q as i64)).rem_euclid(24);
-    let s2 = || pow(Term::int(2), Term::rat(1, 2));
-    let s3 = || pow(Term::int(3), Term::rat(1, 2));
-    let half = |t: Term| mul(vec![Term::rat(1, 2), t]);
-    // 第 1 象限の値 (cos, sin) を k mod 6 で
-    let quad = |j: i64| -> (Term, Term) {
-        match j {
-            0 => (Term::one(), Term::zero()),
-            2 => (half(s3()), Term::rat(1, 2)),
-            3 => (half(s2()), half(s2())),
-            4 => (Term::rat(1, 2), half(s3())),
-            6 => (Term::zero(), Term::one()),
-            _ => unreachable!(),
-        }
-    };
-    if k % 6 == 1 || k % 6 == 5 {
-        return None; // π/12 の奇数倍（SC0）
-    }
-    let (c, s) = match k {
-        0..=6 => quad(k),
-        7..=12 => {
-            let (c, s) = quad(12 - k);
-            (neg(c), s)
-        }
-        13..=18 => {
-            let (c, s) = quad(k - 12);
-            (neg(c), neg(s))
-        }
-        _ => {
-            let (c, s) = quad(24 - k);
-            (c, neg(s))
-        }
-    };
-    Some((c, s))
+    let r = Rat::from_parts(Int::from(p), Nat::from(q));
+    super::values::trig_of_pi_multiple(&r).map(|(c, s, _)| (c, s))
 }
 
 /// 有理数の有理数乗（計画の EX2 の 1）
@@ -653,9 +634,15 @@ fn is_real_number(t: &Term) -> bool {
     match t {
         Term::Num(_) => true,
         Term::Atom(a) => *a != Atom::I,
-        Term::Pow(b, e) => is_positive_number(b) && e.as_rat().is_some(),
+        Term::Pow(b, e) if e.as_rat().is_some() && is_positive_number(b) => true,
+        // 入れ子の根号 √(10 − 2√5): 中身が実数で、値が正と分かれば実数
+        Term::Pow(b, e) => e.as_rat().is_some() && b.is_number() && is_real_number(b) && super::values::real_sign(b) == Some(1),
         Term::Mul(v) | Term::Add(v) => v.iter().all(is_real_number),
         Term::Fn(Func::Ln, a) => a.len() == 1 && is_positive_number(&a[0]),
+        // 実数の引数で実数の値になる関数
+        Term::Fn(Func::Sin | Func::Cos | Func::Tan | Func::Atan | Func::Sinh | Func::Cosh | Func::Tanh | Func::Asinh | Func::Abs | Func::Zeta | Func::Gamma | Func::Digamma, a) => {
+            a.len() == 1 && is_real_number(&a[0])
+        }
         _ => false,
     }
 }
@@ -687,6 +674,9 @@ fn conjugate_inverse(t: &Term) -> Option<Term> {
 /// 関数の呼び出し（自明な値と整数の関数だけ計算する）
 pub fn call(f: Func, args: Vec<Term>) -> Term {
     if let Some(t) = call_rules(f, &args) {
+        return t;
+    }
+    if let Some(t) = super::values::special(f, &args) {
         return t;
     }
     Term::Fn(f, args)

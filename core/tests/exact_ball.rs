@@ -61,8 +61,9 @@ fn constants_to_300_digits() {
 #[test]
 fn zero_test() {
     let mut rules = Vec::new();
-    // sin π は式の形では 0 にならない（特別な値の表は SC0）が、数値で 0 とみなす
-    let s = call(Func::Sin, vec![Term::Atom(Atom::Pi)]);
+    // sin²(π/7) + cos²(π/7) − 1 は式の形では 0 にならない（三角関数の恒等式は EX9）が、数値で 0 とみなす
+    let a = mul(vec![q(1, 7), Term::Atom(Atom::Pi)]);
+    let s = add(vec![pow(call(Func::Sin, vec![a.clone()]), Term::int(2)), pow(call(Func::Cos, vec![a]), Term::int(2)), Term::int(-1)]);
     assert_eq!(ball::is_zero(&s, &mut rules), Some(true));
     assert_eq!(rules, vec!["数値で 0 とみなした"]);
     // e^{π√163} − 262537412640768744 ≈ −7.5 × 10^{−13} は 0 でない
