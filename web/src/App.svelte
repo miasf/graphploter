@@ -2,6 +2,7 @@
   // アプリの画面全体。左に式の一覧、右に3D表示。
   import { onMount, tick } from 'svelte'
   import ExpressionItem from './lib/ExpressionItem.svelte'
+  import { requestExact } from './lib/exactClient'
   import { conditionHolds, paramConditions, hasIntegral, inlineRegions, integralDisplay, riemannDisplay, type ParamCondition, type RiemannMethod, latexToText, regionDisplayLatex, regionsUsed, setRegions } from './lib/latex'
   import { blankMatrix, matrixDefinition, MAX_SIZE as MATRIX_MAX } from './lib/matrixEdit'
   import { evalBounds, evalValue, exprError } from './lib/evalExpr'
@@ -204,6 +205,76 @@
     })()
     return () => viewer?.dispose()
   })
+
+  // ---- 厳密値（計画 docs/plan-exact-core.md の EX5）----
+
+  /** 厳密値を計算するか（標準はオン。端末ごとの好みなので、このブラウザにだけ覚える） */
+  const EXACT_KEY = 'graphploter.exactValues'
+  let exactValues = $state(
+    (() => {
+      try {
+        return localStorage.getItem(EXACT_KEY) !== '0'
+      } catch {
+        return true
+      }
+    })(),
+  )
+  function setExactValues(on: boolean) {
+    exactValues = on
+    try {
+      localStorage.setItem(EXACT_KEY, on ? '1' : '0')
+    } catch {
+      // 保存できない環境では、この画面の間だけ
+    }
+    for (const it of items) {
+      it.exactKey = undefined
+      if (!on) it.exact = undefined
+      else if (it.visible && it.latex.trim() !== '') schedule(it, 0)
+    }
+  }
+  const exactTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+  /**
+   * 行の厳密値を、止まってから 300 ms 後に別の Worker で計算する（スライダーを動かしている間は頼まない。計画の D6）。
+   * 結果は item.exact（式の行の右下に出る）。式・定義・スライダーの値が変わらなければ頼み直さない
+   */
+  function scheduleExact(item: PlotItem, source: string, isDefinition: boolean) {
+    clearTimeout(exactTimers.get(item.id))
+    if (!exactValues || isDefinition) {
+      item.exact = undefined
+      item.exactKey = undefined
+      return
+    }
+    const params = currentParams()
+    const names = Object.keys(params)
+    const values = names.flatMap((n) => [params[n].re, params[n].im])
+    const defs = currentDefinitions(item)
+    const key = JSON.stringify([source, defs, names, values])
+    if (item.exactKey === key) return
+    // 古い厳密値は、式が変わった時点で消す（違う式の厳密値を見せない）
+    item.exact = undefined
+    if (pointerOnControl) return
+    exactTimers.set(
+      item.id,
+      setTimeout(async () => {
+        item.exactKey = key
+        const slow = setTimeout(() => {
+          if (item.exactKey === key && !item.exact) item.exact = { kind: 'computing' }
+        }, 500)
+        const state = await requestExact(item.id, { source, defs, names, values })
+        clearTimeout(slow)
+        if (item.exactKey !== key || !items.includes(item)) return
+        item.exact = state && state.kind !== 'notFound' ? state : undefined
+      }, 300),
+    )
+  }
+
+  /** 厳密値の「行に追加」: 答えの式を、その行のすぐ下に新しい行として足す（計画の D2） */
+  function addExactRow(item: PlotItem, latex: string) {
+    const k = items.indexOf(item) + 1
+    items.splice(k, 0, newItem(latex, { folder: item.folder }))
+    schedule(items[k], 0)
+  }
 
   // ---- 点を押すと値が出る（学習用）----
 
@@ -1242,6 +1313,7 @@
     if (item.showSequenceTable && item.latex === inputLatex) item.sequenceTable = res.sequenceTable
     item.usedParams = res.usedParams
     item.usedDefs = res.usedDefs
+    scheduleExact(item, source, !!res.defName || !!res.param)
     item.odeStates = res.odeStates && res.odeStates.length > 0 ? res.odeStates : undefined
     item.odeVar = res.odeVar
     // 前の保存データの常微分方程式: 前の規則で解いた初期時刻を欄に入れる（0 なら空欄のまま）。それからは表示範囲によらない（#131）
@@ -3450,6 +3522,7 @@
             paramPlaying={playingParams.includes(item.id)}
             onPlayParam={() => togglePlayParam(item)}
             onAddSlider={(name) => addSlider(item, name)}
+            onAddRow={(latex) => addExactRow(item, latex)}
             onEnter={() => insertAfter(item)}
             onDrag={(phase, e) => dragItem(item, phase, e)}
             dragging={dragId === item.id}
@@ -3870,6 +3943,14 @@
               <input type="checkbox" checked={pickValues} onchange={(e) => setPickValues(e.currentTarget.checked)} />
               グラフを押したら値を出す
             </label>
+            <label class="check-row">
+              <input type="checkbox" checked={exactValues} onchange={(e) => setExactValues(e.currentTarget.checked)} />
+              厳密値を計算する
+            </label>
+            <p class="note">
+              オンにすると、定数の式の右下に厳密値（√2、π²/6 など）を出します。厳密値は別の計算担当で計算し、別の方法で計算した値と照らし合わせてから出します。
+              見つからないときは何も出しません（このブラウザに覚えます）。
+            </p>
             <p class="note">
               オンにすると、曲線・曲面を押した所に印と座標が出ます。y = f(x)・z = f(x, y) の式では、極大・極小・零点などの点も灰色の印で出て、押すと種類と座標が出ます。
               タッチで操作すると印が出て見づらいので、標準はオフです（このブラウザに覚えます）。

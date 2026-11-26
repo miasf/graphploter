@@ -238,6 +238,10 @@ pub enum Constant {
     Pi,
     E,
     I,
+    /// オイラーの定数 γ（入力の名前は `eulergamma`。ギリシャ文字 1 字は変数のまま。計画 docs/plan-exact-core.md の D10）
+    EulerGamma,
+    /// カタランの定数 G（入力の名前は `catalan`）
+    Catalan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -493,6 +497,8 @@ fn named_tokens() -> Vec<(&'static str, Tok)> {
         .collect();
     v.push(("pi", Tok::Const(Constant::Pi)));
     v.push(("π", Tok::Const(Constant::Pi)));
+    v.push(("eulergamma", Tok::Const(Constant::EulerGamma)));
+    v.push(("catalan", Tok::Const(Constant::Catalan)));
     v.push(("e", Tok::Const(Constant::E)));
     v.push(("i", Tok::Const(Constant::I)));
     // 座標の名前に使うギリシャ文字（計画 9 章の S38）: 1 つの変数として読む（"theta" を t·h·e·t·a にしない）

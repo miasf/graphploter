@@ -1,0 +1,402 @@
+@int(x) x^2
+@int(x) 1/x
+@int(x) e^(2x)
+@int(x) sin(3x)
+@int(x) x^2 e^x
+@int(x) x ln(x)
+@int(x) sin(x)^3
+@int(x) e^x sin(x)
+@int(x) sqrt(1-x^2)
+@int(x) 1/sqrt(x^2+1)
+@int(x) x sqrt(x^2+1)
+@int(x) 1/(x ln(x))
+@int(x) 1/(1+x^2)
+@int(x) x/(x^2-3x+2)
+@int(x) cos(x)^2
+@int(x) tan(x)
+@int(x) x cos(x)
+@int(x) ln(x)
+@int(x) arctan(x)
+(1+i)^2
+(1+i)(1-i)
+1/(1+i)
+(1+i)^10
+e^(i π/3)
+ln(-1)
+abs(3+4i)
+arg(1+i)
+(1+sqrt(3)i)^6
+e^(i π)+1
+i^2
+(2+3i)/(1-i)
+i^i
+@at(@diff(x) x^3 sin(x), x, π/3)
+@at(@diff(x) sqrt(x), x, 4)
+@at(@diff(x) ln(x), x, 2)
+@at(@diff(x) arctan(x), x, 1)
+@at(@diff(x) x^x, x, 1)
+@at(@diff(x) sin(2x), x, π/6)
+@at(@diff(x) tan(x), x, π/4)
+@at(@diff(x) 1/(1+x^2), x, 1)
+@at(@diff(x) e^(x^2), x, 1)
+@at(@diff(x) x^2 e^x, x, 1)
+@at(@diff(x) cos(x)^2, x, π/4)
+@at(@diff(x) (x^2+1)/(x-1), x, 2)
+@at(@diff(x) arcsin(x), x, 1/2)
+@at(@diff(x) sqrt(1+x^2), x, sqrt(3))
+@at(@diff(x) x ln(x), x, e)
+@at(@diff(x) sin(x)/x, x, π)
+@at(@diff(x) 2^x, x, 0)
+@at(@diff(x) (2x+1)^5, x, 0)
+@at(@diff(x, 2) e^x cos(x), x, 0)
+@at(@diff(x, 2) x^4, x, 1)
+@at(@diff(x, 3) sin(x), x, π)
+@at(@diff(x) abs(x), x, 0)
+@at(@diff(x) x^3-3x, x, 1)
+@at(@diff(x) cos(x), x, π/3)
+@at(@diff(x) e^(-x), x, 0)
+10!
+15!
+20!
+25!
+30!
+nCr(10,3)
+nCr(20,10)
+nCr(30,15)
+nCr(50,25)
+nCr(60,30)
+nCr(100,50)
+nCr(40,7)
+nCr(64,32)
+gcd(12,18)
+gcd(2^60+1, 3^40)
+gcd(123456789,987654321)
+gcd(2^40, 6^20)
+gcd(1001,7007)
+lcm(12,18)
+lcm(1048576,59049)
+lcm(21,6)
+2^64
+3^40
+2^100
+7^30
+2^64-1
+@sum(k,1,100) k^2
+@sum(k,1,10) k^3
+@sum(k,0,20) 2^k
+@sum(k,1,10) 1/(k(k+1))
+@prod(k,1,10) k
+@sum(k,0,10) nCr(10,k)
+12!/(5! 7!)
+nCr(10,5)+nCr(10,4)
+gcd(462,1071)
+2^31-1
+100!/98!
+@sum(k,1,50) k
+@prod(k,1,5) (2k-1)
+@int(x,0,1) x^2
+@int(x,0,π) sin(x)
+@int(x,1,e) 1/x
+@int(x,0,1) e^x
+@int(x,0,π/2) cos(x)
+@int(x,0,1) 1/(1+x^2)
+@int(x,0,1) x e^x
+@int(x,0,1) sqrt(1-x^2)
+@int(x,0,1) 1/sqrt(1-x^2)
+@int(x,0,π) x sin(x)
+@int(x,0,1) ln(x)
+@int(x,0,∞) e^(-x)
+@int(x,1,∞) 1/x^2
+@int(x,0,∞) 1/(1+x^2)
+@int(x,0,π) sin(x)^2
+@int(x,1,2) ln(x)
+@int(x,0,∞) e^(-x^2)
+@int(x,0,∞) x^3 e^(-x)
+@int(x,-∞,∞) 1/(x^2+1)
+@int(x,0,1) x^2(1-x)^3
+@int(x,0,∞) 1/(1+x^4)
+@int(x,0,∞) e^(-x) ln(x)
+@int(x,0,π/2) sin(x)^4 cos(x)^2
+@int(x,0,1) 1/sqrt(x)
+@int(x,-∞,∞) 1/(x^2+2x+5)
+@int(x,0,2π) 1/(2+cos(x))
+@int(x,0,1) x/(1+x^2)
+@int(x,0,π/4) tan(x)
+@int(x,0,1) x^3
+@int(x,-1,1) x^5 cos(x)
+@int(x,0,2) abs(x-1)
+@int(x,0,∞) sin(x)/x
+@int(x,0,1) arctan(x)/x
+@int(x,-1,1) 1/x
+@int(x,1,∞) 1/x
+@int(x,0,π) cos(x)^2
+@int(x,0,1) 1/(1+x)
+@int(x,0,1) x^2 e^x
+@lim(x,0) sin(x)/x
+@lim(x,0) (1-cos(x))/x^2
+@lim(x,0) (tan(x)-sin(x))/x^3
+@lim(x,0) (e^x-1)/x
+@lim(x,0) ln(1+x)/x
+@lim(x,∞) (1+1/x)^x
+@lim(x,∞) (1+2/x)^x
+@lim(x,∞) x^(1/x)
+@lim(x,∞) (sqrt(x^2+x)-x)
+@lim(x,1) (x^2-1)/(x-1)
+@lim(x,∞) (2x^2+1)/(x^2-1)
+@lim(x,0,1) x^x
+@lim(x,0,1) x ln(x)
+@lim(x,0) (e^x-1-x)/x^2
+@lim(x,0,1) sign(x)
+@lim(x,0) (1-cos(2x))/x^2
+@lim(x,0) arcsin(x)/x
+@lim(x,0) (sqrt(1+x)-1)/x
+@lim(x,0) (x-sin(x))/x^3
+@lim(x,∞) x sin(1/x)
+@lim(x,∞) (3x+1)/(2x-5)
+@lim(x,2) (x^3-8)/(x-2)
+@lim(x,0) sin(3x)/sin(5x)
+@lim(x,∞) (1-1/x)^x
+@lim(x,0) (e^(2x)-1)/(e^x-1)
+@lim(x,0) tan(x)/x
+@lim(x,∞) x(e^(1/x)-1)
+@lim(x,0) (cos(x)-1)/(x sin(x))
+@lim(x,0) sin(1/x)
+@lim(x,0) abs(x)/x
+@lim(x,0) 1/x
+@lim(x,0) (2^x-1)/x
+@lim(x,∞) (x^2+3x)/(2x^2-1)
+@lim(x,0) sin(x)^2/x^2
+@det(⟦1,2;3,4⟧)
+@det(⟦1,2,3;4,5,6;7,8,10⟧)
+@det(⟦2,0,1;1,3,2;1,1,1⟧)
+@det(⟦1/2,1/3;1/4,1/5⟧)
+@det(⟦sqrt(2),1;1,sqrt(2)⟧)
+@det(⟦1,1,1,1;1,2,4,8;1,3,9,27;1,4,16,64⟧)
+@det(⟦0.5,1;2,0.1⟧)
+@rank(⟦1,2;2,4⟧)
+@rank(⟦1,2,3;4,5,6;7,8,9⟧)
+@rank(⟦1,0;0,1⟧)
+@tr(⟦1,2;3,4⟧)
+@inv(⟦1,2;3,4⟧)
+@inv(⟦1,2,3;4,5,6;7,8,10⟧)
+@inv(⟦2,1;1,1⟧)
+⟦1,2;3,4⟧⟦0,1;1,0⟧
+sin(0)
+cos(0)
+tan(0)
+sin(π/12)
+cos(π/12)
+tan(π/12)
+sin(2π/12)
+cos(2π/12)
+tan(2π/12)
+sin(3π/12)
+cos(3π/12)
+tan(3π/12)
+sin(4π/12)
+cos(4π/12)
+tan(4π/12)
+sin(5π/12)
+cos(5π/12)
+tan(5π/12)
+sin(6π/12)
+cos(6π/12)
+sin(7π/12)
+cos(7π/12)
+tan(7π/12)
+sin(8π/12)
+cos(8π/12)
+tan(8π/12)
+sin(9π/12)
+cos(9π/12)
+tan(9π/12)
+sin(10π/12)
+cos(10π/12)
+tan(10π/12)
+sin(11π/12)
+cos(11π/12)
+tan(11π/12)
+sin(12π/12)
+cos(12π/12)
+tan(12π/12)
+sin(13π/12)
+cos(13π/12)
+tan(13π/12)
+sin(14π/12)
+cos(14π/12)
+tan(14π/12)
+sin(15π/12)
+cos(15π/12)
+tan(15π/12)
+sin(16π/12)
+cos(16π/12)
+tan(16π/12)
+sin(17π/12)
+cos(17π/12)
+tan(17π/12)
+sin(18π/12)
+cos(18π/12)
+sin(19π/12)
+cos(19π/12)
+tan(19π/12)
+sin(20π/12)
+cos(20π/12)
+tan(20π/12)
+sin(21π/12)
+cos(21π/12)
+tan(21π/12)
+sin(22π/12)
+cos(22π/12)
+tan(22π/12)
+sin(23π/12)
+cos(23π/12)
+tan(23π/12)
+sin(π/8)
+cos(π/8)
+tan(π/8)
+sin(3π/8)
+cos(3π/8)
+tan(3π/8)
+sin(5π/8)
+cos(5π/8)
+tan(5π/8)
+sin(7π/8)
+cos(7π/8)
+tan(7π/8)
+cos(π/5)
+cos(2π/5)
+cos(3π/5)
+cos(4π/5)
+sin(π/5)
+sin(2π/5)
+arcsin(1/2)
+arcsin(sqrt(2)/2)
+arcsin(sqrt(3)/2)
+arcsin(1)
+arcsin(-1/2)
+arcsin(0)
+arccos(1/2)
+arccos(-1/2)
+arccos(0)
+arccos(-1)
+arccos(sqrt(2)/2)
+arccos(-sqrt(3)/2)
+arctan(1)
+arctan(sqrt(3))
+arctan(1/sqrt(3))
+arctan(-1)
+arctan(0)
+arctan(2-sqrt(3))
+sqrt(2)
+sqrt(8)
+sqrt(12)
+sqrt(18)
+sqrt(20)
+sqrt(27)
+sqrt(32)
+sqrt(45)
+sqrt(48)
+sqrt(50)
+sqrt(72)
+sqrt(75)
+sqrt(98)
+sqrt(200)
+1/(sqrt(3)-1)
+1/sqrt(2)
+3/sqrt(3)
+2/(sqrt(5)+sqrt(3))
+1/(2-sqrt(3))
+(sqrt(6)+sqrt(2))/sqrt(2)
+sqrt(3/4)
+sqrt(1/2)
+1/(1+sqrt(2)+sqrt(3))
+sqrt(3+2sqrt(2))
+sqrt(7-4sqrt(3))
+sqrt(5+2sqrt(6))
+sqrt(4+2sqrt(3))
+sqrt(6-2sqrt(5))
+(1+sqrt(2))^2
+(sqrt(3)+sqrt(2))(sqrt(3)-sqrt(2))
+(2+sqrt(3))^3
+sqrt(2)sqrt(8)
+sqrt(3)/sqrt(12)
+sqrt(2)^2-2
+sqrt(12)sqrt(3)
+(sqrt(5)-1)/2+1
+1/3+1/6
+2/3-3/4
+(1/2)^10
+2^10
+2^(-3)
+8^(2/3)
+27^(-1/3)
+(4/9)^(3/2)
+16^(3/4)
+0.1+0.2
+0.5·0.2
+1.5^2
+0.1/0.3
+9.81·2
+@logbase(2) 8
+@logbase(4) 8
+@logbase(3) (1/9)
+log(2)+log(5)
+log(1000)
+ln(e^3)
+e^(2ln(3))
+ln(1)
+e^(ln(5))
+@logbase(2) 3+@logbase(2) (4/3)
+ln(e)/2
+sin(π/12)cos(π/12)
+sin(π/8)^2
+cos(π/12)^2-sin(π/12)^2
+tan(π/12)+tan(5π/12)
+sin(π/3)+cos(π/6)
+2sin(π/4)cos(π/4)
+((sqrt(5)+1)/2)^2-(sqrt(5)+1)/2
+sqrt(2)+sqrt(8)+sqrt(18)
+sqrt(12)-sqrt(27)+sqrt(48)
+(sqrt(3)-1)^2
+1/(sqrt(2)-1)
+(sqrt(3)+1)/(sqrt(3)-1)
+sqrt(2)/(sqrt(2)+1)
+3^(1/2)3^(3/2)
+2^(1/3)4^(1/3)
+@logbase(2) 6-@logbase(2) 3
+@logbase(9) 27
+log(0.01)
+ln(sqrt(e))
+e^(ln(2)+ln(3))
+0.25+0.125
+1.2·1.5
+2.5/0.5
+0.3^2
+1/8+0.125
+@sum(k,1,∞) 1/(k(k+1))
+@sum(k,0,∞) k/2^k
+@sum(k,0,∞) 1/k!
+@sum(k,1,∞) 1/k^2
+@sum(k,1,∞) (-1)^(k+1)/k
+@sum(k,1,∞) 1/k^4
+@sum(k,1,∞) 1/(2k-1)^2
+@sum(k,0,∞) (-1)^k/(2k+1)
+@sum(k,1,∞) 1/(4k^2-1)
+@sum(k,0,∞) (-1)^k/(2k+1)^2
+@sum(k,1,∞) 1/k^3
+@sum(k,0,∞) k^2/3^k
+@sum(k,1,∞) 1/(k(k+2))
+@sum(k,1,∞) 1/2^k
+@sum(k,0,∞) (2/3)^k
+@sum(k,2,∞) 1/(k^2-1)
+@sum(k,0,∞) (-1)^k/k!
+@sum(k,1,∞) k/(k+1)!
+@sum(k,1,∞) 1/(k(k+1)(k+2))
+@sum(k,1,∞) 1/k^6
+@sum(k,1,∞) (-1)^(k+1)/k^2
+@sum(k,1,∞) 1/(2^k k)
+@sum(k,0,∞) 1/(2k+1)!
+@sum(k,1,∞) 1/k
+@sum(k,0,∞) (-1)^k
+@sum(k,1,∞) 1/(k(k+3))
+@sum(k,0,∞) 1/4^k

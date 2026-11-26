@@ -345,7 +345,44 @@ export interface PlotItem extends PlotStyle {
   /** 数列の項の表。開いている間だけ計算担当から受け取る。 */
   showSequenceTable?: boolean
   sequenceTable?: Float64Array
+  /** 厳密値（厳密値の Worker の結果。計画 docs/plan-exact-core.md の EX5。保存しない） */
+  exact?: ExactState
+  /** 最後に厳密値を頼んだ式・定義・スライダーの値（同じなら頼み直さない。保存しない） */
+  exactKey?: string
 }
+
+/** 厳密値の依頼（計画 docs/plan-exact-core.md の EX5） */
+export interface ExactJob {
+  /** 行の式（計算エンジンの文字列） */
+  source: string
+  /** ほかの行の定義（計算エンジンの文字列。改行で区切る） */
+  defs: string
+  /** スライダーの名前と値（実部, 虚部 の順に並べたもの） */
+  names: string[]
+  values: number[]
+}
+
+/** 厳密値の Worker の返事 */
+export interface ExactReply {
+  id: number
+  /** 0: 見つからない、1: 見つかった、2: 推定、3: 存在しない、4: 照らし合わせで捨てた */
+  status: number
+  latex: string
+  inputLatex: string
+  engine: string
+  approx: number[]
+  digits: string
+  reason: string
+  work: number
+}
+
+/** 行の右下に出す厳密値の状態 */
+export type ExactState =
+  | { kind: 'computing' }
+  | { kind: 'found'; latex: string; inputLatex: string; engine: string; approx: [number, number]; digits: string; addable: boolean }
+  | { kind: 'guess'; latex: string; inputLatex: string; engine: string; approx: [number, number] }
+  | { kind: 'notFound'; reason: string }
+  | { kind: 'notExist'; reason: string }
 
 /** 式の下に出す、積分の図の様子（App が作り、ExpressionItem が出す） */
 export interface IntegralViewInfo {

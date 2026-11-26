@@ -910,6 +910,11 @@ fn current() -> Rc<Defs> {
     CURRENT.with(|c| c.borrow().clone())
 }
 
+/// 今の定義の表（厳密値の道 `exact::convert` が、展開の段を通らずに定義を読むため）
+pub(crate) fn current_defs() -> Rc<Defs> {
+    current()
+}
+
 /// 今の定義の名前
 pub fn names() -> Vec<String> {
     current().names()
