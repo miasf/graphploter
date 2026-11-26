@@ -13,8 +13,10 @@ pub mod consts;
 pub mod convert;
 pub mod diff;
 pub mod latex;
+pub mod limit;
 pub mod matrix;
 pub mod num;
+pub mod series;
 pub mod term;
 pub mod values;
 

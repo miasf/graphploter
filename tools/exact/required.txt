@@ -32,6 +32,7 @@ i^i
 @at(@diff(x, 2) e^x cos(x), x, 0)
 @at(@diff(x, 2) x^4, x, 1)
 @at(@diff(x, 3) sin(x), x, π)
+@at(@diff(x) abs(x), x, 0)
 @at(@diff(x) x^3-3x, x, 1)
 @at(@diff(x) cos(x), x, π/3)
 @at(@diff(x) e^(-x), x, 0)
@@ -74,6 +75,40 @@ gcd(462,1071)
 100!/98!
 @sum(k,1,50) k
 @prod(k,1,5) (2k-1)
+@lim(x,0) sin(x)/x
+@lim(x,0) (1-cos(x))/x^2
+@lim(x,0) (tan(x)-sin(x))/x^3
+@lim(x,0) (e^x-1)/x
+@lim(x,0) ln(1+x)/x
+@lim(x,∞) (1+1/x)^x
+@lim(x,∞) (1+2/x)^x
+@lim(x,∞) x^(1/x)
+@lim(x,∞) (sqrt(x^2+x)-x)
+@lim(x,1) (x^2-1)/(x-1)
+@lim(x,∞) (2x^2+1)/(x^2-1)
+@lim(x,0,1) x^x
+@lim(x,0,1) x ln(x)
+@lim(x,0) (e^x-1-x)/x^2
+@lim(x,0,1) sign(x)
+@lim(x,0) (1-cos(2x))/x^2
+@lim(x,0) arcsin(x)/x
+@lim(x,0) (sqrt(1+x)-1)/x
+@lim(x,0) (x-sin(x))/x^3
+@lim(x,∞) x sin(1/x)
+@lim(x,∞) (3x+1)/(2x-5)
+@lim(x,2) (x^3-8)/(x-2)
+@lim(x,0) sin(3x)/sin(5x)
+@lim(x,∞) (1-1/x)^x
+@lim(x,0) (e^(2x)-1)/(e^x-1)
+@lim(x,0) tan(x)/x
+@lim(x,∞) x(e^(1/x)-1)
+@lim(x,0) (cos(x)-1)/(x sin(x))
+@lim(x,0) sin(1/x)
+@lim(x,0) abs(x)/x
+@lim(x,0) 1/x
+@lim(x,0) (2^x-1)/x
+@lim(x,∞) (x^2+3x)/(2x^2-1)
+@lim(x,0) sin(x)^2/x^2
 @det(⟦1,2;3,4⟧)
 @det(⟦1,2,3;4,5,6;7,8,10⟧)
 @det(⟦2,0,1;1,3,2;1,1,1⟧)

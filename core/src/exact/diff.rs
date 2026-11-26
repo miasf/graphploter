@@ -104,3 +104,24 @@ pub fn subst(t: &Term, x: &str, v: &Term) -> Term {
         Term::Matrix(r, c, a) => Term::Matrix(*r, *c, a.iter().map(|y| subst(y, x, v)).collect()),
     }
 }
+
+/// [`subst`] と同じだが、0 の負のべき（0 で割る）を作ったら Err（積の 0 で消える前に見つける）
+pub fn subst_checked(t: &Term, x: &str, v: &Term) -> Result<Term, ()> {
+    Ok(match t {
+        Term::Sym(s) if s == x => v.clone(),
+        Term::Num(_) | Term::Atom(_) | Term::Sym(_) => t.clone(),
+        Term::Add(a) => add(a.iter().map(|y| subst_checked(y, x, v)).collect::<Result<_, _>>()?),
+        Term::Mul(a) => mul(a.iter().map(|y| subst_checked(y, x, v)).collect::<Result<_, _>>()?),
+        Term::Pow(b, e) => {
+            let (nb, ne) = (subst_checked(b, x, v)?, subst_checked(e, x, v)?);
+            if nb.is_zero() && ne.as_rat().is_some_and(|q| super::num::sign(q) < 0) {
+                return Err(());
+            }
+            pow(nb, ne)
+        }
+        Term::Fn(f, a) => call(*f, a.iter().map(|y| subst_checked(y, x, v)).collect::<Result<_, _>>()?),
+        Term::Tuple(a) => Term::Tuple(a.iter().map(|y| subst_checked(y, x, v)).collect::<Result<_, _>>()?),
+        Term::List(a) => Term::List(a.iter().map(|y| subst_checked(y, x, v)).collect::<Result<_, _>>()?),
+        Term::Matrix(r, c, a) => Term::Matrix(*r, *c, a.iter().map(|y| subst_checked(y, x, v)).collect::<Result<_, _>>()?),
+    })
+}

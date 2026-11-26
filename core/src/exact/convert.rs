@@ -42,6 +42,8 @@ fn handler(op: &str) -> Option<Handler> {
         "sum" => Some(finite_sum),
         "prod" => Some(finite_prod),
         "diff" => Some(derivative),
+        "lim" => Some(limit_handler),
+        "seqlim" => Some(seqlimit_handler),
         _ => None,
     }
 }
@@ -186,7 +188,7 @@ impl<'a> Converter<'a> {
                 d = super::diff::diff(&d, var)?;
             }
             self.analytic = true;
-            return Ok(super::diff::subst(&d, var, &value));
+            return super::diff::subst_checked(&d, var, &value).map_err(|()| Stop::NotFound("0 で割っています".into()));
         }
         if formal.len() != args.len() {
             return Err(Stop::NotFound(format!("{name} の引数の数が違います")));
@@ -216,9 +218,40 @@ impl<'a> Converter<'a> {
         self.frames.push(Frame { vars: pairs.iter().map(|(n, _)| (n.clone(), Term::Sym(n.clone()))).collect(), barrier: false });
         let body = self.term(&args[0]);
         self.frames.pop();
-        let mut t = body?;
+        let body = body?;
+        let mut t = body.clone();
+        let mut divides_by_zero = false;
         for (n, v) in &pairs {
-            t = super::diff::subst(&t, n, v);
+            match super::diff::subst_checked(&t, n, v) {
+                Ok(u) => t = u,
+                Err(()) => {
+                    divides_by_zero = true;
+                    break;
+                }
+            }
+        }
+        if divides_by_zero && pairs.len() != 1 {
+            return Err(Stop::NotFound("0 で割っています".into()));
+        }
+        // 1 変数で、入れると 0 で割る（|x| の 0 の導関数）なら、左右の極限で決める（文書 8 の DF0）
+        if (divides_by_zero || t.has_division_by_zero()) && pairs.len() == 1 {
+            use super::limit::{limit, Lim, Point};
+            let (n, v) = &pairs[0];
+            let right = limit(&body, n, &Point::Finite(v.clone()), 1);
+            let left = limit(&body, n, &Point::Finite(v.clone()), -1);
+            self.analytic = true;
+            return match (left, right) {
+                (Ok(Lim::Value(l)), Ok(Lim::Value(r))) if l == r => Ok(l),
+                (Ok(l), Ok(r)) => {
+                    let show = |x: &Lim| match x {
+                        Lim::Value(t) => super::latex::to_latex(t, &super::latex::Style::default()),
+                        Lim::PlusInf => "+∞".into(),
+                        Lim::MinusInf => "−∞".into(),
+                    };
+                    Err(Stop::NotExist(format!("{n} = {} で、左からの極限 {} と右からの極限 {} が違います", super::latex::to_latex(v, &super::latex::Style::default()), show(&l), show(&r))))
+                }
+                _ => Err(Stop::NotFound("0 で割っています".into())),
+            };
         }
         Ok(t)
     }
@@ -321,6 +354,39 @@ fn finite_sum_or_prod(c: &mut Converter, var: &str, args: &[Expr], body: &Expr, 
         k += Int::ONE;
     }
     Ok(if sum { add(parts) } else { mul(parts) })
+}
+
+/// 極限 `@lim(x, a) 項`・`@lim(x, a, ±1) 項`（片側）（文書 8 の LM1）
+fn limit_handler(c: &mut Converter, var: &str, args: &[Expr], body: &Expr) -> Result<Term, Stop> {
+    limit_common(c, var, args, body, false)
+}
+
+/// 数列の極限 `@seqlim(n, ∞) 項`。関数の極限があれば数列の極限も同じ（無ければ、数列では分からないので「見つからない」）
+fn seqlimit_handler(c: &mut Converter, var: &str, args: &[Expr], body: &Expr) -> Result<Term, Stop> {
+    limit_common(c, var, args, body, true)
+}
+
+fn limit_common(c: &mut Converter, var: &str, args: &[Expr], body: &Expr, sequence: bool) -> Result<Term, Stop> {
+    use super::limit::{limit, Lim, Point};
+    let (target, side) = match args {
+        [t] => (t, 0),
+        [t, s] => (t, if s.is_minus_one() { -1 } else { 1 }),
+        _ => return Err(Stop::NotFound("極限の書き方が違います".into())),
+    };
+    let point = match target {
+        Expr::Num(v) if v.is_infinite() => if *v > 0.0 { Point::PlusInf } else { Point::MinusInf },
+        Expr::Neg(e) if matches!(&**e, Expr::Num(v) if v.is_infinite()) => Point::MinusInf,
+        other => Point::Finite(c.term(other)?),
+    };
+    let t = c.with_bound(var, Term::Sym(var.to_string()), |c| c.term(body))?;
+    c.analytic = true;
+    match limit(&t, var, &point, side) {
+        Ok(Lim::Value(v)) => Ok(v),
+        Ok(Lim::PlusInf) => Err(Stop::NotExist("+∞ に発散します".into())),
+        Ok(Lim::MinusInf) => Err(Stop::NotExist("−∞ に発散します".into())),
+        Err(Stop::NotExist(r)) if sequence => Err(Stop::NotFound(format!("関数の極限は存在しません（{r}）が、数列の極限は分かりません"))),
+        Err(e) => Err(e),
+    }
 }
 
 /// 微分 `@diff(x) 項`・`@diff(x, k) 項`（文書 8 の DF0）

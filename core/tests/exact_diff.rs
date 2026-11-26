@@ -37,9 +37,12 @@ fn derivative_values() {
 
 #[test]
 fn kinks_are_not_reported() {
-    // |x| の 0 は 0 で割るので「見つからない」（左右の微分係数で「存在しない」と言うのは LM1 の後）
+    // |x| の 0: 左右の微分係数（−1 と 1）が違うので「存在しない」
     let params = Params::new();
     let _d = expand::install(expand::Defs::parse("", &params));
     let r = evaluate("@at(@diff(x) abs(x), x, 0)", &params);
-    assert!(matches!(r.outcome, Outcome::NotFound(_)), "{r:?}");
+    assert!(matches!(&r.outcome, Outcome::NotExist(s) if s.contains("-1") && s.contains("1")), "{r:?}");
+    // |x|³ の 0 は微分できる（0）
+    let r = evaluate("@at(@diff(x) abs(x)^3, x, 0)", &params);
+    assert!(matches!(&r.outcome, Outcome::Found(_) | Outcome::NotFound(_)), "{r:?}");
 }
