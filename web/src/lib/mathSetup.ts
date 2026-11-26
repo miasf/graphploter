@@ -373,6 +373,51 @@ function setupPageMemory() {
   )
 }
 
+// ---- タブを押したときに、裏の画面が反応しないようにする ----
+// MathLive はタブに指が触れた瞬間（pointerdown）に層を切り替える。行き先の層の段が少ないとキーボードが
+// その場で縮むので、指を離したときの pointerup・click は、指の下に出てきた式の一覧のボタンに届いてしまう。
+// タブを押してから指を離すまで（と、そのあとの click まで）は、キーボードの外に届く操作を捨てる。
+
+/** タブを押してからの操作を捨てる時間の上限（指を離してから click が来るまでの猶予） */
+const TAB_GUARD_MS = 600
+
+function setupTabTapGuard() {
+  const host = () => document.getElementById('math-keyboard')
+  let pointerId: number | null = null
+  let until = 0
+  const active = () => pointerId !== null || performance.now() < until
+  const outside = (t: EventTarget | null) => !(t instanceof Node && t.isConnected && host()?.contains(t))
+
+  document.addEventListener(
+    'pointerdown',
+    (e) => {
+      const target = e.target instanceof Element ? e.target : null
+      if (!target?.closest('.ML__keyboard [data-layer]')) return
+      pointerId = e.pointerId
+      until = 0
+    },
+    true,
+  )
+  const swallow = (e: Event) => {
+    if (!active() || !outside(e.target)) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+  }
+  const release = (e: PointerEvent) => {
+    if (pointerId !== e.pointerId) return
+    swallow(e)
+    pointerId = null
+    until = performance.now() + TAB_GUARD_MS
+  }
+  document.addEventListener('pointerup', release, true)
+  document.addEventListener('pointercancel', release, true)
+  for (const type of ['mousedown', 'mouseup', 'touchend', 'click', 'dblclick', 'contextmenu'])
+    document.addEventListener(type, (e) => {
+      swallow(e)
+      if (e.type === 'click') until = 0 // click が来たら、それで終わり
+    }, true)
+}
+
 // ---- キーの名前の表示 ----
 // PC: カーソルを少し当てていると名前が出る。スマホ: 長押しで名前が出る（名前が出てから指を離したときは、
 // そのキーを入力しない）。名前はキーの tooltip（MathLive が data-tooltip に入れる）。
@@ -618,6 +663,7 @@ export function setupKeyboard() {
   window.mathVirtualKeyboard.container = document.getElementById('math-keyboard')!
   setupKeyTips()
   setupPageMemory()
+  setupTabTapGuard()
   setKeyboardDims(3)
   compactNumeric.addEventListener('change', () => {
     window.mathVirtualKeyboard.layouts = keyboardLayouts(keyboardDims)
