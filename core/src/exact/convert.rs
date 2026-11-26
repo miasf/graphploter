@@ -33,6 +33,8 @@ pub struct Converter<'a> {
     pub uses_ln: bool,
     /// 行が不定積分だけなら（中身, 変数）。答えは原始関数で、微分して戻ることで確かめ、書き出しで + C を足す
     pub antiderivative: Option<(Term, String)>,
+    /// スライダーの文字を今の値にせず、文字 `Sym` のままにする（式の表示 `f(x+2)` → $a(x+2)^2$。`expression.rs`）
+    pub keep_params: bool,
 }
 
 /// 記法の厳密な計算（文書 8 の各ステップが 1 つずつ足す）
@@ -53,7 +55,7 @@ fn handler(op: &str) -> Option<Handler> {
 
 impl<'a> Converter<'a> {
     pub fn new(defs: &'a Defs, params: &'a Params) -> Self {
-        Converter { defs, params, frames: Vec::new(), depth: 0, decimal: false, analytic: false, uses_ln: false, antiderivative: None }
+        Converter { defs, params, frames: Vec::new(), depth: 0, decimal: false, analytic: false, uses_ln: false, antiderivative: None, keep_params: false }
     }
 
     fn lookup(&self, name: &str) -> Option<Term> {
@@ -150,6 +152,21 @@ impl<'a> Converter<'a> {
     fn var(&mut self, name: &str) -> Result<Term, Stop> {
         if let Some(t) = self.lookup(name) {
             return Ok(t);
+        }
+        // 引数の無い定義（行列・ベクトル `A = ⟦…⟧`）は、その右辺（文書 8 の LA1。今の道の `Def::Value` と同じ）
+        if let Some(Def::Value(body)) = self.defs.get(name).cloned() {
+            if self.depth >= 32 {
+                return Err(Stop::NotFound("定義の呼び出しが深すぎます".into()));
+            }
+            self.frames.push(Frame { vars: Vec::new(), barrier: true });
+            self.depth += 1;
+            let r = self.term(&body);
+            self.depth -= 1;
+            self.frames.pop();
+            return r;
+        }
+        if self.keep_params && self.params.contains_key(name) {
+            return Ok(Term::Sym(name.to_string()));
         }
         if let Some(c) = self.params.get(name) {
             let re = num::rat_of_literal(c.re).ok_or_else(|| Stop::NotFound(format!("{name} の値が有限ではありません")))?;

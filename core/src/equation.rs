@@ -927,12 +927,47 @@ fn matrix_line(source: &str, params: &Params, space: &Space) -> Result<Option<Pl
         }
     }
     match expr {
-        Expr::Op { op, args } if op == "eig" && args.len() == 1 => {
+        // 対角化・ジョルダン標準形も、今の道では固有値と固有空間（形は厳密値の道が出す。文書 8 の LA1）
+        Expr::Op { op, args } if matches!(op.as_str(), "eig" | "diagonalize" | "jordan") && args.len() == 1 => {
             let label = matrix_label(&args[0]);
             let Some(m) = numeric(&args[0])? else {
-                return Err(format!("eig {label} の行列の成分は、数とパラメータだけで書いてください"));
+                return Err(format!("{op} {label} の行列の成分は、数とパラメータだけで書いてください"));
             };
             eigen(&label, &m, params, space).map(Some)
+        }
+        Expr::Op { op, args } if op == "gramschmidt" && !args.is_empty() => {
+            // 引数はベクトルの並び、または行列 1 つ（列ベクトル）
+            let mut vs: Vec<Vec<f64>> = Vec::new();
+            for a in args {
+                let Some(m) = numeric(a)? else { return Err("gramschmidt のベクトルの成分は、数とパラメータだけで書いてください".into()) };
+                if args.len() == 1 && m.cols > 1 {
+                    vs.extend((0..m.cols).map(|j| (0..m.rows).map(|i| m.at(i, j)).collect()));
+                } else if m.cols == 1 || m.rows == 1 {
+                    vs.push(m.a.clone());
+                } else {
+                    return Err("gramschmidt の引数はベクトルの並びか行列 1 つにしてください".into());
+                }
+            }
+            let dim = vs.first().map_or(0, Vec::len);
+            if vs.iter().any(|v| v.len() != dim) {
+                return Err("gramschmidt のベクトルの成分の数がそろっていません".into());
+            }
+            let count = vs.len();
+            let units = crate::linalg::orthonormalize(vs);
+            let mut parts: Vec<String> = units.iter().enumerate().map(|(k, u)| format!("u{} = ({})", "₁₂₃₄₅₆₇₈₉".chars().nth(k).map_or_else(|| (k + 1).to_string(), String::from), u.iter().map(|x| format_number(*x)).collect::<Vec<_>>().join(", "))).collect();
+            if units.len() < count {
+                parts.push(format!("{} 本は前のベクトルの 1 次結合なので除いた", count - units.len()));
+            }
+            crate::expand::set_kind(format!("グラム・シュミットの正規直交化 ／ {}", parts.join(" ／ ")));
+            if dim > space.dims || units.is_empty() {
+                return Ok(Some(Plot::Multi(Vec::new())));
+            }
+            if space.dims == 3 && space.axes == [0, 1, 2] && space.rotation_matrix().is_none() && !space.complex_coords {
+                let vectors = units.iter().map(|v| [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)]).collect();
+                return Ok(Some(Plot::Arrows { vectors }));
+            }
+            let vectors: Vec<Vec<f64>> = units.iter().map(|v| (0..space.dims).map(|i| v.get(i).copied().unwrap_or(0.0)).collect()).collect();
+            segments(&vectors, params, space).map(Some)
         }
         Expr::Op { op, args } if (op == "ker" || op == "im") && args.len() == 1 => {
             let name = format!("{} {}", if op == "ker" { "ker" } else { "Im" }, matrix_label(&args[0]));

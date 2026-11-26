@@ -208,7 +208,8 @@ fn real_number(t: &Term, style: &Style) -> String {
         for it in &items {
             den = num::lcm(&den, &Int::from(it.c.denominator().clone()));
         }
-        let neg = items.iter().all(|it| num::sign(&it.c) < 0);
+        // 全部の項が負なら、符号を分数線の前に出す（$-\frac{3+\sqrt{33}}{2}$）。分母が無いときは出さない（$-3-\sqrt{33}$）
+        let neg = den != Int::ONE && items.iter().all(|it| num::sign(&it.c) < 0);
         let mut s = String::new();
         for (i, it) in items.iter().enumerate() {
             let m = num::as_int(&(it.c.clone() * Rat::from(den.clone()))).unwrap();
@@ -327,6 +328,58 @@ fn func_latex(f: Func) -> String {
     }
 }
 
+/// 座標・媒介変数の文字か（和の項の順で次数を数える文字）
+fn coordinate(s: &str) -> bool {
+    crate::equation::coord_index(s).is_some() || matches!(s, "t" | "u" | "v")
+}
+
+/// 単項式（数 × 文字の正の整数乗の積）の、座標の文字ごとの指数（ほかの文字は係数とみなす）。単項式でなければ None
+fn monomial(t: &Term) -> Option<Vec<(String, i64)>> {
+    let mut out: Vec<(String, i64)> = Vec::new();
+    let mut put = |s: &str, k: i64| {
+        if !coordinate(s) {
+            return;
+        }
+        match out.iter_mut().find(|(n, _)| n == s) {
+            Some(e) => e.1 += k,
+            None => out.push((s.to_string(), k)),
+        }
+    };
+    let factors: Vec<&Term> = match t {
+        Term::Mul(v) => v.iter().collect(),
+        other => vec![other],
+    };
+    for f in factors {
+        match f {
+            Term::Num(_) => {}
+            Term::Sym(s) => put(s, 1),
+            Term::Pow(b, e) => match (&**b, e.as_rat().and_then(num::as_int).and_then(|k| i64::try_from(&k).ok())) {
+                (Term::Sym(s), Some(k)) if k > 0 => put(s, k),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// 和の項を並べる鍵（小さいほど先）: (0 = 単項式 / 1 = ほか / 2 = 数, −座標の次数, 座標の順の (文字, −指数))
+fn term_order(t: &Term) -> (u8, i64, Vec<(usize, i64)>) {
+    if t.is_number() {
+        return (2, 0, Vec::new());
+    }
+    let Some(m) = monomial(t) else { return (1, 0, Vec::new()) };
+    let rank = |s: &str| crate::equation::coord_index(s).unwrap_or(100 + s.chars().next().map_or(0, |c| c as usize));
+    let mut lex: Vec<(usize, i64)> = m.iter().map(|(s, k)| (rank(s), -*k)).collect();
+    lex.sort();
+    (0, -m.iter().map(|(_, k)| *k).sum::<i64>(), lex)
+}
+
+/// 和の項を、教科書の順にするか（座標の 1 次以上の単項式があるときだけ。$\frac{\pi}{6} + 2\pi n$ のような和は正規の順のまま）
+fn reorder_sum(v: &[Term]) -> bool {
+    v.iter().any(|t| monomial(t).is_some_and(|m| !m.is_empty()))
+}
+
 /// 一般の式（文字を含む式・根号の和の中など）。文書 8 の各ステップで形を整える
 fn generic(t: &Term, style: &Style) -> String {
     match t {
@@ -353,7 +406,12 @@ fn generic(t: &Term, style: &Style) -> String {
                     return format!("{}\\frac{{{body}}}{{{}}}", if neg_all { "-" } else { "" }, dens[0]);
                 }
             }
-            let mut parts: Vec<String> = v.iter().map(|x| to_latex(x, style)).collect();
+            // 項の順: 多項式の項（次数の高い順。同じ次数は x, y, z の順に指数の大きいもの）→ ほかの項（正規の順）→ 数（式の表示 x³ + 2y）
+            let mut order: Vec<&Term> = v.iter().collect();
+            if reorder_sum(v) {
+                order.sort_by(|a, b| term_order(a).cmp(&term_order(b)));
+            }
+            let mut parts: Vec<String> = order.into_iter().map(|x| to_latex(x, style)).collect();
             if parts.first().is_some_and(|p| p.starts_with('-')) {
                 if let Some(pos) = parts.iter().position(|p| !p.starts_with('-')) {
                     let first = parts.remove(pos);
@@ -375,6 +433,12 @@ fn generic(t: &Term, style: &Style) -> String {
             let body = factors(&nf, style);
             if df.is_one() && *c.denominator() == Nat::ONE {
                 return coef_times(c.numerator(), &body);
+            }
+            // 小数の入力なら、係数も小数で（0.5(x + 2)²。式の表示）
+            if style.decimal && df.is_one() && !body.is_empty() {
+                if let Some(d) = decimal_text(&c) {
+                    return format!("{d}{body}");
+                }
             }
             let p = c.numerator().clone().abs();
             let top = if body.is_empty() { int_text(&p) } else { coef_times(&p, &body) };

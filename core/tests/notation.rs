@@ -1998,6 +1998,14 @@ fn eigenvalues_and_eigenspaces() {
     assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(A-3I)"), "ker (A − 3I) = span{(1, 1)}、(x, y) = t(1, 1)、x − y = 0（1 次元。直線）");
     assert_eq!(kind("A= ⟦2,1;1,2⟧", "@ker(1E - A)"), "ker (1E − A) = span{(1, −1)}、(x, y) = t(1, −1)、x + y = 0（1 次元。直線）");
     assert!(error_of("@ker(A - 3)", "A= ⟦2,1;1,2⟧").contains("単位行列は I か E"));
+    // 対角化・ジョルダン標準形（文書 8 の LA1）: 今の道では固有値と固有空間（形は厳密値の道が出す）
+    assert_eq!(kind("A= ⟦2,1;1,2⟧", "@diagonalize A"), kind("A= ⟦2,1;1,2⟧", "@eig A"));
+    assert_eq!(kind("B= ⟦1,1;0,1⟧", "@jordan(B)"), kind("B= ⟦1,1;0,1⟧", "@eig B"));
+    // グラム・シュミット: 正規直交にしたベクトル（1 次結合のベクトルは除く）
+    assert_eq!(kind("", "@gramschmidt((3,4),(1,0))"), "グラム・シュミットの正規直交化 ／ u₁ = (0.6, 0.8) ／ u₂ = (0.8, −0.6)");
+    assert!(kind("", "@gramschmidt((1,1,1),(2,2,2),(1,0,0))").ends_with("1 本は前のベクトルの 1 次結合なので除いた"));
+    assert!(kind("", "@gramschmidt(⟦1,1;0,1⟧)").contains("u₂ = (0, 1)"));
+    assert!(error_of("@jordan(A) + 1", "A= ⟦2,1;1,2⟧").contains("1 行にそれだけ"));
 }
 
 #[test]
