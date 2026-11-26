@@ -41,6 +41,7 @@ fn handler(op: &str) -> Option<Handler> {
     match op {
         "sum" => Some(finite_sum),
         "prod" => Some(finite_prod),
+        "diff" => Some(derivative),
         _ => None,
     }
 }
@@ -116,6 +117,8 @@ impl<'a> Converter<'a> {
                 Some(h) => h(self, var, args, body)?,
                 None => return Err(Stop::NotFound(format!("記法 {op} はまだ厳密に計算できません"))),
             },
+            Expr::Op { op, args } if op == "at" => self.at(args)?,
+            Expr::Op { op, args } if matches!(op.as_str(), "grad" | "div" | "rot" | "curl" | "lap") && args.len() == 1 => self.vector_operator(op, &args[0])?,
             Expr::Op { op, .. } => return Err(Stop::NotFound(format!("記法 {op} はまだ厳密に計算できません"))),
             other => return Err(Stop::NotFound(format!("この書き方はまだ厳密に計算できません（{}）", short(other)))),
         };
@@ -154,12 +157,29 @@ impl<'a> Converter<'a> {
     }
 
     fn apply(&mut self, name: &str, primes: u8, args: &[Expr]) -> Result<Term, Stop> {
-        if primes > 0 {
-            return Err(Stop::NotFound("導関数 f′ はまだ厳密に計算できません".into()));
-        }
         let Some(Def::Function { args: formal, body }) = self.defs.get(name).cloned() else {
             return Err(Stop::NotFound(format!("{name} はまだ厳密に計算できません")));
         };
+        if primes > 0 {
+            // f′(a): 本体を仮引数で微分してから入れる（引数 1 つの関数だけ。文書 8 の DF0）
+            let ([f0], [a0]) = (formal.as_slice(), args) else { return Err(Stop::NotFound("引数が 1 つでない関数の f′ はまだ厳密に計算できません".into())) };
+            if self.depth >= 32 {
+                return Err(Stop::NotFound("定義の呼び出しが深すぎます".into()));
+            }
+            let value = self.term(a0)?;
+            let var = "#d";
+            self.frames.push(Frame { vars: vec![(f0.clone(), Term::Sym(var.into()))], barrier: true });
+            self.depth += 1;
+            let b = self.term(&body);
+            self.depth -= 1;
+            self.frames.pop();
+            let mut d = b?;
+            for _ in 0..primes {
+                d = super::diff::diff(&d, var)?;
+            }
+            self.analytic = true;
+            return Ok(super::diff::subst(&d, var, &value));
+        }
         if formal.len() != args.len() {
             return Err(Stop::NotFound(format!("{name} の引数の数が違います")));
         }
@@ -173,6 +193,47 @@ impl<'a> Converter<'a> {
         self.depth -= 1;
         self.frames.pop();
         r
+    }
+
+    /// 点での値 `@at(式, x, a, y, b, …)`: 変数を文字のまま式を作ってから、値を入れる（`@at(@diff(x) …, x, π/3)` の微分係数）
+    fn at(&mut self, args: &[Expr]) -> Result<Term, Stop> {
+        if args.len() < 3 || args.len() % 2 == 0 {
+            return Err(Stop::NotFound("点での値の書き方が違います".into()));
+        }
+        let mut pairs = Vec::new();
+        for k in (1..args.len()).step_by(2) {
+            let Expr::Var(name) = &args[k] else { return Err(Stop::NotFound("点での値の変数が名前ではありません".into())) };
+            pairs.push((name.clone(), self.term(&args[k + 1])?));
+        }
+        self.frames.push(Frame { vars: pairs.iter().map(|(n, _)| (n.clone(), Term::Sym(n.clone()))).collect(), barrier: false });
+        let body = self.term(&args[0]);
+        self.frames.pop();
+        let mut t = body?;
+        for (n, v) in &pairs {
+            t = super::diff::subst(&t, n, v);
+        }
+        Ok(t)
+    }
+
+    /// ∇・∇·・∇×・∇²（座標 x, y, z について。今の道の `vector_operator` と同じ意味。文書 8 の DF0）
+    fn vector_operator(&mut self, op: &str, arg: &Expr) -> Result<Term, Stop> {
+        use super::diff::diff;
+        const XYZ: [&str; 3] = ["x", "y", "z"];
+        let v = self.term(arg)?;
+        self.analytic = true;
+        let sub = |a: Term, b: Term| add(vec![a, neg(b)]);
+        Ok(match (op, &v) {
+            ("grad", Term::Tuple(_)) | ("lap", Term::Tuple(_)) => return Err(Stop::NotFound("∇・∇² はスカラーの式に使ってください".into())),
+            ("grad", _) => Term::Tuple(XYZ.iter().map(|c| diff(&v, c)).collect::<Result<_, _>>()?),
+            ("lap", _) => add(XYZ.iter().map(|c| diff(&diff(&v, c)?, c)).collect::<Result<_, _>>()?),
+            ("div", Term::Tuple(items)) if items.len() <= 3 => add(items.iter().zip(XYZ).map(|(f, c)| diff(f, c)).collect::<Result<_, _>>()?),
+            ("rot" | "curl", Term::Tuple(items)) if items.len() == 2 => sub(diff(&items[1], "x")?, diff(&items[0], "y")?),
+            ("rot" | "curl", Term::Tuple(items)) if items.len() == 3 => {
+                let (p, q, r) = (&items[0], &items[1], &items[2]);
+                Term::Tuple(vec![sub(diff(r, "y")?, diff(q, "z")?), sub(diff(p, "z")?, diff(r, "x")?), sub(diff(q, "x")?, diff(p, "y")?)])
+            }
+            _ => return Err(Stop::NotFound("∇·・∇× は 2 成分か 3 成分のベクトル場に使ってください".into())),
+        })
     }
 
     /// 束縛した変数に値を入れて中身を変換する
@@ -220,6 +281,25 @@ fn finite_sum_or_prod(c: &mut Converter, var: &str, args: &[Expr], body: &Expr, 
         k += Int::ONE;
     }
     Ok(if sum { add(parts) } else { mul(parts) })
+}
+
+/// 微分 `@diff(x) 項`・`@diff(x, k) 項`（文書 8 の DF0）
+fn derivative(c: &mut Converter, var: &str, args: &[Expr], body: &Expr) -> Result<Term, Stop> {
+    let k = match args {
+        [] => 1,
+        [k] => {
+            let k = c.integer(k, "微分の回数")?;
+            u32::try_from(&k).ok().filter(|k| *k <= 8).ok_or_else(|| Stop::NotFound("微分の回数は 0〜8 にしてください".into()))?
+        }
+        _ => return Err(Stop::NotFound("微分の書き方が違います".into())),
+    };
+    let t = c.with_bound(var, Term::Sym(var.to_string()), |c| c.term(body))?;
+    let mut d = t;
+    for _ in 0..k {
+        d = super::diff::diff(&d, var)?;
+    }
+    c.analytic = true;
+    Ok(d)
 }
 
 fn short(e: &Expr) -> String {

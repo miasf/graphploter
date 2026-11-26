@@ -3316,6 +3316,25 @@ pub fn eval_values_with(source: &str, params: &Params) -> Result<(Vec<f64>, Vec<
     Ok((vals, used))
 }
 
+/// 定数の式の値を、組・リストなら成分ごとに（厳密値の道の照らし合わせの相手）。数 1 つなら長さ 1
+pub fn eval_constant_items(source: &str, params: &Params) -> Result<Vec<C>, String> {
+    let items = match parse_at(source, 0, params)? {
+        Expr::Tuple(items) | Expr::List(items) => items,
+        e => vec![e],
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for it in &items {
+        let prog = Program::compile_with(it, &[], params).map_err(|_| "数値と、pi などの定数・パラメータだけで書いてください".to_string())?;
+        let mut v = [C::new(0.0, 0.0)];
+        prog.eval_batch(&[], &mut v);
+        if !(v[0].re.is_finite() && v[0].im.is_finite()) {
+            return Err("値が有限ではありません".into());
+        }
+        out.push(v[0]);
+    }
+    Ok(out)
+}
+
 /// 定数の式の複素数の値（厳密値の道の照らし合わせの相手。計画 `docs/plan-exact-core.md` の 2.4）。
 /// [`eval_constant_with`] と同じ道で計算し、実数にしないで返す
 pub fn eval_constant_complex(source: &str, params: &Params) -> Result<C, String> {

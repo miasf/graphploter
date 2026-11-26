@@ -11,6 +11,7 @@ pub mod ball;
 pub mod check;
 pub mod consts;
 pub mod convert;
+pub mod diff;
 pub mod latex;
 pub mod num;
 pub mod term;
@@ -162,11 +163,20 @@ pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
     };
     let mut rep = Report { decimal: c.decimal, uses_ln: c.uses_ln, work, ..Report::new(Outcome::NotFound(String::new())) };
     let t = c.term;
-    if !t.is_number() {
-        rep.outcome = Outcome::NotFound("座標を含む式・組・リストの厳密値はまだ出しません".into());
+    // 組・リスト（成分が全部数）は成分ごとに照らし合わせる
+    let items: Option<Vec<Term>> = match &t {
+        Term::Tuple(v) | Term::List(v) if v.iter().all(Term::is_number) => Some(v.clone()),
+        _ => None,
+    };
+    if items.is_none() && !t.is_number() {
+        rep.outcome = Outcome::NotFound("座標を含む式の厳密値はまだ出しません".into());
         return rep;
     }
-    match check::against_f64(&t, source, params) {
+    let verdict = match &items {
+        Some(v) => check::items_against_f64(v, source, params),
+        None => check::against_f64(&t, source, params),
+    };
+    match verdict {
         check::Check::Agree => {}
         check::Check::Disagree { exact, other } => {
             rep.rules.push("照らし合わせで食い違った");
@@ -184,6 +194,13 @@ pub fn evaluate_with(source: &str, params: &Params, work_limit: u64) -> Report {
             rep.outcome = Outcome::NotFound(format!("値を確かめられません（{e}）"));
             return rep;
         }
+    }
+    if items.is_some() {
+        rep.latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal, input: false });
+        rep.input_latex = latex::to_latex(&t, &latex::Style { decimal: c.decimal, input: true });
+        rep.engine = latex::to_engine(&t);
+        rep.outcome = Outcome::Found(t);
+        return rep;
     }
     if let Ok(b) = ball::value(&t, 64) {
         rep.approx = Some(b.to_f64());

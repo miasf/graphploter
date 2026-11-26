@@ -11,6 +11,30 @@ e^(i π)+1
 i^2
 (2+3i)/(1-i)
 i^i
+@at(@diff(x) x^3 sin(x), x, π/3)
+@at(@diff(x) sqrt(x), x, 4)
+@at(@diff(x) ln(x), x, 2)
+@at(@diff(x) arctan(x), x, 1)
+@at(@diff(x) x^x, x, 1)
+@at(@diff(x) sin(2x), x, π/6)
+@at(@diff(x) tan(x), x, π/4)
+@at(@diff(x) 1/(1+x^2), x, 1)
+@at(@diff(x) e^(x^2), x, 1)
+@at(@diff(x) x^2 e^x, x, 1)
+@at(@diff(x) cos(x)^2, x, π/4)
+@at(@diff(x) (x^2+1)/(x-1), x, 2)
+@at(@diff(x) arcsin(x), x, 1/2)
+@at(@diff(x) sqrt(1+x^2), x, sqrt(3))
+@at(@diff(x) x ln(x), x, e)
+@at(@diff(x) sin(x)/x, x, π)
+@at(@diff(x) 2^x, x, 0)
+@at(@diff(x) (2x+1)^5, x, 0)
+@at(@diff(x, 2) e^x cos(x), x, 0)
+@at(@diff(x, 2) x^4, x, 1)
+@at(@diff(x, 3) sin(x), x, π)
+@at(@diff(x) x^3-3x, x, 1)
+@at(@diff(x) cos(x), x, π/3)
+@at(@diff(x) e^(-x), x, 0)
 10!
 15!
 20!
