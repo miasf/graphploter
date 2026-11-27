@@ -632,6 +632,11 @@ export const PLOT_SEQUENCE_TABLE = 32
 /** ビット 6・7: 曲面をガウス曲率 K・平均曲率 H で色分けする（計画 N2） */
 export const PLOT_CURVATURE_GAUSS = 64
 export const PLOT_CURVATURE_MEAN = 128
+/**
+ * ビット 8: 2 段階の表示の粗い版（App が付ける。計算エンジンには渡さない）。計算担当は、覚えている回す前の形が
+ * この依頼より細かくても捨てない（すぐ後に元の細かさの依頼が来るので、作り直すと無駄になる）
+ */
+export const PLOT_PREVIEW = 256
 /** 曲率の色分け: gauss はガウス曲率 K、mean は平均曲率 H */
 export type CurvatureMode = 'gauss' | 'mean'
 /** 曲率の色分けのビット（無ければ 0） */

@@ -30,7 +30,7 @@ import init, {
 import { coordName, isReserved, prettyName } from './params'
 import type { Cost } from './budget'
 import type { CapData, CapRequest, CapResponse, CoordGridRequest, CoordGridResponse, CutRequest, FieldStageResponse, LimitBehavior, LimitResult, PlotRequest, PlotResponse, PlotTiming } from './types'
-import { COMPLEX_MODE_ORDER, PLOT_CURVATURE_GAUSS, PLOT_CURVATURE_MEAN, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './types'
+import { COMPLEX_MODE_ORDER, PLOT_CURVATURE_GAUSS, PLOT_CURVATURE_MEAN, PLOT_EDGES, PLOT_LOCAL, PLOT_NO_REFINE, PLOT_PREVIEW, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './types'
 
 // WASM の読み込み（最初の1回だけ）
 const ready = init()
@@ -306,6 +306,9 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
     return
   }
   const req = ev.data
+  // 2 段階の表示の粗い版の印は、ここで読んで外す（計算エンジンには渡さない）
+  const preview = (req.flags & PLOT_PREVIEW) !== 0
+  req.flags &= ~PLOT_PREVIEW
   const pendingLocal = localJobs.get(req.itemId)
   localJobs.delete(req.itemId)
   const { requestId, itemId, source, domain: d, resolution, implicitResolution, ranges, params, space, stacks } = req
@@ -485,14 +488,18 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       const w0 = performance.now()
       // ほかの Worker が計算した F の値を使ってメッシュを作る（計算し直すときだけ。使い回すときに入れると、次の計算に残る）
       if (req.field?.mode === 'given') field_mode_given(req.field.values)
-      // 止まったとき: 覚えている回す前の形（回転の再生用）がそのまま使えるなら、作り直さない（表示範囲の面だけ作る）
+      // 止まったとき: 覚えている回す前の形（回転の再生用）がそのまま使えるなら、作り直さない（表示範囲の面だけ作る）。
+      // 2 段階の表示の粗い版なら、覚えている形のほうが細かくても使い続ける（すぐ後に元の細かさの依頼が来る）。
+      // 前は細かさが同じときだけ使い、2 回目に止めたとき（1 回目の計算時間から、粗い版を先に出すようになる）に
+      // 回す前の形を捨てて、粗い版・元の細かさで 2 回作り直していた。作り直しが終わる前に回し始めると、
+      // 1 コマ固まって途中の角度に飛び、粗い版の細かさの形で回っていた
       const thorough = (req.flags & PLOT_THOROUGH) !== 0
       const keepLocal =
         cached !== undefined &&
         cached.shape.rigid &&
         (req.flags & PLOT_LOCAL) !== 0 &&
         cached.key === key(true, true) &&
-        cached.ires === implicitResolution &&
+        (cached.ires === implicitResolution || (preview && cached.ires > implicitResolution)) &&
         cached.thorough === thorough
       r = callPlot()
       // 注目する点（陽関数の極値・零点。頼んだときだけ。plot のすぐ後に読む）
@@ -513,7 +520,7 @@ self.onmessage = async (ev: MessageEvent<PlotRequest | CapRequest | CoordGridReq
       const shape = r.take_shape()
       if (shape && !keepLocal) {
         shapes.set(itemId, { key: key(shape.view_dependent, shape.rigid), shape, refined: refine, ires: implicitResolution, thorough, localShown: false })
-      }
+      } else shape?.free() // 回す前の形を使い続けるときは、作った形は要らない（前は解放せず、止めるたびに WASM のメモリが増えていた）
       // 細かく作る依頼: 面を返した後で、回す前の形を作っておく（次に回すときは、回すだけで描く。回転が 0 のときも作る）
       if (!keepLocal && refine && r.local_available) {
         localJobs.set(itemId, {
