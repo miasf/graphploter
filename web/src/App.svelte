@@ -41,7 +41,7 @@
     Space,
     RenderMode,
   } from './lib/types'
-  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, curvatureFlag, type CurvatureMode, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './lib/types'
+  import { DEFAULT_HIDDEN, GLOBAL_GROUP, HIDDEN_MODE_ORDER, OWN_GROUP, curvatureFlag, type CurvatureMode, PLOT_EDGES, PLOT_NO_REFINE, PLOT_POI, PLOT_PREVIEW, PLOT_SEQUENCE_TABLE, PLOT_THOROUGH } from './lib/types'
   import { Viewer, type PickResult } from './lib/Viewer'
   import type { MotionMode } from './lib/motionQuality'
 
@@ -1280,7 +1280,7 @@
       item.walls ?? false,
       item.layers ?? 1,
       flatSlice,
-      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (item.edges ? PLOT_EDGES : 0) | curvatureFlag(item.curvature) | (coarse || !pickValues ? 0 : PLOT_POI) | sequenceTableFlag,
+      (coarse ? PLOT_NO_REFINE : findSmall ? PLOT_THOROUGH : 0) | (preview !== null ? PLOT_PREVIEW : 0) | (item.edges ? PLOT_EDGES : 0) | curvatureFlag(item.curvature) | (coarse || !pickValues ? 0 : PLOT_POI) | sequenceTableFlag,
       hiddenRequest(item),
       item.complexCoords ?? false,
       coord,
